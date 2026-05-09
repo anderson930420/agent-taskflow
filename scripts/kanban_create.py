@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-bj_kanban_create.py — Safe Bullet Journal Kanban Task Submitter
+kanban_create.py — Safe Kanban Task Submitter for Agent Taskflow
 
-Creates verified git worktrees and Hermes Kanban tasks for bullet_journal_app
-without relying on --workspace worktree auto-binding.
+Creates verified git worktrees and Hermes Kanban tasks for any project
+configured in config/projects.yaml, without relying on --workspace worktree
+auto-binding.
 
 Safety constraints:
-  - Runs ONLY against /home/ubuntu/bullet_journal_app
   - Always creates worktree under .worktrees/<task-key>
   - Uses --workspace dir:<path> (never --workspace worktree)
   - Never pushes, merges, resets hard, or cleans
@@ -15,16 +15,16 @@ Safety constraints:
   - Never overwrites existing worktrees without --reuse-existing-worktree
 
 Usage:
-    python3 scripts/bj_kanban_create.py \\
-        --task-key BJ-0004R \\
-        --title "Redo bullet_journal.db repository policy analysis" \\
-        --body-file /tmp/bj-0004r.md \\
-        --assignee bullet-eng \\
+    python3 scripts/kanban_create.py --config config/projects.yaml \\
+        --project agent-taskflow \\
+        --task-key AT-0001 \\
+        --title "My task title" \\
+        --body-file /tmp/task.md \\
+        --assignee my-profile \\
         --priority 1 \\
         --max-runtime 2h
 
-Dry run:
-    python3 scripts/bj_kanban_create.py --dry-run ...
+With --project omitted, defaults to 'agent-taskflow'.
 """
 
 import argparse
@@ -36,12 +36,19 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
+DEFAULT_CONFIG_PATH = "config/projects.yaml"
+DEFAULT_PROJECT = "agent-taskflow"
+
 # ------------------------------------------------------------------
-# Constants
+# Constants (set after config load)
 # ------------------------------------------------------------------
-REPO_ROOT = Path("/home/ubuntu/bullet_journal_app")
-WORKTREE_BASE = REPO_ROOT / ".worktrees"
-ARTIFACTS_BASE = Path("/home/ubuntu/.hermes/task-artifacts")
+REPO_ROOT: Optional[Path] = None
+WORKTREE_BASE: Optional[Path] = None
+ARTIFACTS_BASE: Optional[Path] = None
+TASK_KEY_PREFIX: Optional[str] = None
+BRANCH_PREFIX: Optional[str] = None
 ALLOWED_KEY_CHARS = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Forbidden git commands (safety)
@@ -51,12 +58,11 @@ GOVERNANCE_HEADER = """
 ---
 ## Governance Requirements (MANDATORY)
 
-This task was created by `scripts/bj_kanban_create.py` using a verified worktree
+This task was created by `scripts/kanban_create.py` using a verified worktree
 under `dir:` workspace (not `--workspace worktree`).
 
 **You MUST follow these rules:**
 - Work ONLY in the verified worktree: `dir:{worktree_path}`
-- Do NOT operate from the main repo at `/home/ubuntu/bullet_journal_app`
 - Do NOT run `git push`
 - Do NOT run `git merge`
 - Do NOT run `git reset --hard`
@@ -194,13 +200,47 @@ def build_hermes_command(args: argparse.Namespace, body_with_header: str,
     return cmd
 
 
+def load_config(config_path: str) -> dict:
+    """Load and parse config/projects.yaml."""
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    with open(config_path, "r") as f:
+        data = yaml.safe_load(f)
+    return data.get("projects", {})
+
+
+def resolve_config(config_path: str, project: str) -> dict:
+    """Load project config and resolve repo_root, worktree_base, artifacts_base, task_key_prefix."""
+    projects = load_config(config_path)
+    if project not in projects:
+        raise ValueError(f"Project {project!r} not found in {config_path}. "
+                         f"Available: {', '.join(sorted(projects.keys()))}")
+    p = projects[project]
+    repo_root = Path(p["repo_path"]).resolve()
+    worktree_base = Path(p["worktrees_dir"])
+    artifacts_base = Path(p["artifacts_root"])
+    task_key_prefix = p.get("task_key_prefix", "")
+    branch_prefix = p.get("branch_prefix", "worktree/")
+    return {
+        "repo_root": repo_root,
+        "worktree_base": worktree_base,
+        "artifacts_base": artifacts_base,
+        "task_key_prefix": task_key_prefix,
+        "branch_prefix": branch_prefix,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Safe Bullet Journal Kanban Task Submitter",
+        description="Safe Kanban Task Submitter for Agent Taskflow",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH,
+                        help="Path to projects config (default: config/projects.yaml)")
+    parser.add_argument("--project", default=DEFAULT_PROJECT,
+                        help=f"Project name from config (default: {DEFAULT_PROJECT})")
     parser.add_argument("--task-key", required=True,
-                        help="Task key (e.g. BJ-0004R). Allowed: [A-Za-z0-9._-]+")
+                        help="Task key (e.g. AT-0001). Allowed: [A-Za-z0-9._-]+")
     parser.add_argument("--title", required=True, help="Task title")
     parser.add_argument("--body-file", required=True,
                         help="Path to file containing task body (markdown)")
@@ -218,6 +258,31 @@ def main() -> None:
                         help="Pass --json to hermes kanban create")
 
     args = parser.parse_args()
+
+    # ------------------------------------------------------------------
+    # Step 0: Load project config
+    # ------------------------------------------------------------------
+    try:
+        cfg = resolve_config(args.config, args.project)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    global REPO_ROOT, WORKTREE_BASE, ARTIFACTS_BASE, TASK_KEY_PREFIX, BRANCH_PREFIX
+    REPO_ROOT = cfg["repo_root"]
+    WORKTREE_BASE = cfg["worktree_base"]
+    ARTIFACTS_BASE = cfg["artifacts_base"]
+    TASK_KEY_PREFIX = cfg["task_key_prefix"]
+    BRANCH_PREFIX = cfg["branch_prefix"]
+
+    print(f"Project:        {args.project}")
+    print(f"Config:         {args.config}")
+    print(f"Repo root:      {REPO_ROOT}")
+    print(f"Worktrees dir:  {WORKTREE_BASE}")
+    print(f"Artifacts dir:  {ARTIFACTS_BASE}")
 
     # ------------------------------------------------------------------
     # Step 1: Validate task key
@@ -259,7 +324,7 @@ def main() -> None:
     # Step 6: Prepare worktree
     # ------------------------------------------------------------------
     wt_path = worktree_path_for(args.task_key)
-    branch = f"worktree/{args.task_key}"
+    branch = f"{BRANCH_PREFIX}{args.task_key}"
     wt_exists = wt_path.exists()
 
     if wt_exists and not args.reuse_existing_worktree:

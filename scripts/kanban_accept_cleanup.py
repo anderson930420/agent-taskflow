@@ -26,21 +26,21 @@ Safety properties:
 Usage:
 
     # Dry run (always safe — no side effects)
-    python3 scripts/kanban_accept_cleanup.py \
-        --project bullet-journal \
-        --task-key BJ-0011R \
-        --task-id t_example \
-        --decision accepted \
-        --merged-commit abc1234 \
+    python3 scripts/kanban_accept_cleanup.py \\
+        --project agent-taskflow \\
+        --task-key AT-0011 \\
+        --task-id t_example \\
+        --decision accepted \\
+        --merged-commit abc1234 \\
         --dry-run
 
     # Real run (requires --confirm)
-    python3 scripts/kanban_accept_cleanup.py \
-        --project bullet-journal \
-        --task-key BJ-0011R \
-        --task-id t_example \
-        --decision accepted \
-        --merged-commit abc1234 \
+    python3 scripts/kanban_accept_cleanup.py \\
+        --project agent-taskflow \\
+        --task-key AT-0011 \\
+        --task-id t_example \\
+        --decision accepted \\
+        --merged-commit abc1234 \\
         --confirm
 
 Exit codes:
@@ -95,14 +95,15 @@ def resolve_paths(config_path: str, project: str, task_key: str) -> dict:
     if project not in projects:
         raise ValueError(f"Project {project!r} not found in {config_path}")
     p = projects[project]
-    repo = p["repo"]
+    repo = p["repo_path"]
+    worktrees_dir = p["worktrees_dir"]
+    artifacts_root = p["artifacts_root"]
     default_branch = p.get("default_branch", "main")
-    artifact_root = p.get("artifact_root", "/home/ubuntu/.hermes/task-artifacts")
     branch_prefix = p.get("branch_prefix", "worktree/")
 
-    worktree = os.path.join(repo, ".worktrees", task_key)
+    worktree = os.path.join(worktrees_dir, task_key)
     branch = branch_prefix + task_key
-    artifact_dir = os.path.join(artifact_root, task_key)
+    artifact_dir = os.path.join(artifacts_root, task_key)
 
     return {
         "repo": repo,
@@ -439,7 +440,7 @@ def main() -> int:
     )
     # Required
     parser.add_argument("--project", required=True, help="Project name from config/projects.yaml")
-    parser.add_argument("--task-key", required=True, help="Task key (e.g. BJ-0011R)")
+    parser.add_argument("--task-key", required=True, help="Task key (e.g. AT-0011)")
     parser.add_argument(
         "--decision",
         required=True,

@@ -2,18 +2,18 @@
 """
 kanban_workflow_regression.py — Read-only workflow regression audit.
 
-Consolidates manual review checks from BJ-0024–BJ-0027 into one command that
+Consolidates manual review checks from multiple tasks into one command that
 checks repo, worktree, branch, artifact folder, manifest, lifecycle audit, and
 optional PR metadata for a task.
 
 Usage:
-    python3 scripts/kanban_workflow_regression.py \
-      --project bullet-journal \
-      --task-key BJ-XXXX \
-      --task-id <task-id> \
+    python3 scripts/kanban_workflow_regression.py \\
+      --project agent-taskflow \\
+      --task-key AT-XXXX \\
+      --task-id <task-id> \\
       --phase review
 
-    python3 scripts/kanban_workflow_regression.py --project bullet-journal --task-key BJ-0027 \
+    python3 scripts/kanban_workflow_regression.py --project agent-taskflow --task-key AT-0027 \\
       --task-id t_f9e50970 --phase post-cleanup
 
 Exit codes:
@@ -97,14 +97,15 @@ def resolve_from_config(config_path: str, project: str, task_key: str) -> dict:
     if not proj:
         raise ValueError(f"Project {project!r} not found in {config_path_abs}")
 
-    repo = proj["repo"]
+    repo = proj["repo_path"]
+    worktrees_dir = proj["worktrees_dir"]
+    artifacts_root = proj["artifacts_root"]
     default_branch = proj["default_branch"]
-    artifact_root = proj.get("artifact_root", ARTIFACT_ROOT_DEFAULT)
     branch_prefix = proj.get("branch_prefix", "worktree/")
 
-    worktree = os.path.join(repo, ".worktrees", task_key)
+    worktree = os.path.join(worktrees_dir, task_key)
     branch = branch_prefix + task_key
-    artifact_dir = os.path.join(artifact_root, task_key)
+    artifact_dir = os.path.join(artifacts_root, task_key)
 
     return {
         "repo": repo,
@@ -720,8 +721,8 @@ def main():
         description="Hermes Workflow Regression Audit — read-only consolidation of manual review checks",
         prog="kanban_workflow_regression.py",
     )
-    parser.add_argument("--project", required=True, help="Project name (e.g. bullet-journal)")
-    parser.add_argument("--task-key", required=True, help="Task key (e.g. BJ-0027)")
+    parser.add_argument("--project", required=True, help="Project name (e.g. agent-taskflow)")
+    parser.add_argument("--task-key", required=True, help="Task key (e.g. AT-0027)")
     parser.add_argument("--task-id", default=None, help="Hermes task ID")
     parser.add_argument("--phase", default="review", choices=list(SUPPORTED_PHASES),
                         help=f"Phase to audit (default: review). Supported: {', '.join(sorted(SUPPORTED_PHASES))}")

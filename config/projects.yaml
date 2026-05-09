@@ -1,0 +1,35 @@
+# Agent Taskflow — Project Registry
+#
+# Configure each repository that Agent Taskflow manages.
+# Scripts load this via --config (default: config/projects.yaml).
+#
+# Schema:
+#   project_slug:   Unique identifier for this project (used with --project)
+#   task_key_prefix: Prefix for task keys (e.g. AT, BJ)
+#   repo_path:       Absolute path to the git repository
+#   github_repo:     GitHub owner/repo (e.g. owner/repo)
+#   artifacts_root:  Where task artifacts are stored
+#   worktrees_dir:   Where git worktrees are created
+#   default_branch:  Main branch name (default: main)
+#   branch_prefix:   Prefix for worktree branches (default: worktree/)
+
+projects:
+  agent-taskflow:
+    project_slug: agent-taskflow
+    task_key_prefix: AT
+    repo_path: /home/ubuntu/agent-taskflow
+    github_repo: anderson930420/agent-taskflow
+    artifacts_root: /home/ubuntu/.hermes/task-artifacts
+    worktrees_dir: /home/ubuntu/agent-taskflow/.worktrees
+    default_branch: main
+    branch_prefix: task/
+
+  bullet_journal:
+    project_slug: bullet_journal
+    task_key_prefix: BJ
+    repo_path: /home/ubuntu/bullet_journal_app
+    github_repo: anderson930420/bullet_journal_app
+    artifacts_root: /home/ubuntu/.hermes/task-artifacts
+    worktrees_dir: /home/ubuntu/bullet_journal_app/.worktrees
+    default_branch: main
+    branch_prefix: worktree/
