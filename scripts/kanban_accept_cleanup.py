@@ -543,7 +543,7 @@ def main() -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
-    repo = proj["repo"]
+    repo = paths["repo"]
     if not os.path.isabs(repo):
         script_dir = Path(__file__).parent.resolve()
         repo = str(script_dir / repo)
