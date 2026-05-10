@@ -241,12 +241,13 @@ class ShellExecutorTests(ExecutorTestCase):
 
 
 class ExecutorRegistryTests(unittest.TestCase):
-    def test_registry_lists_manual_noop_and_shell(self) -> None:
+    def test_registry_lists_manual_noop_shell_and_opencode(self) -> None:
         names = list_executor_names()
 
         self.assertIn("manual", names)
         self.assertIn("noop", names)
         self.assertIn("shell", names)
+        self.assertIn("opencode", names)
 
     def test_registry_returns_manual_and_noop(self) -> None:
         self.assertIsInstance(get_executor("manual"), ManualExecutor)
@@ -263,7 +264,7 @@ class ExecutorRegistryTests(unittest.TestCase):
 
     def test_registry_rejects_unknown_executor(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown executor"):
-            get_executor("opencode")
+            get_executor("missing-executor")
 
 
 if __name__ == "__main__":
