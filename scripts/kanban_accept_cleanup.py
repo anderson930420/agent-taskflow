@@ -58,6 +58,18 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
+# Allow direct execution via:
+#   python3 scripts/kanban_accept_cleanup.py ...
+# while still importing the repo-root package.
+_REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT_FOR_IMPORTS) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT_FOR_IMPORTS))
+
+from agent_taskflow.artifacts import artifact_dir_for as package_artifact_dir_for
+from agent_taskflow.projects import get_project_config, load_projects_config
+from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.worktree import worktree_path_from_base
+
 DEFAULT_CONFIG_PATH = "config/projects.yaml"
 VALID_DECISIONS = ("accepted", "rejected", "abandoned")
 
@@ -81,29 +93,23 @@ def run(cmd: list[str], cwd: str | None = None) -> tuple[int, str, str]:
 
 def load_config(config_path: str) -> dict:
     """Load and parse config/projects.yaml."""
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"config file not found: {config_path}")
-    import yaml
-    with open(config_path, "r") as f:
-        data = yaml.safe_load(f)
-    return data.get("projects", {})
+    return load_projects_config(config_path)
 
 
 def resolve_paths(config_path: str, project: str, task_key: str) -> dict:
     """Resolve repo, worktree, branch, artifact_dir from project registry."""
     projects = load_config(config_path)
-    if project not in projects:
-        raise ValueError(f"Project {project!r} not found in {config_path}")
-    p = projects[project]
+    p = get_project_config(projects, project)
+    key = normalize_task_key(task_key)
     repo = p["repo_path"]
     worktrees_dir = p["worktrees_dir"]
     artifacts_root = p["artifacts_root"]
     default_branch = p.get("default_branch", "main")
     branch_prefix = p.get("branch_prefix", "worktree/")
 
-    worktree = os.path.join(worktrees_dir, task_key)
-    branch = branch_prefix + task_key
-    artifact_dir = os.path.join(artifacts_root, task_key)
+    worktree = str(worktree_path_from_base(worktrees_dir, key))
+    branch = branch_prefix + key
+    artifact_dir = str(package_artifact_dir_for(key, artifacts_root))
 
     return {
         "repo": repo,

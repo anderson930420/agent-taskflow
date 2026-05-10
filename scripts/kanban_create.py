@@ -36,7 +36,16 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
-import yaml
+# Allow direct execution via:
+#   python3 scripts/kanban_create.py ...
+# while still importing the repo-root package.
+_REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT_FOR_IMPORTS) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT_FOR_IMPORTS))
+
+from agent_taskflow.artifacts import artifact_dir_for as package_artifact_dir_for
+from agent_taskflow.projects import get_project_config, load_projects_config
+from agent_taskflow.worktree import worktree_path_from_base
 
 DEFAULT_CONFIG_PATH = "config/projects.yaml"
 DEFAULT_PROJECT = "agent-taskflow"
@@ -127,11 +136,15 @@ def validate_task_key(key: str) -> None:
 
 
 def worktree_path_for(key: str) -> Path:
-    return WORKTREE_BASE / key
+    if WORKTREE_BASE is None:
+        raise RuntimeError("WORKTREE_BASE is not configured")
+    return worktree_path_from_base(WORKTREE_BASE, key)
 
 
 def artifact_path_for(key: str) -> Path:
-    return ARTIFACTS_BASE / key
+    if ARTIFACTS_BASE is None:
+        raise RuntimeError("ARTIFACTS_BASE is not configured")
+    return package_artifact_dir_for(key, ARTIFACTS_BASE)
 
 
 def verify_worktree(wt_path: Path, branch: str) -> None:
@@ -203,20 +216,13 @@ def build_hermes_command(args: argparse.Namespace, body_with_header: str,
 
 def load_config(config_path: str) -> dict:
     """Load and parse config/projects.yaml."""
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    with open(config_path, "r") as f:
-        data = yaml.safe_load(f)
-    return data.get("projects", {})
+    return load_projects_config(config_path)
 
 
 def resolve_config(config_path: str, project: str) -> dict:
     """Load project config and resolve repo_root, worktree_base, artifacts_base, task_key_prefix."""
     projects = load_config(config_path)
-    if project not in projects:
-        raise ValueError(f"Project {project!r} not found in {config_path}. "
-                         f"Available: {', '.join(sorted(projects.keys()))}")
-    p = projects[project]
+    p = get_project_config(projects, project)
     repo_root = Path(p["repo_path"]).resolve()
     worktree_base = Path(p["worktrees_dir"])
     artifacts_base = Path(p["artifacts_root"])
