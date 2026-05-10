@@ -12,6 +12,7 @@
 #   worktrees_dir:   Where git worktrees are created
 #   default_branch:  Main branch name (default: main)
 #   branch_prefix:   Prefix for worktree branches (default: worktree/)
+#   hermes_board:    Hermes Kanban board for this project (default: project_slug)
 
 projects:
   agent-taskflow:
@@ -23,6 +24,7 @@ projects:
     worktrees_dir: /home/ubuntu/agent-taskflow/.worktrees
     default_branch: main
     branch_prefix: task/
+    hermes_board: agent-taskflow
 
   # Example: how bullet_journal_app would be represented
   # (This project was the origin of this tooling before generalization)
@@ -35,3 +37,4 @@ projects:
     worktrees_dir: /home/ubuntu/bullet_journal_app/.worktrees
     default_branch: main
     branch_prefix: worktree/
+    hermes_board: bullet-journal

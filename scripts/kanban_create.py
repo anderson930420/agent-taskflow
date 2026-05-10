@@ -179,10 +179,11 @@ def create_artifact_folder(key: str) -> Path:
 # ------------------------------------------------------------------
 
 def build_hermes_command(args: argparse.Namespace, body_with_header: str,
-                          worktree_verified: Path) -> list[str]:
+                          worktree_verified: Path,
+                          hermes_board: str) -> list[str]:
     """Build the hermes kanban create command as a list of args."""
     cmd = [
-        "hermes", "kanban", "create",
+        "hermes", "kanban", "--board", hermes_board, "create",
         args.title,
         "--assignee", args.assignee,
         "--workspace", f"dir:{worktree_verified}",
@@ -221,12 +222,15 @@ def resolve_config(config_path: str, project: str) -> dict:
     artifacts_base = Path(p["artifacts_root"])
     task_key_prefix = p.get("task_key_prefix", "")
     branch_prefix = p.get("branch_prefix", "worktree/")
+    # hermes_board defaults to project_slug if omitted
+    hermes_board = p.get("hermes_board", p["project_slug"])
     return {
         "repo_root": repo_root,
         "worktree_base": worktree_base,
         "artifacts_base": artifacts_base,
         "task_key_prefix": task_key_prefix,
         "branch_prefix": branch_prefix,
+        "hermes_board": hermes_board,
     }
 
 
@@ -271,18 +275,20 @@ def main() -> None:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
-    global REPO_ROOT, WORKTREE_BASE, ARTIFACTS_BASE, TASK_KEY_PREFIX, BRANCH_PREFIX
+    global REPO_ROOT, WORKTREE_BASE, ARTIFACTS_BASE, TASK_KEY_PREFIX, BRANCH_PREFIX, HERMES_BOARD
     REPO_ROOT = cfg["repo_root"]
     WORKTREE_BASE = cfg["worktree_base"]
     ARTIFACTS_BASE = cfg["artifacts_base"]
     TASK_KEY_PREFIX = cfg["task_key_prefix"]
     BRANCH_PREFIX = cfg["branch_prefix"]
+    HERMES_BOARD = cfg["hermes_board"]
 
     print(f"Project:        {args.project}")
     print(f"Config:         {args.config}")
     print(f"Repo root:      {REPO_ROOT}")
     print(f"Worktrees dir:  {WORKTREE_BASE}")
     print(f"Artifacts dir:  {ARTIFACTS_BASE}")
+    print(f"Hermes board:   {HERMES_BOARD}")
 
     # ------------------------------------------------------------------
     # Step 1: Validate task key
@@ -361,7 +367,7 @@ def main() -> None:
             print(f"\nWould run:")
             print(f"  git worktree add -b {branch} {wt_path} main (from {repo_root})")
         print(f"\nhermes kanban create command:")
-        print(f"  hermes kanban create ... --workspace dir:{wt_path}")
+        print(f"  hermes kanban --board {HERMES_BOARD} create ... --workspace dir:{wt_path}")
         print(f"\nBody with governance header:\n")
         print(body_with_header)
         return
@@ -388,7 +394,7 @@ def main() -> None:
     # Step 12: Create Hermes Kanban task
     # ------------------------------------------------------------------
     print("\nCreating Hermes Kanban task...")
-    cmd = build_hermes_command(args, body_with_header, wt_path)
+    cmd = build_hermes_command(args, body_with_header, wt_path, HERMES_BOARD)
 
     print(f"\nRunning: {' '.join(cmd)}")
     try:

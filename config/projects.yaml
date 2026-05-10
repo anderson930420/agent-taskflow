@@ -23,6 +23,7 @@ projects:
     worktrees_dir: /home/ubuntu/agent-taskflow/.worktrees
     default_branch: main
     branch_prefix: task/
+    hermes_board: agent-taskflow
 
   bullet_journal:
     project_slug: bullet_journal
@@ -33,3 +34,4 @@ projects:
     worktrees_dir: /home/ubuntu/bullet_journal_app/.worktrees
     default_branch: main
     branch_prefix: worktree/
+    hermes_board: bullet-journal

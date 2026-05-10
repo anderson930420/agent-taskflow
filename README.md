@@ -39,7 +39,7 @@ cp examples/project_config.yaml config/projects.yaml
 # Edit config/projects.yaml with your project paths
 ```
 
-Each project in `config/projects.yaml` requires these fields:
+Each project in `config/projects.yaml` supports these fields:
 
 | Field | Description |
 |-------|-------------|
@@ -50,7 +50,8 @@ Each project in `config/projects.yaml` requires these fields:
 | `artifacts_root` | Where task artifacts are stored |
 | `worktrees_dir` | Where git worktrees are created |
 | `default_branch` | Main branch name (default: `main`) |
-| `branch_prefix` | Prefix for worktree branches (default: `worktree/`)
+| `branch_prefix` | Prefix for worktree branches (default: `worktree/`) |
+| `hermes_board` | Hermes Kanban board for this project (default: `project_slug`) |
 
 ### 2. Create a task
 
