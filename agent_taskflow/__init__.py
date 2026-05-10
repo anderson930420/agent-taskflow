@@ -8,5 +8,6 @@ __all__ = [
     "projects",
     "store",
     "tasks",
+    "validators",
     "worktree",
 ]
