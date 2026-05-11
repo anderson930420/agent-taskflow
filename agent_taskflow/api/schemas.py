@@ -5,7 +5,110 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from agent_taskflow.models import TaskArtifactRecord, TaskRecord
+
+
+
+class CreateTaskRequest(BaseModel):
+    """Request body for creating a local mirrored task record."""
+
+    task_key: str
+    project: str
+    repo_path: str
+    worktree_path: str
+    artifact_dir: str
+    executor: str | None = None
+    model: str | None = None
+    validator: str | None = None
+    pr_url: str | None = None
+    pr_number: int | None = None
+    title: str | None = None
+    board: str | None = None
+    hermes_task_id: str | None = None
+    branch: str | None = None
+    base_branch: str | None = "main"
+
+
+class StartTaskRequest(BaseModel):
+    """Request body for dispatching a task through the dispatcher abstraction."""
+
+    validators: list[str] | None = None
+    executor: str | None = None
+    model: str | None = None
+    dry_run: bool = False
+
+
+class ValidateTaskRequest(BaseModel):
+    """Request body reserved for future validation-only dispatch."""
+
+    validators: list[str] | None = None
+
+
+class ApprovalRequest(BaseModel):
+    """Request body for accepting a waiting task after human review."""
+
+    decided_by: str
+    notes: str | None = None
+
+
+class RejectRequest(BaseModel):
+    """Request body for rejecting a task after human review."""
+
+    decided_by: str
+    notes: str | None = None
+
+
+class BlockTaskRequest(BaseModel):
+    """Request body for manually blocking a task."""
+
+    blocked_reason: str
+
+
+class ActionResponse(BaseModel):
+    """Stable action response envelope."""
+
+    ok: bool
+    action: str
+    task_key: str | None = None
+    status: str | None = None
+    message: str
+    item: dict[str, Any] | None = None
+
+
+def action_response(
+    *,
+    ok: bool,
+    action: str,
+    message: str,
+    task_key: str | None = None,
+    status: str | None = None,
+    item: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return json_safe(
+        {
+            "ok": ok,
+            "action": action,
+            "task_key": task_key,
+            "status": status,
+            "message": message,
+            "item": item or {},
+        }
+    )
+
+
+def dispatcher_result_to_dict(result: Any) -> dict[str, Any]:
+    return json_safe(
+        {
+            "task_key": result.task_key,
+            "status": result.status,
+            "summary": result.summary,
+            "executor_status": result.executor_status,
+            "validator_statuses": result.validator_statuses,
+            "blocked_reason": result.blocked_reason,
+        }
+    )
 
 
 _SENSITIVE_KEYS = {

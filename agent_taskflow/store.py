@@ -388,12 +388,16 @@ class TaskMirrorStore:
             if payload.get("kind") not in {"approval_decision", "approval_recorded"}:
                 continue
 
+            reviewer = payload.get("reviewer") or payload.get("decided_by")
+            summary = payload.get("summary") or payload.get("notes")
             decisions.append(
                 {
                     "task_key": event.task_key,
                     "decision": payload.get("decision"),
-                    "reviewer": payload.get("reviewer"),
-                    "summary": payload.get("summary"),
+                    "decided_by": payload.get("decided_by") or reviewer,
+                    "notes": payload.get("notes") or summary,
+                    "reviewer": reviewer,
+                    "summary": summary,
                     "reason": payload.get("reason"),
                     "pr_url": payload.get("pr_url"),
                     "pr_number": payload.get("pr_number"),
@@ -461,6 +465,38 @@ class TaskMirrorStore:
                     now,
                 ),
             )
+
+    def record_approval_decision(
+        self,
+        task_key: str,
+        decision: str,
+        *,
+        decided_by: str,
+        notes: str | None = None,
+        source: str = "api",
+    ) -> None:
+        normalized_decision = decision.strip().lower()
+        if normalized_decision not in {"accepted", "rejected"}:
+            raise ValueError(f"Invalid approval decision: {decision!r}")
+
+        reviewer = decided_by.strip()
+        if not reviewer:
+            raise ValueError("decided_by must not be empty")
+
+        self.record_task_event(
+            task_key,
+            "note",
+            source,
+            message=f"Approval decision recorded: {normalized_decision}",
+            payload={
+                "kind": "approval_decision",
+                "decision": normalized_decision,
+                "decided_by": reviewer,
+                "notes": notes,
+                "reviewer": reviewer,
+                "summary": notes,
+            },
+        )
 
     def record_task_event(
         self,
@@ -902,3 +938,21 @@ def list_approval_decisions(
     task_key: str,
 ) -> list[dict[str, Any]]:
     return TaskMirrorStore(db_path).list_approval_decisions(task_key)
+
+
+def record_approval_decision(
+    db_path: str | Path | None,
+    task_key: str,
+    decision: str,
+    *,
+    decided_by: str,
+    notes: str | None = None,
+    source: str = "api",
+) -> None:
+    TaskMirrorStore(db_path).record_approval_decision(
+        task_key,
+        decision,
+        decided_by=decided_by,
+        notes=notes,
+        source=source,
+    )
