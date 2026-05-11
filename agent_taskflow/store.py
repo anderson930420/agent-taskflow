@@ -58,6 +58,7 @@ def init_db(path: str | Path | None = None) -> None:
                 status TEXT NOT NULL,
                 repo_path TEXT NOT NULL,
                 artifact_dir TEXT,
+                blocked_reason TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_synced_at TEXT
@@ -97,6 +98,13 @@ def init_db(path: str | Path | None = None) -> None:
             """
         )
 
+        task_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "blocked_reason" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN blocked_reason TEXT")
+
 
 def _row_to_task(row: sqlite3.Row) -> TaskRecord:
     return TaskRecord(
@@ -108,6 +116,7 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         status=row["status"],
         repo_path=Path(row["repo_path"]),
         artifact_dir=Path(row["artifact_dir"]) if row["artifact_dir"] else None,
+        blocked_reason=row["blocked_reason"] if "blocked_reason" in row.keys() else None,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         last_synced_at=row["last_synced_at"],
@@ -174,11 +183,12 @@ class TaskMirrorStore:
                     status,
                     repo_path,
                     artifact_dir,
+                    blocked_reason,
                     created_at,
                     updated_at,
                     last_synced_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_key) DO UPDATE SET
                     project = excluded.project,
                     board = excluded.board,
@@ -187,6 +197,7 @@ class TaskMirrorStore:
                     status = excluded.status,
                     repo_path = excluded.repo_path,
                     artifact_dir = excluded.artifact_dir,
+                    blocked_reason = excluded.blocked_reason,
                     updated_at = excluded.updated_at,
                     last_synced_at = excluded.last_synced_at
                 """,
@@ -199,6 +210,7 @@ class TaskMirrorStore:
                     record.status,
                     str(record.repo_path),
                     str(record.artifact_dir) if record.artifact_dir else None,
+                    record.blocked_reason,
                     created_at,
                     updated_at,
                     last_synced_at,
@@ -259,18 +271,25 @@ class TaskMirrorStore:
         *,
         message: str | None = None,
         source: str = "local_mirror",
+        blocked_reason: str | None = None,
     ) -> None:
         validated_status = validate_task_status(status)
         now = utc_now_iso()
+        stored_blocked_reason = (
+            blocked_reason or message if validated_status == "blocked" else None
+        )
 
         with connect(self.db_path) as conn:
             cursor = conn.execute(
                 """
                 UPDATE tasks
-                SET status = ?, updated_at = ?, last_synced_at = ?
+                SET status = ?,
+                    blocked_reason = ?,
+                    updated_at = ?,
+                    last_synced_at = ?
                 WHERE task_key = ?
                 """,
-                (validated_status, now, now, task_key),
+                (validated_status, stored_blocked_reason, now, now, task_key),
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"Task not found: {task_key}")
@@ -292,7 +311,13 @@ class TaskMirrorStore:
                     "status_changed",
                     source,
                     message,
-                    json.dumps({"status": validated_status}, sort_keys=True),
+                    json.dumps(
+                        {
+                            "status": validated_status,
+                            "blocked_reason": stored_blocked_reason,
+                        },
+                        sort_keys=True,
+                    ),
                     now,
                 ),
             )
@@ -337,6 +362,92 @@ class TaskMirrorStore:
                     record.created_at,
                 ),
             )
+
+    def create_executor_run(
+        self,
+        task_key: str,
+        executor: str,
+        *,
+        model: str | None = None,
+        prompt_path: str | Path | None = None,
+    ) -> str:
+        run_id = f"{task_key}:{executor}:{utc_now_iso()}"
+        self.record_task_event(
+            task_key,
+            "note",
+            "dispatcher",
+            message=f"Executor {executor} started",
+            payload={
+                "kind": "executor_run_started",
+                "run_id": run_id,
+                "executor": executor,
+                "model": model,
+                "prompt_path": str(prompt_path) if prompt_path else None,
+            },
+        )
+        return run_id
+
+    def finish_executor_run(
+        self,
+        task_key: str,
+        run_id: str,
+        *,
+        executor: str,
+        status: str,
+        exit_code: int | None = None,
+        summary: str | None = None,
+        log_path: str | Path | None = None,
+        artifacts: dict[str, str | Path] | None = None,
+    ) -> None:
+        self.record_task_event(
+            task_key,
+            "note",
+            "dispatcher",
+            message=f"Executor {executor} finished with status {status}",
+            payload={
+                "kind": "executor_run_finished",
+                "run_id": run_id,
+                "executor": executor,
+                "status": status,
+                "exit_code": exit_code,
+                "summary": summary,
+                "log_path": str(log_path) if log_path else None,
+                "artifacts": {
+                    key: str(path)
+                    for key, path in (artifacts or {}).items()
+                },
+            },
+        )
+
+    def record_validation_result(
+        self,
+        task_key: str,
+        validator: str,
+        *,
+        status: str,
+        exit_code: int | None = None,
+        summary: str | None = None,
+        log_path: str | Path | None = None,
+        artifacts: dict[str, str | Path] | None = None,
+    ) -> None:
+        self.record_task_event(
+            task_key,
+            "note",
+            "dispatcher",
+            message=f"Validator {validator} finished with status {status}",
+            payload={
+                "kind": "validation_result",
+                "validator": validator,
+                "status": status,
+                "exit_code": exit_code,
+                "summary": summary,
+                "log_path": str(log_path) if log_path else None,
+                "artifacts": {
+                    key: str(path)
+                    for key, path in (artifacts or {}).items()
+                },
+            },
+        )
 
     def list_task_events(self, task_key: str) -> list[TaskEventRecord]:
         with connect(self.db_path) as conn:
@@ -525,6 +636,68 @@ def list_task_events(
     task_key: str,
 ) -> list[TaskEventRecord]:
     return TaskMirrorStore(db_path).list_task_events(task_key)
+
+
+def create_executor_run(
+    db_path: str | Path | None,
+    task_key: str,
+    executor: str,
+    *,
+    model: str | None = None,
+    prompt_path: str | Path | None = None,
+) -> str:
+    return TaskMirrorStore(db_path).create_executor_run(
+        task_key,
+        executor,
+        model=model,
+        prompt_path=prompt_path,
+    )
+
+
+def finish_executor_run(
+    db_path: str | Path | None,
+    task_key: str,
+    run_id: str,
+    *,
+    executor: str,
+    status: str,
+    exit_code: int | None = None,
+    summary: str | None = None,
+    log_path: str | Path | None = None,
+    artifacts: dict[str, str | Path] | None = None,
+) -> None:
+    TaskMirrorStore(db_path).finish_executor_run(
+        task_key,
+        run_id,
+        executor=executor,
+        status=status,
+        exit_code=exit_code,
+        summary=summary,
+        log_path=log_path,
+        artifacts=artifacts,
+    )
+
+
+def record_validation_result(
+    db_path: str | Path | None,
+    task_key: str,
+    validator: str,
+    *,
+    status: str,
+    exit_code: int | None = None,
+    summary: str | None = None,
+    log_path: str | Path | None = None,
+    artifacts: dict[str, str | Path] | None = None,
+) -> None:
+    TaskMirrorStore(db_path).record_validation_result(
+        task_key,
+        validator,
+        status=status,
+        exit_code=exit_code,
+        summary=summary,
+        log_path=log_path,
+        artifacts=artifacts,
+    )
 
 
 def record_task_artifact(

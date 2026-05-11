@@ -124,6 +124,7 @@ class TaskRecord:
     hermes_task_id: str | None = None
     title: str | None = None
     artifact_dir: Path | None = None
+    blocked_reason: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
     last_synced_at: str | None = None

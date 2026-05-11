@@ -72,6 +72,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(task.task_key, "AT-0003")
         self.assertEqual(task.project, "agent-taskflow")
         self.assertEqual(task.status, "blocked")
+        self.assertIsNone(task.blocked_reason)
         self.assertEqual(task.repo_path, Path("/home/ubuntu/agent-taskflow"))
 
     def test_task_upsert_updates_existing_task(self) -> None:
@@ -124,6 +125,96 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(events[0].event_type, "status_changed")
         self.assertEqual(events[0].source, "kanban")
         self.assertIn("waiting_approval", events[0].payload_json or "")
+
+    def test_update_task_status_can_record_blocked_reason(self) -> None:
+        self.store.upsert_task(self.make_task(status="queued"))
+
+        self.store.update_task_status(
+            "AT-0003",
+            "blocked",
+            message="Executor failed",
+            source="dispatcher",
+            blocked_reason="executor failed with status failed",
+        )
+
+        task = self.store.get_task("AT-0003")
+        events = self.store.list_task_events("AT-0003")
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "blocked")
+        self.assertEqual(task.blocked_reason, "executor failed with status failed")
+        self.assertIn("executor failed", events[-1].payload_json or "")
+
+    def test_update_non_blocked_status_clears_blocked_reason(self) -> None:
+        self.store.upsert_task(
+            self.make_task(status="blocked").__class__(
+                task_key="AT-0003",
+                project="agent-taskflow",
+                board="agent-taskflow",
+                hermes_task_id="t_at_0003",
+                title="Task AT-0003",
+                status="blocked",
+                repo_path="/home/ubuntu/agent-taskflow",
+                artifact_dir="/home/ubuntu/.hermes/task-artifacts/AT-0003",
+                blocked_reason="old reason",
+            )
+        )
+
+        self.store.update_task_status("AT-0003", "queued", source="dispatcher")
+
+        task = self.store.get_task("AT-0003")
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "queued")
+        self.assertIsNone(task.blocked_reason)
+
+    def test_dispatcher_store_events_can_record_executor_run(self) -> None:
+        self.store.upsert_task(self.make_task())
+
+        run_id = self.store.create_executor_run(
+            "AT-0003",
+            "noop",
+            model="fake-model",
+            prompt_path="/home/ubuntu/.hermes/task-artifacts/AT-0003/implementation_prompt.md",
+        )
+        self.store.finish_executor_run(
+            "AT-0003",
+            run_id,
+            executor="noop",
+            status="completed",
+            exit_code=0,
+            summary="done",
+            log_path="/home/ubuntu/.hermes/task-artifacts/AT-0003/noop.log",
+            artifacts={"log": "/home/ubuntu/.hermes/task-artifacts/AT-0003/noop.log"},
+        )
+
+        events = self.store.list_task_events("AT-0003")
+        payloads = [event.payload_json or "" for event in events]
+
+        self.assertTrue(any("executor_run_started" in payload for payload in payloads))
+        self.assertTrue(any("executor_run_finished" in payload for payload in payloads))
+        self.assertTrue(any(run_id in payload for payload in payloads))
+
+    def test_dispatcher_store_events_can_record_validation_result(self) -> None:
+        self.store.upsert_task(self.make_task())
+
+        self.store.record_validation_result(
+            "AT-0003",
+            "pytest",
+            status="passed",
+            exit_code=0,
+            summary="tests passed",
+            log_path="/home/ubuntu/.hermes/task-artifacts/AT-0003/pytest.log",
+            artifacts={"log": "/home/ubuntu/.hermes/task-artifacts/AT-0003/pytest.log"},
+        )
+
+        events = self.store.list_task_events("AT-0003")
+
+        self.assertEqual(events[-1].source, "dispatcher")
+        self.assertIn("validation_result", events[-1].payload_json or "")
+        self.assertIn("pytest", events[-1].payload_json or "")
 
     def test_update_missing_task_status_raises_key_error(self) -> None:
         with self.assertRaisesRegex(KeyError, "Task not found"):
