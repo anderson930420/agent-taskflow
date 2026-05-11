@@ -264,6 +264,146 @@ class TaskMirrorStore:
 
         return [_row_to_task(row) for row in rows]
 
+    def list_projects(self) -> list[dict[str, Any]]:
+        """Return distinct projects represented in the local task mirror."""
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    project,
+                    COUNT(*) AS task_count,
+                    MAX(updated_at) AS latest_updated_at
+                FROM tasks
+                GROUP BY project
+                ORDER BY project ASC
+                """
+            ).fetchall()
+
+        return [
+            {
+                "project": row["project"],
+                "task_count": row["task_count"],
+                "latest_updated_at": row["latest_updated_at"],
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _event_payload(event: TaskEventRecord) -> dict[str, Any]:
+        if not event.payload_json:
+            return {}
+        try:
+            payload = json.loads(event.payload_json)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+
+    def list_executor_runs(self, task_key: str) -> list[dict[str, Any]]:
+        """Return executor run metadata reconstructed from dispatcher events."""
+        runs: dict[str, dict[str, Any]] = {}
+        ordered_run_ids: list[str] = []
+
+        for event in self.list_task_events(task_key):
+            payload = self._event_payload(event)
+            kind = payload.get("kind")
+            if kind not in {"executor_run_started", "executor_run_finished"}:
+                continue
+
+            run_id = payload.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                continue
+
+            if run_id not in runs:
+                runs[run_id] = {
+                    "run_id": run_id,
+                    "task_key": event.task_key,
+                    "executor": payload.get("executor"),
+                    "model": None,
+                    "prompt_path": None,
+                    "status": None,
+                    "exit_code": None,
+                    "summary": None,
+                    "log_path": None,
+                    "artifacts": {},
+                    "started_at": None,
+                    "finished_at": None,
+                }
+                ordered_run_ids.append(run_id)
+
+            run = runs[run_id]
+            if kind == "executor_run_started":
+                run["executor"] = payload.get("executor")
+                run["model"] = payload.get("model")
+                run["prompt_path"] = payload.get("prompt_path")
+                run["started_at"] = event.created_at
+            else:
+                run["executor"] = payload.get("executor")
+                run["status"] = payload.get("status")
+                run["exit_code"] = payload.get("exit_code")
+                run["summary"] = payload.get("summary")
+                run["log_path"] = payload.get("log_path")
+                artifacts = payload.get("artifacts")
+                run["artifacts"] = artifacts if isinstance(artifacts, dict) else {}
+                run["finished_at"] = event.created_at
+
+        return [runs[run_id] for run_id in ordered_run_ids]
+
+    def list_validation_results(self, task_key: str) -> list[dict[str, Any]]:
+        """Return validator result metadata reconstructed from dispatcher events."""
+        results: list[dict[str, Any]] = []
+
+        for event in self.list_task_events(task_key):
+            payload = self._event_payload(event)
+            if payload.get("kind") != "validation_result":
+                continue
+
+            artifacts = payload.get("artifacts")
+            results.append(
+                {
+                    "task_key": event.task_key,
+                    "validator": payload.get("validator"),
+                    "status": payload.get("status"),
+                    "exit_code": payload.get("exit_code"),
+                    "summary": payload.get("summary"),
+                    "log_path": payload.get("log_path"),
+                    "artifacts": artifacts if isinstance(artifacts, dict) else {},
+                    "created_at": event.created_at,
+                }
+            )
+
+        return results
+
+    def list_approval_decisions(self, task_key: str) -> list[dict[str, Any]]:
+        """Return approval decision metadata from local mirror events.
+
+        Approval events are intentionally read-only here. This method does not
+        approve, reject, merge, clean up, or call any external worker.
+        """
+        decisions: list[dict[str, Any]] = []
+
+        for event in self.list_task_events(task_key):
+            payload = self._event_payload(event)
+            if payload.get("kind") not in {"approval_decision", "approval_recorded"}:
+                continue
+
+            decisions.append(
+                {
+                    "task_key": event.task_key,
+                    "decision": payload.get("decision"),
+                    "reviewer": payload.get("reviewer"),
+                    "summary": payload.get("summary"),
+                    "reason": payload.get("reason"),
+                    "pr_url": payload.get("pr_url"),
+                    "pr_number": payload.get("pr_number"),
+                    "merged_commit": payload.get("merged_commit"),
+                    "created_at": event.created_at,
+                }
+            )
+
+        return decisions
+
     def update_task_status(
         self,
         task_key: str,
@@ -613,6 +753,10 @@ def list_tasks(
     return TaskMirrorStore(db_path).list_tasks(project=project, status=status)
 
 
+def list_projects(db_path: str | Path | None) -> list[dict[str, Any]]:
+    return TaskMirrorStore(db_path).list_projects()
+
+
 def record_task_event(
     db_path: str | Path | None,
     task_key: str,
@@ -737,3 +881,24 @@ def list_task_worktrees(
     status: str | None = None,
 ) -> list[TaskWorktreeRecord]:
     return TaskMirrorStore(db_path).list_task_worktrees(project=project, status=status)
+
+
+def list_executor_runs(
+    db_path: str | Path | None,
+    task_key: str,
+) -> list[dict[str, Any]]:
+    return TaskMirrorStore(db_path).list_executor_runs(task_key)
+
+
+def list_validation_results(
+    db_path: str | Path | None,
+    task_key: str,
+) -> list[dict[str, Any]]:
+    return TaskMirrorStore(db_path).list_validation_results(task_key)
+
+
+def list_approval_decisions(
+    db_path: str | Path | None,
+    task_key: str,
+) -> list[dict[str, Any]]:
+    return TaskMirrorStore(db_path).list_approval_decisions(task_key)
