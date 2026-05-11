@@ -102,6 +102,54 @@ export interface ApprovalDecision {
   [key: string]: unknown;
 }
 
+export interface ActionResponse<T = unknown> {
+  ok: boolean;
+  action: string;
+  task_key?: string | null;
+  status?: string | null;
+  message: string;
+  item?: T | null;
+}
+
+export interface CreateTaskRequest {
+  task_key: string;
+  project: string;
+  repo_path: string;
+  worktree_path: string;
+  artifact_dir: string;
+  executor?: string | null;
+  model?: string | null;
+  validator?: string | null;
+  pr_url?: string | null;
+  pr_number?: number | null;
+  title?: string | null;
+  board?: string | null;
+  hermes_task_id?: string | null;
+  branch?: string | null;
+  base_branch?: string | null;
+}
+
+export interface StartTaskRequest {
+  validators?: string[] | null;
+  executor?: string | null;
+  model?: string | null;
+  dry_run?: boolean;
+}
+
+export interface ApprovalRequest {
+  decided_by: string;
+  notes?: string | null;
+}
+
+export interface RejectRequest {
+  decided_by: string;
+  notes?: string | null;
+}
+
+export interface BlockTaskRequest {
+  blocked_reason: string;
+}
+
 export interface ApiFailure {
   message: string;
   status?: number;

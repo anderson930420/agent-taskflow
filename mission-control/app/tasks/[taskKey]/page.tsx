@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ActionPanel } from "../../../components/ActionPanel";
 import { ApprovalList } from "../../../components/ApprovalList";
 import { ArtifactList } from "../../../components/ArtifactList";
 import { RunList } from "../../../components/RunList";
@@ -124,6 +125,8 @@ export default async function TaskDetailPage({
           </table>
         </div>
       </section>
+
+      <ActionPanel task={task} />
 
       <section className="section panel">
         <h2>Executor Runs</h2>

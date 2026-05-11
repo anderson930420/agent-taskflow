@@ -1,11 +1,17 @@
 import type {
+  ActionResponse,
   ApiResult,
   ApprovalDecision,
+  ApprovalRequest,
   Artifact,
+  BlockTaskRequest,
+  CreateTaskRequest,
   DetailResponse,
   ExecutorRun,
   ListResponse,
   Project,
+  RejectRequest,
+  StartTaskRequest,
   Task,
   TaskDetailBundle,
   ValidationResult
@@ -29,6 +35,59 @@ function failure<T>(message: string, status?: number): ApiResult<T> {
   };
 }
 
+function formatUnknownDetail(detail: unknown): string | null {
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (
+          item &&
+          typeof item === "object" &&
+          "msg" in item &&
+          typeof item.msg === "string"
+        ) {
+          return item.msg;
+        }
+        return JSON.stringify(item);
+      })
+      .join("; ");
+  }
+
+  if (detail && typeof detail === "object") {
+    return JSON.stringify(detail);
+  }
+
+  return null;
+}
+
+async function responseFailure<T>(
+  response: Response,
+  url: string
+): Promise<ApiResult<T>> {
+  let detail = response.statusText;
+
+  try {
+    const body = (await response.json()) as {
+      detail?: unknown;
+      message?: unknown;
+    };
+    const bodyDetail =
+      formatUnknownDetail(body.detail) ?? formatUnknownDetail(body.message);
+
+    if (bodyDetail) {
+      detail = bodyDetail;
+    }
+  } catch {
+    // Keep the HTTP status text if the body is not JSON.
+  }
+
+  return failure(`Request failed for ${url}: ${detail}`, response.status);
+}
+
 export async function requestJson<T>(path: string): Promise<ApiResult<T>> {
   const url = endpoint(path);
 
@@ -42,17 +101,43 @@ export async function requestJson<T>(path: string): Promise<ApiResult<T>> {
     });
 
     if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        const body = (await response.json()) as { detail?: unknown };
-        if (typeof body.detail === "string") {
-          detail = body.detail;
-        }
-      } catch {
-        // Keep the HTTP status text if the body is not JSON.
-      }
+      return responseFailure<T>(response, url);
+    }
 
-      return failure(`Request failed for ${url}: ${detail}`, response.status);
+    return {
+      ok: true,
+      data: (await response.json()) as T
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Unknown network error while contacting Agent Taskflow API";
+
+    return failure(
+      `Agent Taskflow API unavailable at ${API_BASE_URL}. ${message}`
+    );
+  }
+}
+
+export async function postJson<T>(
+  path: string,
+  payload?: unknown
+): Promise<ApiResult<T>> {
+  const url = endpoint(path);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload ?? {})
+    });
+
+    if (!response.ok) {
+      return responseFailure<T>(response, url);
     }
 
     return {
@@ -190,4 +275,50 @@ export async function getTaskDetailBundle(
   }
 
   return failure("Unable to load task detail bundle.");
+}
+
+export async function createTask(
+  payload: CreateTaskRequest
+): Promise<ApiResult<ActionResponse<Task>>> {
+  return postJson<ActionResponse<Task>>("/api/tasks", payload);
+}
+
+export async function startTask(
+  taskKey: string,
+  payload?: StartTaskRequest
+): Promise<ApiResult<ActionResponse>> {
+  return postJson<ActionResponse>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/start`,
+    payload ?? {}
+  );
+}
+
+export async function approveTask(
+  taskKey: string,
+  payload: ApprovalRequest
+): Promise<ApiResult<ActionResponse<Task>>> {
+  return postJson<ActionResponse<Task>>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/approve`,
+    payload
+  );
+}
+
+export async function rejectTask(
+  taskKey: string,
+  payload: RejectRequest
+): Promise<ApiResult<ActionResponse<Task>>> {
+  return postJson<ActionResponse<Task>>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/reject`,
+    payload
+  );
+}
+
+export async function blockTask(
+  taskKey: string,
+  payload: BlockTaskRequest
+): Promise<ApiResult<ActionResponse<Task>>> {
+  return postJson<ActionResponse<Task>>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/block`,
+    payload
+  );
 }

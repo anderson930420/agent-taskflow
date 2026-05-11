@@ -196,3 +196,122 @@ td.mono,
 .badge-cleaned {
   background: #f3f4f6;
 }
+
+
+/* Phase 11 action UI */
+.header-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.button {
+  align-items: center;
+  background: #111827;
+  border: 1px solid #111827;
+  border-radius: 0.5rem;
+  color: #ffffff;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-weight: 600;
+  justify-content: center;
+  padding: 0.55rem 0.85rem;
+  text-decoration: none;
+}
+
+.button:hover:not(:disabled) {
+  background: #1f2937;
+  border-color: #1f2937;
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.button-danger {
+  background: #991b1b;
+  border-color: #991b1b;
+}
+
+.button-danger:hover:not(:disabled) {
+  background: #7f1d1d;
+  border-color: #7f1d1d;
+}
+
+.success {
+  background: #ecfdf5;
+  border: 1px solid #10b981;
+  border-radius: 0.75rem;
+  color: #064e3b;
+  margin: 1rem 0;
+  padding: 0.85rem 1rem;
+}
+
+.action-status-row {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.action-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  margin-top: 1rem;
+}
+
+.action-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 0.75rem;
+  padding: 1rem;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.form-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.form-actions {
+  align-items: end;
+  display: flex;
+}
+
+label {
+  display: grid;
+  font-weight: 600;
+  gap: 0.4rem;
+}
+
+input,
+textarea {
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  font: inherit;
+  padding: 0.55rem 0.7rem;
+}
+
+textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+
+.checkbox-label {
+  align-items: center;
+  display: flex;
+  font-weight: 500;
+  gap: 0.5rem;
+}
+
+.checkbox-label input {
+  width: auto;
+}

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { SummaryCards } from "../components/SummaryCards";
 import { TaskTable } from "../components/TaskTable";
 import { API_BASE_URL, getTasks } from "../lib/api";
@@ -55,6 +56,11 @@ export default async function DashboardPage() {
         <p className="muted">
           API base URL: <span className="mono">{API_BASE_URL}</span>
         </p>
+        <div className="header-actions">
+          <Link className="button" href="/tasks/new">
+            Create Task
+          </Link>
+        </div>
       </header>
 
       <SummaryCards tasks={tasks} />
