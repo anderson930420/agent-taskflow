@@ -1,0 +1,26 @@
+{
+  "name": "mission-control",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p 3001",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1 -p 3001",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "next": "^16.2.6",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^6.0.3"
+  },
+  "private": true
+}
