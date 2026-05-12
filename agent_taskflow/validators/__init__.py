@@ -8,6 +8,7 @@ from agent_taskflow.validators.base import (
     validate_validator_result_status,
 )
 from agent_taskflow.validators.openspec import OpenSpecValidator
+from agent_taskflow.validators.policy import PolicyCheckValidator
 from agent_taskflow.validators.pytest import PytestValidator
 from agent_taskflow.validators.registry import (
     get_validator,
@@ -17,6 +18,7 @@ from agent_taskflow.validators.registry import (
 __all__ = [
     "VALIDATOR_RESULT_STATUSES",
     "OpenSpecValidator",
+    "PolicyCheckValidator",
     "PytestValidator",
     "Validator",
     "ValidatorContext",

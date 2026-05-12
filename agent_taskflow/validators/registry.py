@@ -6,6 +6,7 @@ from typing import Sequence
 
 from agent_taskflow.validators.base import Validator
 from agent_taskflow.validators.openspec import OpenSpecValidator
+from agent_taskflow.validators.policy import PolicyCheckValidator
 from agent_taskflow.validators.pytest import PytestValidator
 
 
@@ -23,6 +24,7 @@ def get_validator(
     pytest_extra_args: Sequence[str] | None = None,
     openspec_bin: str = "openspec",
     openspec_args: Sequence[str] | None = None,
+    scan_artifacts: bool = True,
 ) -> Validator:
     """Return a built-in validator by name without checking external binaries."""
 
@@ -40,13 +42,18 @@ def get_validator(
             args=openspec_args,
         )
 
+    if normalized == "policy":
+        return PolicyCheckValidator(
+            scan_artifacts=scan_artifacts,
+        )
+
     raise ValueError(f"Unknown validator: {name!r}")
 
 
 def list_validator_names() -> list[str]:
     """Return supported validator names."""
 
-    return ["pytest", "openspec"]
+    return ["pytest", "openspec", "policy"]
 
 
 __all__ = [
