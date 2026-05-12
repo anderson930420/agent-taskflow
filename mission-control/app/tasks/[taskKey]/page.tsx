@@ -3,6 +3,7 @@ import { ActionPanel } from "../../../components/ActionPanel";
 import { ApprovalList } from "../../../components/ApprovalList";
 import { ArtifactList } from "../../../components/ArtifactList";
 import { RunList } from "../../../components/RunList";
+import { ReviewEvidenceSection } from "../../../components/ReviewEvidenceSection";
 import { StatusBadge } from "../../../components/StatusBadge";
 import { ValidationList } from "../../../components/ValidationList";
 import { API_BASE_URL, getTaskDetailBundle } from "../../../lib/api";
@@ -24,7 +25,7 @@ function toolsOrDash(value?: string[] | null): string {
 }
 
 export default async function TaskDetailPage({
-  params
+  params,
 }: {
   params: Promise<{ taskKey: string }>;
 }) {
@@ -161,6 +162,11 @@ export default async function TaskDetailPage({
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section className="section panel">
+        <h2>Review Evidence</h2>
+        <ReviewEvidenceSection taskKey={decodedTaskKey} />
       </section>
 
       <ActionPanel task={task} />

@@ -89,6 +89,59 @@ export interface ValidationResult {
   [key: string]: unknown;
 }
 
+export interface MissionContractSummary {
+  exists: boolean;
+  status: "present" | "missing" | "invalid";
+  schema_version?: string | null;
+  task_key?: string | null;
+  goal?: string | null;
+  executor?: string | null;
+  required_validators: string[];
+  forbidden_actions: string[];
+  expected_artifacts: string[];
+  human_approval_required?: boolean | null;
+  governance_rules: string[];
+  error?: string;
+}
+
+export interface ArtifactFileSummary {
+  name: string;
+  kind: string;
+  size_bytes: number;
+  preview_available: boolean;
+  has_secret_warning: boolean;
+  is_binary: boolean;
+  is_validator_log: boolean;
+  is_executor_log: boolean;
+  is_mission_contract: boolean;
+}
+
+export interface ValidatorResultSummary {
+  validator?: string | null;
+  status?: string | null;
+  exit_code?: number | null;
+  summary?: string | null;
+  log_path?: string | null;
+  created_at?: string | null;
+}
+
+export interface TaskReviewEvidence {
+  task_key: string;
+  mission_contract: MissionContractSummary;
+  artifacts: ArtifactFileSummary[];
+  validator_results: ValidatorResultSummary[];
+  policy_status: string;
+  policy_warnings: string[];
+}
+
+export interface ArtifactPreview {
+  name: string;
+  content: string | null;
+  truncated: boolean;
+  size_bytes: number;
+  preview_reason: string | null;
+}
+
 export interface ApprovalDecision {
   task_key: string;
   decision?: string | null;
@@ -173,4 +226,8 @@ export interface TaskDetailBundle {
   artifacts: Artifact[];
   validations: ValidationResult[];
   approvals: ApprovalDecision[];
+}
+
+export interface TaskReviewBundle {
+  item: TaskReviewEvidence;
 }

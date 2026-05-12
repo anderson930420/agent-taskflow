@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from agent_taskflow.api.schemas import (
     ActionResponse,
     ApprovalRequest,
+    ArtifactPreviewResponse,
     BlockTaskRequest,
     CreateTaskRequest,
     RejectRequest,
@@ -20,6 +21,7 @@ from agent_taskflow.api.schemas import (
     ValidateTaskRequest,
     action_response,
     approval_decision_to_dict,
+    artifact_preview_to_dict,
     artifact_to_dict,
     detail_response,
     dispatcher_result_to_dict,
@@ -28,6 +30,11 @@ from agent_taskflow.api.schemas import (
     project_to_dict,
     task_to_dict,
     validation_result_to_dict,
+)
+from agent_taskflow.api.review import (
+    build_artifact_preview,
+    build_contract_summary,
+    build_review_evidence,
 )
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS, Dispatcher
 from agent_taskflow.governance import (
@@ -414,6 +421,40 @@ def create_app(
         task = task_or_404(task_key, current_store)
         decisions = current_store.list_approval_decisions(task.task_key)
         return list_response([approval_decision_to_dict(decision) for decision in decisions])
+
+    @app.get("/api/tasks/{task_key}/review-evidence")
+    def get_review_evidence(
+        task_key: str,
+        current_store: TaskMirrorStore = Depends(get_store),
+    ) -> dict[str, object]:
+        task = task_or_404(task_key, current_store)
+
+        if task.artifact_dir is None:
+            raise HTTPException(status_code=422, detail="Task has no artifact directory")
+        results = current_store.list_validation_results(task.task_key)
+        evidence = build_review_evidence(
+            task_key=task.task_key,
+            artifact_dir=task.artifact_dir,
+            validation_results=results,
+        )
+        return detail_response(evidence)
+
+
+    @app.get("/api/tasks/{task_key}/artifacts/{artifact_name}")
+    def get_artifact_preview(
+        task_key: str,
+        artifact_name: str,
+        current_store: TaskMirrorStore = Depends(get_store),
+    ) -> dict[str, object]:
+        task = task_or_404(task_key, current_store)
+        if task.artifact_dir is None:
+            raise HTTPException(status_code=422, detail="Task has no artifact directory")
+        try:
+            preview = build_artifact_preview(task.artifact_dir, artifact_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return artifact_preview_to_dict(preview)
+
 
     return app
 

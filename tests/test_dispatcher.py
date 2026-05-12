@@ -943,23 +943,51 @@ class DispatcherPiIntegrationTests(unittest.TestCase):
         self.assertEqual(result.status, "waiting_approval")
 
     def test_dispatcher_pi_without_prompt_blocks(self) -> None:
-        """pi executor blocks when implementation_prompt.md is missing."""
+        """pi executor blocks when neither prompt nor contract is available.
+
+        The dispatcher always writes mission_contract.json before the executor
+        runs (Phase 20+). When the contract exists, the Phase 23 protocol path
+        renders pi_mission_prompt.md from the contract goal even if
+        implementation_prompt.md is missing, and the executor succeeds.
+
+        This test removes both implementation_prompt.md AND the contract
+        before dispatch (simulating a pre-Phase-20 dispatcher) to verify
+        the blocking case.
+        """
         (self.artifact_dir / "implementation_prompt.md").unlink()
-        self.add_task(
-            executor="pi",
-            pi_bin=str(self.fake_pi),
-        )
-        dispatcher = Dispatcher(
-            self.store,
-            executor_registry={},
-            validator_registry={"pytest": FakeValidator("pytest", "passed")},
-            validators=("pytest",),
-            default_executor="pi",
-        )
+        # Also remove the contract so load_contract_for_pi returns None.
+        (self.artifact_dir / "mission_contract.json").unlink(missing_ok=True)
 
-        result = dispatcher.dispatch_task("AT-PI01")
+        # Patch _write_mission_contract to skip writing so contract stays absent.
+        import unittest.mock
+        original_write = self.store.__class__.upsert_task
+        # We need to prevent the dispatcher from writing mission_contract.json.
+        # The cleanest way: monkey-patch the dispatcher's _write_mission_contract.
+        from agent_taskflow.dispatcher import Dispatcher
+        original_method = Dispatcher._write_mission_contract
 
-        self.assertEqual(result.status, "blocked")
+        def noop_write(self, *args, **kwargs):
+            pass  # skip writing contract
+
+        try:
+            Dispatcher._write_mission_contract = noop_write
+            self.add_task(
+                executor="pi",
+                pi_bin=str(self.fake_pi),
+            )
+            dispatcher = Dispatcher(
+                self.store,
+                executor_registry={},
+                validator_registry={"pytest": FakeValidator("pytest", "passed")},
+                validators=("pytest",),
+                default_executor="pi",
+            )
+
+            result = dispatcher.dispatch_task("AT-PI01")
+
+            self.assertEqual(result.status, "blocked")
+        finally:
+            Dispatcher._write_mission_contract = original_method
 
 
 class DispatcherCliTests(unittest.TestCase):
@@ -990,6 +1018,474 @@ class DispatcherCliTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("usage:", result.stderr.lower())
         self.assertIn("--task-key", result.stderr)
+
+
+
+
+# ----------------------------------------------------------------------
+# Phase 20: Mission Contract integration tests
+# ----------------------------------------------------------------------
+
+
+class DispatcherMissionContractTests(unittest.TestCase):
+    """Tests that dispatcher writes mission_contract.json before executor runs."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "state.db"
+        self.repo_path = self.root / "repo"
+        self.worktree_path = self.repo_path / ".worktrees" / "AT-MC01"
+        self.artifact_dir = self.root / "artifacts" / "AT-MC01"
+
+        self.repo_path.mkdir()
+        self.worktree_path.mkdir(parents=True)
+        self.artifact_dir.mkdir(parents=True)
+
+        self.store = TaskMirrorStore(self.db_path)
+        self.store.init_db()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def add_task(
+        self,
+        *,
+        task_key: str = "AT-MC01",
+        status: str = "queued",
+        executor: str = "noop",
+        title: str = "Mission contract test",
+    ) -> None:
+        self.store.upsert_task(
+            TaskRecord(
+                task_key=task_key,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                hermes_task_id=f"t_{task_key.lower().replace('-', '_')}",
+                title=title,
+                status=status,
+                repo_path=self.repo_path,
+                artifact_dir=self.artifact_dir,
+                executor=executor,
+            )
+        )
+        self.store.upsert_task_worktree(
+            TaskWorktreeRecord(
+                task_key=task_key,
+                repo_path=self.repo_path,
+                worktree_path=self.worktree_path,
+                branch=f"task/{task_key}",
+                base_branch="main",
+                status="active",
+            )
+        )
+
+    def test_dispatcher_writes_mission_contract_before_executor(self) -> None:
+        """dispatch_task writes mission_contract.json before executor runs."""
+        self.add_task()
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"noop": FakeExecutor("completed")},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="noop",
+        )
+
+        contract_path = self.artifact_dir / "mission_contract.json"
+        self.assertFalse(contract_path.exists())
+
+        result = dispatcher.dispatch_task("AT-MC01")
+
+        self.assertEqual(result.status, "waiting_approval")
+        self.assertTrue(contract_path.exists(), "mission_contract.json must exist")
+
+    def test_mission_contract_contains_executor_name(self) -> None:
+        """The contract reflects the selected executor name."""
+        self.add_task(executor="manual")
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"manual": FakeExecutor("completed")},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="manual",
+        )
+
+        dispatcher.dispatch_task("AT-MC01")
+
+        import json
+        contract_path = self.artifact_dir / "mission_contract.json"
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        self.assertEqual(contract["executor"], "manual")
+
+    def test_mission_contract_contains_validators(self) -> None:
+        """The contract reflects the dispatcher's selected validators."""
+        self.add_task()
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"noop": FakeExecutor("completed")},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="noop",
+        )
+
+        dispatcher.dispatch_task("AT-MC01")
+
+        import json
+        contract_path = self.artifact_dir / "mission_contract.json"
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        self.assertIn("pytest", contract["required_validators"])
+
+    def test_mission_contract_has_human_approval_required_true(self) -> None:
+        """human_approval_required is always true."""
+        self.add_task()
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"noop": FakeExecutor("completed")},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="noop",
+        )
+
+        dispatcher.dispatch_task("AT-MC01")
+
+        import json
+        contract_path = self.artifact_dir / "mission_contract.json"
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        self.assertTrue(contract["human_approval_required"])
+
+    def test_mission_contract_has_all_forbidden_actions(self) -> None:
+        """forbidden_actions includes all required governance prohibitions."""
+        self.add_task()
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"noop": FakeExecutor("completed")},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="noop",
+        )
+
+        dispatcher.dispatch_task("AT-MC01")
+
+        import json
+        contract_path = self.artifact_dir / "mission_contract.json"
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        required_actions = {
+            "approve", "push", "merge", "cleanup",
+            "delete_worktree", "delete_branch", "self_approve", "force_push"
+        }
+        self.assertTrue(required_actions.issubset(set(contract["forbidden_actions"])))
+
+    def test_mission_contract_has_governance_rules(self) -> None:
+        """The contract includes a governance_rules list."""
+        self.add_task()
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"noop": FakeExecutor("completed")},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="noop",
+        )
+
+        dispatcher.dispatch_task("AT-MC01")
+
+        import json
+        contract_path = self.artifact_dir / "mission_contract.json"
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        self.assertIn("governance_rules", contract)
+        self.assertTrue(len(contract["governance_rules"]) > 0)
+
+    def test_mission_contract_contains_paths(self) -> None:
+        """The contract contains repo_path, worktree_path, and artifact_dir."""
+        self.add_task()
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"noop": FakeExecutor("completed")},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="noop",
+        )
+
+        dispatcher.dispatch_task("AT-MC01")
+
+        import json
+        contract_path = self.artifact_dir / "mission_contract.json"
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        self.assertIn("repo_path", contract)
+        self.assertIn("worktree_path", contract)
+        self.assertIn("artifact_dir", contract)
+
+    def test_dry_run_does_not_write_mission_contract(self) -> None:
+        """dry_run does not write mission_contract.json."""
+        self.add_task()
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"noop": FakeExecutor("completed")},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="noop",
+        )
+
+        contract_path = self.artifact_dir / "mission_contract.json"
+        self.assertFalse(contract_path.exists())
+
+        result = dispatcher.dispatch_task("AT-MC01", dry_run=True)
+
+        self.assertEqual(result.status, "skipped")
+        self.assertFalse(contract_path.exists())
+
+
+class DispatcherPolicyIntegrationTests(unittest.TestCase):
+    """Tests that the policy validator can validate dispatcher-produced artifacts."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "state.db"
+        self.repo_path = self.root / "repo"
+        self.worktree_path = self.repo_path / ".worktrees" / "AT-PI01"
+        self.artifact_dir = self.root / "artifacts" / "AT-PI01"
+
+        self.repo_path.mkdir()
+        self.worktree_path.mkdir(parents=True)
+        self.artifact_dir.mkdir(parents=True)
+
+        self.store = TaskMirrorStore(self.db_path)
+        self.store.init_db()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def add_task(
+        self,
+        *,
+        task_key: str = "AT-PI01",
+        status: str = "queued",
+        executor: str = "noop",
+    ) -> None:
+        self.store.upsert_task(
+            TaskRecord(
+                task_key=task_key,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                hermes_task_id=f"t_{task_key.lower().replace('-', '_')}",
+                title=f"Task {task_key}",
+                status=status,
+                repo_path=self.repo_path,
+                artifact_dir=self.artifact_dir,
+                executor=executor,
+            )
+        )
+        self.store.upsert_task_worktree(
+            TaskWorktreeRecord(
+                task_key=task_key,
+                repo_path=self.repo_path,
+                worktree_path=self.worktree_path,
+                branch=f"task/{task_key}",
+                base_branch="main",
+                status="active",
+            )
+        )
+
+    def test_policy_validator_passes_on_dispatcher_artifact_dir(self) -> None:
+        """PolicyCheckValidator passes on a dispatcher-produced artifact_dir."""
+        self.add_task()
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"noop": FakeExecutor("completed")},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="noop",
+        )
+
+        result = dispatcher.dispatch_task("AT-PI01")
+        self.assertEqual(result.status, "waiting_approval")
+
+        # Now run policy validator against the same artifact_dir
+        from agent_taskflow.validators.policy import PolicyCheckValidator
+        from agent_taskflow.validators.base import ValidatorContext
+
+        policy_ctx = ValidatorContext(
+            task_key="AT-PI01",
+            project="agent-taskflow",
+            worktree_path=self.worktree_path,
+            artifact_dir=self.artifact_dir,
+        )
+        policy_result = PolicyCheckValidator(scan_artifacts=True).run(policy_ctx)
+        self.assertEqual(policy_result.status, "passed")
+
+    def test_policy_validator_fails_on_suspicious_executor_log(self) -> None:
+        """PolicyCheckValidator fails when executor log contains forbidden action."""
+        self.add_task()
+
+        # First dispatch normally so the contract is written
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"noop": FakeExecutor("completed")},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="noop",
+        )
+        result = dispatcher.dispatch_task("AT-PI01")
+        self.assertEqual(result.status, "waiting_approval")
+
+        # Simulate an executor log with a forbidden action (not a .log file,
+        # since policy validator skips .log — use a plain .txt instead)
+        executor_log = self.artifact_dir / "executor-work-log.txt"
+        executor_log.write_text(
+            "Task executed successfully.\n"
+            "git push origin main\n",
+            encoding="utf-8",
+        )
+
+        from agent_taskflow.validators.policy import PolicyCheckValidator
+        from agent_taskflow.validators.base import ValidatorContext
+
+        policy_ctx = ValidatorContext(
+            task_key="AT-PI01",
+            project="agent-taskflow",
+            worktree_path=self.worktree_path,
+            artifact_dir=self.artifact_dir,
+        )
+        policy_result = PolicyCheckValidator(scan_artifacts=True).run(policy_ctx)
+        self.assertEqual(policy_result.status, "failed")
+        self.assertIn("git push", policy_result.summary or "")
+
+    def test_mission_contract_does_not_trigger_false_positive(self) -> None:
+        """mission_contract.json listing forbidden_actions does not fail policy."""
+        self.add_task()
+
+        # Write contract manually to include forbidden_actions (normal case)
+        import json
+        contract_path = self.artifact_dir / "mission_contract.json"
+        contract = {
+            "schema_version": "1",
+            "task_key": "AT-PI01",
+            "goal": "Task AT-PI01",
+            "repo_path": str(self.repo_path),
+            "worktree_path": str(self.worktree_path),
+            "artifact_dir": str(self.artifact_dir),
+            "executor": "noop",
+            "required_validators": ["pytest"],
+            "forbidden_actions": [
+                "approve", "push", "merge", "cleanup",
+                "delete_worktree", "delete_branch",
+                "self_approve", "force_push"
+            ],
+            "expected_artifacts": ["executor_log"],
+            "human_approval_required": True,
+            "governance_rules": ["Worker cannot approve.", "Worker cannot push."],
+        }
+        contract_path.write_text(json.dumps(contract, indent=2), encoding="utf-8")
+
+        from agent_taskflow.validators.policy import PolicyCheckValidator
+        from agent_taskflow.validators.base import ValidatorContext
+
+        policy_ctx = ValidatorContext(
+            task_key="AT-PI01",
+            project="agent-taskflow",
+            worktree_path=self.worktree_path,
+            artifact_dir=self.artifact_dir,
+        )
+        policy_result = PolicyCheckValidator(scan_artifacts=True).run(policy_ctx)
+        self.assertEqual(policy_result.status, "passed")
+
+    def test_policy_validator_skips_own_log(self) -> None:
+        """policy-validate.log does not trigger false positives."""
+        self.add_task()
+
+        # Write contract
+        import json
+        contract_path = self.artifact_dir / "mission_contract.json"
+        contract_path.write_text(
+            json.dumps({
+                "schema_version": "1",
+                "task_key": "AT-PI01",
+                "goal": "Task",
+                "repo_path": str(self.repo_path),
+                "worktree_path": str(self.worktree_path),
+                "artifact_dir": str(self.artifact_dir),
+                "executor": "noop",
+                "required_validators": ["pytest"],
+                "forbidden_actions": [
+                    "approve", "push", "merge", "cleanup",
+                    "delete_worktree", "delete_branch",
+                    "self_approve", "force_push"
+                ],
+                "expected_artifacts": ["executor_log"],
+                "human_approval_required": True,
+                "governance_rules": ["Worker cannot approve.", "Worker cannot push."],
+            }),
+            encoding="utf-8",
+        )
+
+        # Write policy validator's own log (containing suspicious text)
+        policy_log = self.artifact_dir / "policy-validate.log"
+        policy_log.write_text(
+            "Validator: policy\n"
+            "FAILURE: git push detected in executor-work-log.txt\n",
+            encoding="utf-8",
+        )
+
+        from agent_taskflow.validators.policy import PolicyCheckValidator
+        from agent_taskflow.validators.base import ValidatorContext
+
+        policy_ctx = ValidatorContext(
+            task_key="AT-PI01",
+            project="agent-taskflow",
+            worktree_path=self.worktree_path,
+            artifact_dir=self.artifact_dir,
+        )
+        policy_result = PolicyCheckValidator(scan_artifacts=True).run(policy_ctx)
+        # Should pass because policy-validate.log is skipped
+        self.assertEqual(policy_result.status, "passed")
+
+    def test_policy_validator_skips_pytest_log(self) -> None:
+        """pytest.log does not trigger false positives."""
+        self.add_task()
+
+        import json
+        contract_path = self.artifact_dir / "mission_contract.json"
+        contract_path.write_text(
+            json.dumps({
+                "schema_version": "1",
+                "task_key": "AT-PI01",
+                "goal": "Task",
+                "repo_path": str(self.repo_path),
+                "worktree_path": str(self.worktree_path),
+                "artifact_dir": str(self.artifact_dir),
+                "executor": "noop",
+                "required_validators": ["pytest"],
+                "forbidden_actions": [
+                    "approve", "push", "merge", "cleanup",
+                    "delete_worktree", "delete_branch",
+                    "self_approve", "force_push"
+                ],
+                "expected_artifacts": ["executor_log"],
+                "human_approval_required": True,
+                "governance_rules": ["Worker cannot approve.", "Worker cannot push."],
+            }),
+            encoding="utf-8",
+        )
+
+        # Write pytest log containing suspicious text
+        pytest_log = self.artifact_dir / "pytest.log"
+        pytest_log.write_text(
+            "WARNING: git push should not be used in this project.\n",
+            encoding="utf-8",
+        )
+
+        from agent_taskflow.validators.policy import PolicyCheckValidator
+        from agent_taskflow.validators.base import ValidatorContext
+
+        policy_ctx = ValidatorContext(
+            task_key="AT-PI01",
+            project="agent-taskflow",
+            worktree_path=self.worktree_path,
+            artifact_dir=self.artifact_dir,
+        )
+        policy_result = PolicyCheckValidator(scan_artifacts=True).run(policy_ctx)
+        # Should pass because pytest.log is skipped
+        self.assertEqual(policy_result.status, "passed")
 
 
 if __name__ == "__main__":

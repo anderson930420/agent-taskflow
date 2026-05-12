@@ -207,3 +207,20 @@ def list_response(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 def detail_response(item: dict[str, Any]) -> dict[str, Any]:
     return {"item": item}
+
+
+
+class ArtifactPreviewResponse(BaseModel):
+    """Response body for a single artifact file preview."""
+
+    name: str
+    content: str | None = None
+    truncated: bool = False
+    size_bytes: int = 0
+    preview_reason: str | None = None
+
+
+def artifact_preview_to_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """Convert a build_artifact_preview result to a JSON-safe dict."""
+    return json_safe(data)
+
