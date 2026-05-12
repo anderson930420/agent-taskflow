@@ -128,6 +128,12 @@ class TaskRecord:
     created_at: str | None = None
     updated_at: str | None = None
     last_synced_at: str | None = None
+    # Executor selection fields (Phase 13)
+    executor: str | None = None
+    model: str | None = None
+    provider: str | None = None
+    tools: list[str] | None = None
+    pi_bin: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))

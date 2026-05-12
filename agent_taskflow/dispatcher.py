@@ -198,7 +198,13 @@ class Dispatcher:
         )
 
         try:
-            executor = self._get_executor(selected_executor, selected_model)
+            executor = self._get_executor(
+                selected_executor,
+                selected_model,
+                provider=task.provider,
+                tools=task.tools,
+                pi_bin=task.pi_bin,
+            )
         except Exception as exc:
             reason = (
                 f"Executor {selected_executor} is unavailable: "
@@ -355,10 +361,25 @@ class Dispatcher:
     def _selected_model(self, task: TaskRecord, model: str | None) -> str | None:
         return model or getattr(task, "model", None) or self.default_model
 
-    def _get_executor(self, executor_name: str, model: str | None) -> Executor:
+    def _get_executor(
+        self,
+        executor_name: str,
+        model: str | None,
+        *,
+        provider: str | None = None,
+        tools: list[str] | None = None,
+        pi_bin: str | None = None,
+    ) -> Executor:
         if executor_name in self.executor_registry:
             return self.executor_registry[executor_name]
-        return get_executor(executor_name, model=model)
+        # Phase 13: pass pi-specific options from task record
+        return get_executor(
+            executor_name,
+            model=model,
+            provider=provider,
+            tools=tools if tools else None,
+            pi_bin=pi_bin if pi_bin else "pi",
+        )
 
     def _get_validator(self, validator_name: str) -> Validator:
         if validator_name in self.validator_registry:

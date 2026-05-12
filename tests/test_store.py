@@ -321,5 +321,181 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([worktree.task_key for worktree in worktrees], ["AT-0003"])
 
 
+class StoreExecutorFieldsTests(unittest.TestCase):
+    """Phase 13: store persistence of TaskRecord executor selection fields."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp.name) / "state.db"
+        self.store = TaskMirrorStore(self.db_path)
+        self.store.init_db()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_init_db_migration_adds_executor_fields(self) -> None:
+        """init_db adds executor/model/provider/tools/pi_bin columns to existing DB."""
+        # Prime the DB with a task before re-init with new migration
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-0001",
+                project="agent-taskflow",
+                status="queued",
+                repo_path="/home/ubuntu/agent-taskflow",
+            )
+        )
+
+        # Re-init should be idempotent and not raise
+        self.store.init_db()
+
+        # Verify columns exist
+        with sqlite3.connect(self.db_path) as conn:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+
+        for col in ("executor", "model", "provider", "tools", "pi_bin"):
+            self.assertIn(col, cols, f"Column {col} should exist after migration")
+
+    def test_init_db_migration_is_idempotent(self) -> None:
+        """Multiple init_db calls do not fail on existing columns."""
+        self.store.init_db()
+        self.store.init_db()  # Should not raise
+        self.store.init_db()  # Still should not raise
+
+        task = self.store.get_task("AT-NO-SUCH")
+        self.assertIsNone(task)
+
+    def test_upsert_task_persists_executor_fields(self) -> None:
+        """executor/model/provider/tools/pi_bin are persisted correctly."""
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-0013",
+                project="agent-taskflow",
+                status="queued",
+                repo_path="/home/ubuntu/agent-taskflow",
+                executor="pi",
+                model="minimax-01",
+                provider="minimax",
+                tools=["Read", "Write"],
+                pi_bin="pi",
+            )
+        )
+
+        task = self.store.get_task("AT-0013")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.executor, "pi")
+        self.assertEqual(task.model, "minimax-01")
+        self.assertEqual(task.provider, "minimax")
+        self.assertEqual(task.tools, ["Read", "Write"])
+        self.assertEqual(task.pi_bin, "pi")
+
+    def test_upsert_task_persists_tools_as_json(self) -> None:
+        """tools list is stored as JSON text in SQLite."""
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-0013",
+                project="agent-taskflow",
+                status="queued",
+                repo_path="/home/ubuntu/agent-taskflow",
+                tools=["Read", "Write", "Bash"],
+            )
+        )
+
+        # Read raw SQLite value
+        with sqlite3.connect(self.db_path) as conn:
+            raw = conn.execute(
+                "SELECT tools FROM tasks WHERE task_key = ?",
+                ("AT-0013",),
+            ).fetchone()
+
+        self.assertIsNotNone(raw)
+        import json
+        parsed = json.loads(raw[0])
+        self.assertEqual(parsed, ["Read", "Write", "Bash"])
+
+    def test_upsert_task_persists_null_when_fields_not_set(self) -> None:
+        """executor/model/provider/tools/pi_bin are stored as NULL when not set."""
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-0013",
+                project="agent-taskflow",
+                status="queued",
+                repo_path="/home/ubuntu/agent-taskflow",
+            )
+        )
+
+        task = self.store.get_task("AT-0013")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertIsNone(task.executor)
+        self.assertIsNone(task.model)
+        self.assertIsNone(task.provider)
+        self.assertIsNone(task.tools)
+        self.assertIsNone(task.pi_bin)
+
+    def test_upsert_task_updates_executor_fields(self) -> None:
+        """Updating a task can change executor field values."""
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-0013",
+                project="agent-taskflow",
+                status="queued",
+                repo_path="/home/ubuntu/agent-taskflow",
+                executor="pi",
+                model="minimax-01",
+            )
+        )
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-0013",
+                project="agent-taskflow",
+                status="implementing",
+                repo_path="/home/ubuntu/agent-taskflow",
+                executor="manual",
+                model=None,
+            )
+        )
+
+        task = self.store.get_task("AT-0013")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.executor, "manual")
+        self.assertIsNone(task.model)
+
+    def test_tools_field_with_single_tool(self) -> None:
+        """tools list with single element is stored and read back correctly."""
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-0013",
+                project="agent-taskflow",
+                status="queued",
+                repo_path="/home/ubuntu/agent-taskflow",
+                tools=["Read"],
+            )
+        )
+
+        task = self.store.get_task("AT-0013")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.tools, ["Read"])
+
+    def test_tools_field_with_empty_list(self) -> None:
+        """tools empty list is stored as '[]' JSON and read back as []."""
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-0013",
+                project="agent-taskflow",
+                status="queued",
+                repo_path="/home/ubuntu/agent-taskflow",
+                tools=[],
+            )
+        )
+
+        task = self.store.get_task("AT-0013")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.tools, [])
+
+
 if __name__ == "__main__":
     unittest.main()

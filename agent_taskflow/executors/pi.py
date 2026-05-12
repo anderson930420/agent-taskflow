@@ -56,18 +56,19 @@ class PiExecutor(Executor):
     def run(self, context: ExecutorContext) -> ExecutorResult:
         """Execute the Pi CLI for the supplied task context."""
 
-        # Determine the prompt source
-        if context.prompt_path is not None:
-            if not context.prompt_path.exists():
-                return self._blocked(
-                    f"Pi executor prompt_path does not exist: {context.prompt_path}",
-                )
-            prompt_text = context.prompt_path.read_text(encoding="utf-8")
-            if not prompt_text.strip():
-                return self._blocked("Pi executor prompt is empty.")
-        else:
-            # No prompt provided at all
+        # Validate prompt_path
+        if context.prompt_path is None:
             return self._blocked("Pi executor requires context.prompt_path.")
+
+        if not context.prompt_path.exists():
+            return self._blocked(
+                f"Pi executor prompt_path does not exist: {context.prompt_path}",
+            )
+
+        # Verify prompt file is not empty
+        prompt_text = context.prompt_path.read_text(encoding="utf-8")
+        if not prompt_text.strip():
+            return self._blocked("Pi executor prompt is empty.")
 
         context.artifact_dir.mkdir(parents=True, exist_ok=True)
         log_path = context.artifact_dir / "pi-executor.log"

@@ -102,11 +102,34 @@ def init_db(path: str | Path | None = None) -> None:
             row["name"]
             for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
         }
+        # Phase 12: blocked_reason migration
         if "blocked_reason" not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN blocked_reason TEXT")
+        # Phase 13: executor selection migrations (idempotent)
+        if "executor" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN executor TEXT")
+        if "model" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN model TEXT")
+        if "provider" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN provider TEXT")
+        if "tools" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN tools TEXT")
+        if "pi_bin" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN pi_bin TEXT")
 
 
 def _row_to_task(row: sqlite3.Row) -> TaskRecord:
+    # Phase 13: deserialize tools from JSON text
+    tools_value = row["tools"] if "tools" in row.keys() else None
+    tools_list: list[str] | None = None
+    if tools_value:
+        try:
+            parsed = json.loads(tools_value)
+            if isinstance(parsed, list) and all(isinstance(t, str) for t in parsed):
+                tools_list = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     return TaskRecord(
         task_key=row["task_key"],
         project=row["project"],
@@ -120,6 +143,12 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         last_synced_at=row["last_synced_at"],
+        # Phase 13 executor selection fields
+        executor=row["executor"] if "executor" in row.keys() else None,
+        model=row["model"] if "model" in row.keys() else None,
+        provider=row["provider"] if "provider" in row.keys() else None,
+        tools=tools_list,
+        pi_bin=row["pi_bin"] if "pi_bin" in row.keys() else None,
     )
 
 
@@ -171,6 +200,11 @@ class TaskMirrorStore:
         updated_at = record.updated_at or now
         last_synced_at = record.last_synced_at or now
 
+        # Phase 13: serialize tools list as JSON text
+        tools_json: str | None = None
+        if record.tools is not None:
+            tools_json = json.dumps(record.tools, sort_keys=True)
+
         with connect(self.db_path) as conn:
             conn.execute(
                 """
@@ -186,9 +220,14 @@ class TaskMirrorStore:
                     blocked_reason,
                     created_at,
                     updated_at,
-                    last_synced_at
+                    last_synced_at,
+                    executor,
+                    model,
+                    provider,
+                    tools,
+                    pi_bin
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_key) DO UPDATE SET
                     project = excluded.project,
                     board = excluded.board,
@@ -199,7 +238,12 @@ class TaskMirrorStore:
                     artifact_dir = excluded.artifact_dir,
                     blocked_reason = excluded.blocked_reason,
                     updated_at = excluded.updated_at,
-                    last_synced_at = excluded.last_synced_at
+                    last_synced_at = excluded.last_synced_at,
+                    executor = excluded.executor,
+                    model = excluded.model,
+                    provider = excluded.provider,
+                    tools = excluded.tools,
+                    pi_bin = excluded.pi_bin
                 """,
                 (
                     record.task_key,
@@ -214,6 +258,11 @@ class TaskMirrorStore:
                     created_at,
                     updated_at,
                     last_synced_at,
+                    record.executor,
+                    record.model,
+                    record.provider,
+                    tools_json,
+                    record.pi_bin,
                 ),
             )
 

@@ -484,6 +484,484 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(fake_executor.contexts, [])
 
 
+class DispatcherExecutorSelectionTests(unittest.TestCase):
+    """Phase 13: dispatcher task-level executor selection tests."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "state.db"
+        self.repo_path = self.root / "repo"
+        self.worktree_path = self.repo_path / ".worktrees" / "AT-0013"
+        self.artifact_dir = self.root / "artifacts" / "AT-0013"
+
+        self.repo_path.mkdir()
+        self.worktree_path.mkdir(parents=True)
+        self.artifact_dir.mkdir(parents=True)
+        # Create prompt file so opencode/pi executor doesn't block
+        (self.artifact_dir / "implementation_prompt.md").write_text(
+            "Implement the task.", encoding="utf-8"
+        )
+
+        self.store = TaskMirrorStore(self.db_path)
+        self.store.init_db()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def add_task(
+        self,
+        *,
+        task_key: str = "AT-0013",
+        status: str = "queued",
+        executor: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        tools: list[str] | None = None,
+        pi_bin: str | None = None,
+    ) -> None:
+        self.store.upsert_task(
+            TaskRecord(
+                task_key=task_key,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                hermes_task_id=f"t_{task_key.lower().replace('-', '_')}",
+                title=f"Task {task_key}",
+                status=status,
+                repo_path=self.repo_path,
+                artifact_dir=self.artifact_dir,
+                executor=executor,
+                model=model,
+                provider=provider,
+                tools=tools,
+                pi_bin=pi_bin,
+            )
+        )
+        self.store.upsert_task_worktree(
+            TaskWorktreeRecord(
+                task_key=task_key,
+                repo_path=self.repo_path,
+                worktree_path=self.worktree_path,
+                branch=f"task/{task_key}",
+                base_branch="main",
+                status="active",
+            )
+        )
+
+    def test_task_executor_overrides_dispatcher_default_executor(self) -> None:
+        """task.executor='pi' causes dispatcher to select pi even with default='manual'."""
+        import unittest.mock as mock
+
+        self.add_task(executor="pi")
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="manual",
+        )
+
+        with mock.patch(
+            "agent_taskflow.dispatcher.get_executor",
+            return_value=FakeExecutor("completed", "ok"),
+        ) as mock_get_exec:
+            result = dispatcher.dispatch_task("AT-0013")
+
+        self.assertEqual(result.status, "waiting_approval")
+        mock_get_exec.assert_called_once()
+        self.assertEqual(mock_get_exec.call_args.args[0], "pi")
+
+    def test_task_model_is_used_when_task_has_executor_pi(self) -> None:
+        """task.model is passed to executor context when executor is pi."""
+        from agent_taskflow.executors.base import ExecutorContext
+        captured: list[ExecutorContext] = []
+
+        class CapturingFakeExecutor:
+            name = "fake"
+
+            def run(self, context: ExecutorContext) -> ExecutorResult:
+                captured.append(context)
+                return ExecutorResult(
+                    executor=self.name,
+                    status="completed",
+                    exit_code=0,
+                    summary="ok",
+                )
+
+        self.add_task(executor="fake", model="task-model-from-record")
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"fake": CapturingFakeExecutor()},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="manual",
+            default_model="dispatcher-default-model",
+        )
+
+        result = dispatcher.dispatch_task("AT-0013")
+
+        self.assertEqual(result.status, "waiting_approval")
+        self.assertEqual(len(captured), 1)
+        # Task model should override dispatcher default_model
+        self.assertEqual(captured[0].model, "task-model-from-record")
+
+    def test_dispatcher_default_model_when_task_executor_no_model(self) -> None:
+        """When task has no model, dispatcher default_model is used."""
+        from agent_taskflow.executors.base import ExecutorContext
+        captured: list[ExecutorContext] = []
+
+        class CapturingFakeExecutor:
+            name = "fake"
+
+            def run(self, context: ExecutorContext) -> ExecutorResult:
+                captured.append(context)
+                return ExecutorResult(
+                    executor=self.name,
+                    status="completed",
+                    exit_code=0,
+                    summary="ok",
+                )
+
+        # No model set on task
+        self.add_task(executor="fake")
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"fake": CapturingFakeExecutor()},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="fake",
+            default_model="dispatcher-default-model",
+        )
+
+        result = dispatcher.dispatch_task("AT-0013")
+
+        self.assertEqual(result.status, "waiting_approval")
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].model, "dispatcher-default-model")
+
+    def test_task_with_executor_pi_calls_get_executor_with_provider(self) -> None:
+        """task.provider is passed to get_executor when executor is pi."""
+        import unittest.mock as mock
+
+        self.add_task(
+            executor="pi",
+            model="minimax-01",
+            provider="minimax",
+        )
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="manual",
+        )
+
+        with mock.patch(
+            "agent_taskflow.dispatcher.get_executor",
+            return_value=FakeExecutor("completed", "ok"),
+        ) as mock_get_exec:
+            result = dispatcher.dispatch_task("AT-0013")
+
+        mock_get_exec.assert_called_once()
+        call_kwargs = mock_get_exec.call_args
+        # Verify provider was passed
+        self.assertEqual(call_kwargs.kwargs.get("provider"), "minimax")
+        self.assertEqual(call_kwargs.kwargs.get("model"), "minimax-01")
+
+    def test_task_with_executor_pi_calls_get_executor_with_tools(self) -> None:
+        """task.tools is passed to get_executor when executor is pi."""
+        import unittest.mock as mock
+
+        self.add_task(
+            executor="pi",
+            tools=["Read", "Write", "Bash"],
+        )
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="manual",
+        )
+
+        with mock.patch(
+            "agent_taskflow.dispatcher.get_executor",
+            return_value=FakeExecutor("completed", "ok"),
+        ) as mock_get_exec:
+            result = dispatcher.dispatch_task("AT-0013")
+
+        mock_get_exec.assert_called_once()
+        self.assertEqual(
+            mock_get_exec.call_args.kwargs.get("tools"),
+            ["Read", "Write", "Bash"],
+        )
+
+    def test_task_with_executor_pi_calls_get_executor_with_pi_bin(self) -> None:
+        """task.pi_bin is passed to get_executor when executor is pi."""
+        import unittest.mock as mock
+
+        self.add_task(
+            executor="pi",
+            pi_bin="/usr/local/bin/pi",
+        )
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="manual",
+        )
+
+        with mock.patch(
+            "agent_taskflow.dispatcher.get_executor",
+            return_value=FakeExecutor("completed", "ok"),
+        ) as mock_get_exec:
+            result = dispatcher.dispatch_task("AT-0013")
+
+        mock_get_exec.assert_called_once()
+        self.assertEqual(
+            mock_get_exec.call_args.kwargs.get("pi_bin"),
+            "/usr/local/bin/pi",
+        )
+
+    def test_unknown_executor_still_blocks_task(self) -> None:
+        """Unknown executor still blocks task (no behavior regression)."""
+        self.add_task(executor="nonexistent-executor")
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="nonexistent-executor",
+        )
+
+        result = dispatcher.dispatch_task("AT-0013")
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("is unavailable", result.blocked_reason or "")
+
+    def test_task_executor_none_uses_dispatcher_default(self) -> None:
+        """When task.executor is None, dispatcher default is used."""
+        from agent_taskflow.executors.base import ExecutorContext
+        captured: list[ExecutorContext] = []
+
+        class CapturingFakeExecutor:
+            name = "fake"
+
+            def run(self, context: ExecutorContext) -> ExecutorResult:
+                captured.append(context)
+                return ExecutorResult(
+                    executor=self.name,
+                    status="completed",
+                    exit_code=0,
+                    summary="ok",
+                )
+
+        # No executor set on task
+        self.add_task()
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"fake": CapturingFakeExecutor()},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="fake",
+        )
+
+        result = dispatcher.dispatch_task("AT-0013")
+
+        self.assertEqual(result.status, "waiting_approval")
+        self.assertEqual(len(captured), 1)
+
+    def test_dispatch_executor_param_overrides_task_executor(self) -> None:
+        """dispatcher call executor_name overrides task.executor."""
+        from agent_taskflow.executors.base import ExecutorContext
+        captured: list[tuple[str, ExecutorContext]] = []
+
+        class CapturingFakeExecutor:
+            name = "fake"
+
+            def run(self, context: ExecutorContext) -> ExecutorResult:
+                captured.append(("fake", context))
+                return ExecutorResult(
+                    executor=self.name,
+                    status="completed",
+                    exit_code=0,
+                    summary="ok",
+                )
+
+        self.add_task(executor="other-executor")
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={"fake": CapturingFakeExecutor()},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="other-executor",
+        )
+
+        result = dispatcher.dispatch_task("AT-0013", executor_name="fake")
+
+        self.assertEqual(result.status, "waiting_approval")
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0][0], "fake")
+
+
+class DispatcherPiIntegrationTests(unittest.TestCase):
+    """Phase 13: controlled integration smoke test using a fake pi executable.
+
+    Does NOT call real Pi/MiniMax. Uses subprocess with a controlled fake.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "state.db"
+        self.repo_path = self.root / "repo"
+        self.worktree_path = self.repo_path / ".worktrees" / "AT-PI01"
+        self.artifact_dir = self.root / "artifacts" / "AT-PI01"
+
+        self.repo_path.mkdir()
+        self.worktree_path.mkdir(parents=True)
+        self.artifact_dir.mkdir(parents=True)
+        (self.artifact_dir / "implementation_prompt.md").write_text(
+            "Implement the feature.", encoding="utf-8"
+        )
+
+        # Create a fake pi binary that exits 0 (success)
+        # PiExecutor passes prompt content via -p, so we accept any args
+        self.fake_pi = self.root / "fake_pi"
+        self.fake_pi.write_text(
+            "#!/bin/sh\n"
+            "# Fake pi: just succeeds (exit 0) so dispatcher can proceed\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        self.fake_pi.chmod(0o755)
+
+        self.store = TaskMirrorStore(self.db_path)
+        self.store.init_db()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def add_task(
+        self,
+        *,
+        task_key: str = "AT-PI01",
+        status: str = "queued",
+        **task_kwargs: object,
+    ) -> None:
+        self.store.upsert_task(
+            TaskRecord(
+                task_key=task_key,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                hermes_task_id="t_at_pi01",
+                title="Task AT-PI01",
+                status=status,
+                repo_path=self.repo_path,
+                artifact_dir=self.artifact_dir,
+                **task_kwargs,
+            )
+        )
+        self.store.upsert_task_worktree(
+            TaskWorktreeRecord(
+                task_key=task_key,
+                repo_path=self.repo_path,
+                worktree_path=self.worktree_path,
+                branch=f"task/{task_key}",
+                base_branch="main",
+                status="active",
+            )
+        )
+
+    def test_dispatcher_pi_with_fake_binary_succeeds(self) -> None:
+        """Dispatcher using pi executor with a fake pi binary completes successfully."""
+        self.add_task(
+            executor="pi",
+            provider="minimax",
+            model="minimax-01",
+            tools=["Read", "Write"],
+            pi_bin=str(self.fake_pi),
+        )
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="manual",
+        )
+
+        result = dispatcher.dispatch_task("AT-PI01")
+
+        self.assertEqual(result.status, "waiting_approval")
+        self.assertEqual(result.executor_status, "completed")
+
+    def test_dispatcher_pi_fake_binary_logs_command(self) -> None:
+        """Fake pi binary logs the command that was invoked."""
+        self.add_task(
+            executor="pi",
+            provider="minimax",
+            model="test-model",
+            tools=["Bash"],
+            pi_bin=str(self.fake_pi),
+        )
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="manual",
+        )
+
+        result = dispatcher.dispatch_task("AT-PI01")
+
+        self.assertEqual(result.status, "waiting_approval")
+        log_path = self.artifact_dir / "pi-executor.log"
+        self.assertTrue(log_path.exists(), "pi-executor.log should be created")
+        log_content = log_path.read_text(encoding="utf-8")
+        self.assertIn("--provider", log_content)
+        self.assertIn("minimax", log_content)
+        self.assertIn("--model", log_content)
+        self.assertIn("test-model", log_content)
+        self.assertIn("--tools", log_content)
+        self.assertIn("Bash", log_content)
+        self.assertIn("--no-session", log_content)
+
+    def test_dispatcher_pi_with_task_only_executor_selection(self) -> None:
+        """task.executor='pi' with no extra fields still selects pi executor."""
+        self.add_task(executor="pi", pi_bin=str(self.fake_pi))
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="manual",
+        )
+
+        result = dispatcher.dispatch_task("AT-PI01")
+
+        self.assertEqual(result.status, "waiting_approval")
+
+    def test_dispatcher_pi_without_prompt_blocks(self) -> None:
+        """pi executor blocks when implementation_prompt.md is missing."""
+        (self.artifact_dir / "implementation_prompt.md").unlink()
+        self.add_task(
+            executor="pi",
+            pi_bin=str(self.fake_pi),
+        )
+        dispatcher = Dispatcher(
+            self.store,
+            executor_registry={},
+            validator_registry={"pytest": FakeValidator("pytest", "passed")},
+            validators=("pytest",),
+            default_executor="pi",
+        )
+
+        result = dispatcher.dispatch_task("AT-PI01")
+
+        self.assertEqual(result.status, "blocked")
+
+
 class DispatcherCliTests(unittest.TestCase):
     def test_run_dispatcher_help_executes(self) -> None:
         result = subprocess.run(

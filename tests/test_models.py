@@ -71,5 +71,101 @@ class ModelValidationTests(unittest.TestCase):
             )
 
 
+class TaskRecordExecutorFieldsTests(unittest.TestCase):
+    """Phase 13: TaskRecord executor selection fields."""
+
+    def test_task_record_accepts_executor_field(self) -> None:
+        record = TaskRecord(
+            task_key="AT-0013",
+            project="agent-taskflow",
+            status="queued",
+            repo_path="/home/ubuntu/agent-taskflow",
+            executor="pi",
+        )
+        self.assertEqual(record.executor, "pi")
+
+    def test_task_record_accepts_model_field(self) -> None:
+        record = TaskRecord(
+            task_key="AT-0013",
+            project="agent-taskflow",
+            status="queued",
+            repo_path="/home/ubuntu/agent-taskflow",
+            model="minimax-01",
+        )
+        self.assertEqual(record.model, "minimax-01")
+
+    def test_task_record_accepts_provider_field(self) -> None:
+        record = TaskRecord(
+            task_key="AT-0013",
+            project="agent-taskflow",
+            status="queued",
+            repo_path="/home/ubuntu/agent-taskflow",
+            provider="minimax",
+        )
+        self.assertEqual(record.provider, "minimax")
+
+    def test_task_record_accepts_tools_field(self) -> None:
+        record = TaskRecord(
+            task_key="AT-0013",
+            project="agent-taskflow",
+            status="queued",
+            repo_path="/home/ubuntu/agent-taskflow",
+            tools=["Read", "Write", "Bash"],
+        )
+        self.assertEqual(record.tools, ["Read", "Write", "Bash"])
+
+    def test_task_record_accepts_pi_bin_field(self) -> None:
+        record = TaskRecord(
+            task_key="AT-0013",
+            project="agent-taskflow",
+            status="queued",
+            repo_path="/home/ubuntu/agent-taskflow",
+            pi_bin="/usr/local/bin/pi",
+        )
+        self.assertEqual(record.pi_bin, "/usr/local/bin/pi")
+
+    def test_task_record_all_executor_fields_combined(self) -> None:
+        record = TaskRecord(
+            task_key="AT-0013",
+            project="agent-taskflow",
+            status="queued",
+            repo_path="/home/ubuntu/agent-taskflow",
+            executor="pi",
+            model="minimax-01",
+            provider="minimax",
+            tools=["Read", "Write"],
+            pi_bin="pi",
+        )
+        self.assertEqual(record.executor, "pi")
+        self.assertEqual(record.model, "minimax-01")
+        self.assertEqual(record.provider, "minimax")
+        self.assertEqual(record.tools, ["Read", "Write"])
+        self.assertEqual(record.pi_bin, "pi")
+
+    def test_task_record_executor_fields_default_to_none(self) -> None:
+        record = TaskRecord(
+            task_key="AT-0013",
+            project="agent-taskflow",
+            status="queued",
+            repo_path="/home/ubuntu/agent-taskflow",
+        )
+        self.assertIsNone(record.executor)
+        self.assertIsNone(record.model)
+        self.assertIsNone(record.provider)
+        self.assertIsNone(record.tools)
+        self.assertIsNone(record.pi_bin)
+
+    def test_task_record_tools_must_be_list_of_strings(self) -> None:
+        # Empty list is fine
+        record = TaskRecord(
+            task_key="AT-0013",
+            project="agent-taskflow",
+            status="queued",
+            repo_path="/home/ubuntu/agent-taskflow",
+            tools=[],
+        )
+        self.assertEqual(record.tools, [])
+
+
 if __name__ == "__main__":
     unittest.main()
