@@ -165,7 +165,28 @@ runs can align the API server to the same DB.
 
 ### Starting the API Server with the Smoke DB
 
-The API app factory accepts a `db_path` argument:
+The API app factory accepts a `db_path` argument. Use either the official runner
+script or the inline Python approach.
+
+#### Option 1: Using the official runner script (recommended)
+
+```bash
+SMOKE_DB="/tmp/agent-taskflow-pi-gov-smoke.db"
+
+python scripts/run_api.py \
+  --db-path "$SMOKE_DB" \
+  --host 127.0.0.1 \
+  --port 8100 \
+  --log-level warning
+```
+
+The runner script accepts these arguments:
+- `--db-path` (required): Absolute path to the SQLite state DB
+- `--host` (default: 127.0.0.1): Host to bind the server to
+- `--port` (default: 8100): Port to bind the server to
+- `--log-level` (default: warning): Uvicorn log level
+
+#### Option 2: Using inline Python
 
 ```bash
 SMOKE_DB="/tmp/agent-taskflow-pi-gov-smoke.db"
@@ -668,6 +689,13 @@ cat "$SMOKE_ARTIFACT_DIR/policy-validate.log"
 The API server must be running at `http://127.0.0.1:8100`. Start it:
 
 ```bash
+python scripts/run_api.py --db-path "$SMOKE_DB" --host 127.0.0.1 --port 8100 --log-level warning &
+sleep 3
+```
+
+Or using the inline approach:
+
+```bash
 uvicorn agent_taskflow.api.main:app --host 127.0.0.1 --port 8100 &
 sleep 3
 ```
@@ -773,14 +801,14 @@ rm -rf "$SMOKE_WORKTREE" "$SMOKE_ARTIFACT_DIR" "$SMOKE_DB" \
 ; \
 python scripts/create_pi_smoke_task.py --task-key "$SMOKE_TASK_KEY" --db-path "$SMOKE_DB" --repo-path "$REPO_ROOT" --artifact-root "/tmp/agent-taskflow-pi-gov-artifacts" \
 ; \
-uvicorn agent_taskflow.api.main:app --host 127.0.0.1 --port 8100 & \
+python scripts/run_api.py --db-path "$SMOKE_DB" --host 127.0.0.1 --port 8100 --log-level warning & \
 sleep 3 \
 ; \
 python scripts/run_dispatcher.py --task-key "$SMOKE_TASK_KEY" --db-path "$SMOKE_DB" --validators policy \
 ; \
 curl -s http://127.0.0.1:8100/api/tasks/$SMOKE_TASK_KEY/review-evidence | python3 -m json.tool \
 ; \
-pkill -f "uvicorn agent_taskflow.api.main:app" || true \
+pkill -f "uvicorn.*8100" || true \
 ; \
 rm -rf "$SMOKE_WORKTREE" "$SMOKE_ARTIFACT_DIR" "$SMOKE_DB" \
 ; \
