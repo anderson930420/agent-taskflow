@@ -165,15 +165,15 @@ Run the dispatcher only after confirming its supported flags:
 python scripts/run_dispatcher.py --help
 ```
 
-Use the repository-supported equivalent of:
+Use the repository-supported `--db-path` option:
 
 ```bash
 python scripts/run_dispatcher.py \
   --task-key "$SMOKE_TASK_KEY" \
-  --state-db "$SMOKE_DB"
+  --db-path "$SMOKE_DB"
 ```
 
-If `--state-db` or an equivalent test-only DB option is not supported, do not run against the production/default state DB. Add a safe test-only entry point before performing this real-run smoke test.
+If `--db-path` or an equivalent test-only DB option is not supported, do not run against the production/default state DB. Add a safe test-only entry point before performing this real-run smoke test.
 
 ## Verification
 
