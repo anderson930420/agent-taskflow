@@ -7,6 +7,7 @@ from typing import Sequence
 from agent_taskflow.executors.base import Executor
 from agent_taskflow.executors.manual import ManualExecutor, NoopExecutor
 from agent_taskflow.executors.opencode import OpenCodeExecutor
+from agent_taskflow.executors.pi import PiExecutor
 from agent_taskflow.executors.shell import ShellExecutor
 
 
@@ -24,6 +25,9 @@ def get_executor(
     model: str | None = None,
     opencode_bin: str = "opencode",
     extra_args: Sequence[str] | None = None,
+    provider: str | None = None,
+    tools: Sequence[str] | None = None,
+    pi_bin: str = "pi",
 ) -> Executor:
     """Return a built-in executor by name."""
 
@@ -42,6 +46,13 @@ def get_executor(
             model=model,
             opencode_bin=opencode_bin,
             extra_args=extra_args,
+        )
+    if normalized == "pi":
+        return PiExecutor(
+            provider=provider,
+            model=model,
+            tools=list(tools) if tools is not None else None,
+            pi_bin=pi_bin,
         )
 
     raise ValueError(f"Unknown executor: {name!r}")
@@ -68,14 +79,34 @@ def build_opencode_executor(
     )
 
 
+def build_pi_executor(
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    tools: Sequence[str] | None = None,
+    env: dict[str, str] | None = None,
+    pi_bin: str = "pi",
+) -> PiExecutor:
+    """Build a Pi executor without checking external availability."""
+
+    return PiExecutor(
+        provider=provider,
+        model=model,
+        tools=list(tools) if tools is not None else None,
+        env=env,
+        pi_bin=pi_bin,
+    )
+
+
 def list_executor_names() -> list[str]:
     """Return supported executor names."""
 
-    return ["manual", "noop", "shell", "opencode"]
+    return ["manual", "noop", "shell", "opencode", "pi"]
 
 
 __all__ = [
     "build_opencode_executor",
+    "build_pi_executor",
     "build_shell_executor",
     "get_executor",
     "list_executor_names",

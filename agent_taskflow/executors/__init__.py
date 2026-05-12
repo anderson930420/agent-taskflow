@@ -9,8 +9,10 @@ from agent_taskflow.executors.base import (
 )
 from agent_taskflow.executors.manual import ManualExecutor, NoopExecutor
 from agent_taskflow.executors.opencode import OpenCodeExecutor
+from agent_taskflow.executors.pi import PiExecutor
 from agent_taskflow.executors.registry import (
     build_opencode_executor,
+    build_pi_executor,
     build_shell_executor,
     get_executor,
     list_executor_names,
@@ -25,8 +27,10 @@ __all__ = [
     "ManualExecutor",
     "NoopExecutor",
     "OpenCodeExecutor",
+    "PiExecutor",
     "ShellExecutor",
     "build_opencode_executor",
+    "build_pi_executor",
     "build_shell_executor",
     "get_executor",
     "list_executor_names",
