@@ -142,25 +142,55 @@ This script:
 ## Step 2 — Start the Review Evidence API Server
 
 The review evidence API must be running to verify artifact contents and
-secret redaction. Start it in the background:
+secret redaction. The API server reads task state from a SQLite DB —
+**it must use the same DB as the smoke task and dispatcher**, otherwise the
+review evidence endpoint will return 404 because the task will not exist
+in the API server's DB.
+
+### DB Path Alignment
+
+The smoke workflow uses three separate processes, each with its own DB context:
+
+| Process | Default DB | Smoke Workflow DB |
+|---------|-----------|-------------------|
+| `create_pi_smoke_task.py` | — | `--db-path $SMOKE_DB` |
+| `run_dispatcher.py` | — | `--db-path $SMOKE_DB` |
+| API server | `~/.agent-taskflow/state.db` | **must also use `$SMOKE_DB`** |
+
+If the API server starts with its default DB, it will not contain the smoke
+task record, and every review evidence endpoint will return 404. This is
+expected behavior — it indicates a DB path mismatch, not an API or artifact
+failure. The smoke report must record `SMOKE_DB` so future verification
+runs can align the API server to the same DB.
+
+### Starting the API Server with the Smoke DB
+
+The API app factory accepts a `db_path` argument:
 
 ```bash
-cd /home/ubuntu/agent-taskflow
-uvicorn agent_taskflow.api.main:app --host 127.0.0.1 --port 8100 &
-sleep 3
+SMOKE_DB="/tmp/agent-taskflow-pi-gov-smoke.db"
+
+python3 - <<'PY'
+import uvicorn, sys
+sys.path.insert(0, '/home/ubuntu/agent-taskflow')
+from agent_taskflow.api.main import create_app
+
+app = create_app(db_path="$SMOKE_DB")
+uvicorn.run(app, host="127.0.0.1", port=8100, log_level="warning")
+PY
 ```
 
 Verify it is running:
 
 ```bash
 curl -s http://127.0.0.1:8100/health | python3 -m json.tool
-# Expected: {"status":"ok","version":"..."}
+# Expected: {"status":"ok","service":"agent-taskflow-api"}
 ```
 
 Keep the server running throughout the smoke run. Stop it with:
 
 ```bash
-pkill -f "uvicorn agent_taskflow.api.main:app" || true
+pkill -f "uvicorn.*8100" || true
 ```
 
 ---
@@ -298,6 +328,82 @@ test -f "$SMOKE_ARTIFACT_DIR/policy-validate.log" && cat "$SMOKE_ARTIFACT_DIR/po
 
 Expected: status should be `passed`. Any warnings about missing forbidden
 actions or secret detections should be documented and reviewed.
+
+---
+
+## Review Evidence API DB Alignment
+
+The review evidence API (`GET /api/tasks/<task_key>/review-evidence` and
+`GET /api/tasks/<task_key>/artifacts/<name>`) reads task state from the
+configured SQLite DB. For the smoke verification to work, the API server
+**must be started with the same DB** used by the smoke task and dispatcher.
+
+### Why 404 Happens
+
+If the API server uses its default DB (`~/.agent-taskflow/state.db`) while
+the smoke task was created with `$SMOKE_DB`, the review evidence endpoint
+will return 404 because the task record does not exist in the default DB.
+This is the expected result of a DB path mismatch — not an artifact failure
+or an API bug.
+
+The smoke report must record these three values for any post-smoke verification:
+
+```bash
+echo "SMOKE_TASK_KEY=$SMOKE_TASK_KEY"
+echo "SMOKE_ARTIFACT_DIR=$SMOKE_ARTIFACT_DIR"
+echo "SMOKE_DB=$SMOKE_DB"
+```
+
+### Successful Response Indicators
+
+When the API server is aligned to the correct DB, the review evidence endpoint
+returns:
+
+```json
+{
+  "task_key": "<SMOKE_TASK_KEY>",
+  "mission_contract": {
+    "exists": true,
+    "status": "present",
+    "human_approval_required": true,
+    "forbidden_actions": ["approve", "push", "merge", "cleanup", ...]
+  },
+  "artifacts": [
+    {"name": "mission_contract.json", "kind": "mission_contract"},
+    {"name": "pi_mission_plan.json", "kind": "other"},
+    {"name": "pi_mission_prompt.md", "kind": "other"},
+    {"name": "pi-executor.log", "kind": "executor_log"},
+    {"name": "policy-validate.log", "kind": "validator_log"}
+  ],
+  "validator_results": [{"validator": "policy", "status": "passed", ...}],
+  "policy_status": "passed",
+  "policy_warnings": []
+}
+```
+
+Key indicators of a successful governance smoke:
+
+- `mission_contract.status` = `present`
+- `mission_contract.human_approval_required` = `true`
+- `artifacts` includes `pi_mission_plan.json`, `pi_mission_prompt.md`,
+  `pi-executor.log`, `policy-validate.log`
+- `validator_results` includes policy `passed`
+- `policy_status` = `passed`
+- No secret-like values in the response body
+
+### Curl Verification Commands
+
+```bash
+TASK_KEY="$SMOKE_TASK_KEY"
+
+# Full review evidence
+curl -s "http://127.0.0.1:8100/api/tasks/${TASK_KEY}/review-evidence" | python3 -m json.tool
+
+# Artifact previews
+curl -s "http://127.0.0.1:8100/api/tasks/${TASK_KEY}/artifacts/pi_mission_prompt.md" | python3 -m json.tool
+curl -s "http://127.0.0.1:8100/api/tasks/${TASK_KEY}/artifacts/pi_mission_plan.json" | python3 -m json.tool
+curl -s "http://127.0.0.1:8100/api/tasks/${TASK_KEY}/artifacts/policy-validate.log" | python3 -m json.tool
+```
 
 ---
 

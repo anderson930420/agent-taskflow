@@ -15,6 +15,100 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SMOKE_DOC = REPO_ROOT / "docs" / "pi-governance-e2e-smoke.md"
 
 
+class SmokeDocDBAlignmentTests(unittest.TestCase):
+    """Verify the smoke document covers DB alignment for review evidence API."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = SMOKE_DOC.read_text(encoding="utf-8")
+
+    def test_doc_has_db_alignment_section(self) -> None:
+        self.assertIn(
+            "Review Evidence API DB Alignment",
+            self.doc,
+            "Smoke doc must have a Review Evidence API DB Alignment section",
+        )
+
+    def test_doc_says_same_db_required(self) -> None:
+        self.assertIn(
+            "same db",
+            self.doc.lower(),
+            "Smoke doc must say API server must use the same DB as smoke task",
+        )
+
+    def test_doc_explains_default_db_404(self) -> None:
+        self.assertIn(
+            "404",
+            self.doc,
+            "Smoke doc must explain that default DB causes 404",
+        )
+
+    def test_doc_shows_create_app_db_path(self) -> None:
+        self.assertIn(
+            "create_app(db_path=",
+            self.doc,
+            "Smoke doc must show create_app(db_path=...) for smoke DB",
+        )
+
+    def test_doc_records_smoke_db_path(self) -> None:
+        self.assertIn(
+            "SMOKE_DB",
+            self.doc,
+            "Smoke doc must mention SMOKE_DB recording",
+        )
+
+    def test_doc_records_task_key(self) -> None:
+        self.assertIn(
+            "TASK_KEY",
+            self.doc,
+            "Smoke doc must mention TASK_KEY recording",
+        )
+
+    def test_doc_records_artifact_dir(self) -> None:
+        self.assertIn(
+            "ARTIFACT_DIR",
+            self.doc,
+            "Smoke doc must mention ARTIFACT_DIR recording",
+        )
+
+    def test_doc_has_review_evidence_curl_command(self) -> None:
+        self.assertIn(
+            "review-evidence",
+            self.doc,
+            "Smoke doc must have curl command for review-evidence endpoint",
+        )
+
+    def test_doc_has_artifact_preview_curl_commands(self) -> None:
+        for artifact in ["pi_mission_prompt.md", "pi_mission_plan.json", "policy-validate.log"]:
+            self.assertIn(
+                f"/artifacts/{artifact}",
+                self.doc,
+                f"Smoke doc must have curl command for /artifacts/{artifact}",
+            )
+
+    def test_doc_lists_successful_response_indicators(self) -> None:
+        self.assertIn(
+            "present",
+            self.doc.lower(),
+            "Smoke doc must list 'present' as a success indicator",
+        )
+        self.assertIn(
+            "human_approval_required",
+            self.doc.lower(),
+            "Smoke doc must mention human_approval_required",
+        )
+        self.assertIn(
+            "policy_status",
+            self.doc.lower(),
+            "Smoke doc must mention policy_status",
+        )
+        self.assertIn(
+            "no secrets",
+            self.doc.lower(),
+            "Smoke doc must confirm no secrets exposed in API response",
+        )
+
+
 class SmokeDocGovernanceTests(unittest.TestCase):
     """Verify the smoke document contains required governance statements."""
 
