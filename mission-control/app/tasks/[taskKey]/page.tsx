@@ -16,6 +16,13 @@ function valueOrDash(value?: string | number | null): string {
   return String(value);
 }
 
+function toolsOrDash(value?: string[] | null): string {
+  if (!value || value.length === 0) {
+    return "—";
+  }
+  return value.join(", ");
+}
+
 export default async function TaskDetailPage({
   params
 }: {
@@ -120,6 +127,36 @@ export default async function TaskDetailPage({
                     "—"
                   )}
                 </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="section panel">
+        <h2>Executor Metadata</h2>
+        <div className="table-wrap">
+          <table>
+            <tbody>
+              <tr>
+                <th>Executor</th>
+                <td>{valueOrDash(task.executor)}</td>
+              </tr>
+              <tr>
+                <th>Model</th>
+                <td className="mono">{valueOrDash(task.model)}</td>
+              </tr>
+              <tr>
+                <th>Provider</th>
+                <td>{valueOrDash(task.provider)}</td>
+              </tr>
+              <tr>
+                <th>Tools</th>
+                <td className="mono">{toolsOrDash(task.tools)}</td>
+              </tr>
+              <tr>
+                <th>Pi binary</th>
+                <td className="mono">{valueOrDash(task.pi_bin)}</td>
               </tr>
             </tbody>
           </table>

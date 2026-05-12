@@ -45,9 +45,11 @@ export interface Task {
   updated_at?: string | null;
   last_synced_at?: string | null;
 
-  // Reserved for future API enrichment. Current Phase 8/9 API may not expose these.
   executor?: string | null;
   model?: string | null;
+  provider?: string | null;
+  tools?: string[] | null;
+  pi_bin?: string | null;
   validator?: string | null;
   pr_url?: string | null;
   pr_number?: number | null;
