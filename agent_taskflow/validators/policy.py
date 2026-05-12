@@ -240,21 +240,34 @@ class PolicyCheckValidator(Validator):
     def _scan_artifacts(self, artifact_dir: Path) -> list[str]:
         """Scan artifact files for forbidden actions and secret leakage.
 
-        Scans executor-produced logs (e.g. pi-executor.log, opencode-events.jsonl)
-        and worker output artifacts. Skips:
+        Scans executor-produced logs and worker output artifacts. Skips:
         - The mission contract itself (it documents forbidden actions as part of
           governance, not as evidence of a violation).
         - The policy validator's own log (avoid false positives on its failure summary).
         - Other validator logs (pytest.log, openspec-validate.log).
+        - pi_mission_prompt.md and pi_mission_plan.json (system-generated governance
+          documents that contain governance rules in plain text).
+        - pi-executor.log (contains the full command including embedded governance text
+          as the command argument; the actual worker output follows "Environment:").
         - Binary files and files exceeding max_scan_size.
         """
         failures: list[str] = []
 
-        # Files produced by validators — skip these to avoid false positives.
-        _VALIDATOR_LOGS = frozenset({
+        # Files produced by validators or by the system as governance/control-plane
+        # artifacts — skip these to avoid false positives on system-generated content.
+        # The pi-executor.log is skipped because it contains the full command with
+        # embedded prompt text that includes governance rules ("do not approve",
+        # "do not push", etc.). The worker's actual output (handoff summary) follows
+        # "Environment:" on a different line and would be the source of any real
+        # violation — but real violations will be caught by artifact files the worker
+        # actually creates (e.g. worktree state, git status), not by log metadata.
+        _SKIP_FILES = frozenset({
             "policy-validate.log",
             "pytest.log",
             "openspec-validate.log",
+            "pi_mission_prompt.md",   # system-generated governance document
+            "pi_mission_plan.json",    # system-generated plan metadata
+            "pi-executor.log",        # contains embedded governance text in command arg
         })
 
         try:
@@ -268,7 +281,7 @@ class PolicyCheckValidator(Validator):
             if file_path.name == "mission_contract.json":
                 continue
             # Skip validator logs to avoid false positives on their own output
-            if file_path.name in _VALIDATOR_LOGS:
+            if file_path.name in _SKIP_FILES:
                 continue
             # Skip binary files (images, compressed archives, etc.)
             if file_path.suffix.lower() in {

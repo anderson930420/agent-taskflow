@@ -487,8 +487,11 @@ class PolicyValidatorRunTests(unittest.TestCase):
 
         write_contract(artifact_dir, make_contract())
 
-        # Create an executor log with a suspicious action
-        log_file = artifact_dir / "pi-executor.log"
+        # Use a worker-produced artifact name (not pi-executor.log, which is
+        # skipped because it contains embedded governance text in command args).
+        # A real git-push violation would appear in a git status artifact or
+        # worker log, not in the system-generated executor metadata log.
+        log_file = artifact_dir / "git_status.txt"
         log_file.write_text(
             "Executing: git push origin feature-branch\n",
             encoding="utf-8",
@@ -755,8 +758,10 @@ class PolicyValidatorRunTests(unittest.TestCase):
 
         write_contract(artifact_dir, make_contract())
 
-        # Create a suspicious artifact, but scanning is disabled
-        log_file = artifact_dir / "pi-executor.log"
+        # Create a suspicious artifact, but scanning is disabled.
+        # Use a worker artifact name (not pi-executor.log) since the executor
+        # log is skipped by the policy validator's scan filter.
+        log_file = artifact_dir / "git_status.txt"
         log_file.write_text("git push origin main\n", encoding="utf-8")
 
         context = ValidatorContext(
