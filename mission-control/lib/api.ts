@@ -4,6 +4,7 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   Artifact,
+  ArtifactPreview,
   BlockTaskRequest,
   CreateTaskRequest,
   DetailResponse,
@@ -14,6 +15,7 @@ import type {
   StartTaskRequest,
   Task,
   TaskDetailBundle,
+  TaskReviewBundle,
   ValidationResult
 } from "./types";
 
@@ -275,6 +277,23 @@ export async function getTaskDetailBundle(
   }
 
   return failure("Unable to load task detail bundle.");
+}
+
+export async function getTaskReviewEvidence(
+  taskKey: string
+): Promise<ApiResult<TaskReviewBundle>> {
+  return requestJson<TaskReviewBundle>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/review-evidence`
+  );
+}
+
+export async function getArtifactPreview(
+  taskKey: string,
+  artifactName: string
+): Promise<ApiResult<ArtifactPreview>> {
+  return requestJson<ArtifactPreview>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/artifacts/${encodeURIComponent(artifactName)}`
+  );
 }
 
 export async function createTask(
