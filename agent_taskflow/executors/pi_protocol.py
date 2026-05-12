@@ -22,6 +22,9 @@ from agent_taskflow.mission_contract import (
     read_mission_contract,
 )
 
+# Forward reference to avoid circular import at runtime.
+PiMissionPlan: type = object
+
 # High-confidence secret patterns — same as PolicyCheckValidator.
 _SECRET_PATTERNS = (
     # env-style: KEY=value, KEY:value, KEY = value
@@ -83,6 +86,7 @@ def render_pi_mission_prompt(
     contract: MissionContract | dict,
     *,
     original_prompt: str | None = None,
+    mission_plan: "PiMissionPlan | None" = None,
 ) -> str:
     """Render a Mission Contract as a Pi-friendly markdown mission prompt.
 
@@ -95,6 +99,11 @@ def render_pi_mission_prompt(
         Optional raw task prompt text to append at the end of the prompt.
         If the text contains high-confidence secret patterns it is omitted
         and replaced with a placeholder.
+    mission_plan
+        Optional PiMissionPlan to include as a structured step-by-step section.
+        When provided, a "Pi Mission Plan" section is inserted before the
+        Original Task Prompt section, giving Pi explicit structured steps
+        to follow.
 
     Returns
     -------
@@ -240,6 +249,14 @@ def render_pi_mission_prompt(
         "7. After completing your work, stop — do not wait for approval or "
         "attempt to approve yourself.\n"
     )
+
+    # Mission Plan Section
+    if mission_plan is not None:
+        # Import locally to avoid circular import at module level.
+        from agent_taskflow.executors.pi_orchestrator import (
+            render_pi_mission_plan_section,
+        )
+        lines.append(render_pi_mission_plan_section(mission_plan))
 
     # Original Prompt
     if original_prompt is not None:

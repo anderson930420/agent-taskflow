@@ -27,6 +27,10 @@ from agent_taskflow.executors.pi_protocol import (
     render_pi_mission_prompt,
     write_pi_mission_prompt,
 )
+from agent_taskflow.executors.pi_orchestrator import (
+    build_pi_mission_plan,
+    write_pi_mission_plan,
+)
 
 
 class PiExecutor(Executor):
@@ -85,10 +89,16 @@ class PiExecutor(Executor):
         # 2. context.prompt_path (legacy path for backward compatibility)
         prompt_text: str | None = None
         protocol_prompt_path: Path | None = None
+        plan_path: Path | None = None
         prompt_source: str = "legacy"
 
         contract = load_contract_for_pi(context.artifact_dir)
         if contract is not None:
+            # Build the deterministic mission plan first (before rendering prompt).
+            # This writes pi_mission_plan.json and is used by the prompt renderer.
+            mission_plan = build_pi_mission_plan(contract)
+            plan_path = write_pi_mission_plan(context.artifact_dir, mission_plan)
+
             # Read the original prompt text from context.prompt_path if available.
             original_prompt: str | None = None
             if context.prompt_path is not None and context.prompt_path.exists():
@@ -99,7 +109,12 @@ class PiExecutor(Executor):
                 except OSError:
                     pass
 
-            rendered = render_pi_mission_prompt(contract, original_prompt=original_prompt)
+            # Render the protocol prompt with the mission plan embedded.
+            rendered = render_pi_mission_prompt(
+                contract,
+                original_prompt=original_prompt,
+                mission_plan=mission_plan,
+            )
             protocol_prompt_path = write_pi_mission_prompt(context.artifact_dir, rendered)
             prompt_text = rendered
             prompt_source = "protocol"
@@ -155,6 +170,8 @@ class PiExecutor(Executor):
             log_file.write(f"Prompt source: {prompt_source}\n")
             if prompt_source == "protocol":
                 log_file.write(f"Protocol prompt: {protocol_prompt_path}\n")
+            if plan_path is not None:
+                log_file.write(f"Mission plan: {plan_path}\n")
             log_file.write("Environment: not logged\n\n")
             log_file.flush()
 
@@ -184,6 +201,8 @@ class PiExecutor(Executor):
         artifacts: dict[str, Path] = {"pi_log": log_path}
         if protocol_prompt_path is not None:
             artifacts["pi_mission_prompt"] = protocol_prompt_path
+        if plan_path is not None:
+            artifacts["pi_mission_plan"] = plan_path
 
         if start_error is not None:
             return ExecutorResult(
