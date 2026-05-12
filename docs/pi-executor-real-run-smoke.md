@@ -84,80 +84,20 @@ export SMOKE_WORKTREE="$REPO_ROOT/.worktrees/$SMOKE_TASK_KEY"
 export SMOKE_ARTIFACT_DIR="/tmp/agent-taskflow-pi-smoke-artifacts/$SMOKE_TASK_KEY"
 ```
 
-Create isolated directories:
+Create isolated directories and seed the task mirror using the helper:
 
 ```bash
-mkdir -p "$SMOKE_WORKTREE"
-mkdir -p "$SMOKE_ARTIFACT_DIR"
+python scripts/create_pi_smoke_task.py \
+  --task-key "$SMOKE_TASK_KEY" \
+  --db-path "$SMOKE_DB" \
+  --repo-path "$REPO_ROOT" \
+  --artifact-root "/tmp/agent-taskflow-pi-smoke-artifacts"
 ```
 
-Create the implementation prompt artifact:
-
-```bash
-cat > "$SMOKE_ARTIFACT_DIR/implementation_prompt.md" <<'PROMPT'
-This is a controlled Pi executor smoke test.
-
-Create a file named pi_smoke_result.txt in the current working directory containing exactly:
-pi-real-run-smoke-ok
-
-Do not modify files outside the current working directory.
-PROMPT
-```
-
-Seed a temporary `TaskMirrorStore` using the real model classes:
-
-```bash
-python - <<'PY'
-import os
-from pathlib import Path
-
-from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
-from agent_taskflow.store import TaskMirrorStore
-
-task_key = os.environ["SMOKE_TASK_KEY"]
-repo_root = Path(os.environ["REPO_ROOT"]).resolve()
-db_path = Path(os.environ["SMOKE_DB"]).resolve()
-worktree = Path(os.environ["SMOKE_WORKTREE"]).resolve()
-artifact_dir = Path(os.environ["SMOKE_ARTIFACT_DIR"]).resolve()
-
-store = TaskMirrorStore(db_path)
-store.init_db()
-
-store.upsert_task(
-    TaskRecord(
-        task_key=task_key,
-        project="agent-taskflow",
-        board="agent-taskflow",
-        hermes_task_id=f"smoke_{task_key.lower().replace('-', '_')}",
-        title="Pi executor real-run smoke",
-        status="queued",
-        repo_path=repo_root,
-        artifact_dir=artifact_dir,
-        executor="pi",
-        provider="minimax",
-        model="MiniMax-M2.7",
-        tools=["read", "write", "grep", "find", "ls"],
-        pi_bin="pi",
-    )
-)
-
-store.upsert_task_worktree(
-    TaskWorktreeRecord(
-        task_key=task_key,
-        repo_path=repo_root,
-        worktree_path=worktree,
-        branch=f"smoke/{task_key}",
-        base_branch="main",
-        status="active",
-    )
-)
-
-print(f"Seeded smoke task {task_key}")
-print(f"DB: {db_path}")
-print(f"Worktree: {worktree}")
-print(f"Artifacts: {artifact_dir}")
-PY
-```
+The helper creates `.worktrees/<task-key>` and the artifact directory, writes
+`implementation_prompt.md`, and inserts `TaskRecord` + `TaskWorktreeRecord`
+into the mirror DB. It prints a JSON summary including the next dispatch
+command.
 
 Run the dispatcher only after confirming its supported flags:
 
