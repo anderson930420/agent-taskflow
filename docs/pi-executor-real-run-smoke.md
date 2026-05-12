@@ -110,10 +110,13 @@ Use the repository-supported `--db-path` option:
 ```bash
 python scripts/run_dispatcher.py \
   --task-key "$SMOKE_TASK_KEY" \
-  --db-path "$SMOKE_DB"
+  --db-path "$SMOKE_DB" \
+  --validators openspec
 ```
 
 If `--db-path` or an equivalent test-only DB option is not supported, do not run against the production/default state DB. Add a safe test-only entry point before performing this real-run smoke test.
+
+For helper-created minimal smoke worktrees, use `--validators openspec`. The default validator set includes `pytest`, which expects a full repository checkout and may fail in the minimal smoke worktree. In this smoke workflow, `openspec` may skip when no `openspec/` directory exists; that is acceptable because the purpose is to verify the real Pi executor path, not full project validation.
 
 ## Verification
 
