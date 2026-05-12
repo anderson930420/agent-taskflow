@@ -1,4 +1,19 @@
-"""Pi CLI executor adapter for Agent Taskflow."""
+"""Pi CLI executor adapter for Agent Taskflow.
+
+This executor is a pure pass-through to the Pi CLI. It does not call any AI,
+does not run validators, does not approve tasks, and does not modify the
+dispatcher state. It is a deterministic executor backend.
+
+When a mission_contract.json is present in the task artifact directory,
+this executor renders a Pi Mission Protocol prompt (pi_mission_prompt.md) and
+uses that as its input. This gives Pi explicit governance context and
+constraint information as structured text rather than relying on system
+prompt injection alone.
+
+When no mission contract is present, the executor falls back to reading
+context.prompt_path (the legacy implementation_prompt.md) to preserve
+backward compatibility with existing tasks.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +22,11 @@ import subprocess
 from pathlib import Path
 
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
+from agent_taskflow.executors.pi_protocol import (
+    load_contract_for_pi,
+    render_pi_mission_prompt,
+    write_pi_mission_prompt,
+)
 
 
 class PiExecutor(Executor):
@@ -56,23 +76,60 @@ class PiExecutor(Executor):
     def run(self, context: ExecutorContext) -> ExecutorResult:
         """Execute the Pi CLI for the supplied task context."""
 
-        # Validate prompt_path
-        if context.prompt_path is None:
-            return self._blocked("Pi executor requires context.prompt_path.")
-
-        if not context.prompt_path.exists():
-            return self._blocked(
-                f"Pi executor prompt_path does not exist: {context.prompt_path}",
-            )
-
-        # Verify prompt file is not empty
-        prompt_text = context.prompt_path.read_text(encoding="utf-8")
-        if not prompt_text.strip():
-            return self._blocked("Pi executor prompt is empty.")
-
         context.artifact_dir.mkdir(parents=True, exist_ok=True)
         log_path = context.artifact_dir / "pi-executor.log"
 
+        # Determine which prompt text to use.
+        # Priority:
+        # 1. mission_contract.json + pi_mission_prompt.md (Phase 23 protocol path)
+        # 2. context.prompt_path (legacy path for backward compatibility)
+        prompt_text: str | None = None
+        protocol_prompt_path: Path | None = None
+        prompt_source: str = "legacy"
+
+        contract = load_contract_for_pi(context.artifact_dir)
+        if contract is not None:
+            # Read the original prompt text from context.prompt_path if available.
+            original_prompt: str | None = None
+            if context.prompt_path is not None and context.prompt_path.exists():
+                try:
+                    raw = context.prompt_path.read_text(encoding="utf-8")
+                    if raw.strip():
+                        original_prompt = raw
+                except OSError:
+                    pass
+
+            rendered = render_pi_mission_prompt(contract, original_prompt=original_prompt)
+            protocol_prompt_path = write_pi_mission_prompt(context.artifact_dir, rendered)
+            prompt_text = rendered
+            prompt_source = "protocol"
+        elif context.prompt_path is not None:
+            # Legacy path: use context.prompt_path directly.
+            if not context.prompt_path.exists():
+                return self._blocked(
+                    f"Pi executor prompt_path does not exist: {context.prompt_path}",
+                    log_path,
+                )
+            try:
+                prompt_text = context.prompt_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                return self._blocked(
+                    f"Pi executor failed to read prompt_path: {exc}",
+                    log_path,
+                )
+            if not prompt_text.strip():
+                return self._blocked(
+                    "Pi executor prompt is empty.",
+                    log_path,
+                )
+        else:
+            return self._blocked(
+                "Pi executor requires either context.prompt_path or a "
+                "mission_contract.json in the artifact directory.",
+                log_path,
+            )
+
+        assert prompt_text is not None
         command = self._build_command(prompt_text)
 
         run_env: dict[str, str] | None = None
@@ -95,6 +152,9 @@ class PiExecutor(Executor):
             log_file.write(f"Project: {context.project}\n")
             log_file.write(f"Worktree: {context.worktree_path}\n")
             log_file.write(f"Command: {command}\n")
+            log_file.write(f"Prompt source: {prompt_source}\n")
+            if prompt_source == "protocol":
+                log_file.write(f"Protocol prompt: {protocol_prompt_path}\n")
             log_file.write("Environment: not logged\n\n")
             log_file.flush()
 
@@ -122,6 +182,8 @@ class PiExecutor(Executor):
                 log_file.write(f"\n{start_error}\n")
 
         artifacts: dict[str, Path] = {"pi_log": log_path}
+        if protocol_prompt_path is not None:
+            artifacts["pi_mission_prompt"] = protocol_prompt_path
 
         if start_error is not None:
             return ExecutorResult(
@@ -171,14 +233,14 @@ class PiExecutor(Executor):
 
         return command
 
-    def _blocked(self, summary: str) -> ExecutorResult:
+    def _blocked(self, summary: str, log_path: Path | None = None) -> ExecutorResult:
         return ExecutorResult(
             executor=self.name,
             status="blocked",
             exit_code=None,
-            log_path=None,
+            log_path=log_path,
             summary=summary,
-            artifacts={},
+            artifacts={"pi_log": log_path} if log_path is not None else {},
         )
 
 

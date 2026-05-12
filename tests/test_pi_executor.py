@@ -255,8 +255,9 @@ class PiBlockedTests(PiExecutorTestCase):
 
             self.assertEqual(result.status, "blocked")
             self.assertIsNone(result.exit_code)
-            self.assertIsNone(result.log_path)
-            self.assertIn("requires context.prompt_path", result.summary or "")
+            # Phase 23: log_path is created even when blocked so the reason is traceable.
+            self.assertIsNotNone(result.log_path)
+            self.assertIn("mission_contract.json", result.summary or "")
 
     def test_nonexistent_prompt_path_returns_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -478,6 +479,262 @@ class PiRegistryTests(unittest.TestCase):
 
         self.assertIsInstance(executor, PiExecutor)
         self.assertEqual(executor.tools, ["Read"])
+
+
+class PiProtocolIntegrationTests(PiExecutorTestCase):
+    """Phase 23: Pi Mission Protocol integration tests.
+
+    These tests verify that PiExecutor uses the protocol prompt when
+    mission_contract.json exists, and falls back to legacy behavior when it
+    does not.
+    """
+
+    def _write_contract(self, artifact_dir: Path, **overrides) -> None:
+        contract = {
+            "schema_version": "1",
+            "task_key": "AT-0012",
+            "goal": "Implement the feature",
+            "repo_path": str(artifact_dir.parent / "repo"),
+            "worktree_path": str(artifact_dir.parent / "worktree"),
+            "artifact_dir": str(artifact_dir),
+            "executor": "pi",
+            "required_validators": ["pytest", "policy"],
+            "forbidden_actions": ["push", "merge"],
+            "expected_artifacts": ["executor_log"],
+            "human_approval_required": True,
+            "governance_rules": ["agent-taskflow is the control plane."],
+        }
+        contract.update(overrides)
+        (artifact_dir / "mission_contract.json").write_text(
+            __import__("json").dumps(contract), encoding="utf-8"
+        )
+
+    def make_protocol_context(
+        self,
+        tmp_path: Path,
+        *,
+        with_contract: bool = True,
+        with_prompt_file: bool = True,
+    ) -> ExecutorContext:
+        worktree_path = tmp_path / "worktree"
+        artifact_dir = tmp_path / "artifacts"
+        worktree_path.mkdir()
+        artifact_dir.mkdir()
+
+        prompt_path = tmp_path / "implementation_prompt.md"
+        if with_prompt_file:
+            prompt_path.write_text("Original prompt text.", encoding="utf-8")
+
+        if with_contract:
+            self._write_contract(artifact_dir)
+
+        return ExecutorContext(
+            task_key="AT-0012",
+            project="agent-taskflow",
+            worktree_path=worktree_path,
+            artifact_dir=artifact_dir,
+            prompt_path=prompt_path if with_prompt_file else None,
+        )
+
+    def test_with_contract_writes_pi_mission_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_protocol_context(Path(tmp), with_contract=True)
+            _, side_effect = self.make_subprocess_side_effect()
+
+            with patch(
+                "agent_taskflow.executors.pi.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = PiExecutor().run(context)
+
+            self.assertEqual(result.status, "completed")
+            protocol_path = context.artifact_dir / "pi_mission_prompt.md"
+            self.assertTrue(protocol_path.exists())
+            content = protocol_path.read_text(encoding="utf-8")
+            self.assertIn("# Pi Mission Protocol", content)
+            self.assertIn("Implement the feature", content)
+            self.assertIn("pytest", content)
+
+    def test_protocol_prompt_includes_governance_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_protocol_context(Path(tmp), with_contract=True)
+            _, side_effect = self.make_subprocess_side_effect()
+
+            with patch(
+                "agent_taskflow.executors.pi.subprocess.run",
+                side_effect=side_effect,
+            ):
+                PiExecutor().run(context)
+
+            content = (context.artifact_dir / "pi_mission_prompt.md").read_text(encoding="utf-8")
+            self.assertIn("Do NOT approve", content)
+            self.assertIn("Do NOT push", content)
+            self.assertIn("Do NOT merge", content)
+            self.assertIn("Human approval is the final gate", content)
+            self.assertIn("cannot replace deterministic validators", content)
+
+    def test_command_uses_protocol_prompt_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_protocol_context(Path(tmp), with_contract=True)
+            calls, side_effect = self.make_subprocess_side_effect()
+
+            with patch(
+                "agent_taskflow.executors.pi.subprocess.run",
+                side_effect=side_effect,
+            ):
+                PiExecutor().run(context)
+
+            pi_call = calls[0]
+            self.assertIn("-p", pi_call)
+            prompt_index = pi_call.index("-p")
+            # Protocol content should be the rendered prompt, not raw "Original prompt text."
+            self.assertIn("# Pi Mission Protocol", pi_call[prompt_index + 1])
+            self.assertIn("Implement the feature", pi_call[prompt_index + 1])
+
+    def test_log_mentions_protocol_prompt_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_protocol_context(Path(tmp), with_contract=True)
+            _, side_effect = self.make_subprocess_side_effect()
+
+            with patch(
+                "agent_taskflow.executors.pi.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = PiExecutor().run(context)
+
+            assert result.log_path is not None
+            log_text = result.log_path.read_text(encoding="utf-8")
+            self.assertIn("Prompt source: protocol", log_text)
+            self.assertIn("pi_mission_prompt.md", log_text)
+
+    def test_legacy_fallback_uses_prompt_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # No contract, but prompt file exists -> legacy path
+            context = self.make_protocol_context(
+                Path(tmp), with_contract=False, with_prompt_file=True
+            )
+            calls, side_effect = self.make_subprocess_side_effect()
+
+            with patch(
+                "agent_taskflow.executors.pi.subprocess.run",
+                side_effect=side_effect,
+            ):
+                PiExecutor().run(context)
+
+            pi_call = calls[0]
+            prompt_index = pi_call.index("-p")
+            # Legacy path uses the original prompt file content
+            self.assertEqual(pi_call[prompt_index + 1], "Original prompt text.")
+
+    def test_legacy_fallback_log_mentions_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_protocol_context(
+                Path(tmp), with_contract=False, with_prompt_file=True
+            )
+            _, side_effect = self.make_subprocess_side_effect()
+
+            with patch(
+                "agent_taskflow.executors.pi.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = PiExecutor().run(context)
+
+            assert result.log_path is not None
+            log_text = result.log_path.read_text(encoding="utf-8")
+            self.assertIn("Prompt source: legacy", log_text)
+
+    def test_without_contract_nor_prompt_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_protocol_context(
+                Path(tmp), with_contract=False, with_prompt_file=False
+            )
+            result = PiExecutor().run(context)
+
+            self.assertEqual(result.status, "blocked")
+            self.assertIsNotNone(result.log_path)
+            self.assertIn("mission_contract.json", result.summary or "")
+
+    def test_artifact_includes_protocol_prompt_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_protocol_context(Path(tmp), with_contract=True)
+            _, side_effect = self.make_subprocess_side_effect()
+
+            with patch(
+                "agent_taskflow.executors.pi.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = PiExecutor().run(context)
+
+            self.assertIn("pi_mission_prompt", result.artifacts)
+            self.assertEqual(
+                result.artifacts["pi_mission_prompt"],
+                context.artifact_dir / "pi_mission_prompt.md",
+            )
+
+    def test_protocol_with_secret_prompt_omits_original(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # Contract is valid, but original prompt has secrets
+            (Path(tmp) / "implementation_prompt.md").write_text(
+                '''The token is: "api_secret": "sk-testsecret1234567890"
+Please use this to authenticate.''', encoding="utf-8"
+            )
+            artifact_dir = Path(tmp) / "artifacts"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            self._write_contract(artifact_dir)
+
+            worktree_path = Path(tmp) / "worktree"
+            worktree_path.mkdir(parents=True, exist_ok=True)
+
+            context = ExecutorContext(
+                task_key="AT-0012",
+                project="agent-taskflow",
+                worktree_path=worktree_path,
+                artifact_dir=artifact_dir,
+                prompt_path=Path(tmp) / "implementation_prompt.md",
+            )
+            _, side_effect = self.make_subprocess_side_effect()
+
+            with patch(
+                "agent_taskflow.executors.pi.subprocess.run",
+                side_effect=side_effect,
+            ):
+                PiExecutor().run(context)
+
+            protocol_content = (
+                (artifact_dir / "pi_mission_prompt.md").read_text(encoding="utf-8")
+            )
+            # Secret should be redacted / omitted
+            self.assertNotIn("sk-testsecret1234567890", protocol_content)
+            # The secret is redacted
+            self.assertNotIn("sk-testsecret1234567890", protocol_content)
+
+    def test_no_validator_self_invocation(self) -> None:
+        # Verify that the protocol path does not import any validator module.
+        # This prevents the protocol renderer from accidentally calling validators.
+        import sys
+
+        # Snapshot of validator modules before protocol rendering.
+        pre_validator_modules = {k for k in sys.modules if "validator" in k.lower()}
+
+        # Import and run protocol helpers.
+        from agent_taskflow.executors.pi_protocol import (
+            render_pi_mission_prompt,
+            write_pi_mission_prompt,
+            load_contract_for_pi,
+        )
+
+        # Import the module explicitly.
+        import agent_taskflow.executors.pi_protocol as pp_module  # noqa: F401
+
+        post_validator_modules = {k for k in sys.modules if "validator" in k.lower()}
+        new_validator_modules = post_validator_modules - pre_validator_modules
+
+        # pi_protocol should not transitively import any validator module.
+        self.assertEqual(
+            set(),
+            new_validator_modules,
+            f"pi_protocol transitively imported validator modules: {new_validator_modules}",
+        )
 
 
 if __name__ == "__main__":

@@ -943,23 +943,51 @@ class DispatcherPiIntegrationTests(unittest.TestCase):
         self.assertEqual(result.status, "waiting_approval")
 
     def test_dispatcher_pi_without_prompt_blocks(self) -> None:
-        """pi executor blocks when implementation_prompt.md is missing."""
+        """pi executor blocks when neither prompt nor contract is available.
+
+        The dispatcher always writes mission_contract.json before the executor
+        runs (Phase 20+). When the contract exists, the Phase 23 protocol path
+        renders pi_mission_prompt.md from the contract goal even if
+        implementation_prompt.md is missing, and the executor succeeds.
+
+        This test removes both implementation_prompt.md AND the contract
+        before dispatch (simulating a pre-Phase-20 dispatcher) to verify
+        the blocking case.
+        """
         (self.artifact_dir / "implementation_prompt.md").unlink()
-        self.add_task(
-            executor="pi",
-            pi_bin=str(self.fake_pi),
-        )
-        dispatcher = Dispatcher(
-            self.store,
-            executor_registry={},
-            validator_registry={"pytest": FakeValidator("pytest", "passed")},
-            validators=("pytest",),
-            default_executor="pi",
-        )
+        # Also remove the contract so load_contract_for_pi returns None.
+        (self.artifact_dir / "mission_contract.json").unlink(missing_ok=True)
 
-        result = dispatcher.dispatch_task("AT-PI01")
+        # Patch _write_mission_contract to skip writing so contract stays absent.
+        import unittest.mock
+        original_write = self.store.__class__.upsert_task
+        # We need to prevent the dispatcher from writing mission_contract.json.
+        # The cleanest way: monkey-patch the dispatcher's _write_mission_contract.
+        from agent_taskflow.dispatcher import Dispatcher
+        original_method = Dispatcher._write_mission_contract
 
-        self.assertEqual(result.status, "blocked")
+        def noop_write(self, *args, **kwargs):
+            pass  # skip writing contract
+
+        try:
+            Dispatcher._write_mission_contract = noop_write
+            self.add_task(
+                executor="pi",
+                pi_bin=str(self.fake_pi),
+            )
+            dispatcher = Dispatcher(
+                self.store,
+                executor_registry={},
+                validator_registry={"pytest": FakeValidator("pytest", "passed")},
+                validators=("pytest",),
+                default_executor="pi",
+            )
+
+            result = dispatcher.dispatch_task("AT-PI01")
+
+            self.assertEqual(result.status, "blocked")
+        finally:
+            Dispatcher._write_mission_contract = original_method
 
 
 class DispatcherCliTests(unittest.TestCase):
