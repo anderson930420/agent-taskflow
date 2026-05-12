@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import Sequence
 
 from agent_taskflow.validators.base import Validator
+from agent_taskflow.validators.lint import LintValidator
 from agent_taskflow.validators.openspec import OpenSpecValidator
 from agent_taskflow.validators.policy import PolicyCheckValidator
 from agent_taskflow.validators.pytest import PytestValidator
+from agent_taskflow.validators.typecheck import TypecheckValidator
 
 
 def _normalize_name(name: str) -> str:
@@ -47,13 +49,19 @@ def get_validator(
             scan_artifacts=scan_artifacts,
         )
 
+    if normalized == "typecheck":
+        return TypecheckValidator()
+
+    if normalized == "lint":
+        return LintValidator()
+
     raise ValueError(f"Unknown validator: {name!r}")
 
 
 def list_validator_names() -> list[str]:
     """Return supported validator names."""
 
-    return ["pytest", "openspec", "policy"]
+    return ["pytest", "openspec", "policy", "typecheck", "lint"]
 
 
 __all__ = [
