@@ -23,6 +23,7 @@ from agent_taskflow.governance import (
     assert_task_has_artifact_dir,
     assert_worktree_inside_repo_worktrees,
 )
+from agent_taskflow.mission_contract import build_from_task_fields, write_mission_contract
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord, require_absolute_path
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -196,6 +197,12 @@ class Dispatcher:
             source="dispatcher",
             message="Dispatcher preparing task",
         )
+
+        # Phase 20: write mission contract before executor runs.
+        # The contract documents task intent, executor config, validators,
+        # and governance rules. It must be on disk before the executor starts
+        # so it can be audited if the run fails. It is never written in dry_run.
+        self._write_mission_contract(task, worktree, selected_executor, selected_model)
 
         try:
             executor = self._get_executor(
@@ -389,6 +396,37 @@ class Dispatcher:
     @staticmethod
     def _prompt_path(artifact_dir: Path) -> Path:
         return artifact_dir / "implementation_prompt.md"
+
+    def _write_mission_contract(
+        self,
+        task: TaskRecord,
+        worktree: TaskWorktreeRecord,
+        executor_name: str,
+        model: str | None,
+    ) -> None:
+        """Write mission_contract.json to the task artifact directory.
+
+        This is called at the "preparing" step before the executor runs.
+        It documents the task intent, executor config, required validators,
+        and governance rules for audit and policy validation.
+
+        The file is written unconditionally (not skipped in dry_run, since
+        dry_run returns before reaching this point).
+        """
+        goal = task.title or f"Task {task.task_key}"
+        contract = build_from_task_fields(
+            task_key=task.task_key,
+            goal=goal,
+            repo_path=task.repo_path,
+            worktree_path=worktree.worktree_path,
+            artifact_dir=task.artifact_dir,
+            executor=executor_name,
+            model=model,
+            provider=getattr(task, "provider", None),
+            required_validators=tuple(self.validators),
+            implementation_prompt_path=self._prompt_path(task.artifact_dir),
+        )
+        write_mission_contract(contract, artifact_dir=task.artifact_dir)
 
     def _validate_governance(
         self,

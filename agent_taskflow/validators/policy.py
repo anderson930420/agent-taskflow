@@ -238,8 +238,24 @@ class PolicyCheckValidator(Validator):
         return failures
 
     def _scan_artifacts(self, artifact_dir: Path) -> list[str]:
-        """Scan artifact files for forbidden actions and secret leakage."""
+        """Scan artifact files for forbidden actions and secret leakage.
+
+        Scans executor-produced logs (e.g. pi-executor.log, opencode-events.jsonl)
+        and worker output artifacts. Skips:
+        - The mission contract itself (it documents forbidden actions as part of
+          governance, not as evidence of a violation).
+        - The policy validator's own log (avoid false positives on its failure summary).
+        - Other validator logs (pytest.log, openspec-validate.log).
+        - Binary files and files exceeding max_scan_size.
+        """
         failures: list[str] = []
+
+        # Files produced by validators — skip these to avoid false positives.
+        _VALIDATOR_LOGS = frozenset({
+            "policy-validate.log",
+            "pytest.log",
+            "openspec-validate.log",
+        })
 
         try:
             files = list(artifact_dir.iterdir())
@@ -248,10 +264,18 @@ class PolicyCheckValidator(Validator):
             return failures
 
         for file_path in files:
+            # Skip mission contract (it documents governance rules, not violations)
+            if file_path.name == "mission_contract.json":
+                continue
+            # Skip validator logs to avoid false positives on their own output
+            if file_path.name in _VALIDATOR_LOGS:
+                continue
             # Skip binary files (images, compressed archives, etc.)
-            if file_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".ico",
-                                         ".pdf", ".zip", ".tar", ".gz", ".whl",
-                                         ".pyc", ".pyo", ".so", ".dll", ".exe"}:
+            if file_path.suffix.lower() in {
+                ".png", ".jpg", ".jpeg", ".gif", ".ico",
+                ".pdf", ".zip", ".tar", ".gz", ".whl",
+                ".pyc", ".pyo", ".so", ".dll", ".exe"
+            }:
                 continue
             try:
                 if file_path.stat().st_size > self.max_scan_size:
