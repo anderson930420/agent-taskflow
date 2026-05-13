@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { CreateTaskForm } from "../../../components/CreateTaskForm";
+import { GovernanceWarningBox } from "../../../components/GovernanceWarningBox";
 import { API_BASE_URL } from "../../../lib/api";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +23,9 @@ export default function NewTaskPage() {
       </header>
 
       <section className="panel">
+        <GovernanceWarningBox variant="critical" />
+      </section>
+      <section className="section panel">
         <h2>Task Metadata</h2>
         <CreateTaskForm />
       </section>

@@ -180,6 +180,13 @@ export function needsReviewBeforeAction(status: string): boolean {
   return status === "waiting_approval";
 }
 
+/**
+ * Default deterministic validators.
+ * These are always required and cannot be replaced by AI review.
+ * Optional validators (policy, typecheck, lint) are opt-in per task.
+ */
+export const DEFAULT_VALIDATORS = ["pytest", "openspec"] as const;
+
 // ─── State Category helpers ─────────────────────────────────────────────────
 
 export type TaskStateCategoryKey =

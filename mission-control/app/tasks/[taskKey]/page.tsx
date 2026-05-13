@@ -4,6 +4,7 @@ import { ApprovalList } from "../../../components/ApprovalList";
 import { ArtifactList } from "../../../components/ArtifactList";
 import { RunList } from "../../../components/RunList";
 import { ReviewEvidenceSection } from "../../../components/ReviewEvidenceSection";
+import { StartDispatchPanel } from "../../../components/StartDispatchPanel";
 import { StatusBadge } from "../../../components/StatusBadge";
 import { TaskStateTimeline } from "../../../components/TaskStateTimeline";
 import { ValidationList } from "../../../components/ValidationList";
@@ -165,6 +166,13 @@ export default async function TaskDetailPage({
         </div>
       </section>
 
+      <StartDispatchPanel
+        taskKey={task.task_key}
+        currentStatus={task.status}
+        currentExecutor={task.executor}
+        currentModel={task.model}
+      />
+
       <section className="section panel">
         <h2>Task State Timeline</h2>
         <TaskStateTimeline
@@ -177,6 +185,7 @@ export default async function TaskDetailPage({
         <h2>Review Evidence</h2>
         <ReviewEvidenceSection taskKey={decodedTaskKey} />
       </section>
+
 
       <ActionPanel task={task} />
 

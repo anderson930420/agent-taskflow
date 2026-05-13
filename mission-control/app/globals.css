@@ -641,6 +641,41 @@ button:hover,
   background: #222733;
 }
 
+.form-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.form-grid label input,
+.form-grid label textarea,
+.form-grid label select {
+  width: 100%;
+}
+
+
+.field-hint {
+  font-size: 0.72rem;
+  color: var(--muted-2);
+  font-style: italic;
+}
+
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 8px;
+}
+
 @media (max-width: 920px) {
   .linear-shell {
     grid-template-columns: 1fr;

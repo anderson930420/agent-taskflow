@@ -277,3 +277,88 @@ Approval actions remain in the task detail page ActionPanel where review evidenc
 ### Review Evidence Is the Basis for Human Approval
 
 The board provides an overview. Full review evidence — mission contract, validator results, artifact previews — is available on the task detail page. Human approval requires reviewing this evidence through the backend `/review-evidence` API.
+
+## Create Task and Dispatch UI
+
+Mission Control provides two governance-driven interaction flows: creating a task record and dispatching it through the backend executor abstraction.
+
+### Create Task Form
+
+The `/tasks/new` page provides a Create Task form that calls `POST /api/tasks` (existing backend endpoint). Key properties:
+
+- **Required fields:** task_key, project, repo_path, worktree_path, artifact_dir
+- **Executor selector:** OpenCode, Pi (governance mission contract), Shell, Manual. Selecting Pi shows a note that Pi uses mission contract/mission plan but does not self-approve.
+- **Validator selector:** single validator field (mapping to backend `validator` column). Default validators are `pytest` and `openspec`. Optional validators (policy, typecheck, lint) are opt-in.
+- **Optional fields:** model, title, board, hermes_task_id, branch, base_branch, pr_url, pr_number
+- **Inline validation:** task_key format, absolute path enforcement for required path fields
+- **Governance warning:** form shows a warning box explaining that creating a task does not start a worker, workers run after the Start/Dispatch action, and the UI does not push/merge/cleanup.
+- **Confirmation dialog:** requires explicit user confirmation before submitting.
+- **On success:** navigates to task detail page after 1.2s delay.
+- **On error:** shows backend validation error from the API.
+
+### Start / Dispatch UI
+
+The task detail page provides a `StartDispatchPanel` component above the state timeline. It calls `POST /api/tasks/{key}/start` (existing backend endpoint).
+
+- **Enable condition:** task is in `queued`, `blocked`, or `preparing` state only.
+- **Disabled for terminal states:** waiting_approval, accepted, rejected, etc. — shows a message directing the user to the approval action instead.
+- **Options panel (collapsible):** executor selector, model input, validator multi-select (checkboxes), dry_run toggle.
+- **Default validators:** pytest and openspec are always pre-selected and disabled (cannot be unchecked). Optional validators (policy, typecheck, lint) can be toggled.
+- **Confirmation dialog:** shows clear governance warning: UI does not execute Pi/OpenCode/Shell directly, workers cannot approve or push, deterministic validators remain required, human approval is the final gate.
+- **Result banner:** shows success/failure message with resulting task status.
+- **On failure:** shows backend error message.
+
+
+### Executor Selector
+
+The UI shows four executor choices:
+
+- **OpenCode:** default, maps to `opencode` executor
+- **Pi (governance mission contract):** maps to `pi` executor, uses mission contract/mission plan when available, does not self-approve
+- **Shell:** maps to `shell` executor
+- **Manual:** maps to `manual` executor
+
+Executor selection is passed to the backend dispatcher via the start endpoint. The UI does not directly invoke any executor.
+
+### Validator Selector
+
+Validators shown in both create form and dispatch panel:
+
+
+- **Default (always required):** `pytest` (runs project test suite), `openspec` (checks spec consistency)
+- **Optional (opt-in per task):** `policy` (checks governance artifacts/logs), `typecheck` (runs mypy/TypeScript checks), `lint` (runs ruff/flake8)
+
+No validator can replace human approval. The UI enforces that default validators are always selected and cannot be disabled.
+
+
+### UI Does Not Directly Execute Pi/OpenCode/Shell
+
+Workers run through the agent-taskflow backend dispatcher abstraction only. The UI:
+- Does not spawn subprocesses
+- Does not invoke Pi CLI directly
+- Does not run Shell commands directly
+- Does not bypass the executor abstraction layer
+
+### No Push/Merge/Cleanup/Delete
+
+Neither the create task flow nor the dispatch flow produces side effects beyond what the backend API records. Specifically:
+- No git push, force push, or branch push
+- No PR merge or branch merge
+- No worktree cleanup or artifact cleanup
+- No worktree deletion or branch deletion
+
+### Create Task Does Not Auto-Approve
+
+Creating a task record only registers it in the local mirror store. It does not:
+- Start a worker
+- Approve the task
+- Bypass validators
+- Create a PR
+
+### Human Approval Remains Final Gate
+
+The dispatch flow ends with the task reaching `waiting_approval`. The task detail page directs the user to the **Approve / Reject** action in the ActionPanel. Workers cannot approve themselves — human review is required.
+
+### Task Detail Remains Approval Surface
+
+The task detail page is where full review evidence is available. The dispatch panel feeds into the same state machine that ultimately requires human approval. No approval action is available from the board or the dispatch panel itself.

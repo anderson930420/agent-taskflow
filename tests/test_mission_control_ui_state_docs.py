@@ -40,11 +40,9 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
 
     # Action controls
     def test_approve_only_in_waiting_approval(self):
-        # The approve action should be listed under waiting_approval
         waiting_approval_section = self.doc.find("`waiting_approval`")
         accepted_section = self.doc.find("`accepted`")
         self.assertLess(waiting_approval_section, accepted_section)
-        # Check that waiting_approval has approve in its context
         context = self.doc[waiting_approval_section:waiting_approval_section+500]
         self.assertIn("approve", context)
 
@@ -131,13 +129,11 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
     def test_task_state_badge_documented(self):
         self.assertIn("State badge", self.doc)
 
-
     def test_no_direct_executor_actions_from_board(self):
         self.assertIn("No direct executor", self.doc)
         self.assertIn("board", self.doc)
 
     def test_no_push_on_board(self):
-        # Check that the "No push" section covers the board context
         push_section = self.doc.find("No push")
         board_section = self.doc.find("Task Board State Grouping")
         self.assertGreater(push_section, 0)
@@ -155,6 +151,53 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
     def test_review_evidence_basis_for_approval(self):
         self.assertIn("review evidence", self.doc.lower())
         self.assertIn("human approval", self.doc.lower())
+
+    # Create Task and Dispatch UI (Phase 47)
+    def test_create_task_and_dispatch_section_exists(self):
+        self.assertIn("Create Task and Dispatch UI", self.doc)
+
+    def test_executor_selector_documented(self):
+        self.assertIn("Executor selector", self.doc)
+
+    def test_validator_selector_documented(self):
+        self.assertIn("Validator selector", self.doc)
+
+    def test_start_dispatch_action_documented(self):
+        self.assertIn("Start / Dispatch UI", self.doc)
+
+    def test_backend_api_only_for_dispatch(self):
+        self.assertIn("existing backend endpoint", self.doc)
+
+    def test_does_not_directly_execute_pi(self):
+        # The doc has section "UI Does Not Directly Execute Pi/OpenCode/Shell"
+        # with "Does not spawn subprocesses" / "Does not invoke Pi CLI directly"
+        self.assertIn("Does not invoke Pi CLI directly", self.doc)
+        self.assertIn("Does not spawn", self.doc)
+
+    def test_no_push_in_dispatch(self):
+        self.assertIn("No push", self.doc)
+
+    def test_no_merge_in_dispatch(self):
+        self.assertIn("No merge", self.doc)
+
+    def test_no_cleanup_in_dispatch(self):
+        self.assertIn("no cleanup", self.doc.lower())
+
+    def test_no_delete_worktree_in_dispatch(self):
+        self.assertIn("worktree deletion", self.doc.lower())
+
+    def test_human_approval_final_gate_in_dispatch(self):
+        self.assertIn("Human approval", self.doc)
+        self.assertIn("final gate", self.doc.lower())
+
+    def test_deterministic_validators_required(self):
+        self.assertIn("deterministic validators remain required", self.doc.lower())
+
+    def test_create_task_does_not_auto_approve(self):
+        self.assertIn("Create Task Does Not Auto-Approve", self.doc)
+
+    def test_task_detail_remains_approval_surface(self):
+        self.assertIn("Task Detail Remains Approval Surface", self.doc)
 
 
 if __name__ == "__main__":
