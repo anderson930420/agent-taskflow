@@ -64,6 +64,18 @@ _VALIDATOR_LOG_NAMES = frozenset({
     "lint.log",
 })
 
+_VALIDATOR_STATUS_ORDER = {
+    "failed": 0,
+    "blocked": 1,
+    "not_run": 2,
+    "unknown": 3,
+    "not_required": 4,
+    "passed": 5,
+}
+
+# Fallback for validators with no status in the ordering map.
+_FALLBACK_ORDER = 99
+
 _CONTRACT_NAME = "mission_contract.json"
 
 
@@ -142,6 +154,89 @@ def _safe_list_dir(artifact_dir: Path) -> list[Path]:
             continue
         results.append(entry_resolved)
     return sorted(results, key=lambda p: p.name)
+
+
+# ----------------------------------------------------------------------
+# Validators helpers
+# ----------------------------------------------------------------------
+
+
+def _latest_validator_result(
+    results: list[dict[str, Any]],
+    validator: str,
+) -> dict[str, Any] | None:
+    """Return the latest result for the given validator.
+
+    Results are expected to be in insertion order (oldest first). The latest
+    result for a given validator is the LAST one in the list with that validator
+    name — this is stable regardless of identical timestamps.
+    """
+    # Iterate in reverse to find the last occurrence of this validator.
+    # This is equivalent to max(results, key=position_in_list) where position
+    # is counted from the end. We walk the list in reverse and return the first
+    # match, which is the most-recently-inserted result for this validator.
+    latest: dict[str, Any] | None = None
+    for r in reversed(results):
+        if r.get("validator") == validator:
+            latest = r
+            break
+    return latest
+
+
+def _sorted_validator_results(
+    results: list[dict[str, Any]],
+    validator: str,
+) -> list[dict[str, Any]]:
+    """Return validator results sorted newest-first by created_at.
+
+    If timestamps are identical (same-second recording), secondary sort by
+    id() provides stable insertion-order determinism across test runs.
+    """
+    filtered = [r for r in results if r.get("validator") == validator]
+    return sorted(
+        filtered,
+        key=lambda r: (r.get("created_at", ""), id(r)),
+        reverse=True,
+    )
+
+
+def _latest_validator_status(
+    results: list[dict[str, Any]],
+    validator: str,
+    default: str = "unknown",
+) -> str:
+    """Return the status of the latest validator result, or default if none."""
+    latest = _latest_validator_result(results, validator)
+    if latest is None:
+        return default
+    return latest.get("status", default)
+
+
+def _aggregate_policy_status(
+    validation_results: list[dict[str, Any]],
+    contract: dict[str, Any],
+) -> tuple[str, list[str]]:
+    """Compute the aggregate policy status and warnings from validation results.
+
+    The aggregate status uses the most recent policy validator result.
+    Historical failed results are not counted against the current status.
+    """
+    required_validators = contract.get("required_validators", [])
+    latest = _latest_validator_result(validation_results, "policy")
+
+    if latest is None:
+        if "policy" in required_validators:
+            return "not_run", ["Policy validator was required but has not been recorded."]
+        return "not_required", []
+
+    policy_status = latest.get("status", "unknown")
+    policy_warnings: list[str] = []
+    if policy_status == "failed":
+        policy_warnings.append("Policy check failed — see validator logs for details.")
+    elif policy_status == "not_run" and "policy" in required_validators:
+        policy_warnings.append("Policy validator was required but has not been recorded.")
+
+    return policy_status, policy_warnings
 
 
 # ----------------------------------------------------------------------
@@ -355,22 +450,10 @@ def build_review_evidence(
     contract = build_contract_summary(artifact_dir)
     files = build_artifact_file_summaries(artifact_dir)
 
-    # Summarise policy status.
-    policy_result = next(
-        (r for r in validation_results if r.get("validator") == "policy"),
-        None,
+    policy_status, policy_warnings = _aggregate_policy_status(
+        validation_results,
+        contract,
     )
-    if policy_result is None:
-        contract_has_policy = "policy" in contract.get("required_validators", [])
-        policy_status = "not_required" if not contract_has_policy else "not_run"
-    else:
-        policy_status = policy_result.get("status", "unknown")
-
-    policy_warnings: list[str] = []
-    if policy_status == "failed":
-        policy_warnings.append("Policy check failed — see validator logs for details.")
-    elif policy_status == "not_run" and "policy" in contract.get("required_validators", []):
-        policy_warnings.append("Policy validator was required but has not been recorded.")
 
     # Build validator result summary.
     validator_results = [

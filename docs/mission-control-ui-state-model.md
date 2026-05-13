@@ -180,6 +180,20 @@ Before a human can approve a task in `waiting_approval` state:
 
 If policy warnings exist, they are shown before the contract card in a yellow warning box.
 
+## Review Evidence Freshness and Artifact Listing
+
+The review evidence API surface has the following observable properties:
+
+- **Latest validator aggregation:** When the same validator has multiple recorded results (e.g., a task was re-dispatched after a fix), the aggregate `policy_status` uses the most recently recorded result, not the oldest. Historical results are still listed in `validator_results` for traceability.
+
+- **Artifact list completeness:** The `GET /api/tasks/{key}/artifacts` endpoint returns all files present in the task's artifact directory. This includes files written directly by the executor (e.g., `pi-executor.log`, `policy-validate.log`) even when no explicit artifact registration call was made. If DB artifact records exist, those are returned first; otherwise the endpoint falls back to a filesystem scan of the artifact directory.
+
+- **Path traversal protection:** Both the artifact list and the individual artifact preview endpoint enforce that artifacts must be inside the task's artifact directory. Absolute paths and `..` traversal are rejected at the helper level.
+
+- **UI does not read filesystem directly:** The Mission Control frontend never accesses the filesystem. All artifact listing and preview requests go through the backend API.
+
+- **UI does not re-run validators:** Validator execution is driven entirely by the backend dispatcher. The frontend only displays results.
+
 ## Forbidden Actions in Mission Contract
 
 The mission contract `forbidden_actions` list explicitly prevents the worker from:

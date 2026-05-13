@@ -394,6 +394,258 @@ class ReviewEvidenceApiTests(unittest.TestCase):
         self.assertEqual(before_files, after_files, "review-evidence should not modify files")
 
 
+    # ------------------------------------------------------------------
+    # artifact list endpoint tests
+    # ------------------------------------------------------------------
+
+    def test_artifact_list_returns_db_records_when_present(self) -> None:
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        (artifact_dir / "worker.log").write_text("executed", encoding="utf-8")
+        self.store.record_task_artifact(
+            "AT-0100",
+            "worker_log",
+            artifact_dir / "worker.log",
+        )
+
+        response = self.client.get("/api/tasks/AT-0100/artifacts")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertGreater(payload["count"], 0)
+
+    def test_artifact_list_falls_back_to_filesystem_when_no_db_records(self) -> None:
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        (artifact_dir / "mission_contract.json").write_text(
+            '{"schema_version":"1","task_key":"AT-0100"}', encoding="utf-8"
+        )
+        (artifact_dir / "policy-validate.log").write_text("PASSED", encoding="utf-8")
+        (artifact_dir / "pi-executor.log").write_text("done", encoding="utf-8")
+        (artifact_dir / "handoff_summary.md").write_text("summary", encoding="utf-8")
+
+        response = self.client.get("/api/tasks/AT-0100/artifacts")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 4)
+        names = {item["name"] for item in payload["items"]}
+        self.assertIn("mission_contract.json", names)
+        self.assertIn("policy-validate.log", names)
+        self.assertIn("pi-executor.log", names)
+        self.assertIn("handoff_summary.md", names)
+
+        # Verify kind classification.
+        contract_item = next(i for i in payload["items"] if i["name"] == "mission_contract.json")
+        self.assertEqual(contract_item["kind"], "mission_contract")
+        self.assertTrue(contract_item["is_mission_contract"])
+
+        policy_item = next(i for i in payload["items"] if i["name"] == "policy-validate.log")
+        self.assertEqual(policy_item["kind"], "validator_log")
+        self.assertTrue(policy_item["is_validator_log"])
+
+        executor_item = next(i for i in payload["items"] if i["name"] == "pi-executor.log")
+        self.assertEqual(executor_item["kind"], "executor_log")
+        self.assertTrue(executor_item["is_executor_log"])
+
+    def test_artifact_list_returns_empty_for_missing_artifact_dir(self) -> None:
+        # Task with no artifact dir.
+        task = TaskRecord(
+            task_key="AT-0100",
+            project="agent-taskflow",
+            status="queued",
+            repo_path=self.repo_path,
+            artifact_dir=None,
+        )
+        self.store.upsert_task(task)
+
+        response = self.client.get("/api/tasks/AT-0100/artifacts")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["items"], [])
+
+    # ------------------------------------------------------------------
+    # latest validator aggregation tests
+    # ------------------------------------------------------------------
+
+    def test_review_evidence_latest_validator_result_used(self) -> None:
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        (artifact_dir / "mission_contract.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1",
+                    "task_key": "AT-0100",
+                    "goal": "Test",
+                    "executor": "pi",
+                    "repo_path": str(self.repo_path),
+                    "worktree_path": str(self.root / "worktree"),
+                    "artifact_dir": str(artifact_dir),
+                    "required_validators": ["policy"],
+                    "forbidden_actions": [],
+                    "expected_artifacts": [],
+                    "human_approval_required": True,
+                    "governance_rules": [],
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        # Record first policy result as failed.
+        self.store.record_validation_result(
+            "AT-0100",
+            "policy",
+            status="failed",
+            exit_code=1,
+            summary="first run failed",
+        )
+        # Record second policy result as passed.
+        self.store.record_validation_result(
+            "AT-0100",
+            "policy",
+            status="passed",
+            exit_code=0,
+            summary="second run passed",
+        )
+
+        response = self.client.get("/api/tasks/AT-0100/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+
+        # Latest result should determine the aggregate.
+        self.assertEqual(payload["policy_status"], "passed")
+        self.assertEqual(payload["policy_warnings"], [])
+
+        # Historical results should still be listed.
+        self.assertEqual(len(payload["validator_results"]), 2)
+
+    def test_review_evidence_old_passed_new_failed_uses_failed(self) -> None:
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        (artifact_dir / "mission_contract.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1",
+                    "task_key": "AT-0100",
+                    "goal": "Test",
+                    "executor": "pi",
+                    "repo_path": str(self.repo_path),
+                    "worktree_path": str(self.root / "worktree"),
+                    "artifact_dir": str(artifact_dir),
+                    "required_validators": ["policy"],
+                    "forbidden_actions": [],
+                    "expected_artifacts": [],
+                    "human_approval_required": True,
+                    "governance_rules": [],
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        self.store.record_validation_result(
+            "AT-0100",
+            "policy",
+            status="passed",
+            exit_code=0,
+            summary="first run passed",
+        )
+        self.store.record_validation_result(
+            "AT-0100",
+            "policy",
+            status="failed",
+            exit_code=1,
+            summary="second run failed",
+        )
+
+        response = self.client.get("/api/tasks/AT-0100/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        self.assertEqual(payload["policy_status"], "failed")
+        self.assertGreater(len(payload["policy_warnings"]), 0)
+
+    def test_review_evidence_single_failed_result_returns_failed(self) -> None:
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        (artifact_dir / "mission_contract.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1",
+                    "task_key": "AT-0100",
+                    "goal": "Test",
+                    "executor": "pi",
+                    "required_validators": ["policy"],
+                    "forbidden_actions": [],
+                    "expected_artifacts": [],
+                    "human_approval_required": True,
+                    "governance_rules": [],
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        self.store.record_validation_result(
+            "AT-0100",
+            "policy",
+            status="failed",
+            exit_code=1,
+            summary="policy check failed",
+        )
+
+        response = self.client.get("/api/tasks/AT-0100/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        self.assertEqual(payload["policy_status"], "failed")
+        self.assertGreater(len(payload["policy_warnings"]), 0)
+
+    def test_review_evidence_no_validator_results_shows_not_required(self) -> None:
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        (artifact_dir / "mission_contract.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1",
+                    "task_key": "AT-0100",
+                    "goal": "Test",
+                    "executor": "pi",
+                    "required_validators": [],
+                    "forbidden_actions": [],
+                    "expected_artifacts": [],
+                    "human_approval_required": True,
+                    "governance_rules": [],
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/tasks/AT-0100/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        self.assertEqual(payload["policy_status"], "not_required")
+        self.assertEqual(payload["policy_warnings"], [])
+
+    def test_review_evidence_policy_required_but_not_run_returns_not_run(self) -> None:
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        (artifact_dir / "mission_contract.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1",
+                    "task_key": "AT-0100",
+                    "goal": "Test",
+                    "executor": "pi",
+                    "repo_path": str(self.repo_path),
+                    "worktree_path": str(self.root / "worktree"),
+                    "artifact_dir": str(artifact_dir),
+                    "required_validators": ["policy"],
+                    "forbidden_actions": [],
+                    "expected_artifacts": [],
+                    "human_approval_required": True,
+                    "governance_rules": [],
+                },
+            ),
+            encoding="utf-8",
+        )
+        # No validation results recorded.
+
+        response = self.client.get("/api/tasks/AT-0100/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        self.assertEqual(payload["policy_status"], "not_run")
+        self.assertGreater(len(payload["policy_warnings"]), 0)
+
+
 class ReviewEvidenceHelpersTests(unittest.TestCase):
     """Unit tests for the review.py helper functions."""
 

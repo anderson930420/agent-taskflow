@@ -33,6 +33,7 @@ from agent_taskflow.api.schemas import (
     validation_result_to_dict,
 )
 from agent_taskflow.api.review import (
+    build_artifact_file_summaries,
     build_artifact_preview,
     build_contract_summary,
     build_review_evidence,
@@ -428,8 +429,32 @@ def create_app(
         current_store: TaskMirrorStore = Depends(get_store),
     ) -> dict[str, object]:
         task = task_or_404(task_key, current_store)
-        artifacts = current_store.list_task_artifacts(task.task_key)
-        return list_response([artifact_to_dict(artifact) for artifact in artifacts])
+
+        # Use DB artifact records if available.
+        db_artifacts = current_store.list_task_artifacts(task.task_key)
+        if db_artifacts:
+            return list_response([artifact_to_dict(a) for a in db_artifacts])
+
+        # Fallback: scan the filesystem artifact directory directly.
+        if task.artifact_dir is not None and task.artifact_dir.is_dir():
+            summaries = build_artifact_file_summaries(task.artifact_dir)
+            items = [
+                {
+                    "name": s["name"],
+                    "kind": s["kind"],
+                    "size_bytes": s["size_bytes"],
+                    "preview_available": s["preview_available"],
+                    "has_secret_warning": s["has_secret_warning"],
+                    "is_binary": s["is_binary"],
+                    "is_validator_log": s["is_validator_log"],
+                    "is_executor_log": s["is_executor_log"],
+                    "is_mission_contract": s["is_mission_contract"],
+                }
+                for s in summaries
+            ]
+            return list_response(items)
+
+        return list_response([])
 
     @app.get("/api/tasks/{task_key}/validations")
     def list_validations(
