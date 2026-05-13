@@ -334,6 +334,47 @@ class TestPostDogfoodCleanupPlanDocs(unittest.TestCase):
     def test_phase64_optional_future_work(self):
         self.assertIn("Optional future work", self.doc)
 
+    def test_phase69_ui_dogfood_worktree_cleanup_section(self):
+        self.assertIn("UI Dogfood Worktree Cleanup", self.doc)
+
+    def test_phase69_executed_marker(self):
+        self.assertIn("Phase 69", self.doc)
+        self.assertIn("Executed", self.doc)
+
+    def test_phase69_after_tests_ported(self):
+        self.assertIn("Phase 66", self.doc)
+        self.assertIn("ported", self.doc.lower())
+
+    def test_phase69_after_autofill_ported(self):
+        self.assertIn("Phase 68", self.doc)
+        self.assertIn("auto-fill", self.doc.lower())
+
+    def test_phase69_worktree_removed_path(self):
+        self.assertIn(".worktrees/AT-UI-DOGFOOD-59", self.doc)
+
+    def test_phase69_removal_command(self):
+        self.assertIn("git worktree remove", self.doc)
+
+    def test_phase69_artifacts_preserved_path(self):
+        self.assertIn("agent-taskflow-ui-dogfood-59-artifacts/AT-UI-DOGFOOD-59", self.doc)
+
+    def test_phase69_artifacts_not_deleted(self):
+        self.assertIn("all 15 items intact", self.doc)
+
+    def test_phase69_tags_unchanged(self):
+        self.assertIn("Tags unchanged", self.doc)
+        self.assertIn("v0.1.0", self.doc)
+        self.assertIn("v0.1.0-rc1", self.doc)
+
+    def test_phase69_source_code_unchanged(self):
+        self.assertIn("Source code behavior unchanged", self.doc)
+
+    def test_phase69_no_task_operations(self):
+        self.assertIn("No task approval/dispatch/create performed", self.doc)
+
+    def test_phase69_reason(self):
+        self.assertIn("Worktree's two useful artifacts", self.doc)
+
 
 if __name__ == "__main__":
     unittest.main()

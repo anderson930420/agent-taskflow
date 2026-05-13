@@ -438,6 +438,17 @@ All prior evidence (R2 smoke, API runner dogfood) covered only a subset of these
 
 **Phase 64: Executed ✓** — Legacy R2/API runner evidence deleted (192K freed), AT-UI-DOGFOOD-59 preserved as latest dogfood trace.
 
+### UI Dogfood Worktree Cleanup
+
+- **Phase 69: Executed** — After Phase 66 ported the dogfood API tests (`tests/test_ui_create_dispatch_dogfood.py`) to main and Phase 68 ported the CreateTaskForm auto-fill hooks to main, the AT-UI-DOGFOOD-59 worktree was removed.
+- **Worktree removed:** `/home/ubuntu/agent-taskflow/.worktrees/AT-UI-DOGFOOD-59`
+- **Removal command:** `git worktree remove --force /home/ubuntu/agent-taskflow/.worktrees/AT-UI-DOGFOOD-59` (required because worktree had modified tracked file and untracked files; both already ported to main)
+- **Artifacts preserved:** `/tmp/agent-taskflow-ui-dogfood-59-artifacts/AT-UI-DOGFOOD-59/` — all 15 items intact; not deleted
+- **Reason:** Worktree's two useful artifacts (API test file and auto-fill hooks) were successfully ported to main. The worktree had no remaining unique value.
+- **Tags unchanged:** `v0.1.0` at `eee67f3`, `v0.1.0-rc1` at `2039aab`
+- **Source code behavior unchanged:** Only docs/tests updated in cleanup commit; no backend source changed
+- **No task approval/dispatch/create performed** during this cleanup phase
+
 **Optional future work**:
 
 - Responsive/mobile polish for Mission Control
