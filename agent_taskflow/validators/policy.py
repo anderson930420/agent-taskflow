@@ -46,17 +46,45 @@ _REQUIRED_FORBIDDEN_ACTIONS = frozenset({
 
 # High-confidence secret assignment patterns.
 # These match assignment-like syntax, not documentation mentions.
+#
+# P1: compound uppercase env vars (OPENAI_API_KEY, GITHUB_TOKEN, etc.) with = or :
+# P2: JSON/object-style: "api_key": "sk-..." etc.
+# P3: api_key=sk-... / token=sk-... / secret=sk-... (sk- or ak- prefix required)
+# P4: compound UPPERCASE KEY=VALUE (e.g., OPENAI_API_KEY=val, SECRET_KEY=val, API_KEY_123=val)
+# P5: standalone UPPERCASE PASSWORD=/SECRET=/CREDENTIAL= (TOKEN= excluded — too generic)
+#
+# IMPORTANT: P4 and P5 use post-filtering in _find_secret_assignments to avoid
+# false positives on camelCase identifiers like "normalizedTaskKey" (contains "Key"),
+# "taskKey", "artifactKey", etc. The regex alone cannot distinguish these cases.
 _SECRET_PATTERNS = (
-    # env-style: KEY=value, KEY:value, KEY = value
+    # P1: compound uppercase env vars (OPENAI_API_KEY, GITHUB_TOKEN, etc.) with = or :
     re.compile(r'[A-Z_][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)\s*[:=]', re.IGNORECASE),
-    # JSON/object-style: "key": "value" or "key": "sk-..."
+    # P2: JSON/object-style: "api_key": "sk-...", "access_token": "...", etc.
     re.compile(r'"[A-Za-z_]*(?:api_key|token|secret|password|credential|access_token|refresh_token|authorization)"\s*:\s*"[^"]+', re.IGNORECASE),
-    # Common API key prefixes in plain text
+    # P3: api_key=sk-... / token=sk-... / secret=sk-... (requires sk- or ak- prefix)
     re.compile(r'(?:api_key|token|secret)\s*=\s*["\']?(?:sk-|ak-)[A-Za-z0-9_-]{10,}'),
-    # KEY= or TOKEN= or PASSWORD= or SECRET= followed by a value.
-    # Handles bare KEY=, TOKEN=, PASSWORD=, SECRET= and compound keys
-    # like OPENAI_API_KEY=, API_KEY=, API_TOKEN=.
-    re.compile(r'[A-Z_][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)\s*=\s*\S+', re.IGNORECASE),
+    # P4: compound UPPERCASE KEY=VALUE (e.g., OPENAI_API_KEY=val, SECRET_KEY=val, API_KEY_123=val)
+    # Secret suffix (KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL) must be at the end of the identifier.
+    # (?![a-z]) prevents matching camelCase TaskKey within normalizedTaskKey.
+    re.compile(
+        r'[A-Z][A-Z0-9_]*'                            # uppercase-first identifier
+        r'(?:_[A-Z][A-Z0-9_]*)*'                     # optional _UPPERCASE segments
+        r'(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)'   # secret suffix (must be at end)
+        r'(?:_[A-Z0-9]+)*'                           # optional _NUM suffix
+        r'(?![a-z])'                                  # NOT followed by lowercase
+        r'\s*[=:]\s*\S+',                          # = or : with non-empty value
+        re.IGNORECASE
+    ),
+    # P5: standalone UPPERCASE PASSWORD=/SECRET=/CREDENTIAL= (TOKEN= excluded — too generic)
+    # (?<![a-zA-Z_]) prevents matching within camelCase identifiers.
+    re.compile(
+        r'(?<![a-zA-Z_])'                            # NOT preceded by letter or underscore
+        r'(?:PASSWORD|SECRET|CREDENTIAL)'            # standalone secret keywords
+        r'(?![a-z])'                                  # NOT followed by lowercase
+        r'(?:_[A-Z0-9]+)*'                           # optional _UPPERCASE segments
+        r'\s*[=:]\s*\S+',                          # = or : with non-empty value
+        re.IGNORECASE
+    ),
 )
 
 # Suspicious action patterns that indicate a worker may have self-approved,
@@ -95,11 +123,59 @@ def _normalize_list(value: object) -> list[str]:
 
 
 def _find_secret_assignments(text: str) -> list[str]:
-    """Return a list of secret-like assignment patterns found in text."""
-    findings = []
+    """Return a list of secret-like assignment patterns found in text.
+
+    Uses high-confidence secret patterns (P1-P5) with post-filtering to avoid
+    false positives on camelCase identifiers like normalizedTaskKey, taskKey,
+    and artifactKey that contain 'Key' as a substring.
+    """
+    findings: list[str] = []
     for pattern in _SECRET_PATTERNS:
         for match in pattern.finditer(text):
-            findings.append(f"secret assignment: {match.group()!r}")
+            matched = match.group()
+            # Post-filter P4 (compound uppercase KEY=VALUE): skip if identifier has
+            # both uppercase and lowercase letters (camelCase false positive).
+            # e.g. normalizedTaskKey, taskKey, artifactKey.
+            # Also verify the secret suffix is at the end of the identifier, not
+            # followed by descriptive text like _LABEL.
+            if pattern == _SECRET_PATTERNS[3]:  # P4
+                id_part = re.split(r'[=:]', matched)[0].strip()
+                has_upper = any(c.isupper() for c in id_part)
+                has_lower = any(c.islower() for c in id_part)
+                if has_upper and has_lower:
+                    continue  # camelCase identifier — skip false positive
+                # Verify secret suffix is at the end of identifier.
+                # Check: after the suffix (KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL),
+                # only _NUM or empty string should follow.
+                suffix_valid = False
+                prefix_all_upper = True
+                for suffix in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"):
+                    suffix_lower = suffix.lower()
+                    suffix_pos = id_part.lower().rfind(suffix_lower)
+                    if suffix_pos >= 0:
+                        prefix = id_part[:suffix_pos]
+                        after = id_part[suffix_pos + len(suffix) :]
+                        # Prefix must be all uppercase (or empty) to be a real env var.
+                        prefix_all_upper = (
+                            prefix == ""
+                            or all(
+                                c.isupper() or c == "_" or c.isdigit()
+                                for c in prefix
+                            )
+                        )
+                        # After suffix must be empty or _NUM only.
+                        suffix_valid = not after or bool(re.match(r"^_\d+$", after))
+                        if suffix_valid and prefix_all_upper:
+                            break
+                if not suffix_valid or not prefix_all_upper:
+                    continue
+            # Post-filter P5 (standalone PASSWORD=/SECRET=/CREDENTIAL=): skip if
+            # identifier starts with a lowercase letter (e.g. token in "const token = ...")
+            if pattern == _SECRET_PATTERNS[4]:  # P5
+                id_part = re.split(r'[=:]', matched)[0].strip()
+                if id_part and id_part[0].islower():
+                    continue  # lowercase identifier — skip false positive
+            findings.append(f"secret assignment: {matched!r}")
             # Avoid flooding with many matches from the same line
             if len(findings) >= 5:
                 return findings

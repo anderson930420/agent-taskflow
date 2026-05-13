@@ -162,6 +162,123 @@ class SecretPatternTests(unittest.TestCase):
         findings = _find_secret_assignments(text)
         self.assertEqual(len(findings), 0)
 
+    # ------------------------------------------------------------------
+    # Phase 60: camelCase false-positive tests
+    # These identifiers contain "Key" as a camelCase segment but are NOT
+    # secret assignments. The policy validator must NOT flag them.
+    # ------------------------------------------------------------------
+    def test_ignores_normalized_task_key_camel_case(self) -> None:
+        """normalizedTaskKey = taskKey.trim() is not a secret assignment."""
+        findings = _find_secret_assignments(
+            "const normalizedTaskKey = taskKey.trim();"
+        )
+        self.assertEqual(len(findings), 0)
+
+    def test_ignores_task_key_identifier(self) -> None:
+        """let taskKey = input.trim() is not a secret assignment."""
+        findings = _find_secret_assignments("let taskKey = input.trim();")
+        self.assertEqual(len(findings), 0)
+
+    def test_ignores_artifact_key_identifier(self) -> None:
+        """const artifactKey = taskKey + ":" is not a secret assignment."""
+        findings = _find_secret_assignments(
+            'const artifactKey = taskKey + ":";'
+        )
+        self.assertEqual(len(findings), 0)
+
+    def test_ignores_key_name_identifier(self) -> None:
+        """const keyName = \"task_key\"; is not a secret assignment."""
+        findings = _find_secret_assignments('const keyName = "task_key";')
+        self.assertEqual(len(findings), 0)
+
+    def test_ignores_public_key_label(self) -> None:
+        """const publicKeyLabel = \"Public key\"; is not a secret assignment."""
+        findings = _find_secret_assignments(
+            'const publicKeyLabel = "Public key";'
+        )
+        self.assertEqual(len(findings), 0)
+
+    def test_ignores_token_value_identifier(self) -> None:
+        """let tokenValue = getToken(); is not a secret assignment."""
+        findings = _find_secret_assignments("let tokenValue = getToken();")
+        self.assertEqual(len(findings), 0)
+
+    def test_ignores_api_key_label(self) -> None:
+        """API_KEY_LABEL is a label, not a secret."""
+        findings = _find_secret_assignments(
+            'const API_KEY_LABEL = "test";'
+        )
+        self.assertEqual(len(findings), 0)
+
+    def test_ignores_json_task_key_field(self) -> None:
+        """JSON {\"task_key\": \"AT-123\"} is not a secret."""
+        findings = _find_secret_assignments('{"task_key": "AT-123"}')
+        self.assertEqual(len(findings), 0)
+
+    def test_ignores_lowercase_token_identifier(self) -> None:
+        """const token = \"test\" is not a secret assignment."""
+        findings = _find_secret_assignments('const token = "test"')
+        self.assertEqual(len(findings), 0)
+
+    # ------------------------------------------------------------------
+    # Phase 60: true-positive tests
+    # These MUST still be flagged as secret assignments.
+    # ------------------------------------------------------------------
+    def test_matches_bare_password_assignment(self) -> None:
+        """PASSWORD=\"hunter2\" must be flagged."""
+        findings = _find_secret_assignments('PASSWORD="hunter2"')
+        self.assertTrue(len(findings) > 0)
+
+    def test_matches_bare_secret_assignment(self) -> None:
+        """SECRET=\"super-secret\" must be flagged."""
+        findings = _find_secret_assignments('SECRET="super-secret"')
+        self.assertTrue(len(findings) > 0)
+
+    def test_matches_api_key_number_suffix(self) -> None:
+        """API_KEY_123=\"value\" must be flagged."""
+        findings = _find_secret_assignments('API_KEY_123="value"')
+        self.assertTrue(len(findings) > 0)
+
+    def test_ignores_bare_token_as_compound_prefix(self) -> None:
+        """TOKEN_VALUE=\"test\" is a generic identifier, not a secret.
+
+        Only TOKEN as a standalone suffix (SECRET_TOKEN=) or bare TOKEN= at word
+        boundary would be a concern. TOKEN_VALUE where TOKEN is a prefix is not a
+        high-confidence secret indicator.
+        """
+        findings = _find_secret_assignments('TOKEN_VALUE="test"')
+        self.assertEqual(len(findings), 0)
+
+    def test_matches_standalone_token_as_label(self) -> None:
+        """OPENAI_API_KEY: (label-style) must be flagged."""
+        findings = _find_secret_assignments("OPENAI_API_KEY:")
+        self.assertTrue(len(findings) > 0)
+
+    def test_matches_client_secret_snake_case(self) -> None:
+        """client_secret = \"abc123\" must be flagged."""
+        findings = _find_secret_assignments('client_secret = "abc123"')
+        self.assertTrue(len(findings) > 0)
+
+    def test_matches_json_access_token(self) -> None:
+        """{\"access_token\": \"token-value\"} must be flagged."""
+        findings = _find_secret_assignments('{"access_token": "token-value"}')
+        self.assertTrue(len(findings) > 0)
+
+    def test_matches_my_secret_compound(self) -> None:
+        """MY_SECRET=\"value\" must be flagged."""
+        findings = _find_secret_assignments('MY_SECRET="value"')
+        self.assertTrue(len(findings) > 0)
+
+    def test_matches_my_password_compound(self) -> None:
+        """MY_PASSWORD=\"hunter2\" must be flagged."""
+        findings = _find_secret_assignments('MY_PASSWORD="hunter2"')
+        self.assertTrue(len(findings) > 0)
+
+    def test_matches_bare_credential(self) -> None:
+        """CREDENTIAL=abc123 must be flagged."""
+        findings = _find_secret_assignments("CREDENTIAL=abc123")
+        self.assertTrue(len(findings) > 0)
+
 
 class SuspiciousActionPatternTests(unittest.TestCase):
     def test_matches_git_push(self) -> None:
