@@ -335,13 +335,20 @@ The Create Task form auto-fills certain fields to reduce manual entry, while pre
 - **No dispatch:** Auto-fill does not call the start/dispatch endpoint. It only populates form fields.
 - **No approval, push, merge, or cleanup:** Auto-fill has no side effects beyond setting React state for form field values.
 
+### Create Task Executor Default
+
+The Create Task form defaults the executor to `pi`. This default reflects the most validated post-v0.1.0 governance pipeline path (AT-UI-DOGFOOD-59). Operators can still select opencode, shell, or manual from the selector.
+
+This is a frontend form default only. The backend executor registry still supports opencode, pi, shell, and manual. Dispatch goes through the backend start API (`POST /api/tasks/{key}/start`). The UI does not directly run Pi or any executor.
+
+This does not change dispatcher state machine, DB schema, approval semantics, or DEFAULT_VALIDATORS.
 
 ### Executor Selector
 
 The UI shows four executor choices:
 
-- **OpenCode:** default, maps to `opencode` executor
-- **Pi (governance mission contract):** maps to `pi` executor, uses mission contract/mission plan when available, does not self-approve
+- **Pi:** default, maps to `pi` executor, uses mission contract/mission plan when available, does not self-approve
+- **OpenCode:** maps to `opencode` executor
 - **Shell:** maps to `shell` executor
 - **Manual:** maps to `manual` executor
 

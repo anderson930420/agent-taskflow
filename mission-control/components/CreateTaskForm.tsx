@@ -41,7 +41,7 @@ export function CreateTaskForm() {
   const [repoPath, setRepoPath] = useState("/home/ubuntu/agent-taskflow");
   const [worktreePath, setWorktreePath] = useState("");
   const [artifactDir, setArtifactDir] = useState("");
-  const [executor, setExecutor] = useState("opencode");
+  const [executor, setExecutor] = useState("pi");
   const [model, setModel] = useState("");
   const [validator, setValidator] = useState("pytest");
   const [title, setTitle] = useState("");

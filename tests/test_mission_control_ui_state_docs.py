@@ -377,6 +377,48 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
     def test_autofill_no_cleanup(self):
         self.assertIn("No cleanup", self.doc)
 
+    def test_create_task_executor_default_section_exists(self):
+        self.assertIn("Create Task Executor Default", self.doc)
+
+    def test_create_task_defaults_executor_to_pi(self):
+        self.assertIn("defaults the executor to `pi`", self.doc)
+
+    def test_create_task_executor_default_frontend_only(self):
+        self.assertIn("frontend form default only", self.doc)
+
+    def test_create_task_executor_default_backend_still_supports_opencode(self):
+        self.assertIn("backend executor registry still supports opencode", self.doc)
+
+    def test_create_task_executor_default_backend_still_supports_shell(self):
+        self.assertIn("backend executor registry still supports opencode, pi, shell, and manual", self.doc)
+
+    def test_create_task_executor_default_backend_still_supports_manual(self):
+        self.assertIn("opencode, pi, shell, and manual", self.doc)
+
+    def test_create_task_executor_default_operators_can_choose_opencode(self):
+        self.assertIn("Operators can still select opencode, shell, or manual", self.doc)
+
+    def test_create_task_executor_default_ui_does_not_run_pi(self):
+        self.assertIn("UI does not directly run Pi", self.doc)
+
+    def test_create_task_executor_default_backend_start_api(self):
+        self.assertIn("backend start API", self.doc)
+
+    def test_create_task_executor_default_no_dispatcher_change(self):
+        self.assertIn("dispatcher state machine", self.doc)
+        self.assertIn("does not change", self.doc)
+
+    def test_create_task_executor_default_no_db_schema_change(self):
+        self.assertIn("DB schema", self.doc)
+        self.assertIn("does not change", self.doc)
+
+    def test_create_task_executor_default_no_approval_change(self):
+        self.assertIn("approval semantics", self.doc)
+        self.assertIn("does not change", self.doc)
+
+    def test_create_task_executor_default_no_default_validators_change(self):
+        self.assertIn("DEFAULT_VALIDATORS", self.doc)
+
 
 if __name__ == "__main__":
     unittest.main()
