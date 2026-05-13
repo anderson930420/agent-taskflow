@@ -244,6 +244,56 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
     def test_no_delete_in_evidence_ux(self):
         self.assertIn("worktree deletion", self.doc.lower())
 
+    # Artifact Review and Full Preview UX (Phase 49)
+    def test_artifact_review_section_exists(self):
+        self.assertIn("Artifact Review and Full Preview UX", self.doc)
+
+    def test_artifact_classification_documented(self):
+        self.assertIn("Artifact Classification", self.doc)
+        self.assertIn("mission_contract", self.doc.lower())
+        self.assertIn("executor_log", self.doc.lower())
+
+    def test_inline_preview_documented(self):
+        self.assertIn("Inline Preview", self.doc)
+        self.assertIn("expand", self.doc.lower())
+
+    def test_full_preview_modal_documented(self):
+        self.assertIn("ArtifactPreviewModal", self.doc)
+        self.assertIn("Modal", self.doc)
+
+    def test_mission_contract_viewer_documented(self):
+        self.assertIn("MissionContractViewer", self.doc)
+        self.assertIn("forbidden actions", self.doc.lower())
+
+    def test_pi_mission_plan_viewer_documented(self):
+        self.assertIn("PiMissionPlanViewer", self.doc)
+        self.assertIn("Protocol steps", self.doc)
+
+    def test_policy_log_viewer_documented(self):
+        self.assertIn("PolicyLogViewer", self.doc)
+        self.assertIn("Policy check failed", self.doc)
+
+    def test_backend_artifact_api_only(self):
+        self.assertIn("artifact preview api", self.doc.lower())
+
+    def test_no_push_in_artifact_review(self):
+        self.assertIn("No push", self.doc)
+
+    def test_no_merge_in_artifact_review(self):
+        self.assertIn("No merge", self.doc)
+
+    def test_no_cleanup_in_artifact_review(self):
+        self.assertIn("no cleanup", self.doc.lower())
+
+    def test_no_delete_in_artifact_review(self):
+        self.assertIn("worktree deletion", self.doc.lower())
+
+    def test_secret_warning_documented(self):
+        self.assertIn("secret", self.doc.lower())
+
+    def test_truncated_preview_documented(self):
+        self.assertIn("truncation notice", self.doc.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

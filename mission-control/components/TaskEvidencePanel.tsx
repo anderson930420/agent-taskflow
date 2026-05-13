@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { getTaskReviewEvidence } from "../lib/api";
 import type { ApiFailure, TaskReviewBundle } from "../lib/types";
 import { ApiErrorPanel } from "./ApiErrorPanel";
+import { ArtifactReviewPanel } from "./ArtifactReviewPanel";
 import { ExecutorLogPanel } from "./ExecutorLogPanel";
 import { ValidatorSummaryCard } from "./ValidatorSummaryCard";
 
@@ -128,6 +129,11 @@ export function TaskEvidencePanel({ taskKey }: TaskEvidencePanelProps) {
       <section className="section panel">
         <h2>Executor Logs</h2>
         <ExecutorLogPanel taskKey={taskKey} executorLogs={executorLogs} />
+      </section>
+
+      <section className="section panel">
+        <h2>Artifact Review</h2>
+        <ArtifactReviewPanel evidence={item} taskKey={taskKey} />
       </section>
     </>
   );

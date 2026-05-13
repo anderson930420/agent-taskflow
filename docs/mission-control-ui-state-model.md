@@ -363,6 +363,109 @@ The dispatch flow ends with the task reaching `waiting_approval`. The task detai
 
 The task detail page is where full review evidence is available. The dispatch panel feeds into the same state machine that ultimately requires human approval. No approval action is available from the board or the dispatch panel itself.
 
+## Artifact Review and Full Preview UX
+
+Mission Control provides a comprehensive artifact review surface on the task detail page, with structured viewers, inline previews, and a full preview modal.
+
+### Artifact Review Panel
+
+The `ArtifactReviewPanel` component displays all task artifacts from the review evidence endpoint. It provides:
+
+- **Summary bar:** total artifacts, previewable count, secret warning count, executor/validator log counts.
+- **Category filter pills:** All, Mission, Pi Protocol, Executor, Validator, Prompts, Other.
+- **Special structured viewers** for known artifact types.
+- **Artifact list** with expandable rows and inline preview.
+
+
+All previews use the existing `GET /api/tasks/{key}/artifacts/{name}` endpoint. No filesystem access from the UI.
+
+### Artifact Classification
+
+Artifacts are classified by examining artifact metadata from review evidence:
+
+- **mission:** `is_mission_contract: true` or name === `mission_contract.json`
+- **pi_protocol:** name === `pi_mission_plan.json` or `pi_mission_prompt.md`
+- **executor_logs:** `is_executor_log: true`
+- **validator_logs:** `is_validator_log: true`
+- **prompts:** name === `implementation_prompt.md` or `*_prompt.md`
+- **other:** all remaining artifacts
+
+### MissionContractViewer
+
+For `mission_contract.json`, a structured viewer shows:
+
+- Status badge (present / missing / invalid)
+- Schema version
+- Task key, executor, goal, human_approval_required
+- Required validators (as colored pills)
+- Forbidden actions (red rows with ✕ icon)
+- Expected artifacts
+- Governance rules
+
+Highlights: `human_approval_required: true` shown in yellow, forbidden actions in red.
+
+### PiMissionPlanViewer
+
+For `pi_mission_plan.json`, a structured viewer shows:
+
+- Schema version, task key, executor, goal
+- Human approval requirement
+- Required validators
+- Protocol steps with numbered circles and descriptions
+
+A note is shown: "These are protocol steps, not autonomous agents. The UI does not execute steps. Deterministic validators run separately."
+
+If JSON parse fails, falls back to raw text preview.
+
+### PolicyLogViewer
+
+For `policy-validate.log`, a log viewer shows:
+
+- Policy check status badge (passed / failed / blocked / not_run)
+- Status banner: "Policy check passed" (green) or "Policy check failed" (red with guidance)
+- Log lines with syntax highlighting:
+  - Green + left border: lines mentioning "passed", "✓", "no violations"
+  - Red + left border: lines mentioning "failed", "✗", "violation"
+  - Yellow: lines mentioning "warning", "secret", "api_key", "token"
+  - Red + ⚠ prefix: forbidden action lines
+
+The UI does NOT alter or rerun policy validation results.
+
+### Inline Preview
+
+Artifact rows expand on click (▶ toggle button). When expanded:
+
+1. Calls `GET /api/tasks/{key}/artifacts/{name}` to load preview.
+2. Shows monospaced content with preserved whitespace (max 240px height, scrollable).
+3. Shows truncation notice if preview was truncated by backend.
+4. Shows secret warning if secrets detected.
+5. Shows preview unavailable reason if backend blocks preview.
+6. Does NOT auto-fetch all previews (only on user action).
+
+### ArtifactPreviewModal
+
+Clicking "Modal" on any artifact row opens a full-screen modal:
+
+- Shows artifact name, kind badge, size
+- Shows secret warning if applicable
+- "Load preview" button (only if not loaded and no secrets)
+- Full monospaced content with unlimited scroll height
+- Truncation notice if truncated
+- Close button + Escape key support
+- No external modal library used
+
+### No Direct Filesystem Access
+
+The UI never reads files directly. All artifact content is served through the backend artifact preview API. The backend enforces path traversal protection (artifacts must be inside the task artifact directory).
+
+### No Rerun of Validators
+
+The frontend never reruns any validator. All validator results are pre-recorded in the database. The Validator Summary Card and Policy Log Viewer read existing data only.
+
+### No Push/Merge/Cleanup/Delete in Artifact Review
+
+Artifact previews and structured viewers do not expose any push, merge, cleanup, or delete actions. They are read-only review surfaces.
+
 ## API Health, Loading, and Evidence Preview UX
 
 Mission Control provides operator-experience improvements for API reachability, loading states, error display, validator summaries, and executor log previews.
