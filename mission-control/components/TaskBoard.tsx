@@ -9,6 +9,7 @@ import {
   type TaskStateCategoryKey,
 } from "../lib/taskState";
 import type { Task } from "../lib/types";
+import { ApiStatusIndicator } from "./ApiStatus";
 import { TaskBoardFilters } from "./TaskBoardFilters";
 import { TaskCategorySummary } from "./TaskCategorySummary";
 
@@ -287,6 +288,7 @@ export function TaskBoard({ tasks }: { tasks: Task[] }) {
             <h1>Executor Mission Board</h1>
           </div>
           <div className="topbar-actions">
+            <ApiStatusIndicator />
             <div className="readonly-pill">Read-only</div>
             <Link className="ghost-button" href="/tasks/new">
               Create Task

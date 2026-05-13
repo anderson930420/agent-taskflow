@@ -6,6 +6,7 @@ import { RunList } from "../../../components/RunList";
 import { ReviewEvidenceSection } from "../../../components/ReviewEvidenceSection";
 import { StartDispatchPanel } from "../../../components/StartDispatchPanel";
 import { StatusBadge } from "../../../components/StatusBadge";
+import { TaskEvidencePanel } from "../../../components/TaskEvidencePanel";
 import { TaskStateTimeline } from "../../../components/TaskStateTimeline";
 import { ValidationList } from "../../../components/ValidationList";
 import { API_BASE_URL, getTaskDetailBundle } from "../../../lib/api";
@@ -186,6 +187,7 @@ export default async function TaskDetailPage({
         <ReviewEvidenceSection taskKey={decodedTaskKey} />
       </section>
 
+      <TaskEvidencePanel taskKey={decodedTaskKey} />
 
       <ActionPanel task={task} />
 

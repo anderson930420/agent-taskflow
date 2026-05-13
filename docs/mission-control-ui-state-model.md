@@ -362,3 +362,85 @@ The dispatch flow ends with the task reaching `waiting_approval`. The task detai
 ### Task Detail Remains Approval Surface
 
 The task detail page is where full review evidence is available. The dispatch panel feeds into the same state machine that ultimately requires human approval. No approval action is available from the board or the dispatch panel itself.
+
+## API Health, Loading, and Evidence Preview UX
+
+Mission Control provides operator-experience improvements for API reachability, loading states, error display, validator summaries, and executor log previews.
+
+### API Health / Reachability Indicator
+
+The Mission Control dashboard shows an API status indicator in the top bar. It calls `GET /health` on the Agent Taskflow API every 30 seconds.
+
+States:
+- **Loading:** "Checking API…" with a muted pulsing dot.
+- **Connected:** "API connected" with a green dot and service name.
+- **Degraded:** "API error" with a red dot and the backend error message.
+
+The indicator does not trigger any write action. It is purely read-only.
+
+
+### Loading States
+
+A `loading.tsx` file at `mission-control/app/loading.tsx` provides a simple spinner with accessible text "Loading Mission Control…" while Next.js Suspense resolves the dashboard data.
+
+
+Task detail and create task pages use Next.js `loading.tsx` if data is slow. All loading states are minimal and non-blocking.
+
+
+### API Error Panel
+
+`ApiErrorPanel` is a reusable component for displaying backend API errors:
+- Shows the error title and message
+- Shows HTTP status if available
+- Shows a retry guidance message (no stack traces)
+- Optional retry button
+
+`ApiErrorBanner` is a smaller inline version for inline action failures.
+
+Both components never show raw stack traces. Errors are displayed as user-friendly messages with clear next steps.
+
+
+### Validator Summary Card
+
+The task detail page shows a `ValidatorSummaryCard` above the full Review Evidence section. It displays:
+
+- **Pass/fail/blocked/other counts** as colored badges.
+- **Policy check banner** highlighted by color (green/yellow/red) with policy warnings.
+- **Per-validator rows** showing validator name, exit code, and status.
+- **Loading skeleton** while review evidence is being fetched.
+- **Empty state** if no validator evidence is loaded yet.
+
+Data comes from the existing `/api/tasks/{key}/review-evidence` endpoint. No validators are rerun by the frontend.
+
+### Executor Log Preview Panel
+
+The task detail page shows an `ExecutorLogPanel` below the Validator Summary Card.
+
+Executor logs are identified from the review evidence artifact list (`is_executor_log: true`). The panel shows:
+
+- Log name (Pi executor log, OpenCode log, etc.)
+- File name and size
+- "Load preview" button if preview is available and no secrets detected
+
+On clicking "Load preview":
+1. Calls `GET /api/tasks/{key}/artifacts/{name}` (existing artifact preview endpoint).
+2. Shows truncated preview (first 20 KB) with a warning if the file was truncated.
+3. Shows secret warning if the file contains high-confidence secret patterns.
+4. Shows preview unavailable message if the backend returns a reason.
+
+If no executor log artifacts exist, shows an empty state with a description.
+
+The panel does NOT read the filesystem directly. All preview content comes from the backend artifact preview API.
+
+### No Rerun of Validators
+
+The frontend never reruns validators. The Validator Summary Card reads from the existing `review-evidence` endpoint which includes pre-recorded validator results. No validator subprocess is spawned by the UI.
+
+### No Direct Filesystem Access
+
+The UI never reads files directly. All artifact previews, executor logs, and mission contracts are served through the backend API. The backend enforces path traversal protection (artifacts must be inside the task artifact directory).
+
+
+### No Push/Merge/Cleanup/Delete in Evidence UX
+
+The evidence preview components (ValidatorSummaryCard, ExecutorLogPanel, ReviewEvidenceSection) do not expose any push, merge, cleanup, or delete actions.

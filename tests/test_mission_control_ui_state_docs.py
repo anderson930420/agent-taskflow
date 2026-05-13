@@ -169,8 +169,6 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
         self.assertIn("existing backend endpoint", self.doc)
 
     def test_does_not_directly_execute_pi(self):
-        # The doc has section "UI Does Not Directly Execute Pi/OpenCode/Shell"
-        # with "Does not spawn subprocesses" / "Does not invoke Pi CLI directly"
         self.assertIn("Does not invoke Pi CLI directly", self.doc)
         self.assertIn("Does not spawn", self.doc)
 
@@ -198,6 +196,53 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
 
     def test_task_detail_remains_approval_surface(self):
         self.assertIn("Task Detail Remains Approval Surface", self.doc)
+
+    # API Health, Loading, and Evidence Preview UX (Phase 48)
+    def test_api_health_section_exists(self):
+        self.assertIn("API Health, Loading, and Evidence Preview UX", self.doc)
+
+    def test_api_reachability_indicator_documented(self):
+        self.assertIn("API status indicator", self.doc)
+        self.assertIn("GET /health", self.doc)
+
+    def test_loading_states_documented(self):
+        self.assertIn("Loading Mission Control", self.doc)
+        self.assertIn("loading.tsx", self.doc)
+
+    def test_api_error_panel_documented(self):
+        self.assertIn("ApiErrorPanel", self.doc)
+        self.assertIn("API Error", self.doc)
+
+    def test_validator_summary_card_documented(self):
+        self.assertIn("ValidatorSummaryCard", self.doc)
+
+    def test_executor_log_preview_documented(self):
+        self.assertIn("ExecutorLogPanel", self.doc)
+        self.assertIn("Load preview", self.doc)
+
+    def test_artifact_previews_use_backend_api(self):
+        self.assertIn("artifact preview endpoint", self.doc.lower())
+
+    def test_never_reads_filesystem_directly(self):
+        self.assertIn("does NOT read the filesystem directly", self.doc)
+
+    def test_never_reruns_validators(self):
+        self.assertIn("never reruns validators", self.doc.lower())
+
+    def test_never_executes_pi_in_evidence(self):
+        self.assertIn("No direct executor", self.doc)
+
+    def test_no_push_in_evidence_ux(self):
+        self.assertIn("No push", self.doc)
+
+    def test_no_merge_in_evidence_ux(self):
+        self.assertIn("No merge", self.doc)
+
+    def test_no_cleanup_in_evidence_ux(self):
+        self.assertIn("no cleanup", self.doc.lower())
+
+    def test_no_delete_in_evidence_ux(self):
+        self.assertIn("worktree deletion", self.doc.lower())
 
 
 if __name__ == "__main__":
