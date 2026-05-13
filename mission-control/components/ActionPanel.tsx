@@ -15,6 +15,7 @@ import {
 } from "./ActionResultBanner";
 import { ConfirmActionButton } from "./ConfirmActionButton";
 import { StatusBadge } from "./StatusBadge";
+import { APPROVE_WARNING, REJECT_WARNING, BLOCK_WARNING } from "../lib/taskState";
 
 const STARTABLE_STATUSES = new Set(["queued", "blocked", "preparing"]);
 const APPROVABLE_STATUSES = new Set(["waiting_approval"]);
@@ -68,8 +69,8 @@ export function ActionPanel({ task }: { task: Task }) {
     <section className="section panel">
       <h2>Task Actions</h2>
       <p className="muted">
-        Controlled actions only. This UI does not provide cleanup, merge, push,
-        PR creation, branch deletion, or worktree deletion.
+        Controlled actions only. This UI does not execute Pi, OpenCode, or Shell directly.
+        No push, merge, cleanup, worktree deletion, or branch deletion is available here.
       </p>
 
       <div className="action-status-row">
@@ -149,6 +150,21 @@ export function ActionPanel({ task }: { task: Task }) {
             Records a human decision through the backend action API.
           </p>
 
+          <div
+            style={{
+              padding: "8px 12px",
+              marginBottom: "10px",
+              background: "rgba(234,179,8,0.08)",
+              border: "1px solid rgba(234,179,8,0.25)",
+              borderRadius: "8px",
+              fontSize: "0.78rem",
+              color: "var(--yellow)",
+            }}
+          >
+            <strong>Human approval is the final gate.</strong> Worker cannot self-approve.
+            Approving does not push, merge, or cleanup.
+          </div>
+
           <label>
             Decided by
             <input
@@ -169,7 +185,7 @@ export function ActionPanel({ task }: { task: Task }) {
 
           <div className="button-row">
             <ConfirmActionButton
-              confirmMessage={`Approve task ${task.task_key}? This will mark it accepted.`}
+              confirmMessage={APPROVE_WARNING + `\n\nProceed to approve ${task.task_key}?`}
               disabled={!canApprove || decidedBy.trim() === ""}
               label="Approve task"
               onConfirm={() =>
@@ -182,7 +198,7 @@ export function ActionPanel({ task }: { task: Task }) {
             />
 
             <ConfirmActionButton
-              confirmMessage={`Reject task ${task.task_key}? This will mark it rejected.`}
+              confirmMessage={REJECT_WARNING + `\n\nProceed to reject ${task.task_key}?`}
               danger
               disabled={!canReject || decidedBy.trim() === ""}
               label="Reject task"
@@ -209,6 +225,20 @@ export function ActionPanel({ task }: { task: Task }) {
             Manually blocks a non-terminal task with an explicit reason.
           </p>
 
+          <div
+            style={{
+              padding: "8px 12px",
+              marginBottom: "10px",
+              background: "rgba(239,68,68,0.08)",
+              border: "1px solid rgba(239,68,68,0.25)",
+              borderRadius: "8px",
+              fontSize: "0.78rem",
+              color: "var(--red)",
+            }}
+          >
+            Blocking does not delete or clean up any artifacts or files.
+          </div>
+
           <label>
             Blocked reason
             <textarea
@@ -219,7 +249,7 @@ export function ActionPanel({ task }: { task: Task }) {
           </label>
 
           <ConfirmActionButton
-            confirmMessage={`Block task ${task.task_key}?`}
+            confirmMessage={BLOCK_WARNING + `\n\nProceed to block ${task.task_key}?`}
             danger
             disabled={!canBlock || blockedReason.trim() === ""}
             label="Block task"

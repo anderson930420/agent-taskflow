@@ -5,6 +5,7 @@ import { ArtifactList } from "../../../components/ArtifactList";
 import { RunList } from "../../../components/RunList";
 import { ReviewEvidenceSection } from "../../../components/ReviewEvidenceSection";
 import { StatusBadge } from "../../../components/StatusBadge";
+import { TaskStateTimeline } from "../../../components/TaskStateTimeline";
 import { ValidationList } from "../../../components/ValidationList";
 import { API_BASE_URL, getTaskDetailBundle } from "../../../lib/api";
 
@@ -162,6 +163,14 @@ export default async function TaskDetailPage({
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section className="section panel">
+        <h2>Task State Timeline</h2>
+        <TaskStateTimeline
+          currentStatus={task.status}
+          blockedReason={task.blocked_reason}
+        />
       </section>
 
       <section className="section panel">
