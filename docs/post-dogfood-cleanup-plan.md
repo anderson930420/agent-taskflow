@@ -453,5 +453,83 @@ All prior evidence (R2 smoke, API runner dogfood) covered only a subset of these
 
 - Responsive/mobile polish for Mission Control
 - Auth/multi-user design
-- Default executor `pi` in CreateTaskForm
-- Optional: cleanup AT-UI-DOGFOOD-59 worktree uncommitted changes (not required, harmless)
+- AT-UI-DOGFOOD-59 artifacts final archival decision
+
+---
+
+## Final AT-UI-DOGFOOD-59 Evidence Archival Decision
+
+### Phase 72 — Decision
+
+**Decision: Keep AT-UI-DOGFOOD-59 evidence for now.**
+
+No evidence deleted in this phase. Decision will be revisited when cleanup conditions are met (see below).
+
+### Evidence Path
+
+```
+/tmp/agent-taskflow-ui-dogfood-59-artifacts/AT-UI-DOGFOOD-59/
+```
+
+### Evidence Summary
+
+| Property | Value |
+|---|---|
+| Task key | `AT-UI-DOGFOOD-59` |
+| Final status | `accepted` |
+| Executor | `pi` |
+| Policy status | `passed` |
+| Total artifacts | 15 |
+| Total size | 92K |
+| Validator runs | 2 (Phase 59: failed; Phase 61: passed after policy fix) |
+| Approval | `decided_by=human`, `decision=accepted` |
+
+### Artifact Files
+
+| File | Kind | Size |
+|---|---|---|
+| `mission_contract.json` | mission_contract | 1477B |
+| `pi_mission_plan.json` | other | 4531B |
+| `pi_mission_prompt.md` | other | 8915B |
+| `pi-executor.log` | executor_log | 11468B |
+| `policy-validate.log` | validator_log | 503B |
+| `git_diff.txt` | other | 1663B |
+| `git_status.txt` | other | 319B |
+| `handoff_summary.md` | other | 1427B |
+| `scout_notes.md` | other | 2427B |
+| `implementation_plan.md` | other | 1140B |
+| `self_review_notes.md` | other | 1379B |
+| `executor_log` | other | 2977B |
+| `git_diff` | other | 1663B |
+| `git_status` | other | 444B |
+| `validator_logs` | other | 4771B |
+
+### Rationale
+
+- It is the newest complete post-v0.1.0 dogfood trace.
+- It covers the full governance pipeline: UI create → dispatch → policy validate → evidence surface → human approval.
+- It supersedes all legacy evidence (R2 smoke, API runner dogfood), which was already deleted in Phase 64.
+- The 92K footprint is negligible compared to the 500M staging clone deleted in Phase 58.
+- It is useful for future regression testing, debug scenarios, and documentation.
+- It contains both Phase 59 (failed, stale policy) and Phase 61 (passed, fixed policy) runs — illustrating the Phase 62 latest-status fix.
+
+### Cleanup Condition
+
+Delete or archive the evidence only after **one or more** of the following conditions are met:
+
+1. **Next major Mission Control dogfood** completes successfully and produces newer evidence.
+2. **v0.1.1 or next release cycle** produces newer complete dogfood trace.
+3. **Explicit human approval** for deletion is given.
+4. **Compression archival** — evidence is compressed (e.g., `tar.gz`) and moved to an archive location before deletion.
+
+Until any of the above conditions are met, the evidence remains at:
+`/tmp/agent-taskflow-ui-dogfood-59-artifacts/AT-UI-DOGFOOD-59/`
+
+### Compliance
+
+- **No evidence deleted** in this phase
+- **No source behavior changed** — only docs/tests updated
+- **Tags unchanged** — `v0.1.0` at `eee67f3`, `v0.1.0-rc1` at `2039aab`
+- **No task operations performed** — no create/dispatch/approve in this phase
+- **No wildcard cleanup used** — exact path documented only
+- **No push/merge/tag operations** — commit only

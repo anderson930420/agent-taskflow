@@ -376,5 +376,66 @@ class TestPostDogfoodCleanupPlanDocs(unittest.TestCase):
         self.assertIn("Worktree's two useful artifacts", self.doc)
 
 
+class TestPhase72FinalEvidenceArchivalDecision(unittest.TestCase):
+    """Phase 72: Final AT-UI-DOGFOOD-59 Evidence Archival Decision."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open("docs/post-dogfood-cleanup-plan.md") as f:
+            cls.doc = f.read()
+
+    def test_phase72_section_exists(self):
+        self.assertIn("Final AT-UI-DOGFOOD-59 Evidence Archival Decision", self.doc)
+
+    def test_phase72_decision_keep(self):
+        self.assertIn("Decision: Keep AT-UI-DOGFOOD-59 evidence for now", self.doc)
+
+    def test_phase72_evidence_path(self):
+        self.assertIn(
+            "agent-taskflow-ui-dogfood-59-artifacts/AT-UI-DOGFOOD-59", self.doc
+        )
+
+    def test_phase72_task_key(self):
+        self.assertIn("AT-UI-DOGFOOD-59", self.doc)
+
+    def test_phase72_final_status(self):
+        self.assertIn("accepted", self.doc)
+
+    def test_phase72_artifact_list(self):
+        for f in ["mission_contract.json", "pi_mission_plan.json",
+                  "pi_mission_prompt.md", "pi-executor.log",
+                  "policy-validate.log"]:
+            with self.subTest(file=f):
+                self.assertIn(f, self.doc)
+
+    def test_phase72_rationale(self):
+        self.assertIn("newest complete post-v0.1.0 dogfood trace", self.doc)
+
+    def test_phase72_cleanup_condition_future_work(self):
+        self.assertIn("AT-UI-DOGFOOD-59 artifacts final archival decision", self.doc)
+
+    def test_phase72_no_evidence_deleted(self):
+        self.assertIn("No evidence deleted in this phase", self.doc)
+
+    def test_phase72_source_behavior_unchanged(self):
+        self.assertIn("No source behavior changed", self.doc)
+
+    def test_phase72_tags_unchanged(self):
+        self.assertIn("v0.1.0", self.doc)
+        self.assertIn("v0.1.0-rc1", self.doc)
+
+    def test_phase72_no_task_operations(self):
+        self.assertIn("No task operations performed", self.doc)
+
+    def test_phase72_cleanup_condition_explicit_human_approval(self):
+        self.assertIn("Explicit human approval", self.doc)
+
+    def test_phase72_cleanup_condition_next_dogfood(self):
+        self.assertIn("Next major Mission Control dogfood", self.doc)
+
+    def test_phase72_evidence_size(self):
+        self.assertIn("92K", self.doc)
+
+
 if __name__ == "__main__":
     unittest.main()
