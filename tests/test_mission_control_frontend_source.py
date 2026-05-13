@@ -51,7 +51,8 @@ class TestResponsiveLayoutCSS(unittest.TestCase):
 
     def test_css_contains_board_responsive_rule(self):
         """Board grid has responsive column sizing."""
-        self.assertIn("grid-auto-columns", self.css)
+        self.assertIn("grid-template-columns: repeat", self.css)
+        self.assertIn("minmax", self.css)
 
     def test_css_contains_form_grid_responsive_rule(self):
         """Form grid switches to single column on narrow screens."""
