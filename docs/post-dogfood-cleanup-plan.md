@@ -361,12 +361,86 @@ R2 smoke and dogfood evidence retained until post-v0.1.0 UI create/dispatch dogf
 3. **Rerun tests/build** — confirm 870 tests still pass, compileall clean, frontend build clean
 4. **Verify git status clean** — no untracked files in main
 
+## Legacy Evidence Cleanup After UI Dogfood
+
+**Phase**: 64
+**Date**: 2026-05-13
+**Task Completed**: AT-UI-DOGFOOD-59 reached `accepted` status
+**Approval Type**: API approval after browser review verification (not a browser confirm-click verification)
+
+### Deleted Legacy Evidence
+
+| Path | Size | Reason |
+|---|---|---|
+| `/tmp/agent-taskflow-pi-gov-smoke-28-r2.db` | 32K | Superseded by AT-UI-DOGFOOD-59 as latest post-v0.1.0 dogfood trace |
+| `/tmp/agent-taskflow-pi-gov-artifacts-28-r2/` | 52K | Superseded by AT-UI-DOGFOOD-59 as latest post-v0.1.0 dogfood trace |
+| `/tmp/agent-taskflow-dogfood-api-db-path.db` | 44K | Superseded by AT-UI-DOGFOOD-59 as latest post-v0.1.0 dogfood trace |
+| `/tmp/agent-taskflow-dogfood-api-db-path-artifacts/` | 64K | Superseded by AT-UI-DOGFOOD-59 as latest post-v0.1.0 dogfood trace |
+
+**Total freed**: ~192K
+
+### Preserved Evidence
+
+| Path | Purpose |
+|---|---|
+| `/tmp/agent-taskflow-ui-dogfood-59-artifacts/AT-UI-DOGFOOD-59/` | Latest post-v0.1.0 UI create/dispatch/evidence/approval dogfood trace. 15 artifacts, policy_status=passed, accepted by human. Supersedes all prior evidence. |
+| `/home/ubuntu/agent-taskflow/.worktrees/AT-UI-DOGFOOD-59/` | Worktree at detached HEAD `9b4b6a9`. Contains uncommitted changes to `CreateTaskForm.tsx` and untracked `test_ui_create_dispatch_dogfood.py`. Not deleted — untracked changes are harmless, worktree not git-tracked, Phase 63 report flagged it as "possible non-clean state" but no cleanup action taken per Phase 64 non-goals. |
+
+### AT-UI-DOGFOOD-59 State
+
+| Item | Value |
+|---|---|
+| Status | `accepted` |
+| decided_by | `human` |
+| policy_status | `passed` (latest validator result used; historical failed result preserved in validator_results list) |
+| Artifact count | 15 |
+| review-evidence endpoint | `policy_status: passed`, `policy_warnings: []` |
+| `/artifacts` endpoint | `count: 15`, includes `mission_contract.json`, `policy-validate.log`, `pi-executor.log` |
+| individual previews | All 3 key artifacts readable ✅ |
+| Tags unchanged | `v0.1.0` at `eee67f3`, `v0.1.0-rc1` at `2039aab` |
+| Source code unchanged | Only docs/tests updated |
+
+### Approval Note
+
+Phase 63 approval used the API endpoint `POST /api/tasks/AT-UI-DOGFOOD-59/approve` with `decided_by="human"`, not a browser confirm-click via the Mission Control UI. Phase 53 had previously verified the browser click-approve flow end-to-end. The Phase 63 API approval reflects backend approval after browser review verification, with `decided_by="human"` enforced server-side regardless of client source.
+
+### Rationale
+
+AT-UI-DOGFOOD-59 is the most complete post-v0.1.0 dogfood evidence because it covers:
+
+1. **UI create task** — task created via Mission Control CreateTaskForm
+2. **UI dispatch** — task dispatched via StartDispatchPanel
+3. **Policy validator** — run and passed (Phase 60 fix applied)
+4. **Evidence surface** — review evidence with latest status (Phase 62 fix applied)
+5. **Artifact listing** — 15 artifacts listed (Phase 62 fix applied)
+6. **Human approval** — task accepted with `decided_by="human"`
+
+All prior evidence (R2 smoke, API runner dogfood) covered only a subset of these steps. They are superseded and safe to delete.
+
+### Compliance
+
+- **No AT-UI-DOGFOOD-59 evidence deleted** — artifacts, worktree, DB record preserved
+- **No wildcard cleanup used** — exact paths only
+- **No source code changed** — docs/tests updated
+- **No tags pushed** — only main pushed to origin
+- **No dispatcher/DB/approval semantics changed**
+- **No DEFAULT_VALIDATORS changed**
+
 ## Next Phase Recommendation
 
-**Phase 43: Executed ✓** — Stale worktrees, failed smoke attempt artifacts, and old smoke artifacts deleted. Evidence preserved.
+**Phase 43: Executed ✓** — Stale worktrees, failed smoke attempt artifacts, and old smoke artifacts deleted.
 
 **Phase 44: Staging Clone Archive Decision ✓** — documented, preserved until v0.1.0 final release.
 
 **Phase 57: Post-v0.1.0 Evidence Decision ✓** — v0.1.0 final release confirmed, evidence decision table updated.
 
 **Phase 58: Executed ✓** — Staging clone deleted (500M freed), R2/dogfood evidence preserved.
+
+**Phase 64: Executed ✓** — Legacy R2/API runner evidence deleted (192K freed), AT-UI-DOGFOOD-59 preserved as latest dogfood trace.
+
+**Optional future work**:
+
+- Responsive/mobile polish for Mission Control
+- Auth/multi-user design
+- Default executor `pi` in CreateTaskForm
+- Optional: cleanup AT-UI-DOGFOOD-59 worktree uncommitted changes (not required, harmless)

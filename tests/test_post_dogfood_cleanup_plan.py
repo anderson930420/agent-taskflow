@@ -271,6 +271,69 @@ class TestPostDogfoodCleanupPlanDocs(unittest.TestCase):
         self.assertIn("Phase 58", self.doc)
         self.assertIn("Executed", self.doc)
 
+    def test_phase64_legacy_evidence_cleanup_section(self):
+        self.assertIn("Legacy Evidence Cleanup After UI Dogfood", self.doc)
+
+    def test_phase64_executed_after_accepted(self):
+        self.assertIn("AT-UI-DOGFOOD-59 reached", self.doc)
+        self.assertIn("accepted", self.doc)
+
+    def test_phase64_deleted_r2_smoke_db(self):
+        self.assertIn("agent-taskflow-pi-gov-smoke-28-r2.db", self.doc)
+
+    def test_phase64_deleted_r2_artifacts(self):
+        self.assertIn("agent-taskflow-pi-gov-artifacts-28-r2", self.doc)
+
+    def test_phase64_deleted_dogfood_db(self):
+        self.assertIn("agent-taskflow-dogfood-api-db-path.db", self.doc)
+
+    def test_phase64_deleted_dogfood_artifacts(self):
+        self.assertIn("agent-taskflow-dogfood-api-db-path-artifacts", self.doc)
+
+    def test_phase64_preserved_ui_dogfood_artifacts(self):
+        self.assertIn("agent-taskflow-ui-dogfood-59-artifacts/AT-UI-DOGFOOD-59", self.doc)
+
+    def test_phase64_supersedes_r2_api_evidence(self):
+        self.assertIn("supersedes", self.doc.lower())
+        self.assertIn("R2", self.doc)
+        self.assertIn("API", self.doc)
+
+    def test_phase64_api_approval_not_browser_confirm(self):
+        self.assertIn("API approval", self.doc)
+        self.assertIn("not a browser confirm-click", self.doc)
+
+    def test_phase64_acceptance_note_phase53(self):
+        self.assertIn("Phase 53", self.doc)
+        self.assertIn("browser", self.doc.lower())
+
+    def test_phase64_decided_by_human_enforced(self):
+        self.assertIn("decided_by", self.doc)
+        self.assertIn("human", self.doc)
+
+    def test_phase64_tags_unchanged(self):
+        self.assertIn("Tags Unchanged", self.doc)
+        self.assertIn("v0.1.0", self.doc)
+        self.assertIn("v0.1.0-rc1", self.doc)
+
+    def test_phase64_source_code_unchanged(self):
+        self.assertIn("Source code unchanged", self.doc)
+
+    def test_phase64_no_evidence_deleted_compliance(self):
+        self.assertIn("No AT-UI-DOGFOOD-59 evidence deleted", self.doc)
+
+    def test_phase64_phase64_executed_marker(self):
+        self.assertIn("Phase 64", self.doc)
+        self.assertIn("Executed", self.doc)
+
+    def test_phase64_worktree_not_deleted_note(self):
+        self.assertIn(".worktrees/AT-UI-DOGFOOD-59", self.doc)
+
+    def test_phase64_ui_dogfood_artifacts_preserved(self):
+        self.assertIn("agent-taskflow-ui-dogfood-59-artifacts/AT-UI-DOGFOOD-59/", self.doc)
+
+    def test_phase64_optional_future_work(self):
+        self.assertIn("Optional future work", self.doc)
+
 
 if __name__ == "__main__":
     unittest.main()
