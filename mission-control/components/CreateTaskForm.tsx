@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { createTask } from "../lib/api";
 import type { ActionResponse, ApiFailure, CreateTaskRequest, Task } from "../lib/types";
 import { ActionResultBanner, type ActionResultState } from "./ActionResultBanner";
@@ -53,6 +53,27 @@ export function CreateTaskForm() {
   const [prNumber, setPrNumber] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<ActionResultState | null>(null);
+
+  // Auto-generate worktree_path when task_key or repo_path changes
+  useEffect(() => {
+    if (taskKey && repoPath && !worktreePath) {
+      setWorktreePath(`${repoPath}/.worktrees/${taskKey}`);
+    }
+  }, [taskKey, repoPath, worktreePath]);
+
+  // Auto-generate artifact_dir when task_key or project changes
+  useEffect(() => {
+    if (taskKey && project && !artifactDir) {
+      setArtifactDir(`/tmp/agent-taskflow-${project}-artifacts/${taskKey}`);
+    }
+  }, [taskKey, project, artifactDir]);
+
+  // Auto-generate branch when task_key changes
+  useEffect(() => {
+    if (taskKey && !branch) {
+      setBranch(`task/${taskKey}`);
+    }
+  }, [taskKey, branch]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

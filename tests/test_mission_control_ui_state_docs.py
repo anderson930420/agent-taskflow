@@ -328,6 +328,55 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
     def test_approval_does_not_cleanup_in_docs(self):
         self.assertIn(", or clean up any branch or worktree", self.doc)
 
+    def test_create_task_autofill_section_exists(self):
+        self.assertIn("Create Task Auto-fill Behavior", self.doc)
+
+    def test_autofill_worktree_path_documented(self):
+        self.assertIn("worktree_path", self.doc)
+        self.assertIn("auto-fill", self.doc.lower())
+        self.assertIn("repo_path", self.doc)
+
+    def test_autofill_artifact_dir_documented(self):
+        self.assertIn("artifact_dir", self.doc)
+        self.assertIn("auto-fill", self.doc.lower())
+        self.assertIn("project", self.doc)
+
+    def test_autofill_branch_documented(self):
+        self.assertIn("branch", self.doc)
+        self.assertIn("auto-fill", self.doc.lower())
+        self.assertIn("task_key", self.doc)
+
+    def test_autofill_task_key_formula_documented(self):
+        self.assertIn('"task/" + task_key', self.doc)
+
+    def test_autofill_user_override_preserved(self):
+        self.assertIn("User overrides preserved", self.doc)
+        self.assertIn("does not overwrite", self.doc)
+
+    def test_autofill_refill_on_clear_documented(self):
+        self.assertIn("Re-fill on clear", self.doc)
+        self.assertIn("clears", self.doc.lower())
+
+    def test_autofill_no_auto_submit(self):
+        self.assertIn("No auto-submit", self.doc)
+        self.assertIn("form submission", self.doc)
+
+    def test_autofill_no_dispatch(self):
+        self.assertIn("No dispatch", self.doc)
+        self.assertIn("start/dispatch", self.doc)
+
+    def test_autofill_no_approval(self):
+        self.assertIn("No approval", self.doc)
+
+    def test_autofill_no_push(self):
+        self.assertIn("No push", self.doc)
+
+    def test_autofill_no_merge(self):
+        self.assertIn("No merge", self.doc)
+
+    def test_autofill_no_cleanup(self):
+        self.assertIn("No cleanup", self.doc)
+
 
 if __name__ == "__main__":
     unittest.main()

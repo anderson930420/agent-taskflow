@@ -322,6 +322,19 @@ The task detail page provides a `StartDispatchPanel` component above the state t
 - **Result banner:** shows success/failure message with resulting task status.
 - **On failure:** shows backend error message.
 
+### Create Task Auto-fill Behavior
+
+The Create Task form auto-fills certain fields to reduce manual entry, while preserving user overrides:
+
+- **worktree_path:** Auto-filled from `repo_path + "/.worktrees/" + task_key` when both `task_key` and `repo_path` are non-empty and `worktree_path` is currently empty.
+- **artifact_dir:** Auto-filled from `"/tmp/agent-taskflow-" + project + "-artifacts/" + task_key` when both `task_key` and `project` are non-empty and `artifact_dir` is currently empty.
+- **branch:** Auto-filled as `"task/" + task_key` when `task_key` is non-empty and `branch` is currently empty.
+- **User overrides preserved:** If a user has already entered a value in any of these fields, the auto-fill does not overwrite it. The auto-fill only fires when the field is empty.
+- **Re-fill on clear:** If a user clears one of these fields and then changes `task_key`, `project`, or `repo_path`, the auto-fill fires again. This allows users to reset to the auto-generated value by clearing the field.
+- **No auto-submit:** Auto-fill does not trigger form submission. The user must click the submit button to create the task.
+- **No dispatch:** Auto-fill does not call the start/dispatch endpoint. It only populates form fields.
+- **No approval, push, merge, or cleanup:** Auto-fill has no side effects beyond setting React state for form field values.
+
 
 ### Executor Selector
 
