@@ -4,6 +4,58 @@
 **Execution date**: 2026-05-13
 **Executed by**: phase-43 automated cleanup
 
+## Staging Clone Archive Decision
+
+**Phase**: 44
+**Date**: 2026-05-13
+**Path**: `/tmp/agent-taskflow-v0.1.0-rc1-staging/`
+**Size**: ~500 MB (actual: 500M)
+
+### Purpose
+
+Isolated checkout from `v0.1.0-rc1` tag (`2039aab`) used in Phase 37 to verify release reproducibility in a clean staging environment. Contains full smoke task evidence separate from source repo.
+
+### Evidence Contained
+
+| Item | Path | Description |
+|---|---|---|
+| Staging repo | `repo/` | Detached checkout at `2039aab`, Pi executor run verified |
+| Staging DB | `agent-taskflow-staging-rc1.db` | SQLite DB with 1 task (AT-PI-STAGING-RC1), 7 events |
+| Artifacts | `artifacts/AT-PI-STAGING-RC1/` | 7 files: mission_contract.json, pi-executor.log (10905B), pi_mission_plan.json, pi_mission_prompt.md, policy-validate.log, handoff_summary.md, implementation_prompt.md |
+| Smoke result | `repo/.worktrees/AT-PI-STAGING-RC1/pi_smoke_result.txt` | Content: `pi-real-run-smoke-ok` |
+
+### Archive Decision
+
+**Decision**: Preserve until v0.1.0 final release
+
+**Rationale**:
+- It is the strongest local reproducibility evidence for the `v0.1.0-rc1` release candidate
+- Shows that the tagged commit (`2039aab`) passes governance smoke when checked out in isolation
+- Contains both DB evidence (task state) and artifact evidence (executor logs, policy validation)
+- If deleted before a formal v0.1.0 release, there would be no local copy of the isolated staging smoke proof
+
+### Deletion Condition
+
+This staging clone MAY be deleted after EITHER:
+
+1. `v0.1.0` final release is cut and verified, OR
+2. Equivalent evidence summary is archived in docs (e.g., a release sign-off doc confirming staging smoke passes)
+
+### Explicit Non-Action
+
+**No deletion performed in Phase 44.** Staging clone intentionally preserved.
+
+### Future Cleanup Command
+
+```bash
+# DO NOT RUN before final release sign-off
+rm -rf /tmp/agent-taskflow-v0.1.0-rc1-staging/
+```
+
+### Warning
+
+Do not run the above command until v0.1.0 final release sign-off is complete.
+
 ## Cleanup Execution Status
 
 **Executed**: 2026-05-13 (Phase 43)

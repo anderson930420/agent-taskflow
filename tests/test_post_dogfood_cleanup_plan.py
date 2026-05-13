@@ -131,6 +131,43 @@ class TestPostDogfoodCleanupPlanDocs(unittest.TestCase):
         self.assertIn("Phase 44", self.doc)
         self.assertIn("Staging Clone", self.doc)
 
+    def test_staging_clone_archive_decision(self):
+        self.assertIn("Staging Clone Archive Decision", self.doc)
+
+    def test_staging_clone_path_mentioned(self):
+        self.assertIn("agent-taskflow-v0.1.0-rc1-staging", self.doc)
+
+    def test_staging_clone_preserve_decision(self):
+        # doc says "Preserve until v0.1.0 final release"
+        self.assertIn("Preserve until v0.1.0 final release", self.doc)
+
+    def test_staging_clone_release_reproducibility(self):
+        self.assertIn("release reproducibility", self.doc)
+
+    def test_staging_clone_detached_checkout(self):
+        # doc uses "Detached checkout" (capital D)
+        self.assertIn("Detached checkout", self.doc)
+
+    def test_staging_clone_v010rc1_tag(self):
+        self.assertIn("v0.1.0-rc1", self.doc)
+
+    def test_staging_clone_2039aab(self):
+        self.assertIn("2039aab", self.doc)
+
+    def test_staging_clone_no_deletion_in_phase44(self):
+        self.assertIn("No deletion performed in Phase 44", self.doc)
+
+    def test_staging_clone_future_cleanup_command(self):
+        self.assertIn("rm -rf /tmp/agent-taskflow-v0.1.0-rc1-staging", self.doc)
+
+    def test_staging_clone_do_not_run_warning(self):
+        self.assertIn("do not run", self.doc.lower())
+        self.assertIn("before final release sign-off", self.doc.lower())
+
+    def test_staging_clone_equivalent_evidence_archived(self):
+        # doc says "Equivalent evidence summary is archived in docs"
+        self.assertIn("Equivalent evidence summary is archived", self.doc)
+
 
 if __name__ == "__main__":
     unittest.main()
