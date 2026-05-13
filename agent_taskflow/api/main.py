@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import AsyncIterator, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from agent_taskflow.api.schemas import (
@@ -48,6 +49,15 @@ from agent_taskflow.tasks import normalize_task_key
 
 SERVICE_NAME = "agent-taskflow-api"
 
+# Allowed CORS origins for the Mission Control frontend.
+# Credentials=False — no cookies or auth headers sent cross-origin.
+DEFAULT_CORS_ORIGINS = [
+    "http://127.0.0.1:3001",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+]
+
 DispatcherFactory = Callable[[TaskMirrorStore, Sequence[str]], Any]
 
 
@@ -70,6 +80,14 @@ def create_app(
         yield
 
     app = FastAPI(title="Agent Taskflow Mission Control API", lifespan=lifespan)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=DEFAULT_CORS_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
 
     def get_store() -> TaskMirrorStore:
         return store
