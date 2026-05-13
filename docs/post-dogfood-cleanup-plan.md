@@ -1,5 +1,56 @@
 # Post-Dogfood Cleanup Plan
 
+**Document version**: Phase 43 — Executed
+**Execution date**: 2026-05-13
+**Executed by**: phase-43 automated cleanup
+
+## Cleanup Execution Status
+
+**Executed**: 2026-05-13 (Phase 43)
+**Commit**: `b0b8a95` → cleanup execution commit (pending push)
+
+### Cleaned Paths (deleted)
+
+| Path | Reason |
+|---|---|
+| `/home/ubuntu/agent-taskflow/.worktrees/AT-PI-SMOKE-28/` | stale worktree, not git-tracked |
+| `/home/ubuntu/agent-taskflow/.worktrees/AT-PI-SMOKE-28-R2/` | stale worktree, not git-tracked |
+| `/home/ubuntu/agent-taskflow/.worktrees/AT-DOGFOOD-API-DB-PATH/` | dogfood worktree merged to main, not git-tracked |
+| `/tmp/agent-taskflow-pi-gov-smoke-28.db` | failed smoke attempt, superseded by R2 |
+| `/tmp/agent-taskflow-pi-gov-artifacts-28/` | failed smoke attempt artifacts, superseded by R2 |
+| `/tmp/agent-taskflow-pi-smoke-artifacts/` | old 4K smoke artifacts, verified empty before delete |
+
+### Preserved Paths (intentionally retained)
+
+| Path | Task | Reason |
+|---|---|---|
+| `/tmp/agent-taskflow-pi-gov-smoke-28-r2.db` | AT-PI-SMOKE-28-R2 | passed smoke, policy passed, audit evidence |
+| `/tmp/agent-taskflow-pi-gov-artifacts-28-r2/` | AT-PI-SMOKE-28-R2 | passed smoke, policy passed, audit evidence |
+| `/tmp/agent-taskflow-dogfood-api-db-path.db` | AT-DOGFOOD-API-DB-PATH | approved, merged, audit evidence |
+| `/tmp/agent-taskflow-dogfood-api-db-path-artifacts/` | AT-DOGFOOD-API-DB-PATH | approved, merged, audit evidence |
+| `/tmp/agent-taskflow-v0.1.0-rc1-staging/` | AT-PI-STAGING-RC1 | v0.1.0-rc1 smoke verification, staging clone |
+
+### Verification Result
+
+- All cleaned paths confirmed removed
+- All preserved paths confirmed intact
+- No unapproved paths were deleted
+- No source repo files modified
+- v0.1.0-rc1 tag unchanged
+- Source repo clean after cleanup
+
+### Compliance Notes
+
+- No wildcard cleanup used
+- Only exact approved paths deleted
+- git worktree remove attempted first (paths were not git-tracked, fell back to rm -rf)
+- No DB schema changes
+- No source code changes
+- No dispatcher state machine changes
+- No approval semantics changes
+- No DEFAULT_VALIDATORS changes
+- No tags pushed
+
 ## Current Repository State
 
 | Item | Value |
@@ -139,23 +190,13 @@ When executing Phase 43:
 
 ## Next Phase Recommendation
 
-**Phase 43: Execute Approved Cleanup Plan**
+**Phase 43: Executed ✓** — Stale worktrees, failed smoke attempt artifacts, and old smoke artifacts deleted. Evidence preserved.
 
-Execute only the "safe to delete" items from this plan. Preserve all evidence items until formal v0.1.0 release sign-off.
+**Phase 44: Staging Clone Archive Decision**
 
-Commands to execute in Phase 43 (not this phase):
-```bash
-git worktree remove /home/ubuntu/agent-taskflow/.worktrees/AT-PI-SMOKE-28 || true
-git worktree remove /home/ubuntu/agent-taskflow/.worktrees/AT-PI-SMOKE-28-R2 || true
-git worktree remove /home/ubuntu/agent-taskflow/.worktrees/AT-DOGFOOD-API-DB-PATH || true
-rm -rf /tmp/agent-taskflow-pi-gov-artifacts-28
-rm -f /tmp/agent-taskflow-pi-gov-smoke-28.db
-# rm -rf /tmp/agent-taskflow-pi-smoke-artifacts/  # verify first
-```
-
-Preserve for now:
-- `/tmp/agent-taskflow-pi-gov-smoke-28-r2.db`
-- `/tmp/agent-taskflow-pi-gov-artifacts-28-r2/`
-- `/tmp/agent-taskflow-dogfood-api-db-path.db`
-- `/tmp/agent-taskflow-dogfood-api-db-path-artifacts/`
-- `/tmp/agent-taskflow-v0.1.0-rc1-staging/`
+Remaining preserved evidence (do not delete yet):
+- `/tmp/agent-taskflow-pi-gov-smoke-28-r2.db` — R2 smoke audit evidence
+- `/tmp/agent-taskflow-pi-gov-artifacts-28-r2/` — R2 smoke audit evidence
+- `/tmp/agent-taskflow-dogfood-api-db-path.db` — dogfood audit evidence
+- `/tmp/agent-taskflow-dogfood-api-db-path-artifacts/` — dogfood audit evidence
+- `/tmp/agent-taskflow-v0.1.0-rc1-staging/` — staging clone (500M), archive or delete after v0.1.0 formal release

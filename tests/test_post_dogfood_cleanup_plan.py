@@ -91,9 +91,45 @@ class TestPostDogfoodCleanupPlanDocs(unittest.TestCase):
         self.assertIn("AT-PI-SMOKE-28-R2", self.doc)
         self.assertIn("AT-DOGFOOD-API-DB-PATH", self.doc)
 
-    def test_next_phase_recommendation(self):
+    def test_has_cleanup_execution_status(self):
+        self.assertIn("Cleanup Execution Status", self.doc)
+
+    def test_cleanup_executed_date_recorded(self):
+        self.assertIn("Execution date", self.doc)
+
+    def test_cleaned_paths_documented(self):
+        self.assertIn("/tmp/agent-taskflow-pi-gov-smoke-28.db", self.doc)
+        self.assertIn("agent-taskflow-pi-gov-artifacts-28", self.doc)
+        self.assertIn("agent-taskflow-pi-smoke-artifacts", self.doc)
+
+    def test_worktree_cleanup_documented(self):
+        self.assertIn(".worktrees/AT-PI-SMOKE-28", self.doc)
+        self.assertIn(".worktrees/AT-PI-SMOKE-28-R2", self.doc)
+        self.assertIn(".worktrees/AT-DOGFOOD-API-DB-PATH", self.doc)
+
+    def test_preserved_paths_documented(self):
+        self.assertIn("agent-taskflow-pi-gov-smoke-28-r2.db", self.doc)
+        self.assertIn("agent-taskflow-pi-gov-artifacts-28-r2", self.doc)
+        self.assertIn("agent-taskflow-dogfood-api-db-path.db", self.doc)
+        self.assertIn("agent-taskflow-v0.1.0-rc1-staging", self.doc)
+
+    def test_tag_unchanged(self):
+        self.assertIn("v0.1.0-rc1 tag unchanged", self.doc.lower())
+
+    def test_no_wildcard_cleanup(self):
+        # doc should not contain broad wildcard patterns in actual commands
+        self.assertNotIn("rm -rf /tmp/agent-taskflow*\n", self.doc.replace("# rm -rf", "# rm -rf"))
+
+    def test_source_repo_not_deleted_compliance(self):
+        self.assertIn("source repo clean after cleanup", self.doc.lower())
+
+    def test_phase_43_executed_marker(self):
         self.assertIn("Phase 43", self.doc)
-        self.assertIn("Execute Approved Cleanup Plan", self.doc)
+        self.assertIn("Executed", self.doc)
+
+    def test_next_phase_recommendation(self):
+        self.assertIn("Phase 44", self.doc)
+        self.assertIn("Staging Clone", self.doc)
 
 
 if __name__ == "__main__":
