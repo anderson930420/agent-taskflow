@@ -227,6 +227,50 @@ class TestPostDogfoodCleanupPlanDocs(unittest.TestCase):
         self.assertIn("safe to delete", self.doc.lower())
         self.assertIn("tag and GitHub release preserve source state", self.doc)
 
+    def test_phase58_staging_clone_cleanup_executed(self):
+        self.assertIn("Staging Clone Cleanup Execution", self.doc)
+
+    def test_phase58_deleted_path(self):
+        self.assertIn("agent-taskflow-v0.1.0-rc1-staging", self.doc)
+        self.assertIn("500M", self.doc)
+
+    def test_phase58_preserved_r2_evidence(self):
+        self.assertIn("agent-taskflow-pi-gov-smoke-28-r2.db", self.doc)
+        self.assertIn("agent-taskflow-pi-gov-artifacts-28-r2", self.doc)
+
+    def test_phase58_preserved_dogfood_evidence(self):
+        self.assertIn("agent-taskflow-dogfood-api-db-path.db", self.doc)
+        self.assertIn("agent-taskflow-dogfood-api-db-path-artifacts", self.doc)
+
+    def test_phase58_tags_unchanged(self):
+        self.assertIn("v0.1.0", self.doc)
+        self.assertIn("v0.1.0-rc1", self.doc)
+        self.assertIn("eee67f3", self.doc)
+        self.assertIn("2039aab", self.doc)
+
+    def test_phase58_source_code_unchanged(self):
+        self.assertIn("no source code changed", self.doc.lower())
+
+    def test_phase58_no_r2_evidence_deleted(self):
+        self.assertIn("No R2 evidence deleted", self.doc)
+
+    def test_phase58_no_dogfood_evidence_deleted(self):
+        self.assertIn("no dogfood evidence deleted", self.doc.lower())
+
+    def test_phase58_v010_release_url(self):
+        self.assertIn("github.com/anderson930420/agent-taskflow/releases/tag/v0.1.0", self.doc)
+
+    def test_phase58_retained_until_ui_dogfood(self):
+        self.assertIn("UI create/dispatch dogfood completes", self.doc)
+
+    def test_phase58_compliance_notes(self):
+        self.assertIn("Compliance", self.doc)
+        self.assertIn("No wildcard cleanup", self.doc)
+
+    def test_phase58_phase58_executed_marker(self):
+        self.assertIn("Phase 58", self.doc)
+        self.assertIn("Executed", self.doc)
+
 
 if __name__ == "__main__":
     unittest.main()
