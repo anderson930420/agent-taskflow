@@ -13,6 +13,7 @@ export function TaskBoardFilters({
 }: TaskBoardFiltersProps) {
   return (
     <div
+      className="board-filters-row"
       style={{
         display: "flex",
         alignItems: "center",

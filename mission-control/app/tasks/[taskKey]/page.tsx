@@ -174,42 +174,48 @@ export default async function TaskDetailPage({
         currentModel={task.model}
       />
 
-      <section className="section panel">
-        <h2>Task State Timeline</h2>
-        <TaskStateTimeline
-          currentStatus={task.status}
-          blockedReason={task.blocked_reason}
-        />
-      </section>
+      <div className="task-detail-body">
+        <div className="task-detail-main">
+          <section className="section panel">
+            <h2>Task State Timeline</h2>
+            <TaskStateTimeline
+              currentStatus={task.status}
+              blockedReason={task.blocked_reason}
+            />
+          </section>
 
-      <section className="section panel">
-        <h2>Review Evidence</h2>
-        <ReviewEvidenceSection taskKey={decodedTaskKey} />
-      </section>
+          <section className="section panel">
+            <h2>Review Evidence</h2>
+            <ReviewEvidenceSection taskKey={decodedTaskKey} />
+          </section>
 
-      <TaskEvidencePanel taskKey={decodedTaskKey} />
+          <TaskEvidencePanel taskKey={decodedTaskKey} />
 
-      <ActionPanel task={task} />
+          <section className="section panel">
+            <h2>Executor Runs</h2>
+            <RunList runs={runs} />
+          </section>
 
-      <section className="section panel">
-        <h2>Executor Runs</h2>
-        <RunList runs={runs} />
-      </section>
+          <section className="section panel">
+            <h2>Artifacts</h2>
+            <ArtifactList artifacts={artifacts} />
+          </section>
 
-      <section className="section panel">
-        <h2>Artifacts</h2>
-        <ArtifactList artifacts={artifacts} />
-      </section>
+          <section className="section panel">
+            <h2>Validation Results</h2>
+            <ValidationList validations={validations} />
+          </section>
 
-      <section className="section panel">
-        <h2>Validation Results</h2>
-        <ValidationList validations={validations} />
-      </section>
+          <section className="section panel">
+            <h2>Approval Decisions</h2>
+            <ApprovalList approvals={approvals} />
+          </section>
+        </div>
 
-      <section className="section panel">
-        <h2>Approval Decisions</h2>
-        <ApprovalList approvals={approvals} />
-      </section>
+        <aside className="task-detail-sidebar">
+          <ActionPanel task={task} />
+        </aside>
+      </div>
     </main>
   );
 }

@@ -33,6 +33,7 @@ export function TaskCategorySummary({
 
   return (
     <div
+      className="category-summary"
       style={{
         display: "flex",
         gap: "10px",

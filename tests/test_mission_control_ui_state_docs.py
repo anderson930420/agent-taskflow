@@ -420,5 +420,71 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
         self.assertIn("DEFAULT_VALIDATORS", self.doc)
 
 
+class TestResponsiveLayoutBehavior(unittest.TestCase):
+    """Phase 74: Responsive layout behavior doc tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open("docs/mission-control-ui-state-model.md") as f:
+            cls.doc = f.read()
+
+    def test_responsive_layout_section_exists(self):
+        self.assertIn("Responsive Layout Behavior", self.doc)
+
+    def test_board_adapts_by_viewport(self):
+        self.assertIn("Board columns", self.doc)
+        self.assertIn("adapt", self.doc.lower())
+
+    def test_board_uses_grid_auto_columns(self):
+        self.assertIn("grid-auto-columns", self.doc)
+
+    def test_task_detail_two_column_desktop(self):
+        self.assertIn("two-column", self.doc)
+
+    def test_task_detail_single_column_narrow(self):
+        self.assertIn("single-column", self.doc)
+
+    def test_create_task_form_single_column_narrow(self):
+        self.assertIn("Create task form", self.doc)
+        self.assertIn("single-column", self.doc)
+
+    def test_category_filters_wrap(self):
+        self.assertIn("flex-wrap", self.doc)
+        self.assertIn("wrap", self.doc.lower())
+
+    def test_action_buttons_wrap(self):
+        self.assertIn("topbar actions", self.doc)
+        self.assertIn("wrap", self.doc.lower())
+
+    def test_artifact_log_preview_contained(self):
+        self.assertIn("log", self.doc.lower())
+        self.assertIn("preview", self.doc.lower())
+        self.assertIn("overflow-y: auto", self.doc)
+
+    def test_log_preview_uses_max_height(self):
+        self.assertIn("max-height: 320px", self.doc)
+
+    def test_no_page_wide_horizontal_scroll(self):
+        self.assertIn("overflow-x: hidden", self.doc)
+
+    def test_responsive_is_ui_only(self):
+        self.assertIn("UI-only", self.doc)
+
+    def test_no_backend_behavior_change(self):
+        self.assertIn("No backend behavior", self.doc)
+
+    def test_no_workflow_action_change(self):
+        self.assertIn("workflow actions", self.doc)
+
+    def test_no_push_merge_cleanup_delete_added(self):
+        self.assertIn("push/merge/cleanup/delete", self.doc)
+
+    def test_responsive_no_dispatcher_change(self):
+        self.assertIn("dispatcher state machine", self.doc)
+
+    def test_responsive_no_approval_semantics_change(self):
+        self.assertIn("approval semantics", self.doc)
+
+
 if __name__ == "__main__":
     unittest.main()
