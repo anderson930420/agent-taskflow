@@ -114,6 +114,48 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
         self.assertIn("confirmation", self.doc.lower())
         self.assertIn("Proceed to approve", self.doc)
 
+    # Task Board State Grouping (Phase 46)
+    def test_task_board_section_exists(self):
+        self.assertIn("Task Board State Grouping", self.doc)
+
+    def test_state_category_filter_documented(self):
+        self.assertIn("Category filter", self.doc)
+
+    def test_search_by_task_key(self):
+        self.assertIn("task key", self.doc)
+        self.assertIn("Search", self.doc)
+
+    def test_search_by_executor(self):
+        self.assertIn("executor", self.doc)
+
+    def test_task_state_badge_documented(self):
+        self.assertIn("State badge", self.doc)
+
+
+    def test_no_direct_executor_actions_from_board(self):
+        self.assertIn("No direct executor", self.doc)
+        self.assertIn("board", self.doc)
+
+    def test_no_push_on_board(self):
+        # Check that the "No push" section covers the board context
+        push_section = self.doc.find("No push")
+        board_section = self.doc.find("Task Board State Grouping")
+        self.assertGreater(push_section, 0)
+        self.assertGreater(board_section, 0)
+
+    def test_no_merge_on_board(self):
+        self.assertIn("No merge", self.doc)
+
+    def test_no_cleanup_on_board(self):
+        self.assertIn("no cleanup", self.doc.lower())
+
+    def test_approval_actions_remain_in_task_detail(self):
+        self.assertIn("approval actions remain", self.doc.lower())
+
+    def test_review_evidence_basis_for_approval(self):
+        self.assertIn("review evidence", self.doc.lower())
+        self.assertIn("human approval", self.doc.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

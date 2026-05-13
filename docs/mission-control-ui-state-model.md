@@ -212,3 +212,68 @@ The UI does not enforce these at the UI layer — enforcement is the backend dis
 ## No New Endpoints in UI Phase
 
 No new backend API endpoints are introduced in this UI improvement phase. All action controls call existing endpoints. No push/merge/cleanup/delete endpoints are added to the UI.
+
+## Task Board State Grouping
+
+The Mission Control dashboard (`/`) displays all tasks on a visual board grouped by state category.
+
+### State Categories
+
+Tasks are grouped into the following categories, mapped from the backend task status:
+
+
+| Category | Statuses | Color |
+|---|---|---|
+| Not Started | `queued` | muted |
+| Running | `preparing`, `implementing`, `validating` | blue |
+| Needs Review | `waiting_approval`, `waiting_for_review` | yellow |
+| Succeeded | `accepted`, `completed` | green |
+| Failed | `rejected`, `failed` | red |
+| Blocked | `blocked` | red |
+| Closed | `cleaned`, `canceled` | muted-2 |
+
+The board uses `taskState.ts` metadata — `TASK_CATEGORIES`, `getTaskCategory()`, `getCategoryForStatus()`, `countTasksByCategory()` — to derive colors, labels, and counts from the backend task list.
+
+### Search and Filter Behavior
+
+The board provides:
+
+1. **Search** — Client-side filter by task key, title, executor, model, project, or provider. No backend query required.
+2. **Category filter** — One-click category summary bar. Selecting a category shows only tasks in that category. "All" resets the filter.
+3. **Combined** — Search and category filter can be applied together.
+
+### Card Metadata
+
+Each task card on the board shows:
+
+- State badge (colored, with status label and category pill)
+- Task key
+- Title or task key if title is absent
+- Executor / model / provider subtitle
+- Last updated timestamp
+- Quick link to task detail page
+
+No push/merge/cleanup/delete actions are available from board cards. "View details" navigates to the task detail page where full review evidence and action controls are available.
+
+
+### No Direct Executor Actions from Board
+
+The board is read-only:
+- No approve / reject / block from board cards
+- No start task from board
+- No direct Pi / OpenCode / Shell execution
+- No push / merge / cleanup / delete
+
+Approval actions remain in the task detail page ActionPanel where review evidence must be loaded before a human can approve.
+
+
+### Empty / Loading / Error States
+
+- **No tasks**: Shows a placeholder message with a "Create Task" CTA.
+- **No results after filter**: Shows "No matching tasks."
+- **API error**: Shows a full-page error panel with error message and API base URL.
+- **Loading**: Handled by Next.js `loading.tsx` or Suspense boundary.
+
+### Review Evidence Is the Basis for Human Approval
+
+The board provides an overview. Full review evidence — mission contract, validator results, artifact previews — is available on the task detail page. Human approval requires reviewing this evidence through the backend `/review-evidence` API.

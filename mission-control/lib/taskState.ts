@@ -179,3 +179,138 @@ export function showActionPanel(status: string): boolean {
 export function needsReviewBeforeAction(status: string): boolean {
   return status === "waiting_approval";
 }
+
+// ─── State Category helpers ─────────────────────────────────────────────────
+
+export type TaskStateCategoryKey =
+  | "not_started"
+  | "running"
+  | "review"
+  | "terminal_success"
+  | "terminal_failure"
+  | "terminal_blocked"
+  | "terminal_skipped"
+  | "unknown";
+
+export interface TaskCategoryMeta {
+  readonly key: TaskStateCategoryKey;
+  readonly label: string;
+  readonly description: string;
+  readonly color: string;
+  readonly statuses: readonly string[];
+}
+
+export const TASK_CATEGORIES: Readonly<TaskCategoryMeta>[] = [
+  {
+    key: "not_started",
+    label: "Not Started",
+    description: "Tasks queued and not yet dispatched.",
+    color: "var(--muted)",
+    statuses: ["queued"],
+  },
+  {
+    key: "running",
+    label: "Running",
+    description: "Tasks actively being prepared, implemented, or validated.",
+    color: "var(--blue)",
+    statuses: ["preparing", "implementing", "validating"],
+  },
+  {
+    key: "review",
+    label: "Needs Review",
+    description: "Tasks awaiting human review and approval.",
+    color: "var(--yellow)",
+    statuses: ["waiting_approval", "waiting_for_review"],
+  },
+  {
+    key: "terminal_success",
+    label: "Succeeded",
+    description: "Tasks that completed or were approved.",
+    color: "var(--green)",
+    statuses: ["accepted", "completed"],
+  },
+  {
+    key: "terminal_failure",
+    label: "Failed",
+    description: "Tasks that failed or were rejected.",
+    color: "var(--red)",
+    statuses: ["rejected", "failed"],
+  },
+  {
+    key: "terminal_blocked",
+    label: "Blocked",
+    description: "Tasks manually blocked or in error state.",
+    color: "var(--red)",
+    statuses: ["blocked"],
+  },
+  {
+    key: "terminal_skipped",
+    label: "Closed",
+    description: "Tasks cleaned up or canceled.",
+    color: "var(--muted-2)",
+    statuses: ["cleaned", "canceled"],
+  },
+];
+
+export function getCategoryMeta(category: TaskStateCategoryKey): TaskCategoryMeta | undefined {
+  return TASK_CATEGORIES.find((c) => c.key === category);
+}
+
+export function getCategoryLabel(category: TaskStateCategoryKey): string {
+  return getCategoryMeta(category)?.label ?? category;
+}
+
+export function getCategoryDescription(category: TaskStateCategoryKey): string {
+  return getCategoryMeta(category)?.description ?? category;
+}
+
+/**
+ * Returns the state category key for a given task status string.
+ */
+export function getTaskCategory(status: string): TaskStateCategoryKey {
+  return getStateInfo(status).category;
+}
+
+/**
+ * Maps TaskStateCategory (used in TaskStateBadge) to TaskStateCategoryKey (used in TASK_CATEGORIES).
+ * They share the same keys so this is a simple pass-through.
+ */
+export function categoryToKey(category: TaskStateCategory): TaskStateCategoryKey {
+  return category as TaskStateCategoryKey;
+}
+
+/**
+ * Returns category metadata for a given task status string.
+ */
+export function getCategoryForStatus(status: string): TaskCategoryMeta | undefined {
+  return getCategoryMeta(getTaskCategory(status));
+}
+
+export interface TaskCategoryCounts {
+  readonly total: number;
+  readonly byCategory: Readonly<Record<TaskStateCategoryKey, number>>;
+  readonly byStatus: Readonly<Record<string, number>>;
+}
+
+/**
+ * Counts tasks grouped by state category and individual status.
+ */
+export function countTasksByCategory(
+  tasks: Array<{ status: string }>
+): TaskCategoryCounts {
+  const byCategory: Partial<Record<TaskStateCategoryKey, number>> = {};
+  const byStatus: Record<string, number> = {};
+
+  for (const task of tasks) {
+    const status = String(task.status);
+    byStatus[status] = (byStatus[status] ?? 0) + 1;
+    const cat = getTaskCategory(status);
+    byCategory[cat] = (byCategory[cat] ?? 0) + 1;
+  }
+
+  return {
+    total: tasks.length,
+    byCategory: byCategory as Readonly<Record<TaskStateCategoryKey, number>>,
+    byStatus,
+  };
+}

@@ -1,70 +1,44 @@
+"use client";
+
+import { useState } from "react";
 import Link from "next/link";
+import {
+  getCategoryForStatus,
+  getStateInfo,
+  TASK_CATEGORIES,
+  type TaskStateCategoryKey,
+} from "../lib/taskState";
 import type { Task } from "../lib/types";
+import { TaskBoardFilters } from "./TaskBoardFilters";
+import { TaskCategorySummary } from "./TaskCategorySummary";
 
-type BoardColumn = {
-  key: string;
-  title: string;
-  statuses: string[];
-  accent: string;
-  emptyText: string;
-};
-
-const COLUMNS: BoardColumn[] = [
-  {
-    key: "backlog",
-    title: "Backlog",
-    statuses: ["queued"],
-    accent: "neutral",
-    emptyText: "No queued tasks."
-  },
-  {
-    key: "todo",
-    title: "Todo",
-    statuses: ["preparing"],
-    accent: "slate",
-    emptyText: "No tasks ready to prepare."
-  },
-  {
-    key: "in-progress",
-    title: "In Progress",
-    statuses: ["implementing", "validating"],
-    accent: "yellow",
-    emptyText: "No tasks currently running."
-  },
-  {
-    key: "in-review",
-    title: "In Review",
-    statuses: ["waiting_approval", "waiting_for_review"],
-    accent: "green",
-    emptyText: "No tasks waiting for review."
-  }
-];
+type FilterCategory = TaskStateCategoryKey | "all";
 
 const TERMINAL_STATUSES = new Set([
   "accepted",
   "completed",
   "cleaned",
   "rejected",
-  "canceled"
+  "canceled",
+  "blocked",
 ]);
 
 function valueOrDash(value?: string | number | null): string {
-  if (value === undefined || value === null || value === "") {
-    return "—";
+  if (value === undefined || value || value === 0) {
+    return String(value ?? "—");
   }
-  return String(value);
+  return "—";
 }
 
 function relativeDate(value?: string | null): string {
-  if (!value) return "No update time";
+  if (!value) return "—";
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-
+  if (Number.isNaN(parsed.getTime())) return String(value);
   return new Intl.DateTimeFormat("en", {
     month: "short",
     day: "numeric",
     hour: "2-digit",
-    minute: "2-digit"
+    minute: "2-digit",
   }).format(parsed);
 }
 
@@ -72,38 +46,175 @@ function taskSubtitle(task: Task): string {
   const pieces = [
     task.executor ? `executor: ${task.executor}` : null,
     task.model ? `model: ${task.model}` : null,
-    task.provider ? `provider: ${task.provider}` : null
+    task.provider ? `provider: ${task.provider}` : null,
   ].filter(Boolean);
-
   return pieces.length > 0 ? pieces.join(" · ") : "No executor metadata";
 }
 
-function tasksForColumn(tasks: Task[], column: BoardColumn): Task[] {
-  return tasks.filter((task) => column.statuses.includes(String(task.status)));
+function matchesSearch(task: Task, search: string): boolean {
+  if (!search.trim()) return true;
+  const q = search.toLowerCase();
+  return (
+    task.task_key.toLowerCase().includes(q) ||
+    (task.title ?? "").toLowerCase().includes(q) ||
+    (task.executor ?? "").toLowerCase().includes(q) ||
+    (task.model ?? "").toLowerCase().includes(q) ||
+    (task.project ?? "").toLowerCase().includes(q) ||
+    (task.provider ?? "").toLowerCase().includes(q)
+  );
 }
 
-function ungroupedTasks(tasks: Task[]): Task[] {
-  const groupedStatuses = new Set(COLUMNS.flatMap((column) => column.statuses));
-  return tasks.filter(
-    (task) =>
-      !groupedStatuses.has(String(task.status)) &&
-      !TERMINAL_STATUSES.has(String(task.status))
+function tasksInCategory(tasks: Task[], category: FilterCategory): Task[] {
+  if (category === "all") return tasks;
+  const cat = TASK_CATEGORIES.find((c) => c.key === category);
+  if (!cat) return [];
+  const statusSet = new Set(cat.statuses);
+  return tasks.filter((t) => statusSet.has(String(t.status)));
+}
+
+// Board columns — now driven by state category colors
+type BoardColumn = {
+  key: string;
+  title: string;
+  categories: TaskStateCategoryKey[];
+  emptyText: string;
+};
+
+const COLUMNS: BoardColumn[] = [
+  {
+    key: "not_started",
+    title: "Not Started",
+    categories: ["not_started"],
+    emptyText: "No queued tasks.",
+  },
+  {
+    key: "running",
+    title: "Running",
+    categories: ["running"],
+    emptyText: "No tasks currently running.",
+  },
+  {
+    key: "review",
+    title: "Needs Review",
+    categories: ["review"],
+    emptyText: "No tasks waiting for review.",
+  },
+  {
+    key: "terminal",
+    title: "Terminal",
+    categories: ["terminal_success", "terminal_failure", "terminal_blocked", "terminal_skipped"],
+    emptyText: "No completed tasks.",
+  },
+];
+
+function TaskCard({ task }: { task: Task }) {
+  const info = getStateInfo(task.status);
+  const cat = getCategoryForStatus(task.status);
+  const color = cat?.color ?? "var(--muted)";
+
+  return (
+    <Link
+      className="task-card"
+      href={`/tasks/${encodeURIComponent(task.task_key)}`}
+      key={task.task_key}
+    >
+      <div className="task-card-top">
+        {/* State badge */}
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "5px",
+            padding: "3px 8px",
+            background: "var(--panel)",
+            border: `1px solid ${color}`,
+            borderRadius: "999px",
+            fontSize: "0.68rem",
+            fontWeight: 750,
+            color: color,
+          }}
+        >
+          <span
+            style={{
+              width: "7px",
+              height: "7px",
+              borderRadius: "999px",
+              background: color,
+              flexShrink: 0,
+            }}
+          />
+          {info.label}
+        </span>
+        {/* Category pill */}
+        {cat && (
+          <span
+            style={{
+              fontSize: "0.62rem",
+              color: "var(--muted-2)",
+              padding: "1px 5px",
+              background: "var(--panel-2)",
+              border: "1px solid var(--border)",
+              borderRadius: "999px",
+            }}
+          >
+            {cat.label}
+          </span>
+        )}
+      </div>
+
+      <h3>{task.title ?? task.task_key}</h3>
+      <p>{taskSubtitle(task)}</p>
+
+      <div className="task-card-meta">
+        <span className="task-key">{task.task_key}</span>
+        <span>{relativeDate(task.updated_at)}</span>
+      </div>
+    </Link>
+  );
+}
+
+function EmptyState({ message }: { message: string }) {
+  return (
+    <div
+      style={{
+        padding: "18px 10px",
+        color: "var(--muted-2)",
+        fontSize: "0.84rem",
+        textAlign: "center",
+        background: "rgb(255,255,255,0.018)",
+        border: "1px dashed var(--border-soft)",
+        borderRadius: "12px",
+      }}
+    >
+      {message}
+    </div>
   );
 }
 
 export function TaskBoard({ tasks }: { tasks: Task[] }) {
-  const activeOrVisibleTasks = tasks.filter(
-    (task) => !TERMINAL_STATUSES.has(String(task.status))
-  );
-  const acceptedCount = tasks.filter((task) => task.status === "accepted").length;
-  const completedCount = tasks.filter(
-    (task) => task.status === "completed" || task.status === "cleaned"
-  ).length;
-  const blockedCount = tasks.filter((task) => task.status === "blocked").length;
+  const [activeCategory, setActiveCategory] = useState<FilterCategory>("all");
+  const [search, setSearch] = useState("");
+
+  // Apply category filter
+  let visible = tasksInCategory(tasks, activeCategory);
+  // Apply search filter
+  if (search.trim()) {
+    visible = visible.filter((t) => matchesSearch(t, search));
+  }
+
+  // Summary counts (on full task list for All)
+  const totalTasks = tasks.length;
+  const runningCount =
+    (tasks.filter((t) => ["running"].includes(t.status)).length) +
+    tasks.filter((t) =>
+      ["preparing", "implementing", "validating"].includes(t.status)
+    ).length;
   const waitingCount = tasks.filter(
-    (task) => task.status === "waiting_approval" || task.status === "waiting_for_review"
+    (t) => t.status === "waiting_approval" || t.status === "waiting_for_review"
   ).length;
-  const otherTasks = ungroupedTasks(tasks);
+  const terminalCount = tasks.filter((t) =>
+    TERMINAL_STATUSES.has(String(t.status))
+  ).length;
 
   return (
     <div className="linear-shell">
@@ -129,7 +240,6 @@ export function TaskBoard({ tasks }: { tasks: Task[] }) {
           <a className="sidebar-item" href="#blocked">
             <span className="sidebar-icon">!</span>
             Blocked
-            <span className="sidebar-count">{blockedCount}</span>
           </a>
         </nav>
 
@@ -152,16 +262,20 @@ export function TaskBoard({ tasks }: { tasks: Task[] }) {
         <div className="sidebar-footer">
           <div className="sidebar-heading">Summary</div>
           <div className="mini-stat">
-            <span>Visible tasks</span>
-            <strong>{activeOrVisibleTasks.length}</strong>
+            <span>Total tasks</span>
+            <strong>{totalTasks}</strong>
           </div>
           <div className="mini-stat">
-            <span>Accepted</span>
-            <strong>{acceptedCount}</strong>
+            <span>Running</span>
+            <strong>{runningCount}</strong>
           </div>
           <div className="mini-stat">
-            <span>Completed</span>
-            <strong>{completedCount}</strong>
+            <span>Needs review</span>
+            <strong>{waitingCount}</strong>
+          </div>
+          <div className="mini-stat">
+            <span>Terminal</span>
+            <strong>{terminalCount}</strong>
           </div>
         </div>
       </aside>
@@ -180,92 +294,108 @@ export function TaskBoard({ tasks }: { tasks: Task[] }) {
           </div>
         </header>
 
-        <div className="board-tabs">
-          <span className="board-tab active">Issues</span>
-          <span className="board-tab">Runs</span>
-          <span className="board-tab">Artifacts</span>
-          <span className="board-tab">Approvals</span>
-        </div>
+        {/* Category summary bar */}
+        <TaskCategorySummary
+          tasks={tasks}
+          activeCategory={activeCategory}
+          onSelectCategory={setActiveCategory}
+        />
 
+        {/* Search */}
+        <TaskBoardFilters search={search} onSearchChange={setSearch} />
+
+        {/* Search active indicator */}
+        {search.trim() && (
+          <div
+            style={{
+              marginBottom: "12px",
+              padding: "8px 12px",
+              background: "var(--panel)",
+              border: "1px solid var(--border)",
+              borderRadius: "10px",
+              fontSize: "0.8rem",
+              color: "var(--muted)",
+            }}
+          >
+            <strong>{visible.length}</strong> result{visible.length !== 1 ? "s" : ""} for
+            &ldquo;<span style={{ color: "var(--text)" }}>{search}</span>&rdquo;
+            {activeCategory !== "all" && (
+              <> · filtered to <span style={{ color: "var(--blue)" }}>{activeCategory}</span></>
+            )}
+          </div>
+        )}
+
+        {/* Board columns */}
         <div className="board" id="board">
           {COLUMNS.map((column) => {
-            const columnTasks = tasksForColumn(tasks, column);
+            const columnTasks = visible.filter((task) =>
+              column.categories.some((cat) => {
+                const meta = TASK_CATEGORIES.find((c) => c.key === cat);
+                return meta?.statuses.includes(task.status);
+              })
+            );
+
+            const firstCat = TASK_CATEGORIES.find((c) => c.key === column.categories[0]);
+            const colColor = firstCat?.color ?? "var(--border)";
 
             return (
               <section className="board-column" key={column.key}>
                 <header className="column-header">
                   <div className="column-title-wrap">
-                    <span className={`column-status-dot ${column.accent}`} />
+                    <span
+                      style={{
+                        width: "12px",
+                        height: "12px",
+                        borderRadius: "999px",
+                        border: `2px solid ${colColor}`,
+                        background: `${colColor}20`,
+                        flexShrink: 0,
+                      }}
+                    />
                     <h2>{column.title}</h2>
                     <span className="column-count">{columnTasks.length}</span>
                   </div>
                   <span className="column-menu">•••</span>
                 </header>
 
-                <div className="column-add-placeholder">+</div>
-
                 <div className="task-card-list">
                   {columnTasks.length === 0 ? (
-                    <div className="empty-column">{column.emptyText}</div>
+                    <EmptyState
+                      message={
+                        search.trim()
+                          ? "No matching tasks."
+                          : column.emptyText
+                      }
+                    />
                   ) : (
-                    columnTasks.map((task) => (
-                      <Link
-                        className="task-card"
-                        href={`/tasks/${encodeURIComponent(task.task_key)}`}
-                        key={task.task_key}
-                      >
-                        <div className="task-card-top">
-                          <span className="task-key">{task.task_key}</span>
-                          <span className="task-status">{task.status}</span>
-                        </div>
-                        <h3>{task.title ?? task.task_key}</h3>
-                        <p>{taskSubtitle(task)}</p>
-                        <div className="task-card-meta">
-                          <span>{valueOrDash(task.project)}</span>
-                          <span>{relativeDate(task.updated_at)}</span>
-                        </div>
-                      </Link>
-                    ))
+                    columnTasks.map((task) => <TaskCard key={task.task_key} task={task} />)
                   )}
                 </div>
               </section>
             );
           })}
-
-          {otherTasks.length > 0 ? (
-            <section className="board-column compact-column" id="blocked">
-              <header className="column-header">
-                <div className="column-title-wrap">
-                  <span className="column-status-dot red" />
-                  <h2>Other Active</h2>
-                  <span className="column-count">{otherTasks.length}</span>
-                </div>
-                <span className="column-menu">•••</span>
-              </header>
-
-              <div className="task-card-list">
-                {otherTasks.map((task) => (
-                  <Link
-                    className="task-card"
-                    href={`/tasks/${encodeURIComponent(task.task_key)}`}
-                    key={task.task_key}
-                  >
-                    <div className="task-card-top">
-                      <span className="task-key">{task.task_key}</span>
-                      <span className="task-status">{task.status}</span>
-                    </div>
-                    <h3>{task.title ?? task.task_key}</h3>
-                    <p>{taskSubtitle(task)}</p>
-                    <div className="task-card-meta">
-                      <span>{valueOrDash(task.project)}</span>
-                      <span>{relativeDate(task.updated_at)}</span>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            </section>
-          ) : null}
         </div>
+
+        {/* Empty board state */}
+        {tasks.length === 0 && (
+          <div
+            style={{
+              padding: "48px 24px",
+              textAlign: "center",
+              background: "var(--panel)",
+              border: "1px dashed var(--border)",
+              borderRadius: "16px",
+            }}
+          >
+            <div style={{ fontSize: "2rem", marginBottom: "12px" }}>📭</div>
+            <h2 style={{ margin: "0 0 8px", color: "var(--muted)" }}>
+              No tasks yet
+            </h2>
+            <p style={{ color: "var(--muted-2)", fontSize: "0.85rem" }}>
+              Create a task to get started with Mission Control.
+            </p>
+          </div>
+        )}
       </section>
     </div>
   );
