@@ -300,6 +300,15 @@ def create_app(
         current_store: TaskMirrorStore = Depends(get_store),
     ) -> dict[str, object] | JSONResponse:
         task = task_or_404(task_key, current_store)
+        if request.decided_by != "human":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Approval requires decided_by='human'. "
+                    "Worker or system self-approval is not allowed."
+                ),
+            )
+
         if task.status != "waiting_approval":
             return conflict(
                 "approve",

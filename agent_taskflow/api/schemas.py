@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from agent_taskflow.models import TaskArtifactRecord, TaskRecord
-
 
 
 class CreateTaskRequest(BaseModel):
@@ -47,9 +46,14 @@ class ValidateTaskRequest(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
-    """Request body for accepting a waiting task after human review."""
+    """Request body for accepting a waiting task after human review.
 
-    decided_by: str
+    The ``decided_by`` field is restricted to the single value ``"human"``.
+    This enforces the governance principle that a worker or automated agent
+    cannot self-approve a task.  Human approval is the final gate.
+    """
+
+    decided_by: Literal["human"]
     notes: str | None = None
 
 

@@ -311,23 +311,98 @@ class ApiActionTests(unittest.TestCase):
         self.assertEqual(approvals[-1]["decided_by"], "human")
         self.assertEqual(approvals[-1]["notes"], "looks good")
 
-    def test_approve_queued_task_is_rejected(self) -> None:
-        self.add_task(status="queued")
+    def test_approve_rejects_worker_identity(self) -> None:
+        self.add_task(status="waiting_approval")
 
         response = self.client.post(
             "/api/tasks/AT-0009/approve",
-            json={"decided_by": "human", "notes": "not ready"},
+            json={"decided_by": "worker", "notes": "auto-approved"},
         )
 
-        self.assertEqual(response.status_code, 409)
-        self.assertFalse(response.json()["ok"])
+        self.assertEqual(response.status_code, 422)
+        task = self.store.get_task("AT-0009")
+        approvals = self.store.list_approval_decisions("AT-0009")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "waiting_approval")
+        self.assertEqual(approvals, [])
+
+    def test_approve_rejects_pi_identity(self) -> None:
+        self.add_task(status="waiting_approval")
+
+        response = self.client.post(
+            "/api/tasks/AT-0009/approve",
+            json={"decided_by": "pi", "notes": "pi self-approve"},
+        )
+
+        self.assertEqual(response.status_code, 422)
         task = self.store.get_task("AT-0009")
         self.assertIsNotNone(task)
         assert task is not None
-        self.assertEqual(task.status, "queued")
+        self.assertEqual(task.status, "waiting_approval")
         self.assertEqual(self.store.list_approval_decisions("AT-0009"), [])
 
-    def test_reject_waiting_approval_records_decision_and_rejects(self) -> None:
+    def test_approve_rejects_agent_identity(self) -> None:
+        self.add_task(status="waiting_approval")
+
+        response = self.client.post(
+            "/api/tasks/AT-0009/approve",
+            json={"decided_by": "agent", "notes": "agent self-approve"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        task = self.store.get_task("AT-0009")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "waiting_approval")
+        self.assertEqual(self.store.list_approval_decisions("AT-0009"), [])
+
+    def test_approve_rejects_system_identity(self) -> None:
+        self.add_task(status="waiting_approval")
+
+        response = self.client.post(
+            "/api/tasks/AT-0009/approve",
+            json={"decided_by": "system", "notes": "system self-approve"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        task = self.store.get_task("AT-0009")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "waiting_approval")
+        self.assertEqual(self.store.list_approval_decisions("AT-0009"), [])
+
+    def test_approve_rejects_empty_decided_by(self) -> None:
+        self.add_task(status="waiting_approval")
+
+        response = self.client.post(
+            "/api/tasks/AT-0009/approve",
+            json={"decided_by": "", "notes": "empty identity"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        task = self.store.get_task("AT-0009")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "waiting_approval")
+        self.assertEqual(self.store.list_approval_decisions("AT-0009"), [])
+
+    def test_approve_rejects_missing_decided_by(self) -> None:
+        self.add_task(status="waiting_approval")
+
+        response = self.client.post(
+            "/api/tasks/AT-0009/approve",
+            json={"notes": "no identity"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        task = self.store.get_task("AT-0009")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "waiting_approval")
+        self.assertEqual(self.store.list_approval_decisions("AT-0009"), [])
+
+    def test_reject_still_works_after_human_identity_enforcement(self) -> None:
         self.add_task(status="waiting_approval")
 
         response = self.client.post(
@@ -347,6 +422,40 @@ class ApiActionTests(unittest.TestCase):
         self.assertEqual(approvals[-1]["decision"], "rejected")
         self.assertEqual(approvals[-1]["decided_by"], "human")
         self.assertEqual(approvals[-1]["notes"], "needs changes")
+
+    def test_block_still_works_after_human_identity_enforcement(self) -> None:
+        self.add_task(status="queued")
+
+        response = self.client.post(
+            "/api/tasks/AT-0009/block",
+            json={"blocked_reason": "missing approval token"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "blocked")
+        task = self.store.get_task("AT-0009")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "blocked")
+        self.assertEqual(task.blocked_reason, "missing approval token")
+
+    def test_approve_queued_task_is_rejected(self) -> None:
+        self.add_task(status="queued")
+
+        response = self.client.post(
+            "/api/tasks/AT-0009/approve",
+            json={"decided_by": "human", "notes": "not ready"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.json()["ok"])
+        task = self.store.get_task("AT-0009")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "queued")
+        self.assertEqual(self.store.list_approval_decisions("AT-0009"), [])
 
     def test_reject_blocked_task_is_allowed(self) -> None:
         self.add_task(status="blocked")

@@ -359,6 +359,26 @@ Creating a task record only registers it in the local mirror store. It does not:
 
 The dispatch flow ends with the task reaching `waiting_approval`. The task detail page directs the user to the **Approve / Reject** action in the ActionPanel. Workers cannot approve themselves — human review is required.
 
+### Human Approval Identity Enforcement
+
+The approval endpoint (`POST /api/tasks/{task_key}/approve`) enforces that `decided_by` must be the literal value `"human"`. This is enforced at two layers:
+
+- **Schema layer:** `ApprovalRequest.decided_by` is typed as `Literal["human"]` — Pydantic rejects any other value at parsing time with a clear validation error.
+- **Runtime layer:** The endpoint also contains an explicit guard that returns HTTP 422 if `decided_by != "human"`, providing a defence-in-depth message that is human-readable: `"Approval requires decided_by='human'. Worker or system self-approval is not allowed."`
+
+All other `decided_by` values are rejected:
+
+- `"worker"` — rejected (worker self-approval)
+- `"pi"` — rejected (executor self-approval)
+- `"agent"` — rejected (agent self-approval)
+- `"system"` — rejected (system self-approval)
+- `""` (empty) — rejected (missing identity)
+- missing field — rejected (absent identity)
+
+The UI always sends `decided_by: "human"` for both the Approve and Reject actions. The `decided_by` field is not user-editable in the UI — it is hard-coded to `"human"`. This ensures the governance principle is upheld regardless of who operates the UI.
+
+Approval does not push, merge, or clean up any branch or worktree. Human approval remains the final gate.
+
 ### Task Detail Remains Approval Surface
 
 The task detail page is where full review evidence is available. The dispatch panel feeds into the same state machine that ultimately requires human approval. No approval action is available from the board or the dispatch panel itself.

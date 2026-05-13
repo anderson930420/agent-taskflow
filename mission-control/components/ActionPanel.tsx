@@ -35,7 +35,6 @@ function isAllowed(status: string, allowed: Set<string>): boolean {
 export function ActionPanel({ task }: { task: Task }) {
   const router = useRouter();
   const [result, setResult] = useState<ActionResultState | null>(null);
-  const [decidedBy, setDecidedBy] = useState("web-ui");
   const [notes, setNotes] = useState("");
   const [blockedReason, setBlockedReason] = useState("");
   const [executor, setExecutor] = useState("");
@@ -166,15 +165,6 @@ export function ActionPanel({ task }: { task: Task }) {
           </div>
 
           <label>
-            Decided by
-            <input
-              onChange={(event) => setDecidedBy(event.target.value)}
-              placeholder="web-ui"
-              value={decidedBy}
-            />
-          </label>
-
-          <label>
             Notes
             <textarea
               onChange={(event) => setNotes(event.target.value)}
@@ -186,11 +176,11 @@ export function ActionPanel({ task }: { task: Task }) {
           <div className="button-row">
             <ConfirmActionButton
               confirmMessage={APPROVE_WARNING + `\n\nProceed to approve ${task.task_key}?`}
-              disabled={!canApprove || decidedBy.trim() === ""}
+              disabled={!canApprove}
               label="Approve task"
               onConfirm={() =>
                 approveTask(task.task_key, {
-                  decided_by: decidedBy.trim(),
+                  decided_by: "human",
                   notes: notes.trim() || undefined
                 })
               }
@@ -200,11 +190,11 @@ export function ActionPanel({ task }: { task: Task }) {
             <ConfirmActionButton
               confirmMessage={REJECT_WARNING + `\n\nProceed to reject ${task.task_key}?`}
               danger
-              disabled={!canReject || decidedBy.trim() === ""}
+              disabled={!canReject || notes.trim() === ""}
               label="Reject task"
               onConfirm={() =>
                 rejectTask(task.task_key, {
-                  decided_by: decidedBy.trim(),
+                  decided_by: "human",
                   notes: notes.trim() || undefined
                 })
               }

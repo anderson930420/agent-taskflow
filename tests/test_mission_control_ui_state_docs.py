@@ -294,6 +294,40 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
     def test_truncated_preview_documented(self):
         self.assertIn("truncation notice", self.doc.lower())
 
+    # Human Approval Identity Enforcement (Phase 52)
+    def test_human_approval_identity_enforcement_section_exists(self):
+        self.assertIn("Human Approval Identity Enforcement", self.doc)
+
+    def test_approval_requires_decided_by_human(self):
+        self.assertIn('decided_by: "human"', self.doc)
+
+    def test_worker_approval_rejected_in_docs(self):
+        self.assertIn('"worker"` — rejected', self.doc)
+
+    def test_pi_approval_rejected_in_docs(self):
+        self.assertIn('"pi"` — rejected', self.doc)
+
+    def test_agent_approval_rejected_in_docs(self):
+        self.assertIn('"agent"` — rejected', self.doc)
+
+    def test_system_approval_rejected_in_docs(self):
+        self.assertIn('"system"` — rejected', self.doc)
+
+    def test_worker_cannot_self_approve_in_docs(self):
+        self.assertIn("Workers cannot self-approve", self.doc)
+
+    def test_human_approval_remains_final_gate_in_docs(self):
+        self.assertIn("Human approval remains the final gate", self.doc)
+
+    def test_approval_does_not_push_in_docs(self):
+        self.assertIn("does not push", self.doc)
+
+    def test_approval_does_not_merge_in_docs(self):
+        self.assertIn("does not push/merge/cleanup", self.doc)
+
+    def test_approval_does_not_cleanup_in_docs(self):
+        self.assertIn(", or clean up any branch or worktree", self.doc)
+
 
 if __name__ == "__main__":
     unittest.main()
