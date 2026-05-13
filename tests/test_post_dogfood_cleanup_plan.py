@@ -168,6 +168,65 @@ class TestPostDogfoodCleanupPlanDocs(unittest.TestCase):
         # doc says "Equivalent evidence summary is archived in docs"
         self.assertIn("Equivalent evidence summary is archived", self.doc)
 
+    def test_phase57_post_v010_evidence_decision(self):
+        self.assertIn("Post-v0.1.0 Evidence Decision", self.doc)
+
+    def test_phase57_v010_release_url(self):
+        self.assertIn("github.com/anderson930420/agent-taskflow/releases/tag/v0.1.0", self.doc)
+
+    def test_phase57_eee67f3_tag_commit(self):
+        self.assertIn("eee67f3", self.doc)
+
+    def test_phase57_2039aab_tag_unchanged(self):
+        self.assertIn("2039aab", self.doc)
+
+    def test_phase57_evidence_decision_table(self):
+        self.assertIn("Evidence Decision Table", self.doc)
+
+    def test_phase57_r2_smoke_evidence(self):
+        self.assertIn("agent-taskflow-pi-gov-smoke-28-r2.db", self.doc)
+        self.assertIn("agent-taskflow-pi-gov-artifacts-28-r2", self.doc)
+
+    def test_phase57_dogfood_evidence(self):
+        self.assertIn("agent-taskflow-dogfood-api-db-path.db", self.doc)
+        self.assertIn("agent-taskflow-dogfood-api-db-path-artifacts", self.doc)
+
+    def test_phase57_staging_clone_path(self):
+        self.assertIn("/tmp/agent-taskflow-v0.1.0-rc1-staging/", self.doc)
+
+    def test_phase57_keep_until_ui_dogfood(self):
+        # R2/dogfood evidence: "keep until post-v0.1.0 UI create/dispatch dogfood completes"
+        self.assertIn("Keep until post-v0.1.0", self.doc)
+
+    def test_phase57_staging_clone_safe_to_delete(self):
+        self.assertIn("Safe to delete", self.doc)
+        self.assertIn("v0.1.0 final release verified", self.doc)
+
+    def test_phase57_no_evidence_deleted(self):
+        self.assertIn("No evidence deleted in Phase 57", self.doc)
+
+    def test_phase57_proposed_next_cleanup_phase(self):
+        self.assertIn("Proposed Next Cleanup Phase", self.doc)
+
+    def test_phase57_staging_clone_500m(self):
+        self.assertIn("500M", self.doc)
+
+    def test_phase57_v010_release_confirmed(self):
+        self.assertIn("v0.1.0 final release confirmed", self.doc)
+
+    def test_phase57_853_tests(self):
+        self.assertIn("853 passed", self.doc)
+
+    def test_phase57_tag_pointing_to_eee67f3(self):
+        # v0.1.0 tag points to eee67f3
+        self.assertIn("v0.1.0 tag commit", self.doc)
+        self.assertIn("eee67f3", self.doc)
+
+    def test_phase57_staging_clone_rationale(self):
+        self.assertIn("staging clone", self.doc.lower())
+        self.assertIn("safe to delete", self.doc.lower())
+        self.assertIn("tag and GitHub release preserve source state", self.doc)
+
 
 if __name__ == "__main__":
     unittest.main()

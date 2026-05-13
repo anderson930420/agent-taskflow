@@ -1,6 +1,6 @@
 # Post-Dogfood Cleanup Plan
 
-**Document version**: Phase 43 — Executed
+**Document version**: Phase 57 — Post-v0.1.0 Evidence Decision
 **Execution date**: 2026-05-13
 **Executed by**: phase-43 automated cleanup
 
@@ -240,15 +240,88 @@ When executing Phase 43:
 4. **Losing reproducibility data** — staging clone at 500M contains full v0.1.0-rc1 smoke evidence
 5. **Tag immutability** — v0.1.0-rc1 tag must never be moved; deletion of tag files does not delete tag on GitHub
 
+## Post-v0.1.0 Evidence Decision
+
+**Phase**: 57
+**Date**: 2026-05-13
+**v0.1.0 Final Release**: https://github.com/anderson930420/agent-taskflow/releases/tag/v0.1.0
+
+### v0.1.0 Release State
+
+| Item | Value |
+|---|---|
+| v0.1.0 tag commit | `eee67f3` |
+| v0.1.0-rc1 tag commit | `2039aab` (unchanged) |
+| main hash | `eee67f3` |
+| origin/main hash | `eee67f3` (synced) |
+| Python tests | 853 passed |
+| compileall | clean |
+| frontend build | clean |
+| GitHub Release | non-prerelease, published 2026-05-13 |
+
+### Evidence Decision Table
+
+| Evidence | Path | Size | Purpose | Decision | Cleanup Condition |
+|---|---|---|---|---|---|
+| R2 smoke DB | `/tmp/agent-taskflow-pi-gov-smoke-28-r2.db` | 32K | Passed governance smoke, policy validator, human approval verified (`decided_by="human"`, task status `accepted`) | **Keep** | Keep until post-v0.1.0 UI create/dispatch dogfood completes |
+| R2 smoke artifacts | `/tmp/agent-taskflow-pi-gov-artifacts-28-r2/` | 52K | Same as above; executor logs, mission contract, Pi plan, policy validation | **Keep** | Keep until post-v0.1.0 UI create/dispatch dogfood completes |
+| Dogfood DB | `/tmp/agent-taskflow-dogfood-api-db-path.db` | 44K | API runner dogfood, full approval flow verified | **Keep** | Keep until post-v0.1.0 UI create/dispatch dogfood completes |
+| Dogfood artifacts | `/tmp/agent-taskflow-dogfood-api-db-path-artifacts/` | 64K | Dogfood approval evidence | **Keep** | Keep until post-v0.1.0 UI create/dispatch dogfood completes |
+| v0.1.0-rc1 staging clone | `/tmp/agent-taskflow-v0.1.0-rc1-staging/` | 500M | Isolated v0.1.0-rc1 smoke verification, detached checkout at `2039aab`, release reproducibility proof | **Safe to delete** | May delete after v0.1.0 final release verified; tag and GitHub release preserve source state; does not affect reproducibility |
+
+### Staging Clone Decision Rationale
+
+The staging clone (`/tmp/agent-taskflow-v0.1.0-rc1-staging/`) is **safe to delete** because:
+
+1. `v0.1.0` final release exists at `eee67f3` — tag and GitHub release preserve source state permanently
+2. `v0.1.0-rc1` tag at `2039aab` is immutable and remains on GitHub
+3. Staging smoke evidence (AT-PI-STAGING-RC1) is documented in Phase 37–44 docs
+4. R2 smoke (AT-PI-SMOKE-28-R2) provides equivalent local governance evidence
+5. 500M disk usage is significant; keeping indefinitely provides no additional governance value once v0.1.0 is released
+
+The other 4 evidence items (R2 smoke DB/artifacts, dogfood DB/artifacts) should remain until at least one more post-v0.1.0 UI create/dispatch dogfood completes, because:
+
+1. They prove the end-to-end human approval enforcement path
+2. Browser approval dogfood was for approval only, not create/dispatch
+3. Full create/dispatch UI flow has not been deeply verified with a real browser click
+4. Keeping them provides audit evidence for the governance pipeline
+
+### Explicit Non-Action
+
+**No evidence deleted in Phase 57.** Only decision recorded.
+
+### Staging Clone Cleanup Command (for future phase)
+
+```bash
+# Safe to run after v0.1.0 final release verified
+# Do NOT run until UI create/dispatch dogfood completes or explicit sign-off
+rm -rf /tmp/agent-taskflow-v0.1.0-rc1-staging/
+```
+
+## Proposed Next Cleanup Phase
+
+**Phase 58 or later** (after post-v0.1.0 UI create/dispatch dogfood):
+
+1. **Archive evidence summary** — document R2 smoke and dogfood results in a cleanup sign-off doc
+2. **Delete staging clone** — `rm -rf /tmp/agent-taskflow-v0.1.0-rc1-staging/` (500M, safe after v0.1.0 verified)
+3. **Optionally keep R2/dogfood evidence** — if UI create/dispatch dogfood passes, optionally delete small evidence (32K–64K each) to reduce clutter
+4. **Rerun tests/build** — confirm 853 tests still pass, compileall clean, frontend build clean
+5. **Verify git status clean** — no untracked files in main
+
 ## Next Phase Recommendation
 
 **Phase 43: Executed ✓** — Stale worktrees, failed smoke attempt artifacts, and old smoke artifacts deleted. Evidence preserved.
 
-**Phase 44: Staging Clone Archive Decision**
+**Phase 44: Staging Clone Archive Decision ✓** — documented, preserved until v0.1.0 final release.
 
-Remaining preserved evidence (do not delete yet):
-- `/tmp/agent-taskflow-pi-gov-smoke-28-r2.db` — R2 smoke audit evidence
-- `/tmp/agent-taskflow-pi-gov-artifacts-28-r2/` — R2 smoke audit evidence
-- `/tmp/agent-taskflow-dogfood-api-db-path.db` — dogfood audit evidence
-- `/tmp/agent-taskflow-dogfood-api-db-path-artifacts/` — dogfood audit evidence
-- `/tmp/agent-taskflow-v0.1.0-rc1-staging/` — staging clone (500M), archive or delete after v0.1.0 formal release
+**Phase 57: Post-v0.1.0 Evidence Decision ✓** — v0.1.0 final release confirmed, evidence decision table updated.
+
+**Phase 58: Proposed** — Delete staging clone (500M, safe now), optionally archive R2/dogfood evidence summary, verify tests/build.
+
+Remaining preserved evidence after Phase 58:
+- `/tmp/agent-taskflow-pi-gov-smoke-28-r2.db` — keep until UI create/dispatch dogfood completes
+- `/tmp/agent-taskflow-pi-gov-artifacts-28-r2/` — keep until UI create/dispatch dogfood completes
+- `/tmp/agent-taskflow-dogfood-api-db-path.db` — keep until UI create/dispatch dogfood completes
+- `/tmp/agent-taskflow-dogfood-api-db-path-artifacts/` — keep until UI create/dispatch dogfood completes
+
+**Note**: Staging clone may be deleted in Phase 58 (500M, safe after v0.1.0 release verified).
