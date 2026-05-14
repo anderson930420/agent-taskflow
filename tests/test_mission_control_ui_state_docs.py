@@ -435,8 +435,9 @@ class TestResponsiveLayoutBehavior(unittest.TestCase):
         self.assertIn("Board columns", self.doc)
         self.assertIn("adapt", self.doc.lower())
 
-    def test_board_uses_grid_auto_columns(self):
-        self.assertIn("grid-auto-columns", self.doc)
+    def test_board_uses_grid_responsive_columns(self):
+        """Board uses responsive CSS Grid with grid-template-columns."""
+        self.assertIn("grid-template-columns", self.doc)
 
     def test_task_detail_two_column_desktop(self):
         self.assertIn("two-column", self.doc)

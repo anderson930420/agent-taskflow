@@ -763,10 +763,10 @@ button:hover,
     gap: 16px;
   }
 
-  /* Contain overflowing tables within task-detail-body */
+  /* Allow tables/logs to scroll internally — do not clip content */
   .task-detail-body,
   .task-detail-main {
-    overflow-x: hidden;
+    overflow-x: auto;
     min-width: 0;
   }
 
@@ -788,7 +788,7 @@ button:hover,
 
   th,
   td {
-    max-width: 100px;
+    /* max-width removed: allow natural table column sizing */
     word-wrap: break-word;
     overflow-wrap: break-word;
   }
@@ -898,7 +898,7 @@ button:hover,
 
   th {
     font-size: 0.7rem;
-    max-width: 120px;
+    /* max-width removed: allow natural header sizing */
   }
 }
 

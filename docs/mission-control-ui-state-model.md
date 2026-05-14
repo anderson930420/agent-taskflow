@@ -607,13 +607,13 @@ The evidence preview components (ValidatorSummaryCard, ExecutorLogPanel, ReviewE
 
 Mission Control uses responsive CSS to ensure readability across desktop and narrow viewports:
 
-- **Board page** (`/`): Board columns use CSS Grid (`grid-auto-columns`) with `minmax` to adapt. On desktop (≥1100px) up to 4 columns show side-by-side. On medium screens (≤1100px) the sidebar is hidden and columns reflow to `minmax(260px, 1fr)`. On narrow screens (≤680px) columns narrow further and stack vertically. The sidebar collapses and topbar actions wrap.
-- **Task detail page** (`/tasks/{key}`): On desktop (≥900px) the page uses a two-column grid — main content on the left, `ActionPanel` sticky on the right. On narrow screens (≤899px) the layout falls back to a single-column flex column; the sidebar stacks below the main content.
+- **Board page** (`/`): Board columns use CSS Grid (`grid-template-columns: repeat(auto-fill, minmax(...))`) to adapt. On desktop (≥1100px) up to 4 columns show side-by-side. On medium screens (≤1100px) the sidebar is hidden and columns reflow. On narrow screens (≤680px) columns narrow further. The sidebar collapses and topbar actions wrap.
+- **Task detail page** (`/tasks/{key}`): On desktop (≥900px) the page uses a two-column grid — main content on the left, `ActionPanel` sticky on the right. On narrow screens (≤899px) the layout falls back to a single-column flex column; the sidebar stacks below the main content. Task detail body and main sections use `overflow-x: auto` so that tables and logs scroll internally rather than being clipped.
 - **Create task form** (`/tasks/new`): The form grid switches to a tighter gap on mobile (≤600px). Form action buttons stack vertically and go full-width so they are easy to tap.
 - **Category filters**: The `TaskCategorySummary` component wraps using `flex-wrap: wrap` on narrow screens. Category buttons shrink rather than overflow horizontally.
 - **Search/filter row**: The `TaskBoardFilters` row uses `flex-wrap` so the search input and read-only indicator stack instead of overflowing.
 - **Task cards**: On narrow screens (≤600px) card titles and descriptions are clamped to fewer lines. Status badges shrink. Card metadata text is smaller.
-- **Tables**: On narrow screens the `table-wrap` uses negative margins to bleed to the viewport edge, and cell padding is reduced to prevent overflow.
+- **Tables**: On narrow screens the `table-wrap` uses `overflow-x: auto` for internal horizontal scroll. Table cells and headers do not have hard max-width constraints (e.g. no `max-width: 100px` or `max-width: 120px`) that would truncate content — columns size naturally with `word-wrap` handling long text.
 - **Log/preview blocks**: Executor log and artifact preview `<pre>` blocks use `overflow-y: auto` with `max-height: 320px` and `word-break: break-all` / `overflow-wrap: break-word` so long lines wrap inside the panel rather than pushing the entire page width.
 - **Action buttons**: The topbar action row and dispatch/approve action rows wrap on narrow screens. Buttons in action rows go full-width on mobile.
 - **No page-wide horizontal scroll**: `html/body` set `overflow-x: hidden` and `max-width: 100vw` to prevent full-page horizontal scroll. Board, main content, and shell all use `max-width: 100%` and `overflow-x: visible`.
