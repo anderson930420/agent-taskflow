@@ -109,6 +109,23 @@ def _require_non_empty(value: str, field_name: str) -> str:
     return normalized
 
 
+def _normalize_path_policy(paths: tuple[str, ...], field_name: str) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for raw in paths:
+        if not isinstance(raw, str):
+            raise TypeError(f"{field_name} entries must be strings")
+        candidate = raw.strip().replace("\\", "/")
+        if Path(candidate).is_absolute() or candidate.startswith("/"):
+            raise ValueError(f"{field_name} entries must be repo-relative paths")
+        value = candidate.strip("/")
+        if not value:
+            raise ValueError(f"{field_name} entries must not be empty")
+        if value.startswith("../") or "/../" in value or value == "..":
+            raise ValueError(f"{field_name} entries must not contain '..'")
+        normalized.append(value)
+    return tuple(normalized)
+
+
 # ----------------------------------------------------------------------
 # Dataclass
 # ----------------------------------------------------------------------
@@ -134,6 +151,8 @@ class MissionContract:
     required_validators: tuple[str, ...] = field(default_factory=lambda: ("pytest", "openspec"))
     forbidden_actions: tuple[str, ...] = field(default_factory=lambda: _GOVERNANCE_FORBIDDEN_ACTIONS)
     expected_artifacts: tuple[str, ...] = field(default_factory=lambda: _GOVERNANCE_EXPECTED_ARTIFACTS)
+    allowed_paths: tuple[str, ...] = field(default_factory=tuple)
+    forbidden_paths: tuple[str, ...] = field(default_factory=tuple)
     human_approval_required: bool = field(default_factory=lambda: True)
     # Optional fields
     title: str | None = None
@@ -180,6 +199,16 @@ class MissionContract:
             "artifact_dir",
             require_absolute_path(self.artifact_dir, "artifact_dir"),
         )
+        object.__setattr__(
+            self,
+            "allowed_paths",
+            _normalize_path_policy(self.allowed_paths, "allowed_paths"),
+        )
+        object.__setattr__(
+            self,
+            "forbidden_paths",
+            _normalize_path_policy(self.forbidden_paths, "forbidden_paths"),
+        )
 
     @property
     def governance_rules(self) -> list[str]:
@@ -218,6 +247,8 @@ def build_mission_contract(
     model: str | None = None,
     provider: str | None = None,
     required_validators: tuple[str, ...] | None = None,
+    allowed_paths: tuple[str, ...] | None = None,
+    forbidden_paths: tuple[str, ...] | None = None,
     implementation_prompt_path: Path | str | None = None,
     extra: dict[str, str] | None = None,
 ) -> MissionContract:
@@ -258,6 +289,8 @@ def build_mission_contract(
         model=model,
         provider=provider,
         required_validators=required_validators or ("pytest", "openspec"),
+        allowed_paths=allowed_paths or (),
+        forbidden_paths=forbidden_paths or (),
         implementation_prompt_path=resolved_prompt_path,
         extra=extra or {},
     )
@@ -285,6 +318,8 @@ def mission_contract_to_dict(contract: MissionContract) -> dict:
         "required_validators": list(contract.required_validators),
         "forbidden_actions": list(contract.forbidden_actions),
         "expected_artifacts": list(contract.expected_artifacts),
+        "allowed_paths": list(contract.allowed_paths),
+        "forbidden_paths": list(contract.forbidden_paths),
         "human_approval_required": contract.human_approval_required,
         "governance_rules": contract.governance_rules,
     }
@@ -324,6 +359,10 @@ def _validate_dict(d: dict) -> None:
         raise TypeError("mission_contract.json required_validators must be a list")
     if not isinstance(d.get("forbidden_actions", []), list):
         raise TypeError("mission_contract.json forbidden_actions must be a list")
+    if not isinstance(d.get("allowed_paths", []), list):
+        raise TypeError("mission_contract.json allowed_paths must be a list")
+    if not isinstance(d.get("forbidden_paths", []), list):
+        raise TypeError("mission_contract.json forbidden_paths must be a list")
     if not isinstance(d.get("human_approval_required", False), bool):
         raise TypeError("mission_contract.json human_approval_required must be a bool")
 
@@ -430,6 +469,8 @@ def build_from_task_fields(
     model: str | None = None,
     provider: str | None = None,
     required_validators: tuple[str, ...] | None = None,
+    allowed_paths: tuple[str, ...] | None = None,
+    forbidden_paths: tuple[str, ...] | None = None,
     implementation_prompt_path: Path | str | None = None,
 ) -> MissionContract:
     """Convenience wrapper for build_mission_contract without extra.
@@ -447,6 +488,8 @@ def build_from_task_fields(
         model=model,
         provider=provider,
         required_validators=required_validators,
+        allowed_paths=allowed_paths,
+        forbidden_paths=forbidden_paths,
         implementation_prompt_path=implementation_prompt_path,
         extra=None,
     )

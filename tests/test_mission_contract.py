@@ -144,6 +144,21 @@ class MissionContractConstructionTests(unittest.TestCase):
         )
         self.assertEqual(contract.extra["note"], "custom field")
 
+    def test_path_policy_fields_are_stored(self) -> None:
+        contract = MissionContract(
+            schema_version="1",
+            task_key="AT-1",
+            goal="x",
+            repo_path="/tmp",
+            worktree_path="/tmp",
+            artifact_dir="/tmp",
+            executor="manual",
+            allowed_paths=("src", "tests/unit"),
+            forbidden_paths=("secrets",),
+        )
+        self.assertEqual(contract.allowed_paths, ("src", "tests/unit"))
+        self.assertEqual(contract.forbidden_paths, ("secrets",))
+
     def test_implementation_prompt_path_is_optional(self) -> None:
         contract = MissionContract(
             schema_version="1",
@@ -274,6 +289,20 @@ class BuildMissionContractTests(unittest.TestCase):
             extra={"note": "custom info", "branch": "task/AT-1"},
         )
         self.assertEqual(contract.extra["note"], "custom info")
+
+    def test_build_accepts_path_policy_fields(self) -> None:
+        contract = build_mission_contract(
+            task_key="AT-1",
+            goal="Implement x.",
+            repo_path="/tmp/repo",
+            worktree_path="/tmp/repo/.worktrees/AT-1",
+            artifact_dir="/tmp/artifacts",
+            executor="manual",
+            allowed_paths=("src/",),
+            forbidden_paths=("secrets/",),
+        )
+        self.assertEqual(contract.allowed_paths, ("src",))
+        self.assertEqual(contract.forbidden_paths, ("secrets",))
 
     def test_resolved_implementation_prompt_path(self) -> None:
         contract = build_mission_contract(
@@ -783,6 +812,8 @@ class GovernanceRulesTests(unittest.TestCase):
         )
         d = mission_contract_to_dict(contract)
         self.assertIn("governance_rules", d)
+        self.assertIn("allowed_paths", d)
+        self.assertIn("forbidden_paths", d)
         self.assertIsInstance(d["governance_rules"], list)
         self.assertTrue(len(d["governance_rules"]) > 0)
 

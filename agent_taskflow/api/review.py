@@ -463,6 +463,7 @@ def build_review_evidence(
             "exit_code": r.get("exit_code"),
             "summary": r.get("summary"),
             "log_path": r.get("log_path"),
+            "artifacts": r.get("artifacts", {}),
             "created_at": r.get("created_at"),
         }
         for r in validation_results
