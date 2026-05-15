@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -670,6 +671,68 @@ class PiProtocolIntegrationTests(PiExecutorTestCase):
                 result.artifacts["pi_mission_prompt"],
                 context.artifact_dir / "pi_mission_prompt.md",
             )
+
+    def test_generated_protocol_artifacts_use_canonical_schema_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_protocol_context(Path(tmp), with_contract=True)
+            _, side_effect = self.make_subprocess_side_effect()
+
+            with patch(
+                "agent_taskflow.executors.pi.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = PiExecutor().run(context)
+
+            self.assertEqual(result.status, "completed")
+            plan = json.loads(
+                (context.artifact_dir / "pi_mission_plan.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(plan["mission_contract"]["artifact_name"], "mission_contract.json")
+            self.assertEqual(plan["mission_contract"]["schema_version"], "1")
+            self.assertEqual(
+                plan["artifacts"],
+                {
+                    "mission_contract": "mission_contract.json",
+                    "mission_plan": "pi_mission_plan.json",
+                    "mission_prompt": "pi_mission_prompt.md",
+                    "executor_log": "pi-executor.log",
+                },
+            )
+            self.assertIn("required_validators", plan)
+            self.assertIn("forbidden_actions", plan)
+
+    def test_generated_protocol_artifacts_do_not_contain_known_typo_strings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_protocol_context(Path(tmp), with_contract=True)
+            _, side_effect = self.make_subprocess_side_effect()
+
+            with patch(
+                "agent_taskflow.executors.pi.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = PiExecutor().run(context)
+
+            self.assertEqual(result.status, "completed")
+            generated = "\n".join(
+                [
+                    (context.artifact_dir / "pi_mission_plan.json").read_text(
+                        encoding="utf-8"
+                    ),
+                    (context.artifact_dir / "pi_mission_prompt.md").read_text(
+                        encoding="utf-8"
+                    ),
+                    (context.artifact_dir / "mission_contract.json").read_text(
+                        encoding="utf-8"
+                    ),
+                    context.prompt_path.read_text(encoding="utf-8")
+                    if context.prompt_path is not None
+                    else "",
+                ]
+            ).lower()
+            for typo in ("validato_logs", "requiredvalidators", "required validators"):
+                self.assertNotIn(typo, generated)
 
     def test_protocol_with_secret_prompt_omits_original(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

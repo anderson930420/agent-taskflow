@@ -173,6 +173,15 @@ class RenderPiMissionPromptTests(unittest.TestCase):
         result = render_pi_mission_prompt(contract)
         self.assertIn("Required Deterministic Validators", result)
 
+    def test_rendered_prompt_uses_canonical_key_wording(self) -> None:
+        contract = self._minimal_contract()
+        result = render_pi_mission_prompt(contract)
+
+        self.assertIn("Required Deterministic Validators", result)
+        self.assertIn("Expected Artifacts", result)
+        for typo in ("validato_logs", "requiredvalidators", "required validators"):
+            self.assertNotIn(typo, result.lower())
+
 
 class WritePiMissionPromptTests(unittest.TestCase):
     """Tests for write_pi_mission_prompt."""

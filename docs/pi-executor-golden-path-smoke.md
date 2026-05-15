@@ -23,6 +23,18 @@ command shape and writes `pi_golden_path_result.txt` under the task artifact
 directory with exactly `pi-golden-path-ok` and no trailing newline. This keeps
 automated tests deterministic and avoids calling the real Pi agent.
 
+Generated Pi protocol artifacts use these canonical snake_case schema keys:
+
+- `mission_contract`
+- `artifacts`
+- `required_validators`
+- `forbidden_actions`
+- `human_approval_required`
+
+`pi_mission_plan.json` names generated proof-of-work artifacts under
+`artifacts`: `mission_contract`, `mission_plan`, `mission_prompt`, and
+`executor_log`.
+
 Run the safe fake-Pi smoke:
 
 ```bash
