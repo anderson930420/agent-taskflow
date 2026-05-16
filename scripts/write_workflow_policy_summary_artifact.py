@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agent_taskflow.workflow_schema import load_workflow_policy
+from agent_taskflow.workflow_policy_artifacts import WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE
 
 
 DEFAULT_POLICY_PATH = Path("examples/workflow-policy.example.json")
@@ -56,7 +57,7 @@ def build_artifact(policy: Any) -> dict[str, Any]:
     result = policy.validate()
     status = "passed" if result.passed else "failed"
     return {
-        "artifact_type": "workflow_policy_summary",
+        "artifact_type": WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
         "schema_version": policy.schema_version,
         "source_path": str(policy.source_path),
         "validation_status": status,

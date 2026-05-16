@@ -18,7 +18,14 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "run_workflow_policy_artifact_smoke.py"
 EXAMPLE_POLICY = REPO_ROOT / "examples" / "workflow-policy.example.json"
-ARTIFACT_FILENAME = "workflow_policy_summary.json"
+
+# Import from shared constants module.
+from agent_taskflow.workflow_policy_artifacts import (
+    WORKFLOW_POLICY_SUMMARY_FILENAME,
+    WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
+)
+
+ARTIFACT_FILENAME = WORKFLOW_POLICY_SUMMARY_FILENAME
 
 
 def _load_script_module():
@@ -73,11 +80,14 @@ class WorkflowPolicyArtifactSmokeTests(unittest.TestCase):
 
             artifact = json.loads((output_dir / ARTIFACT_FILENAME).read_text(encoding="utf-8"))
             self.assertEqual(exit_code, 0)
-            self.assertEqual(artifact["artifact_type"], "workflow_policy_summary")
+            self.assertEqual(artifact["artifact_type"], WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE)
             self.assertEqual(artifact["validation_status"], "passed")
+            # Required fields appear as "- fieldname" (no suffix).
             for field in (
+                "artifact_type",
                 "schema_version",
                 "source_path",
+                "validation_status",
                 "validation_errors",
                 "validation_warnings",
                 "allowed_executors",
@@ -93,6 +103,9 @@ class WorkflowPolicyArtifactSmokeTests(unittest.TestCase):
             ):
                 self.assertIn(field, artifact)
                 self.assertIn(f"- {field}", output)
+            # optional_validators is the sole optional field, printed with "[optional]".
+            self.assertIn("optional_validators", artifact)
+            self.assertIn("- optional_validators  [optional]", output)
 
     def test_output_dir_works(self) -> None:
         with TemporaryDirectory() as tmp:

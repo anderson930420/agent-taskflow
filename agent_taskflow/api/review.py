@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from agent_taskflow.mission_contract import read_mission_contract
+from agent_taskflow.workflow_policy_artifacts import (
+    WORKFLOW_POLICY_ARTIFACT_FILENAMES,
+    WORKFLOW_POLICY_REVIEW_KIND,
+)
 
 
 # ----------------------------------------------------------------------
@@ -64,11 +68,6 @@ _VALIDATOR_LOG_NAMES = frozenset({
     "lint.log",
 })
 
-_WORKFLOW_POLICY_ARTIFACT_NAMES = frozenset({
-    "workflow_policy_summary.json",
-    "artifact_index.json",
-})
-
 _VALIDATOR_STATUS_ORDER = {
     "failed": 0,
     "blocked": 1,
@@ -98,8 +97,8 @@ def _file_kind(name: str) -> str:
         return "mission_contract"
     if name in _VALIDATOR_LOG_NAMES:
         return "validator_log"
-    if name in _WORKFLOW_POLICY_ARTIFACT_NAMES:
-        return "workflow_policy"
+    if name in WORKFLOW_POLICY_ARTIFACT_FILENAMES:
+        return WORKFLOW_POLICY_REVIEW_KIND
     if name.startswith("pi-") or name.startswith("opencode-"):
         return "executor_log"
     return "other"

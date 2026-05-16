@@ -17,29 +17,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agent_taskflow.workflow_schema import load_workflow_policy
+from agent_taskflow.workflow_policy_artifacts import (
+    WORKFLOW_POLICY_SUMMARY_FILENAME,
+    WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
+    WORKFLOW_POLICY_REQUIRED_SUMMARY_FIELDS,
+)
 from scripts.write_workflow_policy_summary_artifact import build_artifact
 
 
 DEFAULT_POLICY_PATH = Path("examples/workflow-policy.example.json")
-ARTIFACT_FILENAME = "workflow_policy_summary.json"
-REQUIRED_ARTIFACT_FIELDS = (
-    "artifact_type",
-    "schema_version",
-    "source_path",
-    "validation_status",
-    "validation_errors",
-    "validation_warnings",
-    "allowed_executors",
-    "required_validators",
-    "path_policy",
-    "workspace_policy",
-    "proof_of_work",
-    "human_review",
-    "forbidden_actions",
-    "deferred_integrations",
-    "governance_invariants",
-    "generated_at",
-)
+ARTIFACT_FILENAME = WORKFLOW_POLICY_SUMMARY_FILENAME
+REQUIRED_ARTIFACT_FIELDS = WORKFLOW_POLICY_REQUIRED_SUMMARY_FIELDS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,8 +64,8 @@ def verify_artifact(artifact: dict[str, Any]) -> list[str]:
         if field not in artifact:
             errors.append(f"missing required artifact field: {field}")
 
-    if artifact.get("artifact_type") != "workflow_policy_summary":
-        errors.append("artifact_type must be workflow_policy_summary")
+    if artifact.get("artifact_type") != WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE:
+        errors.append(f"artifact_type must be {WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE}")
 
     if artifact.get("validation_status") != "passed":
         errors.append("validation_status must be passed")
@@ -100,9 +88,11 @@ def _print_summary(
     print(f"artifact path: {artifact_path}")
     print(f"status: {status}")
     print(f"output kept: {'yes' if kept else 'no'}")
-    print("required fields:")
-    for field in REQUIRED_ARTIFACT_FIELDS:
+    for field in WORKFLOW_POLICY_REQUIRED_SUMMARY_FIELDS:
         print(f"- {field}")
+    # Also print optional_validators for visibility (validation_errors and
+    # validation_warnings are required fields per the contract).
+    print(f"- optional_validators  [optional]")
 
     if errors:
         print("errors:")

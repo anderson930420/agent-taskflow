@@ -18,8 +18,15 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "run_workflow_policy_pow_package_smoke.py"
 EXAMPLE_POLICY = REPO_ROOT / "examples" / "workflow-policy.example.json"
-INDEX_FILENAME = "artifact_index.json"
-SUMMARY_FILENAME = "workflow_policy_summary.json"
+
+# Import from the shared constants module for consistency.
+from agent_taskflow.workflow_policy_artifacts import (
+    WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME,
+    WORKFLOW_POLICY_SUMMARY_FILENAME,
+)
+
+INDEX_FILENAME = WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME
+SUMMARY_FILENAME = WORKFLOW_POLICY_SUMMARY_FILENAME
 
 
 def _load_script_module():

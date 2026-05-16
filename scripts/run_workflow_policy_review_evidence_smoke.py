@@ -42,28 +42,20 @@ from agent_taskflow.api.review import build_artifact_file_summaries
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.store import TaskMirrorStore, init_db
 from agent_taskflow.workflow_schema import load_workflow_policy
-
-# Reuse artifact names from POW package smoke.
-SUMMARY_ARTIFACT_NAME = "workflow_policy_summary.json"
-INDEX_ARTIFACT_NAME = "artifact_index.json"
-
-# Reuse summary fields from POW package smoke.
-REQUIRED_SUMMARY_FIELDS = (
-    "artifact_type",
-    "schema_version",
-    "source_path",
-    "validation_status",
-    "allowed_executors",
-    "required_validators",
-    "path_policy",
-    "workspace_policy",
-    "proof_of_work",
-    "human_review",
-    "forbidden_actions",
-    "deferred_integrations",
-    "governance_invariants",
-    "generated_at",
+from agent_taskflow.workflow_policy_artifacts import (
+    WORKFLOW_POLICY_SUMMARY_FILENAME,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME,
+    WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_TYPE,
+    WORKFLOW_POLICY_PACKAGE_TYPE,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION,
+    WORKFLOW_POLICY_REQUIRED_SUMMARY_FIELDS,
 )
+
+# Alias for local use.
+SUMMARY_ARTIFACT_NAME = WORKFLOW_POLICY_SUMMARY_FILENAME
+INDEX_ARTIFACT_NAME = WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME
+REQUIRED_SUMMARY_FIELDS = WORKFLOW_POLICY_REQUIRED_SUMMARY_FIELDS
 
 DEFAULT_POLICY_PATH = REPO_ROOT / "examples" / "workflow-policy.example.json"
 
@@ -115,13 +107,13 @@ def _write_workflow_policy_artifacts(
     from datetime import datetime, timezone
 
     index_artifact = {
-        "artifact_index_version": "0.1",
-        "package_type": "workflow_policy_proof_of_work",
+        "artifact_index_version": WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION,
+        "package_type": WORKFLOW_POLICY_PACKAGE_TYPE,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "artifacts": [
             {
                 "name": "workflow_policy_summary",
-                "artifact_type": "workflow_policy_summary",
+                "artifact_type": WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
                 "path": SUMMARY_ARTIFACT_NAME,
                 "required": True,
                 "description": "Machine-readable workflow policy summary artifact.",
@@ -144,13 +136,12 @@ def _record_artifacts_via_store(
 ) -> None:
     """Record workflow policy artifacts via existing store API.
 
-    Uses artifact type 'other' since workflow_policy_summary and artifact_index
-    are proof-of-work metadata types not in the core TASK_ARTIFACT_TYPES enum.
-    The review evidence helper reads these files directly from the artifact
-    directory by name.
+    Uses explicit artifact types from the canonical metadata contract.
+    The review evidence helper reads files directly from the artifact directory
+    by name, not by artifact_type.
     """
-    store.record_task_artifact(task_key, "workflow_policy_summary", summary_path)
-    store.record_task_artifact(task_key, "artifact_index", index_path)
+    store.record_task_artifact(task_key, WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE, summary_path)
+    store.record_task_artifact(task_key, WORKFLOW_POLICY_ARTIFACT_INDEX_TYPE, index_path)
 
 
 def _read_review_evidence(artifact_dir: Path) -> list[dict]:
@@ -186,9 +177,8 @@ def _verify_review_evidence(
             f"workflow_policy_summary name mismatch: {summary_evidence['name']!r} != {SUMMARY_ARTIFACT_NAME!r}"
         )
 
-    # Check kind includes workflow_policy_summary (or is other with correct name).
-    # The existing _file_kind helper does not know about workflow_policy_summary yet,
-    # so we verify by name pattern.
+    # Check kind is the canonical workflow_policy kind.
+    # The _file_kind helper classifies these by filename via WORKFLOW_POLICY_REVIEW_KIND.
     if summary_evidence["name"] != SUMMARY_ARTIFACT_NAME:
         errors.append(f"workflow_policy_summary name field incorrect: {summary_evidence['name']!r}")
 
@@ -235,8 +225,8 @@ def _verify_review_evidence(
         errors.append("artifact_index does not reference workflow_policy_summary")
     else:
         summary_entry = summary_entries[0]
-        if summary_entry.get("artifact_type") != "workflow_policy_summary":
-            errors.append("workflow_policy_summary artifact_type must be workflow_policy_summary")
+        if summary_entry.get("artifact_type") != WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE:
+            errors.append(f"workflow_policy_summary artifact_type must be {WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE}")
         if summary_entry.get("path") != SUMMARY_ARTIFACT_NAME:
             errors.append(f"workflow_policy_summary path must be {SUMMARY_ARTIFACT_NAME}, got {summary_entry.get('path')!r}")
         if summary_entry.get("required") is not True:

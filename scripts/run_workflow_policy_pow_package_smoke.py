@@ -18,28 +18,22 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agent_taskflow.workflow_schema import load_workflow_policy
+from agent_taskflow.workflow_policy_artifacts import (
+    WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME,
+    WORKFLOW_POLICY_SUMMARY_FILENAME,
+    WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_TYPE,
+    WORKFLOW_POLICY_PACKAGE_TYPE,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION,
+    WORKFLOW_POLICY_REQUIRED_SUMMARY_FIELDS,
+)
 from scripts.write_workflow_policy_summary_artifact import build_artifact
 
 
 DEFAULT_POLICY_PATH = Path("examples/workflow-policy.example.json")
-ARTIFACT_INDEX_FILENAME = "artifact_index.json"
-SUMMARY_ARTIFACT_FILENAME = "workflow_policy_summary.json"
-REQUIRED_SUMMARY_FIELDS = (
-    "artifact_type",
-    "schema_version",
-    "source_path",
-    "validation_status",
-    "allowed_executors",
-    "required_validators",
-    "path_policy",
-    "workspace_policy",
-    "proof_of_work",
-    "human_review",
-    "forbidden_actions",
-    "deferred_integrations",
-    "governance_invariants",
-    "generated_at",
-)
+ARTIFACT_INDEX_FILENAME = WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME
+SUMMARY_ARTIFACT_FILENAME = WORKFLOW_POLICY_SUMMARY_FILENAME
+REQUIRED_SUMMARY_FIELDS = WORKFLOW_POLICY_REQUIRED_SUMMARY_FIELDS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,13 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def build_artifact_index() -> dict[str, Any]:
     return {
-        "artifact_index_version": "0.1",
-        "package_type": "workflow_policy_proof_of_work",
+        "artifact_index_version": WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION,
+        "package_type": WORKFLOW_POLICY_PACKAGE_TYPE,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "artifacts": [
             {
                 "name": "workflow_policy_summary",
-                "artifact_type": "workflow_policy_summary",
+                "artifact_type": WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
                 "path": SUMMARY_ARTIFACT_FILENAME,
                 "required": True,
                 "description": "Machine-readable workflow policy summary artifact.",
@@ -93,8 +87,8 @@ def verify_summary_artifact(summary: dict[str, Any]) -> list[str]:
         if field not in summary:
             errors.append(f"missing required summary field: {field}")
 
-    if summary.get("artifact_type") != "workflow_policy_summary":
-        errors.append("summary artifact_type must be workflow_policy_summary")
+    if summary.get("artifact_type") != WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE:
+        errors.append(f"summary artifact_type must be {WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE}")
 
     if summary.get("validation_status") != "passed":
         errors.append("summary validation_status must be passed")
@@ -117,8 +111,8 @@ def verify_artifact_index(index: dict[str, Any], artifact_dir: Path) -> list[str
         return ["artifact_index must reference workflow_policy_summary"]
 
     summary_entry = summary_entries[0]
-    if summary_entry.get("artifact_type") != "workflow_policy_summary":
-        errors.append("workflow_policy_summary artifact_type must be workflow_policy_summary")
+    if summary_entry.get("artifact_type") != WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE:
+        errors.append(f"workflow_policy_summary artifact_type must be {WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE}")
     if summary_entry.get("path") != SUMMARY_ARTIFACT_FILENAME:
         errors.append(f"workflow_policy_summary path must be {SUMMARY_ARTIFACT_FILENAME}")
     if summary_entry.get("required") is not True:
