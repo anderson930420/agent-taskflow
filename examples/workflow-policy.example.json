@@ -1,0 +1,81 @@
+{
+  "schema_version": "0.1",
+  "orchestration_boundary": {
+    "deterministic_orchestration": true,
+    "ai_workers_bounded": true,
+    "ai_workers_may_schedule_tasks": false,
+    "ai_workers_may_approve": false,
+    "ai_workers_may_merge": false,
+    "ai_workers_may_push": false,
+    "ai_workers_may_cleanup": false
+  },
+  "allowed_executors": [
+    "manual",
+    "shell",
+    "opencode",
+    "pi"
+  ],
+  "required_validators": [
+    "policy",
+    "changed-files",
+    "pytest",
+    "typecheck",
+    "lint"
+  ],
+  "optional_validators": [
+    "openspec"
+  ],
+  "path_policy": {
+    "allowed_paths": [],
+    "forbidden_paths": []
+  },
+  "workspace_policy": {
+    "isolation_required": true,
+    "preferred_strategy": "per_task_worktree",
+    "preserve_on_failure": true,
+    "cleanup_control": "human_or_deterministic_policy"
+  },
+  "proof_of_work": {
+    "required_artifacts": [
+      "run_summary",
+      "mission_contract",
+      "executor_log",
+      "validation_report",
+      "changed_files_audit"
+    ],
+    "optional_artifacts": [
+      "implementation_prompt",
+      "artifact_index",
+      "handoff_decision"
+    ]
+  },
+  "human_review": {
+    "required": true,
+    "allowed_decisions": [
+      "approve",
+      "reject",
+      "rerun",
+      "block"
+    ]
+  },
+  "forbidden_actions": [
+    "self_approve",
+    "approve_without_human",
+    "push",
+    "force_push",
+    "merge",
+    "auto_merge",
+    "cleanup",
+    "delete_worktree",
+    "delete_branch"
+  ],
+  "deferred_integrations": [
+    "github_issues_sync",
+    "github_projects",
+    "automatic_pr_creation",
+    "automatic_merge",
+    "remote_worker_pool",
+    "multi_host_scheduling"
+  ]
+}
+
