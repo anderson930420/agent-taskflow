@@ -67,6 +67,13 @@ def find_openspec() -> str | None:
 def build_required_checks(python_executable: str = sys.executable) -> list[CheckSpec]:
     return [
         CheckSpec(
+            name="workflow contract validation",
+            command=[
+                python_executable,
+                "scripts/validate_workflow_contract.py",
+            ],
+        ),
+        CheckSpec(
             name="Mission Control golden path smoke",
             command=[
                 python_executable,

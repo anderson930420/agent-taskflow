@@ -20,6 +20,7 @@ explaining that the project `.venv` should be activated.
 The runner executes these checks in order:
 
 ```bash
+python scripts/validate_workflow_contract.py
 python scripts/run_mission_control_smoke.py --keep-workspace
 python scripts/run_pi_executor_golden_path_smoke.py --keep-workspace
 python -m unittest discover -s tests -v
@@ -29,6 +30,10 @@ openspec validate --all --no-interactive
 
 Python commands are invoked with the current `sys.executable`, so an activated
 `.venv` stays consistent across all required checks.
+
+Workflow contract validation is required in the local runner only. It checks
+the repo-level `WORKFLOW.md` contract skeleton before longer smoke tests run;
+it does not make the dispatcher or runtime require `WORKFLOW.md`.
 
 `openspec` is optional. If it is available on `PATH`, the runner executes it.
 If it is unavailable, the runner marks the check as skipped and still exits
