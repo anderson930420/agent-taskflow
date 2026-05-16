@@ -36,6 +36,12 @@ Executor classes are adapter implementations. They translate a task contract
 into a backend-specific execution call. They must not become the governance
 layer, self-approval layer, merge layer, or project-management layer.
 
+Executor adapters are deterministic wrappers, not the AI workers themselves.
+For example, `PiExecutor` and `OpenCodeExecutor` are responsible for command
+construction, workspace selection, environment setup, log capture, artifact
+routing, and standardized run results. The external AI coding tool invoked by
+the adapter is the bounded worker.
+
 Validators are proof-of-work checks. They are not optional commentary and they
 are not replaced by AI review. The changed-files validator is a scope guard that
 helps connect executor output back to allowed paths in the contract.
@@ -44,10 +50,38 @@ FastAPI and Mission Control expose state, artifacts, and review evidence.
 Mission Control is not the core engine; it is the observability and review
 surface.
 
+## AI Worker Boundary
+
+The AI worker may implement changes inside the assigned workspace and within
+the allowed task scope, but it must not control orchestration policy, select
+tasks, mutate lifecycle state directly, approve its own work, bypass validators,
+push, merge, or clean up workspaces.
+
+`WORKFLOW.md` and other workflow contract material may be read by deterministic
+code and may be included in AI prompts for context. AI is not trusted to enforce
+`WORKFLOW.md`. Enforcement belongs to deterministic code, validators,
+changed-files checks, workspace checks, git checks, and human review.
+
+## Component Ownership
+
+| Component | Owner role |
+| --- | --- |
+| Dispatcher / orchestrator | Deterministic scheduler and lifecycle manager |
+| Workspace manager | Planned deterministic workspace preparation and cleanup policy executor |
+| Executor adapter | Deterministic CLI wrapper and result normalizer |
+| AI coding agent | Bounded implementation worker |
+| Validator | Deterministic proof-of-work checker |
+| Human reviewer | Final approval / reject / rerun / block decision maker |
+
 ## Non-Goals
 
 The current architecture explicitly does not include:
 
+- AI self-orchestration loops
+- an agent that chooses its own tasks
+- an agent that validates its own work
+- an agent that approves or merges its own changes
+- prompt-only governance
 - automatic merge
 - automatic push
 - automatic cleanup or delete

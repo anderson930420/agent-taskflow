@@ -44,6 +44,46 @@ agent-taskflow coordinates software tasks through a governed work lifecycle:
 - Human approval is the final gate.
 - The operating principle is: manage work, not agents.
 
+## Deterministic Orchestration Boundary
+
+agent-taskflow is not an AI agent that manages other AI agents.
+
+The dispatcher, orchestrator, future workspace manager, executor adapters,
+validators, state transitions, proof-of-work collection, and review gates are
+deterministic Python-controlled workflow components.
+
+AI coding agents such as Pi, OpenCode, Codex, Claude Code, or future executors
+are invoked only as bounded implementation workers through executor adapters.
+They do not own scheduling, task selection, state transitions, validation
+decisions, approval decisions, merge behavior, push behavior, or cleanup
+behavior.
+
+Workflow policy may be included in prompts for context, but enforcement must
+come from deterministic code, validators, git/workspace checks, changed-files
+checks, and human review gates. AI workers are not trusted to enforce
+`WORKFLOW.md` or any workflow contract by prompt adherence alone.
+
+## Component Ownership
+
+- **Dispatcher / orchestrator** - deterministic scheduler and lifecycle
+  manager.
+- **Workspace manager** - planned deterministic workspace preparation and
+  cleanup policy executor, not implemented yet.
+- **Executor adapter** - deterministic CLI wrapper and result normalizer.
+- **AI coding agent** - bounded implementation worker.
+- **Validator** - deterministic proof-of-work checker.
+- **Human reviewer** - final approval, reject, rerun, or block decision maker.
+
+## Anti-Goals
+
+agent-taskflow should not become:
+
+- an AI self-orchestration loop
+- an agent that chooses its own tasks
+- an agent that validates its own work
+- an agent that approves or merges its own changes
+- a prompt-only governance system
+
 ## What This Means
 
 The system should be judged by whether a task can be traced from source to
