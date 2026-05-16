@@ -21,6 +21,7 @@ The runner executes these checks in order:
 
 ```bash
 python scripts/validate_workflow_contract.py
+python scripts/validate_workflow_policy.py
 python scripts/run_mission_control_smoke.py --keep-workspace
 python scripts/run_pi_executor_golden_path_smoke.py --keep-workspace
 python -m unittest discover -s tests -v
@@ -34,6 +35,11 @@ Python commands are invoked with the current `sys.executable`, so an activated
 Workflow contract validation is required in the local runner only. It checks
 the repo-level `WORKFLOW.md` contract skeleton before longer smoke tests run;
 it does not make the dispatcher or runtime require `WORKFLOW.md`.
+
+Workflow policy validation is also required in the local runner only. It checks
+the draft machine-readable policy example at
+`examples/workflow-policy.example.json`; it does not make the dispatcher,
+executors, validators, or runtime enforce the policy.
 
 `openspec` is optional. If it is available on `PATH`, the runner executes it.
 If it is unavailable, the runner marks the check as skipped and still exits

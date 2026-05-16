@@ -53,6 +53,7 @@ class LocalValidationRunnerTests(unittest.TestCase):
             [check.name for check in checks],
             [
                 "workflow contract validation",
+                "workflow policy validation",
                 "Mission Control golden path smoke",
                 "PiExecutor golden path smoke (fake Pi)",
                 "unit tests",
@@ -71,7 +72,16 @@ class LocalValidationRunnerTests(unittest.TestCase):
             ],
         )
 
-        pi_command = checks[2].command
+        policy_command = checks[1].command
+        self.assertEqual(
+            policy_command,
+            [
+                "/tmp/project/.venv/bin/python",
+                "scripts/validate_workflow_policy.py",
+            ],
+        )
+
+        pi_command = checks[3].command
         self.assertEqual(
             pi_command,
             [

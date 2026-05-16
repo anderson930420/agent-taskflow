@@ -74,6 +74,13 @@ def build_required_checks(python_executable: str = sys.executable) -> list[Check
             ],
         ),
         CheckSpec(
+            name="workflow policy validation",
+            command=[
+                python_executable,
+                "scripts/validate_workflow_policy.py",
+            ],
+        ),
+        CheckSpec(
             name="Mission Control golden path smoke",
             command=[
                 python_executable,
