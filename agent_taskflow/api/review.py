@@ -16,7 +16,14 @@ from typing import Any
 from agent_taskflow.mission_contract import read_mission_contract
 from agent_taskflow.workflow_policy_artifacts import (
     WORKFLOW_POLICY_ARTIFACT_FILENAMES,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_TYPE,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION,
+    WORKFLOW_POLICY_PACKAGE_TYPE,
     WORKFLOW_POLICY_REVIEW_KIND,
+    WORKFLOW_POLICY_REQUIRED_SUMMARY_FIELDS,
+    WORKFLOW_POLICY_SUMMARY_FILENAME,
+    WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
 )
 
 
@@ -475,6 +482,9 @@ def build_review_evidence(
         for r in validation_results
     ]
 
+    # Read-only workflow policy evidence from existing artifacts.
+    workflow_policy_evidence = build_workflow_policy_evidence(artifact_dir)
+
     return {
         "task_key": task_key,
         "mission_contract": contract,
@@ -482,6 +492,182 @@ def build_review_evidence(
         "validator_results": validator_results,
         "policy_status": policy_status,
         "policy_warnings": policy_warnings,
+        "workflow_policy_evidence": workflow_policy_evidence,
+    }
+
+
+def build_workflow_policy_evidence(
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    """Build a read-only workflow_policy_evidence block from existing artifacts.
+
+    This function reads the workflow_policy_summary.json and
+    artifact_index.json files if they exist. It does NOT generate,
+    validate, or mutate those files. It does NOT call the dispatcher,
+    executors, validators, or any write operations.
+
+    Strict availability: available=true only when both canonical files exist,
+    parse as valid JSON, and meet canonical contract requirements. Otherwise
+    returns available=False without masking missing or corrupt content.
+
+    Returns:
+        {
+            "available": bool,
+            "artifact_index": {...} | None,
+            "summary": {...} | None,
+            "review_artifacts": list,
+        }
+    """
+    summary_path = artifact_dir / WORKFLOW_POLICY_SUMMARY_FILENAME
+    index_path = artifact_dir / WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME
+
+    summary_exists = summary_path.exists()
+    index_exists = index_path.exists()
+
+    if not summary_exists or not index_exists:
+        return {
+            "available": False,
+            "artifact_index": None,
+            "summary": None,
+            "review_artifacts": [],
+        }
+
+    # Read and parse the index artifact.
+    index_data: dict[str, Any] | None = None
+    try:
+        index_text = index_path.read_text(encoding="utf-8", errors="replace")
+        index_data = json.loads(index_text)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    if index_data is None:
+        return {
+            "available": False,
+            "artifact_index": None,
+            "summary": None,
+            "review_artifacts": [],
+        }
+
+    # Read and parse the summary artifact.
+    summary_data: dict[str, Any] | None = None
+    try:
+        summary_text = summary_path.read_text(encoding="utf-8", errors="replace")
+        summary_data = json.loads(summary_text)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    if summary_data is None:
+        return {
+            "available": False,
+            "artifact_index": None,
+            "summary": None,
+            "review_artifacts": [],
+        }
+
+    # --- Strict index validation ---
+    if index_data.get("package_type") != WORKFLOW_POLICY_PACKAGE_TYPE:
+        return {
+            "available": False,
+            "artifact_index": None,
+            "summary": None,
+            "review_artifacts": [],
+        }
+    if index_data.get("artifact_index_version") != WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION:
+        return {
+            "available": False,
+            "artifact_index": None,
+            "summary": None,
+            "review_artifacts": [],
+        }
+    if not isinstance(index_data.get("artifacts"), list):
+        return {
+            "available": False,
+            "artifact_index": None,
+            "summary": None,
+            "review_artifacts": [],
+        }
+
+    # --- Strict summary validation ---
+    if summary_data.get("artifact_type") != WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE:
+        return {
+            "available": False,
+            "artifact_index": None,
+            "summary": None,
+            "review_artifacts": [],
+        }
+    if not summary_data.get("validation_status"):
+        return {
+            "available": False,
+            "artifact_index": None,
+            "summary": None,
+            "review_artifacts": [],
+        }
+
+    # Verify all required summary fields are present.
+    for field in WORKFLOW_POLICY_REQUIRED_SUMMARY_FIELDS:
+        if field not in summary_data:
+            return {
+                "available": False,
+                "artifact_index": None,
+                "summary": None,
+                "review_artifacts": [],
+            }
+
+    # governance_invariants must be dict or list when present.
+    gi = summary_data.get("governance_invariants")
+    if gi is not None and not isinstance(gi, (dict, list)):
+        return {
+            "available": False,
+            "artifact_index": None,
+            "summary": None,
+            "review_artifacts": [],
+        }
+
+    # --- Build artifact_index section from verified content ---
+    artifact_index_section: dict[str, Any] = {
+        "name": WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME,
+        "artifact_type": WORKFLOW_POLICY_ARTIFACT_INDEX_TYPE,
+        "path": WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME,
+        "package_type": index_data["package_type"],
+        "artifact_index_version": index_data["artifact_index_version"],
+        "generated_at": index_data.get("generated_at", ""),
+        "artifacts": index_data["artifacts"],
+    }
+
+    # --- Build summary section from verified content (no fallbacks) ---
+    summary_section: dict[str, Any] = {
+        "name": WORKFLOW_POLICY_SUMMARY_FILENAME,
+        "artifact_type": summary_data["artifact_type"],
+        "path": WORKFLOW_POLICY_SUMMARY_FILENAME,
+        "schema_version": summary_data["schema_version"],
+        "validation_status": summary_data["validation_status"],
+        "validation_errors": summary_data["validation_errors"],
+        "validation_warnings": summary_data["validation_warnings"],
+        "source_path": summary_data["source_path"],
+        "generated_at": summary_data["generated_at"],
+        "allowed_executors": summary_data["allowed_executors"],
+        "required_validators": summary_data["required_validators"],
+        "optional_validators": summary_data["optional_validators"],
+        "path_policy": summary_data["path_policy"],
+        "workspace_policy": summary_data["workspace_policy"],
+        "proof_of_work": summary_data["proof_of_work"],
+        "human_review": summary_data["human_review"],
+        "forbidden_actions": summary_data["forbidden_actions"],
+        "deferred_integrations": summary_data["deferred_integrations"],
+        "governance_invariants": summary_data["governance_invariants"],
+    }
+
+    # --- Build review_artifacts from artifact directory scan ---
+    all_files = build_artifact_file_summaries(artifact_dir)
+    review_artifacts = [
+        f for f in all_files if f["kind"] == WORKFLOW_POLICY_REVIEW_KIND
+    ]
+
+    return {
+        "available": True,
+        "artifact_index": artifact_index_section,
+        "summary": summary_section,
+        "review_artifacts": review_artifacts,
     }
 
 
@@ -490,4 +676,5 @@ __all__ = [
     "build_artifact_preview",
     "build_contract_summary",
     "build_review_evidence",
+    "build_workflow_policy_evidence",
 ]

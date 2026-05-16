@@ -13,11 +13,23 @@ This module is tests-only. No API implementation code is modified.
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
+from fastapi.testclient import TestClient
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from agent_taskflow.api.main import create_app
+from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.workflow_policy_artifacts import (
+    WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_TYPE,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION,
+    WORKFLOW_POLICY_PACKAGE_TYPE,
+    WORKFLOW_POLICY_REVIEW_KIND,
+    WORKFLOW_POLICY_SUMMARY_FILENAME,
+    WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
+)
 
 
 # ----------------------------------------------------------------------
@@ -613,45 +625,459 @@ class SafetySemanticsContractTests(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
-@unittest.skip(
-    "Phase 110 will implement workflow_policy_evidence API exposure. "
-    "This test will execute once the API is implemented."
-)
-class FutureApiIntegrationTests(unittest.TestCase):
-    """Skipped tests that verify API behavior once Phase 110 implements exposure.
+class ApiIntegrationTests(unittest.TestCase):
+    """Integration tests for workflow_policy_evidence API exposure.
 
-    These tests require the actual API endpoint to be implemented.
-    They are skipped here and will be enabled in Phase 110.
+    These tests verify the actual API endpoint behavior by testing
+    the FastAPI app with real artifact directories and review evidence helpers.
     """
 
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "state.db"
+        self.repo_path = self.root / "repo"
+        self.artifact_root = self.root / "artifacts"
+        self.repo_path.mkdir()
+        self.artifact_root.mkdir()
+
+        self.store = TaskMirrorStore(self.db_path)
+        self.store.init_db()
+
+        self.client_context = TestClient(create_app(self.db_path))
+        self.client = self.client_context.__enter__()
+
+    def tearDown(self) -> None:
+        self.client_context.__exit__(None, None, None)
+        self.tmp.cleanup()
+
+    def _make_task(self, task_key: str) -> Path:
+        artifact_dir = self.artifact_root / task_key
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        return artifact_dir
+
+    def _seed_task(self, task_key: str, artifact_dir: Path) -> None:
+        from agent_taskflow.models import TaskRecord
+        task = TaskRecord(
+            task_key=task_key,
+            project="agent-taskflow",
+            board="agent-taskflow",
+            status="queued",
+            repo_path=self.repo_path,
+            artifact_dir=artifact_dir,
+        )
+        self.store.upsert_task(task)
+
+    def _write_workflow_policy_package(self, artifact_dir: Path) -> None:
+        """Write minimal but complete workflow policy artifact files."""
+        import json
+
+        # Write the index artifact.
+        index = {
+            "artifact_index_version": WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION,
+            "package_type": WORKFLOW_POLICY_PACKAGE_TYPE,
+            "generated_at": "2025-01-01T00:00:00Z",
+            "artifacts": [
+                {
+                    "name": WORKFLOW_POLICY_SUMMARY_FILENAME,
+                    "artifact_type": WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
+                    "path": WORKFLOW_POLICY_SUMMARY_FILENAME,
+                    "required": True,
+                    "description": "Machine-readable workflow policy summary artifact.",
+                },
+            ],
+        }
+        (artifact_dir / WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME).write_text(
+            json.dumps(index), encoding="utf-8"
+        )
+
+        # Write the summary artifact.
+        summary = {
+            "artifact_type": WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
+            "schema_version": "0.1",
+            "validation_status": "passed",
+            "validation_errors": [],
+            "validation_warnings": [],
+            "source_path": str(artifact_dir / "policy.example.json"),
+            "generated_at": "2025-01-01T00:00:00Z",
+            "allowed_executors": ["manual", "pi", "opencode"],
+            "required_validators": ["policy", "pytest"],
+            "optional_validators": ["openspec"],
+            "path_policy": {"allowed_paths": [], "forbidden_paths": []},
+            "workspace_policy": {
+                "isolation_required": True,
+                "preferred_strategy": "per_task_worktree",
+            },
+            "proof_of_work": {
+                "required_artifacts": ["run_summary"],
+                "optional_artifacts": [],
+            },
+            "human_review": {"required": True, "allowed_decisions": ["approve", "reject"]},
+            "forbidden_actions": ["push", "merge"],
+            "deferred_integrations": ["github_issues_sync"],
+            "governance_invariants": [],
+        }
+        (artifact_dir / WORKFLOW_POLICY_SUMMARY_FILENAME).write_text(
+            json.dumps(summary), encoding="utf-8"
+        )
+
+    # ------------------------------------------------------------------
+    # Basic field presence tests
+    # ------------------------------------------------------------------
+
     def test_review_evidence_response_contains_workflow_policy_evidence_field(self) -> None:
-        """Verify GET /api/tasks/{task_key}/review-evidence includes workflow_policy_evidence."""
-        # Will be implemented in Phase 110.
-        pass
+        artifact_dir = self._make_task("AT-API-0101")
+        self._seed_task("AT-API-0101", artifact_dir)
 
-    def test_workflow_policy_evidence_available_true_when_artifacts_present(self) -> None:
-        """Verify available=true when workflow policy artifacts exist."""
-        pass
-
-    def test_workflow_policy_evidence_available_false_when_artifacts_absent(self) -> None:
-        """Verify available=false when workflow policy artifacts are absent."""
-        pass
+        response = self.client.get("/api/tasks/AT-API-0101/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        self.assertIn("workflow_policy_evidence", payload)
 
     def test_workflow_policy_evidence_backward_compatible_existing_fields(self) -> None:
-        """Verify existing fields (artifacts, mission_contract, validator_results) still present."""
-        pass
+        artifact_dir = self._make_task("AT-API-0102")
+        self._seed_task("AT-API-0102", artifact_dir)
+
+        response = self.client.get("/api/tasks/AT-API-0102/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        # Existing fields must still be present.
+        self.assertIn("task_key", payload)
+        self.assertIn("mission_contract", payload)
+        self.assertIn("artifacts", payload)
+        self.assertIn("validator_results", payload)
+        self.assertIn("policy_status", payload)
+        self.assertIn("policy_warnings", payload)
+
+    # ------------------------------------------------------------------
+    # available=true tests
+    # ------------------------------------------------------------------
+
+    def test_workflow_policy_evidence_available_true_when_artifacts_present(self) -> None:
+        artifact_dir = self._make_task("AT-API-0103")
+        self._seed_task("AT-API-0103", artifact_dir)
+        self._write_workflow_policy_package(artifact_dir)
+
+        response = self.client.get("/api/tasks/AT-API-0103/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+
+        self.assertIsInstance(wpe["available"], bool)
+        self.assertTrue(wpe["available"])
 
     def test_workflow_policy_evidence_exposes_artifact_index_sub_section(self) -> None:
-        """Verify artifact_index sub-section has all expected fields."""
-        pass
+        artifact_dir = self._make_task("AT-API-0104")
+        self._seed_task("AT-API-0104", artifact_dir)
+        self._write_workflow_policy_package(artifact_dir)
+
+        response = self.client.get("/api/tasks/AT-API-0104/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+
+        self.assertIn("artifact_index", wpe)
+        ai = wpe["artifact_index"]
+        self.assertIsNotNone(ai)
+
+        # Check expected fields.
+        for field in EXPECTED_ARTIFACT_INDEX_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(field, ai, f"artifact_index missing: {field}")
+
+        # Check artifact entries.
+        self.assertIn("artifacts", ai)
+        self.assertIsInstance(ai["artifacts"], list)
+        self.assertGreater(len(ai["artifacts"]), 0)
+        for entry in ai["artifacts"]:
+            for field in EXPECTED_INDEX_ARTIFACT_ENTRY_FIELDS:
+                with self.subTest(entry=entry, field=field):
+                    self.assertIn(field, entry, f"artifact entry missing: {field}")
 
     def test_workflow_policy_evidence_exposes_summary_sub_section(self) -> None:
-        """Verify summary sub-section has all expected fields."""
-        pass
+        artifact_dir = self._make_task("AT-API-0105")
+        self._seed_task("AT-API-0105", artifact_dir)
+        self._write_workflow_policy_package(artifact_dir)
+
+        response = self.client.get("/api/tasks/AT-API-0105/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+
+        self.assertIn("summary", wpe)
+        sm = wpe["summary"]
+        self.assertIsNotNone(sm)
+
+        # Check all expected fields.
+        for field in EXPECTED_SUMMARY_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(field, sm, f"summary missing: {field}")
 
     def test_workflow_policy_evidence_exposes_review_artifacts_sub_section(self) -> None:
-        """Verify review_artifacts sub-section has all expected fields."""
-        pass
+        artifact_dir = self._make_task("AT-API-0106")
+        self._seed_task("AT-API-0106", artifact_dir)
+        self._write_workflow_policy_package(artifact_dir)
+
+        response = self.client.get("/api/tasks/AT-API-0106/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+
+        self.assertIn("review_artifacts", wpe)
+        ra = wpe["review_artifacts"]
+        self.assertIsInstance(ra, list)
+        self.assertGreater(len(ra), 0)
+
+        # All review_artifacts entries must have expected entry fields.
+        for entry in ra:
+            for field in EXPECTED_REVIEW_ARTIFACT_ENTRY_FIELDS:
+                with self.subTest(entry=entry, field=field):
+                    self.assertIn(field, entry)
+
+    def test_review_artifacts_include_both_canonical_files_with_kind_workflow_policy(self) -> None:
+        artifact_dir = self._make_task("AT-API-0107")
+        self._seed_task("AT-API-0107", artifact_dir)
+        self._write_workflow_policy_package(artifact_dir)
+
+        response = self.client.get("/api/tasks/AT-API-0107/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+        ra = wpe["review_artifacts"]
+
+        names = {entry["name"] for entry in ra}
+        self.assertIn(WORKFLOW_POLICY_SUMMARY_FILENAME, names)
+        self.assertIn(WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME, names)
+
+        for entry in ra:
+            self.assertEqual(entry["kind"], WORKFLOW_POLICY_REVIEW_KIND)
+
+    # ------------------------------------------------------------------
+    # available=false tests
+    # ------------------------------------------------------------------
+
+    def test_workflow_policy_evidence_available_false_when_artifacts_absent(self) -> None:
+        artifact_dir = self._make_task("AT-API-0108")
+        self._seed_task("AT-API-0108", artifact_dir)
+        # No workflow policy artifacts written.
+
+        response = self.client.get("/api/tasks/AT-API-0108/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+
+        self.assertFalse(wpe["available"])
+        self.assertIn("workflow_policy_evidence", payload)
+
+    def test_missing_summary_only_results_in_available_false(self) -> None:
+        artifact_dir = self._make_task("AT-API-0109")
+        self._seed_task("AT-API-0109", artifact_dir)
+        # Only write index, not summary.
+        import json
+        index = {
+            "artifact_index_version": WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION,
+            "package_type": WORKFLOW_POLICY_PACKAGE_TYPE,
+            "generated_at": "2025-01-01T00:00:00Z",
+            "artifacts": [],
+        }
+        (artifact_dir / WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME).write_text(
+            json.dumps(index), encoding="utf-8"
+        )
+
+        response = self.client.get("/api/tasks/AT-API-0109/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+
+        # Missing summary alone should result in available=False.
+        self.assertFalse(wpe["available"])
+
+    def test_missing_index_only_results_in_available_false(self) -> None:
+        artifact_dir = self._make_task("AT-API-0110")
+        self._seed_task("AT-API-0110", artifact_dir)
+        # Only write summary, not index.
+        import json
+        summary = {
+            "artifact_type": WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
+            "schema_version": "0.1",
+            "validation_status": "passed",
+            "validation_errors": [],
+            "validation_warnings": [],
+            "source_path": "",
+            "generated_at": "2025-01-01T00:00:00Z",
+            "allowed_executors": [],
+            "required_validators": [],
+            "optional_validators": [],
+            "path_policy": {},
+            "workspace_policy": {},
+            "proof_of_work": {},
+            "human_review": {},
+            "forbidden_actions": [],
+            "deferred_integrations": [],
+            "governance_invariants": [],
+        }
+        (artifact_dir / WORKFLOW_POLICY_SUMMARY_FILENAME).write_text(
+            json.dumps(summary), encoding="utf-8"
+        )
+
+        response = self.client.get("/api/tasks/AT-API-0110/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+
+        # Missing index alone should result in available=False.
+        self.assertFalse(wpe["available"])
+
+    def test_no_crash_when_summary_file_corrupted(self) -> None:
+        artifact_dir = self._make_task("AT-API-0111")
+        self._seed_task("AT-API-0111", artifact_dir)
+        # Write a valid index but a corrupted summary.
+        import json
+        index = {
+            "artifact_index_version": WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION,
+            "package_type": WORKFLOW_POLICY_PACKAGE_TYPE,
+            "generated_at": "2025-01-01T00:00:00Z",
+            "artifacts": [],
+        }
+        (artifact_dir / WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME).write_text(
+            json.dumps(index), encoding="utf-8"
+        )
+        (artifact_dir / WORKFLOW_POLICY_SUMMARY_FILENAME).write_text(
+            "not valid json { this is broken", encoding="utf-8"
+        )
+
+        response = self.client.get("/api/tasks/AT-API-0111/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+
+        # Corrupted summary should result in available=False, not a crash.
+        self.assertFalse(wpe["available"])
+
+    # ------------------------------------------------------------------
+    # Forbidden fields safety tests
+    # ------------------------------------------------------------------
+
+    def test_workflow_policy_evidence_no_forbidden_action_fields(self) -> None:
+        artifact_dir = self._make_task("AT-API-0112")
+        self._seed_task("AT-API-0112", artifact_dir)
+        self._write_workflow_policy_package(artifact_dir)
+
+        response = self.client.get("/api/tasks/AT-API-0112/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+
+        errors = validate_no_forbidden_fields(wpe)
+        self.assertEqual(errors, [], f"forbidden fields detected: {errors}")
+
+    def test_workflow_policy_evidence_complete_validation_passes(self) -> None:
+        artifact_dir = self._make_task("AT-API-0113")
+        self._seed_task("AT-API-0113", artifact_dir)
+        self._write_workflow_policy_package(artifact_dir)
+
+        response = self.client.get("/api/tasks/AT-API-0113/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+        wpe = payload["workflow_policy_evidence"]
+
+        errors = validate_workflow_policy_evidence_complete(wpe)
+        self.assertEqual(errors, [], f"shape validation failed: {errors}")
+
+    # ------------------------------------------------------------------
+    # Read-only semantics tests
+    # ------------------------------------------------------------------
+
+    def test_review_evidence_does_not_mutate_workflow_policy_artifacts(self) -> None:
+        artifact_dir = self._make_task("AT-API-0114")
+        self._seed_task("AT-API-0114", artifact_dir)
+        self._write_workflow_policy_package(artifact_dir)
+
+        summary_path = artifact_dir / WORKFLOW_POLICY_SUMMARY_FILENAME
+        index_path = artifact_dir / WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME
+        before_summary = summary_path.read_bytes()
+        before_index = index_path.read_bytes()
+
+        response = self.client.get("/api/tasks/AT-API-0114/review-evidence")
+        self.assertEqual(response.status_code, 200)
+
+        after_summary = summary_path.read_bytes()
+        after_index = index_path.read_bytes()
+
+        self.assertEqual(before_summary, after_summary)
+        self.assertEqual(before_index, after_index)
+
+    def test_review_evidence_does_not_create_workflow_policy_artifacts(self) -> None:
+        artifact_dir = self._make_task("AT-API-0115")
+        self._seed_task("AT-API-0115", artifact_dir)
+        # No workflow policy artifacts.
+        before_files = set(artifact_dir.iterdir())
+
+        response = self.client.get("/api/tasks/AT-API-0115/review-evidence")
+        self.assertEqual(response.status_code, 200)
+
+        after_files = set(artifact_dir.iterdir())
+        # No new files should be created.
+        self.assertEqual(before_files, after_files)
+
+    # ------------------------------------------------------------------
+    # Empty artifact directory compatibility
+    # ------------------------------------------------------------------
+
+    def test_existing_review_evidence_works_without_workflow_policy_artifacts(self) -> None:
+        artifact_dir = self._make_task("AT-API-0116")
+        self._seed_task("AT-API-0116", artifact_dir)
+        # Only mission contract, no workflow policy artifacts.
+        import json
+        (artifact_dir / "mission_contract.json").write_text(
+            json.dumps({
+                "schema_version": "1",
+                "task_key": "AT-API-0116",
+                "goal": "Test",
+                "executor": "pi",
+                "repo_path": str(self.repo_path),
+                "worktree_path": str(self.root / "wt"),
+                "artifact_dir": str(artifact_dir),
+                "required_validators": [],
+                "forbidden_actions": [],
+                "expected_artifacts": [],
+                "human_approval_required": True,
+                "governance_rules": [],
+            }),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/tasks/AT-API-0116/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+
+        # Existing fields must still work.
+        self.assertEqual(payload["task_key"], "AT-API-0116")
+        self.assertTrue(payload["mission_contract"]["exists"])
+        self.assertGreaterEqual(len(payload["artifacts"]), 1)
+
+        # workflow_policy_evidence should be present but not block the response.
+        wpe = payload["workflow_policy_evidence"]
+        self.assertFalse(wpe["available"])
+
+    def test_available_false_fixture_preserves_existing_response(self) -> None:
+        artifact_dir = self._make_task("AT-API-0117")
+        self._seed_task("AT-API-0117", artifact_dir)
+
+        response = self.client.get("/api/tasks/AT-API-0117/review-evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["item"]
+
+        # The response should be complete even with no artifacts.
+        self.assertIn("task_key", payload)
+        self.assertIn("mission_contract", payload)
+        self.assertIn("artifacts", payload)
+        self.assertIn("validator_results", payload)
+        self.assertIn("workflow_policy_evidence", payload)
+
+        wpe = payload["workflow_policy_evidence"]
+        self.assertFalse(wpe["available"])
+        self.assertEqual(wpe["review_artifacts"], [])
 
 
 if __name__ == "__main__":
