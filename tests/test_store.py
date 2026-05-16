@@ -258,6 +258,58 @@ class StoreTests(unittest.TestCase):
             Path("/home/ubuntu/.hermes/task-artifacts/AT-0003/spec.md"),
         )
 
+    def test_task_artifact_workflow_policy_summary_is_accepted(self) -> None:
+        self.store.upsert_task(self.make_task())
+
+        self.store.record_task_artifact(
+            "AT-0003",
+            "workflow_policy_summary",
+            "/tmp/artifacts/AT-0003/workflow_policy_summary.json",
+        )
+
+        artifacts = self.store.list_task_artifacts("AT-0003")
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0].artifact_type, "workflow_policy_summary")
+
+    def test_task_artifact_artifact_index_is_accepted(self) -> None:
+        self.store.upsert_task(self.make_task())
+
+        self.store.record_task_artifact(
+            "AT-0003",
+            "artifact_index",
+            "/tmp/artifacts/AT-0003/artifact_index.json",
+        )
+
+        artifacts = self.store.list_task_artifacts("AT-0003")
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0].artifact_type, "artifact_index")
+
+    def test_task_artifact_other_still_works(self) -> None:
+        self.store.upsert_task(self.make_task())
+
+        self.store.record_task_artifact(
+            "AT-0003",
+            "other",
+            "/tmp/artifacts/AT-0003/misc.json",
+        )
+
+        artifacts = self.store.list_task_artifacts("AT-0003")
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0].artifact_type, "other")
+
+    def test_task_artifact_invalid_type_is_rejected(self) -> None:
+        self.store.upsert_task(self.make_task())
+
+        with self.assertRaisesRegex(ValueError, "Invalid task artifact type"):
+            self.store.record_task_artifact(
+                "AT-0003",
+                "not_a_real_type",
+                "/tmp/artifacts/AT-0003/file.json",
+            )
+
     def test_relative_task_artifact_path_is_rejected(self) -> None:
         self.store.upsert_task(self.make_task())
 

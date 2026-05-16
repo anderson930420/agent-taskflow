@@ -261,12 +261,11 @@ class WorkflowPolicyReviewEvidenceSmokeTests(unittest.TestCase):
         store = module.TaskMirrorStore(db_path)
         artifacts = store.list_task_artifacts(SMOKE_TASK_KEY)
         artifact_types = {a.artifact_type for a in artifacts}
-        # workflow_policy_summary and artifact_index are proof-of-work metadata
-        # artifacts. They use 'other' as the artifact_type since the store's
-        # TASK_ARTIFACT_TYPES enum does not include custom proof-of-work types.
-        # The review evidence helper reads files by name, not by artifact_type.
-        self.assertIn("other", artifact_types)
-        # Verify at least 2 artifacts were recorded (summary + index).
+        # workflow_policy_summary and artifact_index are explicit proof-of-work
+        # metadata artifact types registered in TASK_ARTIFACT_TYPES.
+        self.assertIn("workflow_policy_summary", artifact_types)
+        self.assertIn("artifact_index", artifact_types)
+        # Verify both artifacts were recorded.
         self.assertGreaterEqual(len(artifacts), 2)
 
     def test_review_evidence_shows_no_forbidden_action_in_output(self) -> None:

@@ -53,6 +53,8 @@ TASK_ARTIFACT_TYPES = {
     "worker_log",
     "review_log",
     "manifest",
+    "workflow_policy_summary",
+    "artifact_index",
     "other",
 }
 

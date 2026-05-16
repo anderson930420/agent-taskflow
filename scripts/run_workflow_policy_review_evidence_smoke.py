@@ -149,8 +149,8 @@ def _record_artifacts_via_store(
     The review evidence helper reads these files directly from the artifact
     directory by name.
     """
-    store.record_task_artifact(task_key, "other", summary_path)
-    store.record_task_artifact(task_key, "other", index_path)
+    store.record_task_artifact(task_key, "workflow_policy_summary", summary_path)
+    store.record_task_artifact(task_key, "artifact_index", index_path)
 
 
 def _read_review_evidence(artifact_dir: Path) -> list[dict]:
