@@ -208,6 +208,7 @@ class TaskWorktreeRecord:
     branch: str
     status: str
     base_branch: str | None = None
+    base_sha: str | None = None
     created_at: str | None = None
     cleaned_at: str | None = None
 

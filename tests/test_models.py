@@ -70,6 +70,19 @@ class ModelValidationTests(unittest.TestCase):
                 status="active",
             )
 
+    def test_worktree_record_accepts_optional_base_sha(self) -> None:
+        record = TaskWorktreeRecord(
+            task_key="AT-0003",
+            repo_path="/home/ubuntu/agent-taskflow",
+            worktree_path="/home/ubuntu/agent-taskflow/.worktrees/AT-0003",
+            branch="task/AT-0003",
+            base_branch="main",
+            base_sha="abc123",
+            status="active",
+        )
+
+        self.assertEqual(record.base_sha, "abc123")
+
 
 class TaskRecordExecutorFieldsTests(unittest.TestCase):
     """Phase 13: TaskRecord executor selection fields."""
