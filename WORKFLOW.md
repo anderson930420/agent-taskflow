@@ -56,6 +56,13 @@ It records a local task, issue/spec artifact, and ingestion event only. It does
 not dispatch, prepare workspaces, create PRs, push, merge, clean up, mutate
 GitHub, or run as a webhook/background worker.
 
+The issue-to-prepared-workspace golden-path smoke
+(`scripts/run_issue_to_prepared_workspace_smoke.py`) proves the current
+explicit local chain from offline issue ingestion to prepared workspace
+dispatch and review evidence readback. It is local-only and does not add
+GitHub sync automation, PR creation, push, merge, cleanup, webhooks,
+background polling, frontend changes, or dispatcher auto-create behavior.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
