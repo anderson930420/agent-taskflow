@@ -130,6 +130,30 @@ class WorkspaceManagerTests(unittest.TestCase):
         self.assertEqual(result.status, WORKSPACE_BLOCKED)
         self.assertIn("dirty", result.summary)
 
+    def test_existing_clean_worktree_with_stale_base_is_blocked(self) -> None:
+        first = self.manager.prepare(self.request())
+        (self.repo / "main-change.txt").write_text("new main\n", encoding="utf-8")
+        self._git(["add", "main-change.txt"], self.repo)
+        self._git(["commit", "-m", "advance main"], self.repo)
+
+        result = self.manager.prepare(self.request())
+
+        self.assertEqual(first.status, WORKSPACE_PREPARED)
+        self.assertEqual(result.status, WORKSPACE_BLOCKED)
+        self.assertIn("HEAD does not match requested base ref", result.summary)
+
+    def test_existing_clean_worktree_with_local_commit_is_blocked(self) -> None:
+        first = self.manager.prepare(self.request())
+        (first.worktree_path / "local.txt").write_text("local\n", encoding="utf-8")
+        self._git(["add", "local.txt"], first.worktree_path)
+        self._git(["commit", "-m", "local task change"], first.worktree_path)
+
+        result = self.manager.prepare(self.request())
+
+        self.assertEqual(first.status, WORKSPACE_PREPARED)
+        self.assertEqual(result.status, WORKSPACE_BLOCKED)
+        self.assertIn("HEAD does not match requested base ref", result.summary)
+
     def test_existing_branch_without_matching_worktree_is_blocked(self) -> None:
         self._git(["branch", "task/AT-WS-001", "main"], self.repo)
 

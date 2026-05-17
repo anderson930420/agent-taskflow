@@ -188,6 +188,24 @@ class WorkspaceManager:
                     base_sha,
                     f"existing worktree is dirty and cannot be reused: {worktree_path}",
                 )
+            head = self._git(["rev-parse", "HEAD"], worktree_path)
+            if head.returncode != 0:
+                return self._blocked(
+                    request,
+                    worktree_path,
+                    branch,
+                    base_sha,
+                    f"could not resolve existing worktree HEAD: {head.combined_text}",
+                )
+            head_sha = head.stdout_text.strip()
+            if head_sha != base_sha:
+                return self._blocked(
+                    request,
+                    worktree_path,
+                    branch,
+                    base_sha,
+                    "existing worktree HEAD does not match requested base ref",
+                )
             return WorkspacePreparationResult(
                 task_key=request.task_key,
                 repo_path=repo_path,
