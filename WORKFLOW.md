@@ -49,6 +49,13 @@ artifact readback, and `waiting_approval`. It is local-only and does not add
 GitHub Issue sync, PR creation, push, merge, cleanup automation, or dispatcher
 auto-create behavior.
 
+The GitHub Issue ingestion foundation
+(`scripts/ingest_github_issue.py`) provides explicit, CLI-first, read-only
+ingestion of one human-written GitHub Issue/spec into the local task mirror.
+It records a local task, issue/spec artifact, and ingestion event only. It does
+not dispatch, prepare workspaces, create PRs, push, merge, clean up, mutate
+GitHub, or run as a webhook/background worker.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:

@@ -46,6 +46,7 @@ TASK_EVENT_TYPES = {
     "mirrored",
     "status_changed",
     "artifact_recorded",
+    "github_issue_ingested",
     "worktree_recorded",
     "cleanup_recorded",
     "note",
@@ -53,6 +54,7 @@ TASK_EVENT_TYPES = {
 
 TASK_ARTIFACT_TYPES = {
     "spec",
+    "issue_spec",
     "decision",
     "worker_log",
     "review_log",
