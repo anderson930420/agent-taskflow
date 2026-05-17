@@ -191,6 +191,8 @@ task state, and do not approve/reject tasks.
 
 - **5 deterministic steps**: scout → planner → implementer → reviewer → handoff
 - Each step has: `step_id`, `role`, `title`, `objective`, `allowed_actions`, `forbidden_actions`, `expected_outputs`
+- Top-level plan keys include: `mission_contract`, `artifacts`,
+  `required_validators`, `forbidden_actions`, and `human_approval_required`
 - Every step includes mandatory forbidden actions: `approve`, `self_approve`, `push`, `force_push`, `merge`, `cleanup`, `delete_worktree`, `delete_branch`
 - Plan is deterministic: same contract → same plan (no randomness in step ordering or content)
 - This is a **protocol metadata spike**, not an autonomous multi-agent system

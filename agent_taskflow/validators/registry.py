@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Sequence
 
 from agent_taskflow.validators.base import Validator
+from agent_taskflow.validators.changed_files import ChangedFilesValidator
 from agent_taskflow.validators.lint import LintValidator
 from agent_taskflow.validators.openspec import OpenSpecValidator
 from agent_taskflow.validators.policy import PolicyCheckValidator
@@ -49,6 +50,9 @@ def get_validator(
             scan_artifacts=scan_artifacts,
         )
 
+    if normalized == "changed-files":
+        return ChangedFilesValidator()
+
     if normalized == "typecheck":
         return TypecheckValidator()
 
@@ -61,7 +65,7 @@ def get_validator(
 def list_validator_names() -> list[str]:
     """Return supported validator names."""
 
-    return ["pytest", "openspec", "policy", "typecheck", "lint"]
+    return ["pytest", "openspec", "policy", "changed-files", "typecheck", "lint"]
 
 
 __all__ = [

@@ -12,6 +12,10 @@ from pathlib import Path
 
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.worktree import ensure_absolute_path
+from agent_taskflow.workflow_policy_artifacts import (
+    WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_TYPE,
+)
 
 
 TASK_STATUSES = {
@@ -53,6 +57,8 @@ TASK_ARTIFACT_TYPES = {
     "worker_log",
     "review_log",
     "manifest",
+    WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
+    WORKFLOW_POLICY_ARTIFACT_INDEX_TYPE,
     "other",
 }
 

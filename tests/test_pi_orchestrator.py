@@ -101,6 +101,16 @@ class BuildPiMissionPlanTests(unittest.TestCase):
         for action in _REQUIRED_FORBIDDEN:
             self.assertIn(action, plan.forbidden_actions)
 
+    def test_plan_forbidden_actions_are_unique(self) -> None:
+        contract = self._minimal_contract()
+        contract["forbidden_actions"] = ["push", "merge", "deploy", "deploy"]
+        plan = build_pi_mission_plan(contract)
+        self.assertEqual(
+            len(plan.forbidden_actions),
+            len(set(plan.forbidden_actions)),
+        )
+        self.assertIn("deploy", plan.forbidden_actions)
+
     def test_every_step_has_all_required_forbidden_actions(self) -> None:
         contract = self._minimal_contract()
         plan = build_pi_mission_plan(contract)
@@ -300,6 +310,16 @@ class PiMissionPlanTests(unittest.TestCase):
             ),
             required_validators=("pytest",),
             forbidden_actions=_REQUIRED_FORBIDDEN,
+            mission_contract={
+                "artifact_name": "mission_contract.json",
+                "schema_version": "1",
+            },
+            artifacts={
+                "mission_contract": "mission_contract.json",
+                "mission_plan": "pi_mission_plan.json",
+                "mission_prompt": "pi_mission_prompt.md",
+                "executor_log": "pi-executor.log",
+            },
             human_approval_required=True,
         )
         self.assertEqual(plan.task_key, "AT-0101")
@@ -315,6 +335,8 @@ class PiMissionPlanTests(unittest.TestCase):
                 steps=(step,),
                 required_validators=(),
                 forbidden_actions=(),
+                mission_contract={},
+                artifacts={},
                 human_approval_required=True,
             )
         self.assertIn("missing required forbidden", str(ctx.exception))
@@ -328,6 +350,8 @@ class PiMissionPlanTests(unittest.TestCase):
                 steps=(),
                 required_validators=(),
                 forbidden_actions=(),
+                mission_contract={},
+                artifacts={},
                 human_approval_required=True,
             )
 
@@ -399,6 +423,43 @@ class SerializationTests(unittest.TestCase):
         plan = self._minimal_plan()
         d = pi_mission_plan_to_dict(plan)
         self.assertTrue(d["human_approval_required"])
+
+    def test_to_dict_includes_canonical_artifact_keys(self) -> None:
+        plan = self._minimal_plan()
+        d = pi_mission_plan_to_dict(plan)
+
+        self.assertEqual(
+            set(d),
+            {
+                "schema_version",
+                "task_key",
+                "executor",
+                "steps",
+                "required_validators",
+                "forbidden_actions",
+                "mission_contract",
+                "artifacts",
+                "human_approval_required",
+            },
+        )
+        self.assertEqual(d["mission_contract"]["artifact_name"], "mission_contract.json")
+        self.assertEqual(d["mission_contract"]["schema_version"], "1")
+        self.assertEqual(
+            d["artifacts"],
+            {
+                "mission_contract": "mission_contract.json",
+                "mission_plan": "pi_mission_plan.json",
+                "mission_prompt": "pi_mission_prompt.md",
+                "executor_log": "pi-executor.log",
+            },
+        )
+
+    def test_to_dict_does_not_emit_known_typo_keys(self) -> None:
+        plan = self._minimal_plan()
+        raw = json.dumps(pi_mission_plan_to_dict(plan), sort_keys=True)
+
+        for typo in ("validato_logs", "requiredvalidators", "required validators"):
+            self.assertNotIn(typo, raw)
 
     def test_round_trip_through_json(self) -> None:
         plan = self._minimal_plan()
@@ -517,6 +578,43 @@ class ReadPiMissionPlanTests(unittest.TestCase):
             self.assertEqual(tuple(re_plan.required_validators), ("pytest", "openspec"))
             self.assertFalse(re_plan.human_approval_required)
             self.assertIn("custom_ban", re_plan.forbidden_actions)
+            self.assertEqual(
+                re_plan.artifacts["mission_prompt"],
+                "pi_mission_prompt.md",
+            )
+
+    def test_read_legacy_plan_without_new_artifact_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pi_mission_plan.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "task_key": "AT-LEGACY",
+                        "executor": "pi",
+                        "steps": [
+                            {
+                                "step_id": "scout",
+                                "role": "scout",
+                                "title": "Inspect",
+                                "objective": "Inspect.",
+                                "allowed_actions": [],
+                                "forbidden_actions": list(_REQUIRED_FORBIDDEN),
+                                "expected_outputs": [],
+                            }
+                        ],
+                        "required_validators": ["pytest"],
+                        "forbidden_actions": list(_REQUIRED_FORBIDDEN),
+                        "human_approval_required": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plan = read_pi_mission_plan(path)
+
+        self.assertEqual(plan.mission_contract["artifact_name"], "mission_contract.json")
+        self.assertEqual(plan.artifacts["mission_plan"], "pi_mission_plan.json")
 
     def test_read_nonexistent_raises_file_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -616,6 +714,15 @@ class RenderPiMissionPlanSectionTests(unittest.TestCase):
         self.assertTrue(
             "do not approve" in result.lower(),
             f"Expected 'do not approve' in output, got:\n{result[:300]}",
+        )
+
+    def test_rendered_section_does_not_duplicate_protocol_step_warning(self) -> None:
+        plan = self._minimal_plan()
+        result = render_pi_mission_plan_section(plan)
+
+        self.assertEqual(
+            result.count("These are structured protocol steps"),
+            1,
         )
 
     def test_output_is_deterministic(self) -> None:

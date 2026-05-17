@@ -31,6 +31,10 @@ from agent_taskflow.mission_contract import (
 # ----------------------------------------------------------------------
 
 SCHEMA_VERSION = "1"
+MISSION_CONTRACT_ARTIFACT = "mission_contract.json"
+PI_MISSION_PLAN_ARTIFACT = "pi_mission_plan.json"
+PI_MISSION_PROMPT_ARTIFACT = "pi_mission_prompt.md"
+PI_EXECUTOR_LOG_ARTIFACT = "pi-executor.log"
 
 # Every step must inherit these forbidden actions. They are never removable.
 _REQUIRED_FORBIDDEN_ACTIONS = (
@@ -43,6 +47,17 @@ _REQUIRED_FORBIDDEN_ACTIONS = (
     "delete_worktree",
     "delete_branch",
 )
+
+
+def _dedupe_preserving_order(values: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return tuple(deduped)
 
 
 # ----------------------------------------------------------------------
@@ -94,6 +109,8 @@ class PiMissionPlan:
     steps: tuple[PiMissionStep, ...]
     required_validators: tuple[str, ...]
     forbidden_actions: tuple[str, ...]
+    mission_contract: dict[str, str]
+    artifacts: dict[str, str]
     human_approval_required: bool
 
     def __post_init__(self) -> None:
@@ -109,6 +126,10 @@ class PiMissionPlan:
             object.__setattr__(self, "required_validators", tuple(self.required_validators))
         if not isinstance(self.forbidden_actions, tuple):
             object.__setattr__(self, "forbidden_actions", tuple(self.forbidden_actions))
+        if not isinstance(self.mission_contract, dict):
+            object.__setattr__(self, "mission_contract", dict(self.mission_contract))
+        if not isinstance(self.artifacts, dict):
+            object.__setattr__(self, "artifacts", dict(self.artifacts))
         # Safety: verify no step allows dangerous actions
         for step in self.steps:
             overlap = set(step.forbidden_actions) & set(_REQUIRED_FORBIDDEN_ACTIONS)
@@ -282,19 +303,21 @@ def build_pi_mission_plan(
         contract_forbidden = contract.forbidden_actions
         required_validators = contract.required_validators
         human_approval = contract.human_approval_required
+        contract_schema_version = contract.schema_version
     else:
         task_key = contract.get("task_key", "")
         executor = contract.get("executor", "")
         contract_forbidden = tuple(contract.get("forbidden_actions", []) or [])
         required_validators = tuple(contract.get("required_validators", []) or [])
         human_approval = bool(contract.get("human_approval_required", True))
+        contract_schema_version = str(contract.get("schema_version", SCHEMA_VERSION))
 
     if not task_key or not str(task_key).strip():
         raise ValueError("contract is missing required field: 'task_key'")
     if not executor or not str(executor).strip():
         raise ValueError("contract is missing required field: 'executor'")
 
-    forbidden = _REQUIRED_FORBIDDEN_ACTIONS + contract_forbidden
+    forbidden = _dedupe_preserving_order(_REQUIRED_FORBIDDEN_ACTIONS + contract_forbidden)
 
     plan = PiMissionPlan(
         schema_version=SCHEMA_VERSION,
@@ -309,6 +332,16 @@ def build_pi_mission_plan(
         ),
         required_validators=required_validators,
         forbidden_actions=forbidden,
+        mission_contract={
+            "artifact_name": MISSION_CONTRACT_ARTIFACT,
+            "schema_version": contract_schema_version,
+        },
+        artifacts={
+            "mission_contract": MISSION_CONTRACT_ARTIFACT,
+            "mission_plan": PI_MISSION_PLAN_ARTIFACT,
+            "mission_prompt": PI_MISSION_PROMPT_ARTIFACT,
+            "executor_log": PI_EXECUTOR_LOG_ARTIFACT,
+        },
         human_approval_required=human_approval,
     )
     return plan
@@ -339,6 +372,8 @@ def pi_mission_plan_to_dict(plan: PiMissionPlan) -> dict:
         ],
         "required_validators": list(plan.required_validators),
         "forbidden_actions": list(plan.forbidden_actions),
+        "mission_contract": dict(plan.mission_contract),
+        "artifacts": dict(plan.artifacts),
         "human_approval_required": plan.human_approval_required,
     }
 
@@ -399,6 +434,22 @@ def read_pi_mission_plan(path: str | Path) -> PiMissionPlan:
         steps=tuple(steps),
         required_validators=tuple(d.get("required_validators", []) or []),
         forbidden_actions=tuple(d.get("forbidden_actions", []) or []),
+        mission_contract=dict(
+            d.get("mission_contract")
+            or {
+                "artifact_name": MISSION_CONTRACT_ARTIFACT,
+                "schema_version": SCHEMA_VERSION,
+            }
+        ),
+        artifacts=dict(
+            d.get("artifacts")
+            or {
+                "mission_contract": MISSION_CONTRACT_ARTIFACT,
+                "mission_plan": PI_MISSION_PLAN_ARTIFACT,
+                "mission_prompt": PI_MISSION_PROMPT_ARTIFACT,
+                "executor_log": PI_EXECUTOR_LOG_ARTIFACT,
+            }
+        ),
         human_approval_required=bool(d.get("human_approval_required", True)),
     )
 
@@ -489,7 +540,6 @@ def render_pi_mission_plan_section(
 
     lines.append("## Pi Mission Plan\n")
     lines.append(
-        "**These are structured protocol steps, not independent autonomous agents.**\n"
         "**These are structured protocol steps, not independent autonomous agents.**\n"
         "Complete them within one controlled Pi executor run.\n"
         "**Do not create new uncontrolled subagents.**\n"
