@@ -326,6 +326,7 @@ class StoreTests(unittest.TestCase):
                 worktree_path="/home/ubuntu/agent-taskflow/.worktrees/AT-0003",
                 branch="task/AT-0003",
                 base_branch="main",
+                base_sha="abc123",
                 status="active",
             )
         )
@@ -336,11 +337,24 @@ class StoreTests(unittest.TestCase):
         assert worktree is not None
         self.assertEqual(worktree.task_key, "AT-0003")
         self.assertEqual(worktree.branch, "task/AT-0003")
+        self.assertEqual(worktree.base_sha, "abc123")
         self.assertEqual(worktree.status, "active")
         self.assertEqual(
             worktree.worktree_path,
             Path("/home/ubuntu/agent-taskflow/.worktrees/AT-0003"),
         )
+
+    def test_task_worktree_base_sha_migration_is_idempotent(self) -> None:
+        init_db(self.db_path)
+        init_db(self.db_path)
+
+        with sqlite3.connect(self.db_path) as conn:
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(task_worktrees)").fetchall()
+            }
+
+        self.assertIn("base_sha", columns)
 
     def test_task_worktrees_can_be_filtered_by_project_and_status(self) -> None:
         self.store.upsert_task(self.make_task("AT-0003", project="agent-taskflow"))

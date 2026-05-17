@@ -29,13 +29,15 @@ checks, git checks, and human review.
 | Component | Ownership |
 | --- | --- |
 | Dispatcher / orchestrator | Deterministic lifecycle and scheduling code |
-| Workspace manager | Planned deterministic workspace setup and cleanup policy executor |
+| Workspace manager | Deterministic workspace setup foundation; cleanup policy remains deferred |
 | Executor adapter | Deterministic CLI wrapper and result normalizer |
 | AI coding agent | Bounded implementation worker |
 | Validator | Deterministic proof-of-work checker |
 | Human reviewer | Final approve / reject / rerun / block decision maker |
 
-The workspace manager is planned but not implemented in this phase.
+The workspace manager foundation can prepare isolated local git worktrees for
+tasks. Cleanup policy remains deferred and must stay human-controlled or
+deterministic-policy-controlled.
 
 ## Task Lifecycle
 
@@ -58,11 +60,15 @@ validation.
 - Each task or run should use an isolated workspace.
 - Direct writes to the main working tree should be avoided for agent runs.
 - The workspace path must be recorded.
+- The workspace manager foundation prepares task worktrees under
+  `<repo>/.worktrees/<task-key>` from a resolved base ref and records the base
+  commit SHA when integrated with the local store.
 - Failed runs should preserve the workspace where useful for debugging.
 - Cleanup should be human-controlled or deterministic policy-controlled, not
   worker-controlled.
 
-This phase does not implement a workspace manager.
+This foundation does not implement GitHub Issue sync, PR creation, merge, push,
+remote worker scheduling, or automatic cleanup/delete behavior.
 
 ## Executor Policy
 

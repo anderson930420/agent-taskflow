@@ -90,6 +90,7 @@ def init_db(path: str | Path | None = None) -> None:
                 worktree_path TEXT NOT NULL,
                 branch TEXT NOT NULL,
                 base_branch TEXT,
+                base_sha TEXT,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 cleaned_at TEXT,
@@ -116,6 +117,13 @@ def init_db(path: str | Path | None = None) -> None:
             conn.execute("ALTER TABLE tasks ADD COLUMN tools TEXT")
         if "pi_bin" not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN pi_bin TEXT")
+
+        worktree_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(task_worktrees)").fetchall()
+        }
+        if "base_sha" not in worktree_columns:
+            conn.execute("ALTER TABLE task_worktrees ADD COLUMN base_sha TEXT")
 
 
 def _row_to_task(row: sqlite3.Row) -> TaskRecord:
@@ -179,6 +187,7 @@ def _row_to_worktree(row: sqlite3.Row) -> TaskWorktreeRecord:
         worktree_path=Path(row["worktree_path"]),
         branch=row["branch"],
         base_branch=row["base_branch"],
+        base_sha=row["base_sha"] if "base_sha" in row.keys() else None,
         status=row["status"],
         created_at=row["created_at"],
         cleaned_at=row["cleaned_at"],
@@ -747,16 +756,18 @@ class TaskMirrorStore:
                     worktree_path,
                     branch,
                     base_branch,
+                    base_sha,
                     status,
                     created_at,
                     cleaned_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_key) DO UPDATE SET
                     repo_path = excluded.repo_path,
                     worktree_path = excluded.worktree_path,
                     branch = excluded.branch,
                     base_branch = excluded.base_branch,
+                    base_sha = excluded.base_sha,
                     status = excluded.status,
                     cleaned_at = excluded.cleaned_at
                 """,
@@ -766,6 +777,7 @@ class TaskMirrorStore:
                     str(record.worktree_path),
                     record.branch,
                     record.base_branch,
+                    record.base_sha,
                     record.status,
                     created_at,
                     record.cleaned_at,
