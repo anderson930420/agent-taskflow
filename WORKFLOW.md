@@ -42,6 +42,13 @@ Explicit CLI and API entrypoints can request workspace preparation before
 dispatcher execution. The dispatcher consumes recorded prepared workspaces; it
 does not silently create them.
 
+The prepared workspace golden-path smoke
+(`scripts/run_prepared_workspace_golden_path_smoke.py`) proves the local flow
+from explicit workspace preparation through dispatcher execution, validation,
+artifact readback, and `waiting_approval`. It is local-only and does not add
+GitHub Issue sync, PR creation, push, merge, cleanup automation, or dispatcher
+auto-create behavior.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
