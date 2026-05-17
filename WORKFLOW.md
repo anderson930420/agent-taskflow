@@ -38,6 +38,9 @@ checks, git checks, and human review.
 The workspace manager foundation can prepare isolated local git worktrees for
 tasks. Cleanup policy remains deferred and must stay human-controlled or
 deterministic-policy-controlled.
+Explicit CLI and API entrypoints can request workspace preparation before
+dispatcher execution. The dispatcher consumes recorded prepared workspaces; it
+does not silently create them.
 
 ## Task Lifecycle
 
@@ -68,7 +71,8 @@ validation.
   worker-controlled.
 
 This foundation does not implement GitHub Issue sync, PR creation, merge, push,
-remote worker scheduling, or automatic cleanup/delete behavior.
+remote worker scheduling, frontend expansion, or automatic cleanup/delete
+behavior.
 
 ## Executor Policy
 

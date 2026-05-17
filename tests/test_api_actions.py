@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -137,6 +138,71 @@ class ApiActionTests(unittest.TestCase):
                 status="active",
             )
         )
+
+    def add_task_without_worktree(
+        self,
+        task_key: str = "AT-0009",
+        *,
+        status: str = "queued",
+    ) -> None:
+        artifact_dir = self.root / "artifacts" / task_key
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        self.store.upsert_task(
+            TaskRecord(
+                task_key=task_key,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                hermes_task_id=f"t_{task_key.lower().replace('-', '_')}",
+                title=f"Task {task_key}",
+                status=status,
+                repo_path=self.repo_path,
+                artifact_dir=artifact_dir,
+            )
+        )
+
+    def init_git_repo(self) -> str:
+        subprocess.run(["git", "init"], cwd=self.repo_path, shell=False, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "agent-taskflow@example.invalid"],
+            cwd=self.repo_path,
+            shell=False,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Agent Taskflow"],
+            cwd=self.repo_path,
+            shell=False,
+            check=True,
+        )
+        (self.repo_path / "README.md").write_text("# test repo\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "README.md"],
+            cwd=self.repo_path,
+            shell=False,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "initial"],
+            cwd=self.repo_path,
+            shell=False,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "branch", "-M", "main"],
+            cwd=self.repo_path,
+            shell=False,
+            check=True,
+        )
+        completed = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=self.repo_path,
+            shell=False,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return completed.stdout.strip()
 
     def assert_no_sensitive_keys(self, value: Any) -> None:
         if isinstance(value, dict):
@@ -514,6 +580,52 @@ class ApiActionTests(unittest.TestCase):
         self.assertEqual(payload["action"], "validate")
         self.assertIn("not implemented", payload["message"])
         self.assertEqual(self.dispatcher_factory_calls, [])
+
+    def test_prepare_workspace_success_records_worktree_with_base_sha(self) -> None:
+        base_sha = self.init_git_repo()
+        self.add_task_without_worktree()
+
+        response = self.client.post("/api/tasks/AT-0009/prepare-workspace", json={})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "prepare-workspace")
+        self.assertEqual(payload["status"], "prepared")
+        self.assertEqual(payload["item"]["base_sha"], base_sha)
+        self.assertEqual(payload["item"]["worktree_path"], str(self.worktree_path))
+        worktree = self.store.get_task_worktree("AT-0009")
+        self.assertIsNotNone(worktree)
+        assert worktree is not None
+        self.assertEqual(worktree.worktree_path, self.worktree_path)
+        self.assertEqual(worktree.base_sha, base_sha)
+        self.assertEqual(worktree.status, "active")
+
+    def test_prepare_workspace_blocked_returns_ok_false(self) -> None:
+        self.init_git_repo()
+        self.add_task_without_worktree()
+        self.worktree_path.mkdir(parents=True)
+
+        response = self.client.post("/api/tasks/AT-0009/prepare-workspace", json={})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["action"], "prepare-workspace")
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("not registered", payload["message"])
+        self.assertIsNone(self.store.get_task_worktree("AT-0009"))
+
+    def test_prepare_workspace_does_not_dispatch_executor(self) -> None:
+        self.init_git_repo()
+        self.add_task_without_worktree()
+
+        response = self.client.post("/api/tasks/AT-0009/prepare-workspace", json={})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        self.assertEqual(self.dispatcher_factory_calls, [])
+        self.assertEqual(self.dispatchers, [])
 
     def test_action_responses_do_not_contain_secrets(self) -> None:
         response = self.client.post("/api/tasks", json=self.task_payload())
