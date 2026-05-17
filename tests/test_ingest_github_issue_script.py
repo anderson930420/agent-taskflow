@@ -153,7 +153,7 @@ class IngestGitHubIssueScriptTests(unittest.TestCase):
         self.assertNotIn("git merge", text)
         self.assertNotIn("git rebase", text)
         self.assertNotIn("git branch -d", text)
-        self.assertNotIn("git branch -d", text)
+        self.assertNotIn("git branch -D", text)
         self.assertNotIn("git worktree remove", text)
         self.assertNotIn("dispatch_task", text)
         self.assertNotIn("prepare_task_workspace", text)
