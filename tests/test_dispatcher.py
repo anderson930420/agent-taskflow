@@ -304,6 +304,32 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         self.assertIn("main repo path", result.blocked_reason or "")
 
+    def test_missing_worktree_record_is_blocked_without_creating_workspace(self) -> None:
+        self.worktree_path.rmdir()
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-0007",
+                project="agent-taskflow",
+                board="agent-taskflow",
+                hermes_task_id="t_at_0007",
+                title="Task AT-0007",
+                status="queued",
+                repo_path=self.repo_path,
+                artifact_dir=self.artifact_dir,
+            )
+        )
+        dispatcher = self.make_dispatcher()
+
+        result = dispatcher.dispatch_task("AT-0007")
+
+        task = self.store.get_task("AT-0007")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(task.status, "blocked")
+        self.assertIn("Task worktree not found", result.blocked_reason or "")
+        self.assertFalse(self.worktree_path.exists())
+
     def test_relative_worktree_path_is_rejected(self) -> None:
         self.store.upsert_task(
             TaskRecord(

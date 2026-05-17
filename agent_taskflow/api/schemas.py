@@ -45,6 +45,14 @@ class ValidateTaskRequest(BaseModel):
     validators: list[str] | None = None
 
 
+class PrepareWorkspaceRequest(BaseModel):
+    """Request body for explicit task workspace preparation."""
+
+    base_branch: str = "main"
+    branch: str | None = None
+    worktree_root: str | None = None
+
+
 class ApprovalRequest(BaseModel):
     """Request body for accepting a waiting task after human review.
 
@@ -111,6 +119,21 @@ def dispatcher_result_to_dict(result: Any) -> dict[str, Any]:
             "executor_status": result.executor_status,
             "validator_statuses": result.validator_statuses,
             "blocked_reason": result.blocked_reason,
+        }
+    )
+
+
+def workspace_preparation_result_to_dict(result: Any) -> dict[str, Any]:
+    return json_safe(
+        {
+            "task_key": result.task_key,
+            "repo_path": result.repo_path,
+            "worktree_path": result.worktree_path,
+            "branch": result.branch,
+            "base_branch": result.base_branch,
+            "base_sha": result.base_sha,
+            "status": result.status,
+            "summary": result.summary,
         }
     )
 
@@ -227,4 +250,3 @@ class ArtifactPreviewResponse(BaseModel):
 def artifact_preview_to_dict(data: dict[str, Any]) -> dict[str, Any]:
     """Convert a build_artifact_preview result to a JSON-safe dict."""
     return json_safe(data)
-

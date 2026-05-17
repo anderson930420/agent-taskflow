@@ -17,6 +17,7 @@ from agent_taskflow.api.schemas import (
     ArtifactPreviewResponse,
     BlockTaskRequest,
     CreateTaskRequest,
+    PrepareWorkspaceRequest,
     RejectRequest,
     StartTaskRequest,
     ValidateTaskRequest,
@@ -31,6 +32,7 @@ from agent_taskflow.api.schemas import (
     project_to_dict,
     task_to_dict,
     validation_result_to_dict,
+    workspace_preparation_result_to_dict,
 )
 from agent_taskflow.api.review import (
     build_artifact_file_summaries,
@@ -46,6 +48,10 @@ from agent_taskflow.governance import (
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord, require_absolute_path
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.workspace_manager import (
+    WorkspacePreparationRequest,
+    prepare_task_workspace,
+)
 
 
 SERVICE_NAME = "agent-taskflow-api"
@@ -292,6 +298,36 @@ def create_app(
                 message="validation-only endpoint is not implemented yet",
                 item=task_to_dict(task),
             ),
+        )
+
+    @app.post("/api/tasks/{task_key}/prepare-workspace", response_model=ActionResponse)
+    def prepare_workspace(
+        task_key: str,
+        request: PrepareWorkspaceRequest | None = None,
+        current_store: TaskMirrorStore = Depends(get_store),
+    ) -> dict[str, object]:
+        task = task_or_404(task_key, current_store)
+        request = request or PrepareWorkspaceRequest()
+
+        try:
+            workspace_request = WorkspacePreparationRequest(
+                task_key=task.task_key,
+                repo_path=task.repo_path,
+                base_branch=request.base_branch,
+                branch=request.branch,
+                worktree_root=request.worktree_root,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        result = prepare_task_workspace(workspace_request, store=current_store)
+        return action_response(
+            ok=result.ok,
+            action="prepare-workspace",
+            task_key=result.task_key,
+            status=result.status,
+            message=result.summary,
+            item=workspace_preparation_result_to_dict(result),
         )
 
     @app.post("/api/tasks/{task_key}/approve", response_model=ActionResponse)
