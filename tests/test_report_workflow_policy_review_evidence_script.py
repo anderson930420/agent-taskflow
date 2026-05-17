@@ -60,6 +60,13 @@ def _run_main(argv: list[str]) -> tuple[int, str]:
 class ReportWorkflowPolicyReviewEvidenceScriptTests(unittest.TestCase):
     """Tests for the report workflow policy review evidence script."""
 
+    def test_module_docstring_describes_generate_and_no_generate_modes(self) -> None:
+        module = _load_script_module()
+
+        self.assertIn("Default mode generates/writes", module.__doc__)
+        self.assertIn("--no-generate", module.__doc__)
+        self.assertIn("without modifying artifact files", module.__doc__)
+
     def test_default_generate_mode_exits_zero(self) -> None:
         exit_code, output = _run_main(["--keep-artifacts"])
         self.assertEqual(exit_code, 0)

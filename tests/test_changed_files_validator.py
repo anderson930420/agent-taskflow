@@ -72,6 +72,33 @@ class ChangedFilesValidatorTests(unittest.TestCase):
         )
         write_mission_contract(contract, artifact_dir=self.artifact_dir)
 
+    def write_raw_contract(
+        self,
+        *,
+        allowed_paths: object,
+        forbidden_paths: object = (),
+    ) -> None:
+        contract = {
+            "schema_version": "1",
+            "task_key": "AT-CF01",
+            "goal": "Changed files validator test.",
+            "repo_path": str(self.repo),
+            "worktree_path": str(self.repo),
+            "artifact_dir": str(self.artifact_dir),
+            "executor": "manual",
+            "required_validators": ["changed-files"],
+            "forbidden_actions": ["push", "merge", "cleanup"],
+            "expected_artifacts": ["changed-files-audit.json"],
+            "allowed_paths": allowed_paths,
+            "forbidden_paths": forbidden_paths,
+            "human_approval_required": True,
+            "governance_rules": [],
+        }
+        (self.artifact_dir / "mission_contract.json").write_text(
+            json.dumps(contract),
+            encoding="utf-8",
+        )
+
     def make_context(self) -> ValidatorContext:
         return ValidatorContext(
             task_key="AT-CF01",
@@ -140,6 +167,38 @@ class ChangedFilesValidatorTests(unittest.TestCase):
         self.assertEqual(audit["changed_files"], [])
         self.assertEqual(audit["violations"], [])
         self.assertEqual(audit["status"], "passed")
+
+    def test_malformed_allowed_paths_non_string_blocks(self) -> None:
+        self.write_raw_contract(allowed_paths=["src", 123])
+
+        result = ChangedFilesValidator().run(self.make_context())
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("Malformed path policy", result.summary)
+
+    def test_malformed_allowed_paths_empty_string_blocks(self) -> None:
+        self.write_raw_contract(allowed_paths=[""])
+
+        result = ChangedFilesValidator().run(self.make_context())
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("Malformed path policy", result.summary)
+
+    def test_malformed_allowed_paths_absolute_path_blocks(self) -> None:
+        self.write_raw_contract(allowed_paths=["/tmp/src"])
+
+        result = ChangedFilesValidator().run(self.make_context())
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("Malformed path policy", result.summary)
+
+    def test_malformed_allowed_paths_traversal_blocks(self) -> None:
+        self.write_raw_contract(allowed_paths=["../src"])
+
+        result = ChangedFilesValidator().run(self.make_context())
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("Malformed path policy", result.summary)
 
     def test_registry_includes_changed_files_validator(self) -> None:
         self.assertIn("changed-files", list_validator_names())

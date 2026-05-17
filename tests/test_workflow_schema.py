@@ -148,6 +148,84 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assertIn("path_policy.allowed_paths is required", result.errors)
         self.assertIn("path_policy.forbidden_paths is required", result.errors)
 
+    def test_allowed_executors_entries_must_be_non_empty_strings(self) -> None:
+        data = _example_data()
+        data["allowed_executors"] = ["manual", "", 123]
+
+        with _policy_file(data) as path:
+            result = load_workflow_policy(path).validate()
+
+        self.assertFalse(result.passed)
+        self.assertIn("allowed_executors[1] must be a non-empty string", result.errors)
+        self.assertIn("allowed_executors[2] must be a non-empty string", result.errors)
+
+    def test_required_validators_entries_must_be_non_empty_strings(self) -> None:
+        data = _example_data()
+        data["required_validators"] = ["policy", "  ", None]
+
+        with _policy_file(data) as path:
+            result = load_workflow_policy(path).validate()
+
+        self.assertFalse(result.passed)
+        self.assertIn("required_validators[1] must be a non-empty string", result.errors)
+        self.assertIn("required_validators[2] must be a non-empty string", result.errors)
+
+    def test_optional_validators_must_be_list_of_non_empty_strings(self) -> None:
+        data = _example_data()
+        data["optional_validators"] = ["openspec", ""]
+
+        with _policy_file(data) as path:
+            result = load_workflow_policy(path).validate()
+
+        self.assertFalse(result.passed)
+        self.assertIn("optional_validators[1] must be a non-empty string", result.errors)
+
+    def test_path_policy_values_must_be_lists(self) -> None:
+        data = _example_data()
+        data["path_policy"]["allowed_paths"] = "src"
+        data["path_policy"]["forbidden_paths"] = {"path": "secrets"}
+
+        with _policy_file(data) as path:
+            result = load_workflow_policy(path).validate()
+
+        self.assertFalse(result.passed)
+        self.assertIn("path_policy.allowed_paths must be a list", result.errors)
+        self.assertIn("path_policy.forbidden_paths must be a list", result.errors)
+
+    def test_path_policy_rejects_absolute_and_traversal_paths(self) -> None:
+        data = _example_data()
+        data["path_policy"]["allowed_paths"] = ["/tmp/src", "../src", "src/../tests"]
+        data["path_policy"]["forbidden_paths"] = [".", "..", ""]
+
+        with _policy_file(data) as path:
+            result = load_workflow_policy(path).validate()
+
+        self.assertFalse(result.passed)
+        self.assertIn("path_policy.allowed_paths[0] must be a safe repo-relative path", result.errors)
+        self.assertIn("path_policy.allowed_paths[1] must be a safe repo-relative path", result.errors)
+        self.assertIn("path_policy.allowed_paths[2] must be a safe repo-relative path", result.errors)
+        self.assertIn("path_policy.forbidden_paths[0] must be a safe repo-relative path", result.errors)
+        self.assertIn("path_policy.forbidden_paths[1] must be a safe repo-relative path", result.errors)
+        self.assertIn("path_policy.forbidden_paths[2] must be a safe repo-relative path", result.errors)
+
+    def test_forbidden_actions_entries_must_be_non_empty_strings(self) -> None:
+        data = _example_data()
+        data["forbidden_actions"] = [
+            "self_approve",
+            "push",
+            "merge",
+            "cleanup",
+            "",
+            123,
+        ]
+
+        with _policy_file(data) as path:
+            result = load_workflow_policy(path).validate()
+
+        self.assertFalse(result.passed)
+        self.assertIn("forbidden_actions[4] must be a non-empty string", result.errors)
+        self.assertIn("forbidden_actions[5] must be a non-empty string", result.errors)
+
     def test_raw_data_is_copied_from_input_file(self) -> None:
         data = _example_data()
         original = copy.deepcopy(data)

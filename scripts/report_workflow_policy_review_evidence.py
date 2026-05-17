@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Standalone workflow policy review evidence report command.
 
-Reads or generates workflow policy proof-of-work artifacts and outputs a
-read-only JSON report using existing review evidence helpers.
+Reads or generates workflow policy proof-of-work artifacts and outputs a JSON
+report using existing review evidence helpers.
+
+Default mode generates/writes workflow_policy_summary.json and
+artifact_index.json in the selected artifact directory. Use --no-generate to
+read existing artifacts without modifying artifact files.
 
 This is a standalone API-free reporting command. It does not:
 - call dispatcher, executor, validator registry, API, or Mission Control UI
 - create approval/merge/push/cleanup/delete artifacts
-- modify artifact file contents
 - add endpoints or UI elements
 """
 

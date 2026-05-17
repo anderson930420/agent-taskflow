@@ -322,9 +322,198 @@ class ReviewEvidenceApiTests(unittest.TestCase):
         # Large content should not contain secret patterns
         self.assertFalse(payload["content"].startswith("secret"))
 
+    def test_artifact_preview_redacts_secret_in_large_truncated_file(self) -> None:
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        large_content = "TOKEN=sk-secret-token-value\n" + ("x" * (25 * 1024))
+        (artifact_dir / "large-env.log").write_text(large_content, encoding="utf-8")
+
+        response = self.client.get("/api/tasks/AT-0100/artifacts/large-env.log")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIsNone(payload["content"])
+        self.assertTrue(payload["truncated"])
+        self.assertIn("secret", payload["preview_reason"].lower())
+
     # ------------------------------------------------------------------
     # review.py helper tests
     # ------------------------------------------------------------------
+
+    def _write_workflow_policy_artifacts(
+        self,
+        artifact_dir: Path,
+        *,
+        index_artifacts: list[object] | None = None,
+        omit_optional_validators: bool = False,
+    ) -> None:
+        summary = {
+            "artifact_type": "workflow_policy_summary",
+            "schema_version": "0.1",
+            "source_path": "/tmp/workflow-policy.example.json",
+            "validation_status": "passed",
+            "validation_errors": [],
+            "validation_warnings": [],
+            "allowed_executors": ["manual", "shell", "opencode", "pi"],
+            "required_validators": ["policy", "changed-files"],
+            "optional_validators": ["openspec"],
+            "path_policy": {"allowed_paths": [], "forbidden_paths": []},
+            "workspace_policy": {"isolation_required": True},
+            "proof_of_work": {"required_artifacts": ["mission_contract"]},
+            "human_review": {"required": True},
+            "forbidden_actions": ["self_approve", "push", "merge", "cleanup"],
+            "deferred_integrations": [],
+            "governance_invariants": {"ai_workers_may_approve": False},
+            "generated_at": "2026-01-01T00:00:00Z",
+        }
+        if omit_optional_validators:
+            summary.pop("optional_validators")
+        artifacts = index_artifacts
+        if artifacts is None:
+            artifacts = [
+                {
+                    "name": "workflow_policy_summary",
+                    "artifact_type": "workflow_policy_summary",
+                    "path": "workflow_policy_summary.json",
+                    "required": True,
+                    "description": "Machine-readable workflow policy summary artifact.",
+                }
+            ]
+        index = {
+            "artifact_index_version": "0.1",
+            "package_type": "workflow_policy_proof_of_work",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "artifacts": artifacts,
+        }
+        (artifact_dir / "workflow_policy_summary.json").write_text(
+            json.dumps(summary),
+            encoding="utf-8",
+        )
+        (artifact_dir / "artifact_index.json").write_text(
+            json.dumps(index),
+            encoding="utf-8",
+        )
+
+    def test_workflow_policy_evidence_handles_missing_optional_validators(self) -> None:
+        from agent_taskflow.api.review import build_workflow_policy_evidence
+
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        self._write_workflow_policy_artifacts(
+            artifact_dir,
+            omit_optional_validators=True,
+        )
+
+        evidence = build_workflow_policy_evidence(artifact_dir)
+
+        self.assertTrue(evidence["available"])
+        self.assertEqual(evidence["summary"]["optional_validators"], [])
+
+    def test_workflow_policy_evidence_rejects_missing_summary_index_entry(self) -> None:
+        from agent_taskflow.api.review import build_workflow_policy_evidence
+
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        self._write_workflow_policy_artifacts(artifact_dir, index_artifacts=[])
+
+        self.assertFalse(build_workflow_policy_evidence(artifact_dir)["available"])
+
+    def test_workflow_policy_evidence_rejects_wrong_summary_index_path(self) -> None:
+        from agent_taskflow.api.review import build_workflow_policy_evidence
+
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        self._write_workflow_policy_artifacts(
+            artifact_dir,
+            index_artifacts=[
+                {
+                    "name": "workflow_policy_summary",
+                    "artifact_type": "workflow_policy_summary",
+                    "path": "summary.json",
+                    "required": True,
+                }
+            ],
+        )
+
+        self.assertFalse(build_workflow_policy_evidence(artifact_dir)["available"])
+
+    def test_workflow_policy_evidence_rejects_wrong_summary_index_type(self) -> None:
+        from agent_taskflow.api.review import build_workflow_policy_evidence
+
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        self._write_workflow_policy_artifacts(
+            artifact_dir,
+            index_artifacts=[
+                {
+                    "name": "workflow_policy_summary",
+                    "artifact_type": "other",
+                    "path": "workflow_policy_summary.json",
+                    "required": True,
+                }
+            ],
+        )
+
+        self.assertFalse(build_workflow_policy_evidence(artifact_dir)["available"])
+
+    def test_workflow_policy_evidence_rejects_summary_index_required_false(self) -> None:
+        from agent_taskflow.api.review import build_workflow_policy_evidence
+
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        self._write_workflow_policy_artifacts(
+            artifact_dir,
+            index_artifacts=[
+                {
+                    "name": "workflow_policy_summary",
+                    "artifact_type": "workflow_policy_summary",
+                    "path": "workflow_policy_summary.json",
+                    "required": False,
+                }
+            ],
+        )
+
+        self.assertFalse(build_workflow_policy_evidence(artifact_dir)["available"])
+
+    def test_workflow_policy_evidence_rejects_absolute_index_path(self) -> None:
+        from agent_taskflow.api.review import build_workflow_policy_evidence
+
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        self._write_workflow_policy_artifacts(
+            artifact_dir,
+            index_artifacts=[
+                {
+                    "name": "workflow_policy_summary",
+                    "artifact_type": "workflow_policy_summary",
+                    "path": "/tmp/workflow_policy_summary.json",
+                    "required": True,
+                }
+            ],
+        )
+
+        self.assertFalse(build_workflow_policy_evidence(artifact_dir)["available"])
+
+    def test_workflow_policy_evidence_rejects_traversal_index_path(self) -> None:
+        from agent_taskflow.api.review import build_workflow_policy_evidence
+
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        self._write_workflow_policy_artifacts(
+            artifact_dir,
+            index_artifacts=[
+                {
+                    "name": "workflow_policy_summary",
+                    "artifact_type": "workflow_policy_summary",
+                    "path": "../workflow_policy_summary.json",
+                    "required": True,
+                }
+            ],
+        )
+
+        self.assertFalse(build_workflow_policy_evidence(artifact_dir)["available"])
+
+    def test_workflow_policy_evidence_rejects_non_dict_index_entry(self) -> None:
+        from agent_taskflow.api.review import build_workflow_policy_evidence
+
+        artifact_dir = self._get_artifact_dir("AT-0100")
+        self._write_workflow_policy_artifacts(
+            artifact_dir,
+            index_artifacts=["workflow_policy_summary"],
+        )
+
+        self.assertFalse(build_workflow_policy_evidence(artifact_dir)["available"])
 
     def test_review_evidence_response_matches_expected_schema(self) -> None:
         artifact_dir = self._get_artifact_dir("AT-0100")

@@ -31,15 +31,22 @@ class ChangedFile:
 
 def _normalize_policy_paths(raw_paths: object) -> list[str]:
     if not isinstance(raw_paths, list):
-        return []
+        raise ValueError("must be a list")
 
     paths: list[str] = []
-    for raw in raw_paths:
+    for index, raw in enumerate(raw_paths):
         if not isinstance(raw, str):
-            continue
-        value = raw.strip().replace("\\", "/").strip("/")
+            raise ValueError(f"entry {index} must be a string")
+        candidate = raw.strip().replace("\\", "/")
+        if Path(candidate).is_absolute() or candidate.startswith("/"):
+            raise ValueError(f"entry {index} must be a repo-relative path")
+        value = candidate.strip("/")
         if not value or value == ".":
-            continue
+            raise ValueError(f"entry {index} must not be empty")
+        if value == ".." or value.startswith("../") or "/../" in value:
+            raise ValueError(f"entry {index} must not contain '..'")
+        if any(part in {"", "."} for part in value.split("/")):
+            raise ValueError(f"entry {index} must be a normalized repo-relative path")
         paths.append(value)
     return paths
 
@@ -207,20 +214,25 @@ class ChangedFilesValidator(Validator):
                 collection_error = f"Cannot read mission contract: {exc}"
                 log_file.write(f"BLOCKED: {collection_error}\n")
             else:
-                allowed_paths = _normalize_policy_paths(contract.get("allowed_paths", []))
-                forbidden_paths = _normalize_policy_paths(contract.get("forbidden_paths", []))
-                log_file.write(f"allowed_paths: {allowed_paths}\n")
-                log_file.write(f"forbidden_paths: {forbidden_paths}\n")
-
                 try:
-                    changed_files = collect_changed_files(context.worktree_path)
-                except RuntimeError as exc:
-                    collection_error = f"Cannot collect changed files: {exc}"
+                    allowed_paths = _normalize_policy_paths(contract.get("allowed_paths", []))
+                    forbidden_paths = _normalize_policy_paths(contract.get("forbidden_paths", []))
+                except ValueError as exc:
+                    collection_error = f"Malformed path policy in mission contract: {exc}"
                     log_file.write(f"BLOCKED: {collection_error}\n")
                 else:
-                    log_file.write(f"changed_files: {len(changed_files)}\n")
-                    for changed in changed_files:
-                        log_file.write(f"  {changed.status} {changed.path}\n")
+                    log_file.write(f"allowed_paths: {allowed_paths}\n")
+                    log_file.write(f"forbidden_paths: {forbidden_paths}\n")
+
+                    try:
+                        changed_files = collect_changed_files(context.worktree_path)
+                    except RuntimeError as exc:
+                        collection_error = f"Cannot collect changed files: {exc}"
+                        log_file.write(f"BLOCKED: {collection_error}\n")
+                    else:
+                        log_file.write(f"changed_files: {len(changed_files)}\n")
+                        for changed in changed_files:
+                            log_file.write(f"  {changed.status} {changed.path}\n")
 
             audit = self._build_audit(
                 task_key=context.task_key,

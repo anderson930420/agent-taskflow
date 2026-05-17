@@ -119,6 +119,61 @@ def _scan_for_secrets(text: str) -> bool:
     return False
 
 
+def _unavailable_workflow_policy_evidence() -> dict[str, Any]:
+    return {
+        "available": False,
+        "artifact_index": None,
+        "summary": None,
+        "review_artifacts": [],
+    }
+
+
+def _is_safe_relative_artifact_path(raw_path: Any) -> bool:
+    if not isinstance(raw_path, str):
+        return False
+    value = raw_path.strip().replace("\\", "/")
+    if not value or value.startswith("/") or value in {".", ".."}:
+        return False
+    if ".." in value:
+        return False
+    parts = value.split("/")
+    return all(part not in {"", ".", ".."} for part in parts)
+
+
+def _valid_artifact_index_entries(artifacts: Any) -> bool:
+    if not isinstance(artifacts, list):
+        return False
+
+    has_summary_entry = False
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            return False
+
+        name = artifact.get("name")
+        artifact_type = artifact.get("artifact_type")
+        path = artifact.get("path")
+        required = artifact.get("required")
+
+        if not isinstance(name, str) or not name.strip():
+            return False
+        if not isinstance(artifact_type, str) or not artifact_type.strip():
+            return False
+        if not _is_safe_relative_artifact_path(path):
+            return False
+        if not isinstance(required, bool):
+            return False
+
+        if (
+            name == WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE
+            and artifact_type == WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE
+            and path == WORKFLOW_POLICY_SUMMARY_FILENAME
+            and required is True
+        ):
+            has_summary_entry = True
+
+    return has_summary_entry
+
+
 def _read_preview(path: Path) -> tuple[str, bool]:
     """Read a preview from path.
 
@@ -405,6 +460,14 @@ def build_artifact_preview(
             with target_resolved.open("rb") as f:
                 raw = f.read(_MAX_PREVIEW_SIZE)
             text = raw.decode("utf-8", errors="replace")
+            if _scan_for_secrets(text):
+                return {
+                    "name": artifact_name,
+                    "content": None,
+                    "truncated": True,
+                    "size_bytes": target_resolved.stat().st_size,
+                    "preview_reason": "contains high-confidence secret-like assignment; preview not available",
+                }
             return {
                 "name": artifact_name,
                 "content": text,
@@ -525,12 +588,7 @@ def build_workflow_policy_evidence(
     index_exists = index_path.exists()
 
     if not summary_exists or not index_exists:
-        return {
-            "available": False,
-            "artifact_index": None,
-            "summary": None,
-            "review_artifacts": [],
-        }
+        return _unavailable_workflow_policy_evidence()
 
     # Read and parse the index artifact.
     index_data: dict[str, Any] | None = None
@@ -541,12 +599,7 @@ def build_workflow_policy_evidence(
         pass
 
     if index_data is None:
-        return {
-            "available": False,
-            "artifact_index": None,
-            "summary": None,
-            "review_artifacts": [],
-        }
+        return _unavailable_workflow_policy_evidence()
 
     # Read and parse the summary artifact.
     summary_data: dict[str, Any] | None = None
@@ -557,71 +610,31 @@ def build_workflow_policy_evidence(
         pass
 
     if summary_data is None:
-        return {
-            "available": False,
-            "artifact_index": None,
-            "summary": None,
-            "review_artifacts": [],
-        }
+        return _unavailable_workflow_policy_evidence()
 
     # --- Strict index validation ---
     if index_data.get("package_type") != WORKFLOW_POLICY_PACKAGE_TYPE:
-        return {
-            "available": False,
-            "artifact_index": None,
-            "summary": None,
-            "review_artifacts": [],
-        }
+        return _unavailable_workflow_policy_evidence()
     if index_data.get("artifact_index_version") != WORKFLOW_POLICY_ARTIFACT_INDEX_VERSION:
-        return {
-            "available": False,
-            "artifact_index": None,
-            "summary": None,
-            "review_artifacts": [],
-        }
-    if not isinstance(index_data.get("artifacts"), list):
-        return {
-            "available": False,
-            "artifact_index": None,
-            "summary": None,
-            "review_artifacts": [],
-        }
+        return _unavailable_workflow_policy_evidence()
+    if not _valid_artifact_index_entries(index_data.get("artifacts")):
+        return _unavailable_workflow_policy_evidence()
 
     # --- Strict summary validation ---
     if summary_data.get("artifact_type") != WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE:
-        return {
-            "available": False,
-            "artifact_index": None,
-            "summary": None,
-            "review_artifacts": [],
-        }
+        return _unavailable_workflow_policy_evidence()
     if not summary_data.get("validation_status"):
-        return {
-            "available": False,
-            "artifact_index": None,
-            "summary": None,
-            "review_artifacts": [],
-        }
+        return _unavailable_workflow_policy_evidence()
 
     # Verify all required summary fields are present.
     for field in WORKFLOW_POLICY_REQUIRED_SUMMARY_FIELDS:
         if field not in summary_data:
-            return {
-                "available": False,
-                "artifact_index": None,
-                "summary": None,
-                "review_artifacts": [],
-            }
+            return _unavailable_workflow_policy_evidence()
 
     # governance_invariants must be dict or list when present.
     gi = summary_data.get("governance_invariants")
     if gi is not None and not isinstance(gi, (dict, list)):
-        return {
-            "available": False,
-            "artifact_index": None,
-            "summary": None,
-            "review_artifacts": [],
-        }
+        return _unavailable_workflow_policy_evidence()
 
     # --- Build artifact_index section from verified content ---
     artifact_index_section: dict[str, Any] = {
@@ -647,7 +660,7 @@ def build_workflow_policy_evidence(
         "generated_at": summary_data["generated_at"],
         "allowed_executors": summary_data["allowed_executors"],
         "required_validators": summary_data["required_validators"],
-        "optional_validators": summary_data["optional_validators"],
+        "optional_validators": summary_data.get("optional_validators", []),
         "path_policy": summary_data["path_policy"],
         "workspace_policy": summary_data["workspace_policy"],
         "proof_of_work": summary_data["proof_of_work"],

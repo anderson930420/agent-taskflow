@@ -43,6 +43,37 @@ _REQUIRED_FORBIDDEN_ACTIONS = (
 )
 
 
+def _validate_name_list(value: Any, field_name: str, errors: list[str]) -> None:
+    if not isinstance(value, list) or not value:
+        errors.append(f"{field_name} must be a non-empty list")
+        return
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            errors.append(f"{field_name}[{index}] must be a non-empty string")
+
+
+def _is_safe_repo_relative_path(value: str) -> bool:
+    normalized = value.strip().replace("\\", "/")
+    if not normalized or normalized in {".", ".."}:
+        return False
+    if Path(normalized).is_absolute() or normalized.startswith("/"):
+        return False
+    parts = normalized.strip("/").split("/")
+    return all(part not in {"", ".", ".."} for part in parts)
+
+
+def _validate_path_list(value: Any, field_name: str, errors: list[str]) -> None:
+    if not isinstance(value, list):
+        errors.append(f"{field_name} must be a list")
+        return
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            errors.append(f"{field_name}[{index}] must be a string")
+            continue
+        if not _is_safe_repo_relative_path(item):
+            errors.append(f"{field_name}[{index}] must be a safe repo-relative path")
+
+
 @dataclass(frozen=True)
 class WorkflowPolicyValidationResult:
     """Validation result for a draft workflow policy."""
@@ -89,19 +120,36 @@ class WorkflowPolicy:
                 if self.orchestration_boundary.get(flag) is not False:
                     errors.append(f"orchestration_boundary.{flag} must be false")
 
-        if not isinstance(self.allowed_executors, list) or not self.allowed_executors:
-            errors.append("allowed_executors must be a non-empty list")
+        _validate_name_list(self.allowed_executors, "allowed_executors", errors)
 
-        if not isinstance(self.required_validators, list) or not self.required_validators:
-            errors.append("required_validators must be a non-empty list")
+        _validate_name_list(self.required_validators, "required_validators", errors)
+
+        if not isinstance(self.optional_validators, list):
+            errors.append("optional_validators must be a list")
+        else:
+            for index, item in enumerate(self.optional_validators):
+                if not isinstance(item, str) or not item.strip():
+                    errors.append(f"optional_validators[{index}] must be a non-empty string")
 
         if not isinstance(self.path_policy, dict):
             errors.append("path_policy must be an object")
         else:
             if "allowed_paths" not in self.path_policy:
                 errors.append("path_policy.allowed_paths is required")
+            else:
+                _validate_path_list(
+                    self.path_policy.get("allowed_paths"),
+                    "path_policy.allowed_paths",
+                    errors,
+                )
             if "forbidden_paths" not in self.path_policy:
                 errors.append("path_policy.forbidden_paths is required")
+            else:
+                _validate_path_list(
+                    self.path_policy.get("forbidden_paths"),
+                    "path_policy.forbidden_paths",
+                    errors,
+                )
 
         if not isinstance(self.workspace_policy, dict):
             errors.append("workspace_policy must be an object")
@@ -117,6 +165,9 @@ class WorkflowPolicy:
         if not isinstance(self.forbidden_actions, list) or not self.forbidden_actions:
             errors.append("forbidden_actions must be a non-empty list")
         else:
+            for index, action in enumerate(self.forbidden_actions):
+                if not isinstance(action, str) or not action.strip():
+                    errors.append(f"forbidden_actions[{index}] must be a non-empty string")
             forbidden_actions = set(self.forbidden_actions)
             for action in _REQUIRED_FORBIDDEN_ACTIONS:
                 if action not in forbidden_actions:
@@ -164,4 +215,3 @@ def load_workflow_policy(path: Path) -> WorkflowPolicy:
         source_path=source_path,
         raw_data=preserved_raw_data,
     )
-

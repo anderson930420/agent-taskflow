@@ -85,11 +85,15 @@ Each entry in `artifacts` must be a dict with the following fields:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | yes | Human-readable artifact name. |
+| `name` | string | yes | Logical artifact name, e.g., `workflow_policy_summary`. |
 | `artifact_type` | string | yes | Store artifact type, e.g., `workflow_policy_summary`. |
 | `path` | string | yes | Filename relative to the artifact directory. |
 | `required` | boolean | yes | Whether this artifact is required for the package. |
 | `description` | string | no | Human-readable description of the artifact. |
+
+In review evidence, a top-level evidence object's `name` may be a display
+filename such as `artifact_index.json`. Inside `artifact_index.artifacts[]`,
+`name` is the logical artifact name and `path` is the artifact filename.
 
 ### Required Artifact Entry
 
@@ -128,7 +132,7 @@ summary of the workflow policy.
 | `human_review` | object | Human review policy section from the policy. |
 | `forbidden_actions` | list[string] | Actions forbidden by the policy. |
 | `deferred_integrations` | list[string] | Integrations deferred by the policy. |
-| `governance_invariants` | list[object] | Governance invariant checks from the policy. |
+| `governance_invariants` | object | Governance invariant values emitted from the policy orchestration boundary. |
 | `generated_at` | string | ISO-8601 timestamp of artifact generation. |
 
 ### Optional Fields
@@ -172,13 +176,13 @@ summary of the workflow policy.
   },
   "forbidden_actions": ["self_approve", "approve_without_human", "push"],
   "deferred_integrations": ["github_issues_sync", "automatic_pr_creation"],
-  "governance_invariants": [
-    {
-      "invariant": "ai_workers_may_approve",
-      "value": false,
-      "description": "AI workers may not approve their own tasks."
-    }
-  ],
+  "governance_invariants": {
+    "ai_workers_may_schedule_tasks": false,
+    "ai_workers_may_approve": false,
+    "ai_workers_may_merge": false,
+    "ai_workers_may_push": false,
+    "ai_workers_may_cleanup": false
+  },
   "generated_at": "2025-01-01T00:00:00Z"
 }
 ```

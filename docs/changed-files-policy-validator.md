@@ -13,6 +13,12 @@ Path policy is recorded in `mission_contract.json`:
 }
 ```
 
+The validator currently enforces only the `allowed_paths` and
+`forbidden_paths` values present in `mission_contract.json`. The draft
+machine-readable workflow policy's `path_policy` is not automatically injected
+into mission contracts by the dispatcher in this branch. Full
+policy-to-contract runtime enforcement is deferred to a later branch.
+
 Semantics:
 
 - `forbidden_paths` wins over `allowed_paths`.
@@ -24,6 +30,7 @@ Semantics:
   `git status --porcelain=v1 -z --untracked-files=all`.
 - Task artifacts are separate from repo changes when the artifact directory is
   outside the worktree, matching the current Mission Control architecture.
+- Malformed path policy blocks validation instead of widening scope.
 
 The validator writes `changed-files-audit.json` and
 `changed-files-validate.log` into the task artifact directory. Dispatcher/store

@@ -679,7 +679,7 @@ class ApiIntegrationTests(unittest.TestCase):
             "generated_at": "2025-01-01T00:00:00Z",
             "artifacts": [
                 {
-                    "name": WORKFLOW_POLICY_SUMMARY_FILENAME,
+                    "name": WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
                     "artifact_type": WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
                     "path": WORKFLOW_POLICY_SUMMARY_FILENAME,
                     "required": True,

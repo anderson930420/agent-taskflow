@@ -69,6 +69,11 @@ def _resolve_db_path(db_path: Path | None) -> tuple[Path, bool]:
     return Path(tmpdir) / "state.db", True
 
 
+def _cleanup_temp_db_path(db_path: Path) -> None:
+    """Remove the temporary DB directory created by _resolve_db_path(None)."""
+    shutil.rmtree(db_path.parent, ignore_errors=True)
+
+
 def _resolve_artifact_dir(artifact_dir: Path | None) -> tuple[Path, bool]:
     if artifact_dir is not None:
         return Path(artifact_dir), False
@@ -392,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
 
     finally:
         if db_created_temp and not keep_workspace:
-            shutil.rmtree(db_path, ignore_errors=True)
+            _cleanup_temp_db_path(db_path)
         if artifact_created_temp and not keep_workspace:
             shutil.rmtree(artifact_dir, ignore_errors=True)
 

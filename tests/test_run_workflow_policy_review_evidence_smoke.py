@@ -93,6 +93,20 @@ class WorkflowPolicyReviewEvidenceSmokeTests(unittest.TestCase):
         self.assertTrue(db_path.exists())
         self.assertIn(f"db path: {db_path}", output)
 
+    def test_temp_db_cleanup_removes_parent_directory(self) -> None:
+        module = _load_script_module()
+        db_path, created_temp = module._resolve_db_path(None)
+        parent = db_path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_text("placeholder", encoding="utf-8")
+
+        self.assertTrue(created_temp)
+        self.assertTrue(parent.exists())
+
+        module._cleanup_temp_db_path(db_path)
+
+        self.assertFalse(parent.exists())
+
     def test_review_evidence_includes_workflow_policy_summary(self) -> None:
         tmp = self._make_temp_dir()
         artifact_dir = tmp / "artifacts"

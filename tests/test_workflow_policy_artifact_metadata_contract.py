@@ -53,6 +53,11 @@ class WorkflowPolicyArtifactMetadataContractTests(unittest.TestCase):
         self.assertIn("required", self.content)
         self.assertIn("description", self.content)
 
+    def test_doc_clarifies_artifact_index_name_and_path_semantics(self) -> None:
+        self.assertIn("Logical artifact name", self.content)
+        self.assertIn("top-level evidence object's `name`", self.content)
+        self.assertIn("`path` is the artifact filename", self.content)
+
     def test_doc_lists_workflow_policy_summary_required_fields(self) -> None:
         for field in (
             "artifact_type",
@@ -143,6 +148,10 @@ class WorkflowPolicyArtifactMetadataContractTests(unittest.TestCase):
         self.assertIn("validation_status", self.content)
         self.assertIn("passed", self.content)
         self.assertIn("failed", self.content)
+
+    def test_doc_describes_governance_invariants_as_object(self) -> None:
+        self.assertIn("`governance_invariants` | object", self.content)
+        self.assertIn('"ai_workers_may_approve": false', self.content)
 
     def test_doc_states_db_schema_unchanged(self) -> None:
         self.assertIn("schema", self.content.lower())
