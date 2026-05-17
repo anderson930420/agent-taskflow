@@ -73,6 +73,14 @@ worktrees, mutate GitHub, dispatch tasks, prepare workspaces, run executors, or
 run in the background. Human review remains the final gate before any GitHub
 action.
 
+The PR handoff golden-path smoke
+(`scripts/run_pr_handoff_golden_path_smoke.py`) proves the current local chain
+from offline issue ingestion through explicit workspace preparation,
+dispatcher execution, validation, review evidence readback, and local PR
+handoff package generation. It is local-only and does not create PRs, push,
+merge, clean up, mutate GitHub, run webhooks/background polling, change the
+frontend, or run real AI executors.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
