@@ -63,6 +63,16 @@ dispatch and review evidence readback. It is local-only and does not add
 GitHub sync automation, PR creation, push, merge, cleanup, webhooks,
 background polling, frontend changes, or dispatcher auto-create behavior.
 
+The PR Handoff Foundation (`scripts/create_pr_handoff.py`) generates local
+handoff artifacts for a task that has already reached `waiting_approval`. It
+summarizes task state, prepared worktree metadata, branch/base information,
+changed files, executor evidence, validator evidence, artifact evidence,
+review evidence, and proposed draft PR metadata. It is handoff evidence only:
+it does not create PRs, push, merge, rebase, clean up, delete branches, remove
+worktrees, mutate GitHub, dispatch tasks, prepare workspaces, run executors, or
+run in the background. Human review remains the final gate before any GitHub
+action.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
