@@ -26,24 +26,30 @@ class FakeCompletedProcess:
 
 
 class FakeRunner:
-    def __init__(self, completed: FakeCompletedProcess | None = None) -> None:
-        self.completed = completed or FakeCompletedProcess(
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "url": "https://github.com/anderson930420/agent-taskflow/pull/123",
-                    "number": 123,
-                    "headRefName": "task/AT-DRAFT-001",
-                    "baseRefName": "main",
-                    "isDraft": True,
-                }
+    def __init__(self, completed: list[FakeCompletedProcess] | None = None) -> None:
+        self.completed = completed or [
+            FakeCompletedProcess(
+                returncode=0,
+                stdout="https://github.com/anderson930420/agent-taskflow/pull/123\n",
             ),
-        )
+            FakeCompletedProcess(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "url": "https://github.com/anderson930420/agent-taskflow/pull/123",
+                        "number": 123,
+                        "headRefName": "task/AT-DRAFT-001",
+                        "baseRefName": "main",
+                        "isDraft": True,
+                    }
+                ),
+            ),
+        ]
         self.calls: list[dict[str, Any]] = []
 
     def __call__(self, args: list[str], **kwargs: Any) -> FakeCompletedProcess:
         self.calls.append({"args": args, "kwargs": kwargs})
-        return self.completed
+        return self.completed.pop(0)
 
 
 class DraftPrTests(unittest.TestCase):
@@ -183,7 +189,7 @@ class DraftPrTests(unittest.TestCase):
         self.assertEqual(result.status, "dry_run")
         self.assertEqual(runner.calls, [])
 
-    def test_real_creation_executes_exactly_gh_pr_create_draft_shell_false(self) -> None:
+    def test_real_creation_executes_create_then_read_only_view_shell_false(self) -> None:
         runner = FakeRunner()
         result = create_draft_pr(
             self._request(dry_run=False, confirm=True),
@@ -191,37 +197,111 @@ class DraftPrTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "created")
-        self.assertEqual(len(runner.calls), 1)
-        call = runner.calls[0]
+        self.assertEqual(len(runner.calls), 2)
+        create_call = runner.calls[0]
         self.assertEqual(
-            call["args"][:5],
+            create_call["args"][:5],
             ["gh", "pr", "create", "--draft", "--repo"],
         )
-        self.assertIn("--json", call["args"])
+        self.assertIn("--base", create_call["args"])
+        self.assertIn("--head", create_call["args"])
+        self.assertIn("--title", create_call["args"])
+        self.assertIn("--body", create_call["args"])
+        self.assertNotIn("--json", create_call["args"])
+        self.assertIs(create_call["kwargs"]["shell"], False)
+        self.assertEqual(create_call["kwargs"]["cwd"], self.worktree)
+
+        view_call = runner.calls[1]
         self.assertEqual(
-            call["args"][call["args"].index("--json") + 1],
+            view_call["args"][:4],
+            [
+                "gh",
+                "pr",
+                "view",
+                "https://github.com/anderson930420/agent-taskflow/pull/123",
+            ],
+        )
+        self.assertIn("--repo", view_call["args"])
+        self.assertIn("--json", view_call["args"])
+        self.assertEqual(
+            view_call["args"][view_call["args"].index("--json") + 1],
             "url,number,headRefName,baseRefName,isDraft",
         )
-        self.assertIs(call["kwargs"]["shell"], False)
-        self.assertEqual(call["kwargs"]["cwd"], self.worktree)
+        self.assertIs(view_call["kwargs"]["shell"], False)
+        self.assertEqual(view_call["kwargs"]["cwd"], self.worktree)
 
-    def test_real_creation_parses_gh_json_and_requires_is_draft_true(self) -> None:
+    def test_missing_pr_url_from_create_stdout_raises(self) -> None:
         runner = FakeRunner(
-            FakeCompletedProcess(
-                returncode=0,
-                stdout=json.dumps(
-                    {
-                        "url": "https://github.com/anderson930420/agent-taskflow/pull/124",
-                        "number": 124,
-                        "headRefName": "task/AT-DRAFT-001",
-                        "baseRefName": "main",
-                        "isDraft": False,
-                    }
+            [
+                FakeCompletedProcess(returncode=0, stdout="created\n"),
+            ]
+        )
+
+        with self.assertRaisesRegex(DraftPrError, "did not print"):
+            create_draft_pr(self._request(dry_run=False, confirm=True), runner=runner)
+
+    def test_gh_view_invalid_json_raises(self) -> None:
+        runner = FakeRunner(
+            [
+                FakeCompletedProcess(
+                    returncode=0,
+                    stdout="https://github.com/anderson930420/agent-taskflow/pull/124\n",
                 ),
-            )
+                FakeCompletedProcess(returncode=0, stdout="not-json\n"),
+            ]
+        )
+
+        with self.assertRaisesRegex(DraftPrError, "gh pr view returned invalid JSON"):
+            create_draft_pr(self._request(dry_run=False, confirm=True), runner=runner)
+
+    def test_gh_view_requires_is_draft_true(self) -> None:
+        runner = FakeRunner(
+            [
+                FakeCompletedProcess(
+                    returncode=0,
+                    stdout="https://github.com/anderson930420/agent-taskflow/pull/124\n",
+                ),
+                FakeCompletedProcess(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "url": "https://github.com/anderson930420/agent-taskflow/pull/124",
+                            "number": 124,
+                            "headRefName": "task/AT-DRAFT-001",
+                            "baseRefName": "main",
+                            "isDraft": False,
+                        }
+                    ),
+                ),
+            ]
         )
 
         with self.assertRaisesRegex(DraftPrError, "draft PR"):
+            create_draft_pr(self._request(dry_run=False, confirm=True), runner=runner)
+
+    def test_gh_view_base_head_mismatch_raises(self) -> None:
+        runner = FakeRunner(
+            [
+                FakeCompletedProcess(
+                    returncode=0,
+                    stdout="https://github.com/anderson930420/agent-taskflow/pull/125\n",
+                ),
+                FakeCompletedProcess(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "url": "https://github.com/anderson930420/agent-taskflow/pull/125",
+                            "number": 125,
+                            "headRefName": "task/AT-DRAFT-001",
+                            "baseRefName": "release",
+                            "isDraft": True,
+                        }
+                    ),
+                ),
+            ]
+        )
+
+        with self.assertRaisesRegex(DraftPrError, "baseRefName"):
             create_draft_pr(self._request(dry_run=False, confirm=True), runner=runner)
 
     def test_rejects_missing_task(self) -> None:

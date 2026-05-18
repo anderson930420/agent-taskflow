@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import shlex
 import subprocess
 from typing import Any, Callable, Protocol
@@ -154,8 +155,8 @@ def create_draft_pr(
     current_store.init_db()
 
     context = _load_context(current_store, request)
-    command = _build_gh_command(context)
-    preview = DraftPrCommandPreview(tuple(command)).text
+    create_command = _build_gh_create_command(context)
+    preview = DraftPrCommandPreview(tuple(create_command)).text
     should_create = request.confirm_create_pr and not request.dry_run
 
     if not should_create:
@@ -184,8 +185,9 @@ def create_draft_pr(
             draft_pr_json_path=context["draft_pr_json_path"],
         )
 
-    completed = (runner or subprocess.run)(
-        command,
+    run = runner or subprocess.run
+    create_completed = run(
+        create_command,
         cwd=context["worktree_path"],
         shell=False,
         check=False,
@@ -193,26 +195,49 @@ def create_draft_pr(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    if completed.returncode != 0:
+    if create_completed.returncode != 0:
         raise DraftPrError(
             "gh pr create failed with "
-            f"{completed.returncode}: {completed.stderr.strip()}"
+            f"{create_completed.returncode}: {create_completed.stderr.strip()}"
         )
 
-    gh_payload = _parse_gh_output(completed.stdout)
+    pr_url = _extract_pr_url(create_completed.stdout)
+    view_command = _build_gh_view_command(context["repo"], pr_url)
+    view_completed = run(
+        view_command,
+        cwd=context["worktree_path"],
+        shell=False,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if view_completed.returncode != 0:
+        raise DraftPrError(
+            "gh pr view failed with "
+            f"{view_completed.returncode}: {view_completed.stderr.strip()}"
+        )
+
+    gh_payload = _parse_gh_view_output(view_completed.stdout)
     if gh_payload.get("isDraft") is not True:
         raise DraftPrError("GitHub response did not confirm a draft PR")
 
-    pr_url = _require_non_empty_str(gh_payload, "url")
+    verified_pr_url = _require_non_empty_str(gh_payload, "url")
+    if verified_pr_url != pr_url:
+        raise DraftPrError("GitHub verification URL did not match created PR URL")
     pr_number = gh_payload.get("number")
     if not isinstance(pr_number, int):
         raise DraftPrError("GitHub response missing numeric PR number")
+    if gh_payload.get("baseRefName") != context["base_branch"]:
+        raise DraftPrError("GitHub response baseRefName did not match requested base")
+    if gh_payload.get("headRefName") != context["head_branch"]:
+        raise DraftPrError("GitHub response headRefName did not match requested head")
 
     artifact_path = context["draft_pr_json_path"]
     evidence = _draft_pr_evidence(
         task_key=request.task_key,
         repo=context["repo"],
-        pr_url=pr_url,
+        pr_url=verified_pr_url,
         pr_number=pr_number,
         is_draft=True,
         base_branch=context["base_branch"],
@@ -240,7 +265,7 @@ def create_draft_pr(
         status="created",
         task_key=request.task_key,
         repo=context["repo"],
-        pr_url=pr_url,
+        pr_url=verified_pr_url,
         pr_number=pr_number,
         is_draft=True,
         base_branch=context["base_branch"],
@@ -385,7 +410,7 @@ def _validate_handoff(handoff: dict[str, Any], *, task_key: str) -> None:
             )
 
 
-def _build_gh_command(context: dict[str, Any]) -> list[str]:
+def _build_gh_create_command(context: dict[str, Any]) -> list[str]:
     return [
         "gh",
         "pr",
@@ -401,18 +426,35 @@ def _build_gh_command(context: dict[str, Any]) -> list[str]:
         context["title"],
         "--body",
         context["body"],
+    ]
+
+
+def _build_gh_view_command(repo: str, pr_url: str) -> list[str]:
+    return [
+        "gh",
+        "pr",
+        "view",
+        pr_url,
+        "--repo",
+        repo,
         "--json",
         "url,number,headRefName,baseRefName,isDraft",
     ]
 
 
-def _parse_gh_output(stdout: str) -> dict[str, Any]:
+def _extract_pr_url(stdout: str) -> str:
+    for match in re.findall(r"https://github\.com/[^\s]+/pull/\d+", stdout):
+        return match.rstrip()
+    raise DraftPrError("gh pr create did not print a created PR URL")
+
+
+def _parse_gh_view_output(stdout: str) -> dict[str, Any]:
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise DraftPrError(f"gh pr create returned invalid JSON: {exc}") from exc
+        raise DraftPrError(f"gh pr view returned invalid JSON: {exc}") from exc
     if not isinstance(payload, dict):
-        raise DraftPrError("gh pr create returned non-object JSON")
+        raise DraftPrError("gh pr view returned non-object JSON")
     return payload
 
 
