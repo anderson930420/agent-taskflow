@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ActionPanel } from "../../../components/ActionPanel";
 import { ApprovalList } from "../../../components/ApprovalList";
 import { ArtifactList } from "../../../components/ArtifactList";
+import { DogfoodEvidencePanel } from "../../../components/DogfoodEvidencePanel";
 import { RunList } from "../../../components/RunList";
 import { ReviewEvidenceSection } from "../../../components/ReviewEvidenceSection";
 import { StartDispatchPanel } from "../../../components/StartDispatchPanel";
@@ -187,6 +188,11 @@ export default async function TaskDetailPage({
           <section className="section panel">
             <h2>Review Evidence</h2>
             <ReviewEvidenceSection taskKey={decodedTaskKey} />
+          </section>
+
+          <section className="section panel">
+            <h2>Evidence Summary</h2>
+            <DogfoodEvidencePanel taskKey={decodedTaskKey} />
           </section>
 
           <TaskEvidencePanel taskKey={decodedTaskKey} />

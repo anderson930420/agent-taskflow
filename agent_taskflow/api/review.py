@@ -89,6 +89,29 @@ _FALLBACK_ORDER = 99
 
 _CONTRACT_NAME = "mission_contract.json"
 
+_EVIDENCE_CATEGORIES = (
+    "issue",
+    "workspace",
+    "execution",
+    "validation",
+    "review",
+    "handoff",
+    "publication",
+    "draft_pr",
+    "preflight",
+    "governance",
+    "other",
+)
+
+_EVIDENCE_SAFETY = {
+    "read_only": True,
+    "push_available_from_this_endpoint": False,
+    "pr_creation_available_from_this_endpoint": False,
+    "merge_available_from_this_endpoint": False,
+    "cleanup_available_from_this_endpoint": False,
+    "approval_available_from_this_endpoint": False,
+}
+
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -222,6 +245,130 @@ def _safe_list_dir(artifact_dir: Path) -> list[Path]:
             continue
         results.append(entry_resolved)
     return sorted(results, key=lambda p: p.name)
+
+
+def _artifact_category(
+    *,
+    artifact_type: str | None = None,
+    name: str | None = None,
+    kind: str | None = None,
+) -> str:
+    normalized_type = (artifact_type or "").strip().lower()
+    normalized_name = (name or "").strip().lower()
+    normalized_kind = (kind or "").strip().lower()
+
+    if normalized_type in {"issue_spec", "spec"} or normalized_name in {
+        "issue_spec.md",
+        "issue_spec.json",
+    }:
+        return "issue"
+    if normalized_type == "pr_handoff" or normalized_name.startswith("pr_handoff"):
+        return "handoff"
+    if normalized_type == "branch_push" or normalized_name.startswith("branch_push"):
+        return "publication"
+    if normalized_type == "draft_pr" or normalized_name.startswith("draft_pr"):
+        return "draft_pr"
+    if normalized_type == "preflight" or "preflight" in normalized_name:
+        return "preflight"
+    if normalized_kind == WORKFLOW_POLICY_REVIEW_KIND or normalized_type.startswith(
+        "workflow_policy"
+    ):
+        return "governance"
+    if normalized_kind == "mission_contract" or normalized_name == _CONTRACT_NAME:
+        return "execution"
+    if normalized_kind == "executor_log" or normalized_type in {
+        "worker_log",
+        "manifest",
+    }:
+        return "execution"
+    if normalized_kind == "validator_log":
+        return "validation"
+    if normalized_type in {"review_log", "decision"}:
+        return "review"
+    return "other"
+
+
+def _is_artifact_dir_child(artifact_dir: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(artifact_dir.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _db_artifact_evidence_item(
+    artifact: Any,
+    *,
+    artifact_dir: Path,
+    file_summaries_by_name: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    path = Path(artifact.path)
+    name = path.name
+    summary = file_summaries_by_name.get(name) if _is_artifact_dir_child(artifact_dir, path) else None
+    kind = summary.get("kind", "artifact_record") if summary else "artifact_record"
+    return {
+        "name": name,
+        "artifact_type": artifact.artifact_type,
+        "kind": kind,
+        "category": _artifact_category(
+            artifact_type=artifact.artifact_type,
+            name=name,
+            kind=kind,
+        ),
+        "path": str(path),
+        "exists": path.exists(),
+        "preview_available": bool(summary and summary.get("preview_available")),
+        "size_bytes": summary.get("size_bytes") if summary else (path.stat().st_size if path.is_file() else 0),
+        "source": "artifact_record",
+        "created_at": artifact.created_at,
+    }
+
+
+def _file_evidence_item(
+    summary: dict[str, Any],
+    *,
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    name = summary["name"]
+    return {
+        "name": name,
+        "artifact_type": summary["kind"],
+        "kind": summary["kind"],
+        "category": _artifact_category(name=name, kind=summary["kind"]),
+        "path": str(artifact_dir / name),
+        "exists": True,
+        "preview_available": summary["preview_available"],
+        "size_bytes": summary["size_bytes"],
+        "source": "artifact_directory",
+        "has_secret_warning": summary["has_secret_warning"],
+        "is_binary": summary["is_binary"],
+    }
+
+
+def _validation_evidence_item(result: dict[str, Any]) -> dict[str, Any]:
+    validator = result.get("validator")
+    status = result.get("status")
+    log_path = result.get("log_path")
+    return {
+        "name": str(validator or "validation"),
+        "artifact_type": "validation_result",
+        "kind": "validation_result",
+        "category": "validation",
+        "path": str(log_path) if log_path else None,
+        "exists": Path(log_path).exists() if log_path else False,
+        "preview_available": False,
+        "size_bytes": Path(log_path).stat().st_size if log_path and Path(log_path).is_file() else 0,
+        "source": "validation_result",
+        "validator": validator,
+        "status": status,
+        "exit_code": result.get("exit_code"),
+        "summary": result.get("summary"),
+        "created_at": result.get("created_at"),
+    }
+
+
+def _empty_evidence_categories() -> dict[str, list[dict[str, Any]]]:
+    return {category: [] for category in _EVIDENCE_CATEGORIES}
 
 
 # ----------------------------------------------------------------------
@@ -559,6 +706,72 @@ def build_review_evidence(
     }
 
 
+def build_task_evidence_readback(
+    *,
+    task_key: str,
+    artifact_dir: Path,
+    task_artifacts: list[Any],
+    validation_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build grouped read-only dogfood evidence from existing task evidence.
+
+    This summary reads existing task artifact records, artifact directory files,
+    and validation rows. It does not create records, parse large artifacts, run
+    validators, call executors, dispatch tasks, or mutate external systems.
+    """
+    categories = _empty_evidence_categories()
+    file_summaries = build_artifact_file_summaries(artifact_dir)
+    file_summaries_by_name = {summary["name"]: summary for summary in file_summaries}
+    seen_file_names: set[str] = set()
+
+    for artifact in task_artifacts:
+        item = _db_artifact_evidence_item(
+            artifact,
+            artifact_dir=artifact_dir,
+            file_summaries_by_name=file_summaries_by_name,
+        )
+        categories[item["category"]].append(item)
+        if _is_artifact_dir_child(artifact_dir, Path(artifact.path)):
+            seen_file_names.add(Path(artifact.path).name)
+
+    for summary in file_summaries:
+        if summary["name"] in seen_file_names:
+            continue
+        item = _file_evidence_item(summary, artifact_dir=artifact_dir)
+        categories[item["category"]].append(item)
+
+    for result in validation_results:
+        item = _validation_evidence_item(result)
+        categories["validation"].append(item)
+
+    validation_statuses = [
+        {
+            "validator": result.get("validator"),
+            "status": result.get("status"),
+            "summary": result.get("summary"),
+        }
+        for result in validation_results
+    ]
+
+    def has_category(category: str) -> bool:
+        return bool(categories.get(category))
+
+    return {
+        "task_key": task_key,
+        "available": True,
+        "categories": categories,
+        "summary": {
+            "has_issue_spec": has_category("issue"),
+            "has_pr_handoff": has_category("handoff"),
+            "has_branch_push": has_category("publication"),
+            "has_draft_pr": has_category("draft_pr"),
+            "has_preflight": has_category("preflight"),
+            "validation_statuses": validation_statuses,
+        },
+        "safety": dict(_EVIDENCE_SAFETY),
+    }
+
+
 def build_workflow_policy_evidence(
     artifact_dir: Path,
 ) -> dict[str, Any]:
@@ -689,5 +902,6 @@ __all__ = [
     "build_artifact_preview",
     "build_contract_summary",
     "build_review_evidence",
+    "build_task_evidence_readback",
     "build_workflow_policy_evidence",
 ]

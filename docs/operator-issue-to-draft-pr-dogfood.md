@@ -154,6 +154,14 @@ python3 scripts/create_pr_handoff.py \
   --repo "$REPO"
 ```
 
+If the API and Mission Control frontend are running, the task detail page can
+also be used for read-only dogfood evidence review. Mission Control surfaces
+existing issue/spec, validation, handoff, branch publication, draft PR,
+preflight, and governance evidence when those artifacts are already recorded.
+The CLI/operator flow remains the source of truth. Mission Control evidence
+readback does not push, create PRs, merge, approve, clean up, dispatch tasks,
+prepare workspaces, run executors, or mutate GitHub.
+
 Preview branch publication. This only checks the recorded worktree and prints
 the inert command preview; it must not publish anything:
 
