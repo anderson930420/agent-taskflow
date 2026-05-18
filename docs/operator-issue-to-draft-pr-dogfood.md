@@ -301,6 +301,89 @@ This runbook is not:
 - a cleanup system
 - a real AI executor dogfood proof
 
+## First Real Executor Dogfood Checklist
+
+When running a real AI executor (Pi, OpenCode, or Shell) against an actual
+task for the first time, follow this checklist to keep the experience safe
+and reviewable.
+
+### Before Execution
+
+- [ ] Use only one executor, preferably Pi Agent first.
+- [ ] Keep the task small and low-risk.
+- [ ] Modify `docs/` or `tests/` rather than core push/PR/cleanup logic.
+- [ ] Start from a clean main branch.
+- [ ] Run baseline validation before execution:
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m compileall agent_taskflow scripts tests
+```
+
+- [ ] Verify the dispatcher and validators are correctly configured.
+- [ ] Confirm the executor adapter is deterministic and bounded.
+
+### During Execution
+
+- [ ] Monitor executor log output for obvious errors or misrouted commands.
+- [ ] Do not interrupt the executor unless it is clearly stuck or unbounded.
+- [ ] Preserve the executor log as evidence.
+
+### After Execution
+
+- [ ] Run deterministic validators:
+
+```bash
+python3 -m unittest tests.test_operator_issue_to_draft_pr_runbook -v
+python3 -m unittest discover -s tests -v
+python3 -m compileall agent_taskflow scripts tests
+python3 scripts/run_local_validation.py
+```
+
+- [ ] Inspect validation failures before assuming they are acceptable.
+- [ ] Produce review evidence (executor log, validator logs, git status, git diff)
+  before PR handoff.
+- [ ] Run branch push dry-run before confirmed push:
+
+```bash
+python3 scripts/push_task_branch.py \
+  --task-key "$TASK_KEY" \
+  --db-path "$DB_PATH" \
+  --dry-run
+```
+
+- [ ] Run draft PR dry-run before confirmed draft PR creation:
+
+```bash
+python3 scripts/create_draft_pr.py \
+  --task-key "$TASK_KEY" \
+  --db-path "$DB_PATH" \
+  --repo "$REPO" \
+  --dry-run
+```
+
+### Safety Constraints
+
+- Do not touch branch push implementation.
+- Do not touch draft PR creation implementation.
+- Do not touch dispatcher implementation.
+- Do not touch workspace manager implementation.
+- Do not touch cleanup/merge policy.
+- Do not touch Mission Control frontend.
+- Keep merge and cleanup human-controlled.
+- Do not approve tasks in the executor.
+- Do not push branches from the executor.
+
+### Why This Checklist Matters
+
+Real executors are bounded implementation workers, not orchestrators. They
+cannot self-approve, self-merge, or push.
+
+Specifically, executors cannot self-approve. They cannot self-merge. They cannot
+push. Human review remains the final gate.
+This checklist ensures the first real executor run is traceable, reviewable,
+and bounded by the same safety constraints as the rest of the system.
+
 ## Next Phases
 
 - First real operator branch publication dogfood using the explicit push CLI.
