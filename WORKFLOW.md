@@ -90,6 +90,13 @@ run background workers, or run automatically from dispatcher, ingestion,
 workspace preparation, validators, or PR handoff smoke. Human review remains
 the final gate.
 
+The Draft PR Creation Fake-gh Golden Path Smoke
+(`scripts/run_draft_pr_fake_gh_golden_path_smoke.py`) proves the current local
+chain from offline issue ingestion through PR handoff and draft PR evidence
+generation using a fake gh runner only. It does not create real PRs, push,
+merge, approve, clean up, mutate GitHub, run webhooks/background polling, change
+the frontend, or run real AI executors.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
