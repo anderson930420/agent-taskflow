@@ -56,7 +56,7 @@ class OperatorIssueToDraftPrRunbookTests(unittest.TestCase):
 
     def test_runbook_explicitly_preserves_safety_boundaries(self) -> None:
         required = [
-            "this runbook does not run git push",
+            "does not push branches automatically",
             "there is no auto-merge",
             "there is no auto-approve",
             "there is no cleanup automation",
@@ -67,9 +67,11 @@ class OperatorIssueToDraftPrRunbookTests(unittest.TestCase):
         for phrase in required:
             self.assertIn(phrase, self.doc_lower)
 
-    def test_branch_push_foundation_is_not_implemented(self) -> None:
-        self.assertIn("explicit branch push foundation is not implemented yet", self.doc_lower)
-        self.assertIn("the system does not push branches", self.doc_lower)
+    def test_branch_push_foundation_is_documented_as_explicit(self) -> None:
+        self.assertIn("explicit branch push foundation is implemented", self.doc_lower)
+        self.assertIn("does not push branches automatically", self.doc_lower)
+        self.assertIn("scripts/push_task_branch.py", self.doc)
+        self.assertIn("--confirm-push", self.doc)
 
     def test_real_draft_pr_creation_requires_dry_run_and_confirm(self) -> None:
         self.assertIn("dry-run first", self.doc_lower)
@@ -83,6 +85,7 @@ class OperatorIssueToDraftPrRunbookTests(unittest.TestCase):
             "scripts/prepare_task_workspace.py",
             "scripts/run_dispatcher.py",
             "scripts/create_pr_handoff.py",
+            "scripts/push_task_branch.py",
             "scripts/create_draft_pr.py",
             "scripts/run_draft_pr_fake_gh_golden_path_smoke.py",
         ]
@@ -126,8 +129,8 @@ class OperatorIssueToDraftPrRunbookTests(unittest.TestCase):
         for command in forbidden:
             self.assertNotIn(command, executable_text)
 
-    def test_static_safety_negative_push_language_is_not_executable(self) -> None:
-        self.assertIn("git push", self.doc_lower)
+    def test_static_safety_no_raw_git_push_command_is_executable(self) -> None:
+        self.assertIn("scripts/push_task_branch.py", self.doc)
         executable_text = "\n".join(_executable_code_blocks(self.doc)).lower()
         self.assertNotIn("git push", executable_text)
 
