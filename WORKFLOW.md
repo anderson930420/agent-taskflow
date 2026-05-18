@@ -97,6 +97,14 @@ generation using a fake gh runner only. It does not create real PRs, push,
 merge, approve, clean up, mutate GitHub, run webhooks/background polling, change
 the frontend, or run real AI executors.
 
+The Operator Issue-to-Draft-PR Dogfood Runbook
+(`docs/operator-issue-to-draft-pr-dogfood.md`) documents the current
+human-triggered semi-automatic procedure for issue ingestion, workspace
+preparation, dispatcher execution, review evidence, PR handoff, draft PR
+dry-run, and fake-gh proof. It is documentation and safety guidance only; it
+does not add GitHub mutation automation, push, merge, approval, cleanup,
+background workers, webhooks, frontend actions, or real AI executor changes.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
