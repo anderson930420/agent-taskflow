@@ -105,6 +105,14 @@ dry-run, and fake-gh proof. It is documentation and safety guidance only; it
 does not add GitHub mutation automation, push, merge, approval, cleanup,
 background workers, webhooks, frontend actions, or real AI executor changes.
 
+The First Real Executor Dogfood Report
+(`docs/first-real-executor-dogfood-report.md`) records the first real Pi
+executor dogfood run from GitHub Issue ingestion through workspace preparation,
+deterministic validation, review evidence, branch push evidence, draft PR
+handoff, and human review gate. It is historical documentation only and does
+not change dispatcher, workspace, push, PR, approval, merge, cleanup, or
+Mission Control behavior.
+
 The Explicit Branch Push Foundation (`scripts/push_task_branch.py`) provides an
 explicit CLI-only path to publish the task branch recorded in
 `TaskWorktreeRecord` from the prepared worktree. It is dry-run by default and
