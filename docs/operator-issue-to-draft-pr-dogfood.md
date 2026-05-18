@@ -117,6 +117,22 @@ python3 scripts/prepare_task_workspace.py \
   --base-branch main
 ```
 
+Run the real executor preflight before any real executor or dispatcher path.
+This checks the active Python environment and selected validator/executor
+prerequisites before Pi, OpenCode, or another bounded worker starts:
+
+```bash
+python3 scripts/run_real_executor_preflight.py \
+  --executor pi \
+  --validators pytest,openspec
+```
+
+Missing `pytest` blocks before Pi starts when the `pytest` validator is
+selected. Missing `openspec` remains optional and reported as warning/skipped
+unless `--require-openspec` is provided. The preflight does not install
+dependencies, modify `.venv`, run the executor, dispatch tasks, push, create
+PRs, merge, approve, clean up, or mutate GitHub.
+
 Run the dispatcher explicitly. Choose the executor and validators deliberately
 for the dogfood task:
 
@@ -318,6 +334,14 @@ and reviewable.
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m compileall agent_taskflow scripts tests
+```
+
+- [ ] Run the real executor preflight before dispatcher execution:
+
+```bash
+python3 scripts/run_real_executor_preflight.py \
+  --executor pi \
+  --validators pytest,openspec
 ```
 
 - [ ] Verify the dispatcher and validators are correctly configured.

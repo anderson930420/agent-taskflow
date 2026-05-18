@@ -112,6 +112,22 @@ Post-change validation:
 - The operator runbook should remain the primary control surface until Mission
   Control exposes the evidence clearly.
 
+## Follow-up preflight check
+
+This report led directly to the Real Executor Preflight Dependency Check. The
+missing `pytest` blocker from the first Pi dispatcher attempt should now be
+caught before executor dispatch by running:
+
+```bash
+python3 scripts/run_real_executor_preflight.py \
+  --executor pi \
+  --validators pytest,openspec
+```
+
+The preflight is check/report only. It reports missing prerequisites before a
+real executor run starts and does not install dependencies, run executors,
+dispatch tasks, push, create PRs, merge, approve, clean up, or mutate GitHub.
+
 ## Safety boundaries preserved
 
 - no auto-merge
