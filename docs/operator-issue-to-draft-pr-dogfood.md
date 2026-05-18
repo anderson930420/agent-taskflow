@@ -19,6 +19,7 @@ human writes GitHub Issue/spec
 -> operator explicitly runs the dispatcher
 -> operator inspects review evidence
 -> operator creates local PR handoff evidence
+-> operator may explicitly push the clean committed task branch
 -> operator runs draft PR dry-run or fake-gh smoke
 -> operator may create a real draft PR only after all preconditions pass
 -> human reviews the PR and decides merge, reject, or rerun
@@ -48,14 +49,18 @@ calling real GitHub.
 
 ## Current Limitation
 
-Explicit Branch Push Foundation is not implemented yet.
+Explicit Branch Push Foundation is implemented as an operator-triggered CLI path.
+It is dry-run by default and requires `--confirm-push` before the recorded task
+branch may be published.
 
-The system does not push branches. Real draft PR creation assumes the head
-branch already exists remotely or that GitHub CLI can resolve it. Until branch
-push policy exists, real draft PR creation should be treated as optional/manual
-and should not be the default dogfood path.
+The system still does not push branches automatically. The push foundation only
+publishes the existing clean committed task branch recorded in
+`TaskWorktreeRecord`. It does not create commits, stage files, stash changes,
+force push, merge, clean up, create PRs, or approve PRs.
 
-This runbook does not run git push.
+Real draft PR creation should remain optional/manual and should happen only
+after branch push dry-run, optional confirmed branch push, PR handoff review,
+and draft PR dry-run all pass.
 
 ## Preconditions
 
@@ -66,8 +71,7 @@ This runbook does not run git push.
 - The target GitHub Issue exists, or an offline issue JSON fixture exists.
 - `gh` is authenticated only if the operator intends to create a real draft PR.
 - The operator does not expect auto-merge, auto-approval, or automatic cleanup.
-- The operator accepts that branch publication remains manual until an explicit
-  branch push foundation exists.
+- The operator understands branch publication is explicit and dry-run-first.
 
 ## Safe Command Sequence: Local/Fake-gh Proof Path
 
@@ -134,6 +138,16 @@ python3 scripts/create_pr_handoff.py \
   --repo "$REPO"
 ```
 
+Preview branch publication. This only checks the recorded worktree and prints
+the inert command preview; it must not publish anything:
+
+```bash
+python3 scripts/push_task_branch.py \
+  --task-key "$TASK_KEY" \
+  --db-path "$DB_PATH" \
+  --dry-run
+```
+
 Run draft PR creation in dry-run mode first. This must not call `gh`:
 
 ```bash
@@ -159,8 +173,7 @@ Inspect the generated artifacts named in command output, including
 
 ## Real Draft PR Creation Caution Path
 
-Real draft PR creation is optional and should not be the default dogfood path
-until branch push policy exists.
+Real draft PR creation is optional and should not be the default dogfood path.
 
 Only consider it when all of these are true:
 
@@ -169,12 +182,37 @@ Only consider it when all of these are true:
 - Review evidence has been inspected by a human/operator.
 - `pr_handoff.json` exists and remains conservative.
 - The prepared worktree and branch are present.
-- The remote head branch already exists, or the operator has deliberately
-  handled branch publication outside this runbook.
-- A dry-run has been run first.
+- Branch push dry-run has passed.
+- The branch has been published by the explicit branch push command, or the
+  remote head branch already exists.
+- Draft PR dry-run has been run first.
 - The operator explicitly chooses draft PR creation.
 
-Dry-run first:
+Branch push dry-run first:
+
+```bash
+python3 scripts/push_task_branch.py \
+  --task-key "$TASK_KEY" \
+  --db-path "$DB_PATH" \
+  --dry-run
+```
+
+Only if the worktree is clean, the current branch matches the recorded task
+branch, the branch is not a protected/base branch, and the branch has committed
+work beyond `base_sha`, the operator may publish the branch:
+
+```bash
+python3 scripts/push_task_branch.py \
+  --task-key "$TASK_KEY" \
+  --db-path "$DB_PATH" \
+  --confirm-push
+```
+
+That command only publishes an existing clean committed task branch. It does not
+create commits, force push, merge, clean up, create PRs, approve PRs, delete
+branches, or delete worktrees.
+
+Draft PR dry-run next:
 
 ```bash
 python3 scripts/create_draft_pr.py \
@@ -210,6 +248,8 @@ delete branches, delete worktrees, edit issues, or mutate GitHub Projects.
 - `pr_handoff.json`
 - `pr_handoff.md`
 - `pr_handoff_created` event
+- `branch_push.json`, only after confirmed branch publication
+- `branch_pushed` event, only after confirmed branch publication
 - `draft_pr.json`, only after fake or real draft PR creation
 - `draft_pr_created` event, only after fake or real draft PR creation
 
@@ -225,6 +265,8 @@ Common blockers:
 - Task is not `waiting_approval`.
 - Missing prepared worktree.
 - Missing `pr_handoff` artifact.
+- Dirty worktree; commit or handle changes before pushing.
+- Task branch has no commits beyond `base_sha`.
 - Head branch is unavailable remotely.
 - Validators failed.
 - Review evidence is unavailable.
@@ -261,7 +303,7 @@ This runbook is not:
 
 ## Next Phases
 
-- Explicit Branch Push Foundation.
+- First real operator branch publication dogfood using the explicit push CLI.
 - First real dogfood task with Pi/OpenCode.
 - Mission Control read-only exposure for PR handoff and draft PR evidence.
 - Future issue queue/polling only after the semi-automatic path is stable.

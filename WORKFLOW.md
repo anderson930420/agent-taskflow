@@ -105,6 +105,16 @@ dry-run, and fake-gh proof. It is documentation and safety guidance only; it
 does not add GitHub mutation automation, push, merge, approval, cleanup,
 background workers, webhooks, frontend actions, or real AI executor changes.
 
+The Explicit Branch Push Foundation (`scripts/push_task_branch.py`) provides an
+explicit CLI-only path to publish the task branch recorded in
+`TaskWorktreeRecord` from the prepared worktree. It is dry-run by default and
+requires `--confirm-push` before it may run `git push --set-upstream`. It blocks
+dirty worktrees, protected/base branches, and task branches with no commits
+beyond `base_sha`. It does not force push, create commits, create PRs, merge,
+approve, clean up, delete branches or worktrees, run background workers, or run
+automatically from dispatcher, ingestion, workspace preparation, validators, PR
+handoff, or draft PR creation.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
