@@ -39,6 +39,7 @@ from agent_taskflow.api.review import (
     build_artifact_preview,
     build_contract_summary,
     build_review_evidence,
+    build_task_evidence_readback,
 )
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS, Dispatcher
 from agent_taskflow.governance import (
@@ -524,6 +525,23 @@ def create_app(
             task_key=task.task_key,
             artifact_dir=task.artifact_dir,
             validation_results=results,
+        )
+        return detail_response(evidence)
+
+    @app.get("/api/tasks/{task_key}/evidence")
+    def get_task_evidence(
+        task_key: str,
+        current_store: TaskMirrorStore = Depends(get_store),
+    ) -> dict[str, object]:
+        task = task_or_404(task_key, current_store)
+
+        if task.artifact_dir is None:
+            raise HTTPException(status_code=422, detail="Task has no artifact directory")
+        evidence = build_task_evidence_readback(
+            task_key=task.task_key,
+            artifact_dir=task.artifact_dir,
+            task_artifacts=current_store.list_task_artifacts(task.task_key),
+            validation_results=current_store.list_validation_results(task.task_key),
         )
         return detail_response(evidence)
 

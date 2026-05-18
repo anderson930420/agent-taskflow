@@ -134,6 +134,52 @@ export interface TaskReviewEvidence {
   policy_warnings: string[];
 }
 
+export interface DogfoodEvidenceItem {
+  name: string;
+  artifact_type: string;
+  kind: string;
+  category: string;
+  path?: string | null;
+  exists: boolean;
+  preview_available: boolean;
+  size_bytes?: number | null;
+  source: string;
+  created_at?: string | null;
+  validator?: string | null;
+  status?: string | null;
+  summary?: string | null;
+}
+
+export interface DogfoodEvidenceSummary {
+  has_issue_spec: boolean;
+  has_pr_handoff: boolean;
+  has_branch_push: boolean;
+  has_draft_pr: boolean;
+  has_preflight: boolean;
+  validation_statuses: Array<{
+    validator?: string | null;
+    status?: string | null;
+    summary?: string | null;
+  }>;
+}
+
+export interface DogfoodEvidenceSafety {
+  read_only: boolean;
+  push_available_from_this_endpoint: boolean;
+  pr_creation_available_from_this_endpoint: boolean;
+  merge_available_from_this_endpoint: boolean;
+  cleanup_available_from_this_endpoint: boolean;
+  approval_available_from_this_endpoint: boolean;
+}
+
+export interface TaskDogfoodEvidence {
+  task_key: string;
+  available: boolean;
+  categories: Record<string, DogfoodEvidenceItem[]>;
+  summary: DogfoodEvidenceSummary;
+  safety: DogfoodEvidenceSafety;
+}
+
 export interface ArtifactPreview {
   name: string;
   content: string | null;
@@ -230,4 +276,8 @@ export interface TaskDetailBundle {
 
 export interface TaskReviewBundle {
   item: TaskReviewEvidence;
+}
+
+export interface TaskDogfoodEvidenceBundle {
+  item: TaskDogfoodEvidence;
 }

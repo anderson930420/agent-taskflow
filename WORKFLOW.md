@@ -122,6 +122,14 @@ the executor. It is check/report only: it does not install packages, modify
 `.venv`, run executors, dispatch tasks, prepare workspaces, push, create PRs,
 merge, approve, clean up, or mutate GitHub.
 
+Mission Control dogfood evidence readback exposes existing dogfood loop
+evidence through read-only API serialization and task detail UI display. It
+surfaces available issue/spec, validation, review, handoff, branch publication,
+draft PR, preflight, and governance evidence that existing flows already
+recorded. It does not create evidence records, push, create PRs, merge,
+approve, clean up, dispatch tasks, prepare workspaces, mutate GitHub, or run
+executors.
+
 The Explicit Branch Push Foundation (`scripts/push_task_branch.py`) provides an
 explicit CLI-only path to publish the task branch recorded in
 `TaskWorktreeRecord` from the prepared worktree. It is dry-run by default and
