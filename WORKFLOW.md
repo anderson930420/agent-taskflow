@@ -81,6 +81,15 @@ handoff package generation. It is local-only and does not create PRs, push,
 merge, clean up, mutate GitHub, run webhooks/background polling, change the
 frontend, or run real AI executors.
 
+The Actual Draft PR Creation Foundation (`scripts/create_draft_pr.py`) provides
+an explicit CLI-only path from existing local PR handoff evidence to a GitHub
+draft PR. It is dry-run by default and requires `--confirm-create-pr` before it
+may call `gh pr create --draft`. It creates draft PRs only. It does not push,
+merge, approve, clean up, delete branches or worktrees, mutate issues/projects,
+run background workers, or run automatically from dispatcher, ingestion,
+workspace preparation, validators, or PR handoff smoke. Human review remains
+the final gate.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
