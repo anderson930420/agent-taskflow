@@ -236,9 +236,10 @@ def intake_selected_github_issues(
             status="queued",
         )
 
+    failed_count = sum(item["action"] == "failed" for item in selected)
     mode = "dry_run" if request.dry_run else "confirmed"
     return {
-        "ok": True,
+        "ok": failed_count == 0,
         "mode": mode,
         "repo": request.repo,
         "project": request.project,
@@ -254,7 +255,7 @@ def intake_selected_github_issues(
             "ingested_count": sum(item["action"] == "ingested" for item in selected),
             "already_ingested_count": sum(item["action"] == "already_ingested" for item in selected),
             "would_ingest_count": sum(item["action"] == "would_ingest" for item in selected),
-            "failed_count": sum(item["action"] == "failed" for item in selected),
+            "failed_count": failed_count,
         },
         "safety": {
             "read_only": request.dry_run,

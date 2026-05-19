@@ -132,6 +132,20 @@ class GitHubIssueIntakeGateTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_tasks()), 1)
         self.assertEqual(len(self.store.list_task_events("GH-125")), 1)
 
+    def test_fetcher_failure_marks_selected_entry_failed_and_blocks_ok(self) -> None:
+        result = intake_selected_github_issues(
+            self.request(128, dry_run=False),
+            store=self.store,
+            fetcher=lambda repo, issue_number: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["written"])
+        self.assertEqual(result["summary"]["failed_count"], 1)
+        self.assertEqual(result["selected"][0]["action"], "failed")
+        self.assertEqual(result["selected"][0]["error"], "boom")
+        self.assertFalse(self.db_path.exists())
+
     def test_invalid_non_absolute_repo_or_artifact_paths_fail(self) -> None:
         with self.assertRaisesRegex(ValueError, "repo_path must be absolute"):
             GitHubIssueIntakeRequest(

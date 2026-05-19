@@ -140,6 +140,80 @@ class IntakeGitHubIssuesScriptTests(unittest.TestCase):
         self.assertEqual(event_payload["task_key"], "GH-201")
         self.assertEqual(event_payload["status"], "queued")
 
+    def test_script_fails_when_selected_issue_is_missing_from_fixture_json(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--repo",
+                "anderson930420/agent-taskflow",
+                "--repo-path",
+                str(self.repo),
+                "--artifact-root",
+                str(self.root / "artifacts"),
+                "--db-path",
+                str(self.db_path),
+                "--issues-json-path",
+                str(self.issue_json_path),
+                "--issue",
+                "999",
+                "--confirm-intake",
+            ],
+            cwd=REPO_ROOT,
+            shell=False,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["selected"][0]["action"], "failed")
+        self.assertEqual(payload["selected"][0]["issue_number"], 999)
+        self.assertFalse(payload["written"])
+        self.assertEqual(payload["summary"]["failed_count"], 1)
+
+    def test_script_fails_on_invalid_fetch_input(self) -> None:
+        bad_json = self.root / "bad-issues.json"
+        bad_json.write_text("{not-json", encoding="utf-8")
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--repo",
+                "anderson930420/agent-taskflow",
+                "--repo-path",
+                str(self.repo),
+                "--artifact-root",
+                str(self.root / "artifacts"),
+                "--db-path",
+                str(self.db_path),
+                "--issues-json-path",
+                str(bad_json),
+                "--issue",
+                "201",
+                "--confirm-intake",
+            ],
+            cwd=REPO_ROOT,
+            shell=False,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["selected"], [])
+        self.assertFalse(payload["written"])
+        self.assertIn("invalid issues JSON", payload["summary"])
+
     def test_script_is_idempotent_for_already_ingested_issue(self) -> None:
         first = self.run_script("--confirm-intake")
         self.assertEqual(first.returncode, 0, first.stderr)

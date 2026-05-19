@@ -173,7 +173,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    fetcher = _issues_fetcher(request, issue_json_path=issue_json_path)
+    try:
+        fetcher = _issues_fetcher(request, issue_json_path=issue_json_path)
+    except GitHubIssueIntakeError as exc:
+        _emit(
+            {
+                "ok": False,
+                "mode": "blocked",
+                "repo": request.repo,
+                "project": request.project,
+                "board": request.board,
+                "repo_path": str(request.repo_path),
+                "artifact_root": str(request.artifact_root),
+                "selected": [],
+                "written": False,
+                "summary": str(exc),
+            }
+        )
+        return 1
 
     try:
         store = TaskMirrorStore(request.db_path)
@@ -196,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     _emit(payload)
-    return 0
+    return 0 if payload["ok"] else 1
 
 
 if __name__ == "__main__":
