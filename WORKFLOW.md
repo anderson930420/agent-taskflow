@@ -156,6 +156,8 @@ verifies the target repo, base branch, head branch, and PR title/body before
 creation, checks for an existing open PR on the head branch, and records draft
 PR evidence only after the draft PR is created successfully. It does not merge,
 approve, clean up, delete branches/worktrees, or start background workers.
+Human review of the resulting draft PR remains the final gate before merge or
+cleanup, not a pre-PR approval gate.
 
 The Explicit Local Cleanup Confirm command (`scripts/confirm_local_cleanup.py`)
 adds the Phase 6B operator gate. It consumes the Phase 6A merged cleanup

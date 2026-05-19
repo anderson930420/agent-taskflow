@@ -247,6 +247,21 @@ class PrHandoffPackageTests(unittest.TestCase):
         self.assertIn("Handoff package task", result.handoff["proposed_pr_title"])
         self.assertIn("Task: AT-HANDOFF-PKG-001", result.handoff["proposed_pr_body"])
 
+    def test_complete_waiting_task_without_review_evidence_is_still_ready(self) -> None:
+        self._seed_task(with_approval=False)
+
+        result = create_pr_handoff_package(self._request())
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.summary["ready_for_branch_push_review"])
+        self.assertTrue(result.summary["ready_for_draft_pr_review"])
+        self.assertTrue(result.review_summary["ready_for_human_review"])
+        self.assertTrue(result.git["available"])
+        self.assertEqual(result.git["changed_files"], ["a-change.txt", "z-change.txt"])
+        self.assertFalse(
+            any("approval/review evidence" in warning for warning in result.warnings)
+        )
+
     def test_missing_issue_spec_creates_blocking_warning(self) -> None:
         self._seed_task(with_issue_spec=False)
 
@@ -312,6 +327,19 @@ class PrHandoffPackageTests(unittest.TestCase):
         result = create_pr_handoff_package(self._request())
 
         self.assertEqual(result.git["changed_files"], ["a-change.txt", "z-change.txt"])
+
+    def test_readme_changed_file_is_not_truncated(self) -> None:
+        self._seed_task()
+        for name in ("a-change.txt", "z-change.txt"):
+            path = self.worktree / name
+            if path.exists():
+                path.unlink()
+        (self.worktree / "README.md").write_text("# handoff package test\nupdated\n", encoding="utf-8")
+
+        result = create_pr_handoff_package(self._request())
+
+        self.assertEqual(result.git["changed_files"], ["README.md"])
+        self.assertNotIn("EADME.md", result.git["changed_files"])
 
     def test_proposed_pr_title_and_body_are_deterministic(self) -> None:
         self._seed_task()

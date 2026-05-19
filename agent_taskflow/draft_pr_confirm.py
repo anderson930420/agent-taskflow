@@ -1,7 +1,7 @@
 """Explicit draft PR creation confirmation from Phase 5B and Phase 5C evidence.
 
 This module is intentionally narrow. It can create a GitHub draft PR only when
-called with an explicit confirmation and ready waiting-approval evidence.
+called with an explicit confirmation and ready local evidence.
 It never merges, approves, cleans up, deletes branches or worktrees, pushes,
 or mutates task status.
 """
@@ -484,9 +484,6 @@ def _validate_local_readiness(
 
     if not handoff.summary.get("ready_for_draft_pr_review"):
         warnings.append("Phase 5B handoff is not ready for draft PR review")
-
-    if handoff.review_summary.get("blocking_warnings"):
-        warnings.extend(str(item) for item in handoff.review_summary["blocking_warnings"])
 
     if not handoff.source.get("available"):
         warnings.append("Source evidence is missing")

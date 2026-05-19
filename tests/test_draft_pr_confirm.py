@@ -142,7 +142,7 @@ class DraftPrConfirmTests(unittest.TestCase):
         with_validator: bool = True,
         with_branch_push: bool = True,
         push_ok: bool = True,
-        with_approval: bool = True,
+        with_approval: bool = False,
         branch: str | None = None,
         base_branch: str = "main",
         repo_path: Path | None = None,
@@ -374,6 +374,20 @@ class DraftPrConfirmTests(unittest.TestCase):
         self.assertTrue(any(call["args"][:3] == ["gh", "pr", "list"] for call in runner.calls))
         self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
 
+    def test_missing_review_evidence_does_not_block_dry_run(self) -> None:
+        self._seed_task(with_approval=False)
+        runner = FakeGhRunner(list_stdout="[]\n")
+
+        result = confirm_draft_pr(self._request(dry_run=True), runner=runner)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "dry_run")
+        self.assertTrue(result.handoff["ready_for_draft_pr_review"])
+        self.assertFalse(
+            any("approval/review evidence" in warning for warning in result.warnings)
+        )
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
     def test_missing_phase_5b_readiness_blocks_creation(self) -> None:
         self._seed_task(with_validator=False)
         runner = FakeGhRunner()
@@ -384,6 +398,35 @@ class DraftPrConfirmTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         self.assertIn("Validator evidence", " ".join(result.warnings))
         self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
+    def test_missing_review_evidence_does_not_block_actual_creation(self) -> None:
+        self._seed_task(with_approval=False)
+        runner = FakeGhRunner(
+            list_stdout="[]\n",
+            create_stdout="https://github.com/anderson930420/agent-taskflow/pull/125\n",
+            view_stdout=json.dumps(
+                {
+                    "url": "https://github.com/anderson930420/agent-taskflow/pull/125",
+                    "number": 125,
+                    "headRefName": self.branch,
+                    "baseRefName": "main",
+                    "isDraft": True,
+                    "title": "AT-DF-CONFIRM-001: Draft PR confirm task",
+                    "body": "Task: AT-DF-CONFIRM-001\n",
+                    "state": "OPEN",
+                }
+            ),
+        )
+
+        result = confirm_draft_pr(self._request(confirm=True), runner=runner)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "draft_pr_created")
+        self.assertTrue(result.draft_pr["created"])
+        self.assertFalse(
+            any("approval/review evidence" in warning for warning in result.warnings)
+        )
+        self.assertTrue(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
 
     def test_missing_phase_5c_branch_push_evidence_blocks_creation(self) -> None:
         self._seed_task(with_branch_push=False)

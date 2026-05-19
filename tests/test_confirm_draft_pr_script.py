@@ -136,7 +136,7 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         status: str = "waiting_approval",
         with_branch_push: bool = True,
         push_ok: bool = True,
-        with_approval: bool = True,
+        with_approval: bool = False,
     ) -> None:
         artifact_dir = self.artifact_root / self.task_key
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -340,6 +340,21 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         self.assertFalse(payload["draft_pr"]["created"])
         self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
 
+    def test_script_dry_run_without_review_evidence_still_succeeds(self) -> None:
+        runner = FakeGhRunner(list_stdout="[]\n")
+        exit_code, stdout, _stderr = self._run_main(
+            self._base_args() + ["--dry-run"],
+            runner=runner,
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "dry_run")
+        self.assertTrue(payload["handoff"]["ready_for_draft_pr_review"])
+        self.assertFalse(
+            any("approval/review evidence" in warning for warning in payload["warnings"])
+        )
+
     def test_script_prints_valid_json(self) -> None:
         runner = FakeGhRunner(
             list_stdout="[]\n",
@@ -367,6 +382,37 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         self.assertEqual(payload["status"], "draft_pr_created")
         self.assertTrue(payload["draft_pr"]["created"])
         self.assertEqual(payload["draft_pr"]["number"], 123)
+
+    def test_script_confirm_without_review_evidence_still_creates_draft_pr(self) -> None:
+        runner = FakeGhRunner(
+            list_stdout="[]\n",
+            create_stdout="https://github.com/anderson930420/agent-taskflow/pull/125\n",
+            view_stdout=json.dumps(
+                {
+                    "url": "https://github.com/anderson930420/agent-taskflow/pull/125",
+                    "number": 125,
+                    "headRefName": self.branch,
+                    "baseRefName": "main",
+                    "isDraft": True,
+                    "title": "AT-DF-CLI-001: Draft PR CLI task",
+                    "body": "Task: AT-DF-CLI-001\n",
+                    "state": "OPEN",
+                }
+            ),
+        )
+        exit_code, stdout, _stderr = self._run_main(
+            self._base_args() + ["--confirm-draft-pr"],
+            runner=runner,
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "draft_pr_created")
+        self.assertTrue(payload["draft_pr"]["created"])
+        self.assertFalse(
+            any("approval/review evidence" in warning for warning in payload["warnings"])
+        )
+        self.assertTrue(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
 
     def test_script_rejects_non_waiting_task_by_default(self) -> None:
         self._seed_task(status="blocked")

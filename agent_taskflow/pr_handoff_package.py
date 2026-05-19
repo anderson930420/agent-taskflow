@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 import json
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -201,7 +202,11 @@ def create_pr_handoff_package(
             error=f"Task {request.task_key} must be waiting_approval, got {task.get('status')}",
         )
 
-    warnings = list(review_summary.warnings)
+    warnings = [
+        warning
+        for warning in review_summary.warnings
+        if warning != "No approval/review evidence is present yet"
+    ]
     task_repo_path = task.get("repo_path")
     if task_repo_path and Path(task_repo_path).resolve() != request.repo_path.resolve():
         warnings.append(
@@ -217,18 +222,23 @@ def create_pr_handoff_package(
         task_key=request.task_key,
     )
 
-    package_warnings = _package_warnings(
+    blocking_warnings = _blocking_warnings(
         review_summary=review_summary.review_readiness,
         git_result=git_result,
         repo_path=request.repo_path,
         task_repo_path=task_repo_path,
     )
-    warnings = _dedupe_preserve_order(warnings + package_warnings)
+    warnings = _dedupe_preserve_order(warnings + blocking_warnings)
 
     ready_for_branch_push_review = bool(
-        review_summary.review_readiness["ready_for_human_review"]
-        and git_result["available"]
-        and not package_warnings
+        git_result["available"]
+        and review_summary.source["available"]
+        and review_summary.workspace["available"]
+        and review_summary.executor["available"]
+        and review_summary.executor["finished_ok"]
+        and review_summary.validators["available"]
+        and review_summary.validators["all_passed"]
+        and not blocking_warnings
     )
     ready_for_draft_pr_review = ready_for_branch_push_review
 
@@ -450,7 +460,7 @@ def _inspect_git_state(
     try:
         head_sha = _git(worktree, ["rev-parse", "HEAD"])
         current_branch = _git(worktree, ["rev-parse", "--abbrev-ref", "HEAD"])
-        status_short = _git(worktree, ["status", "--short", "--untracked-files=all"])
+        status_short = _git(worktree, ["status", "--porcelain=v1", "--untracked-files=all"])
         diff_names = _git(worktree, ["diff", "--name-only"])
         diff_stat = _git(worktree, ["diff", "--stat"])
         log_output = _git(worktree, ["log", "--oneline", "-n", "5"])
@@ -499,17 +509,24 @@ def _unavailable_git_state(*, warnings: list[str]) -> dict[str, Any]:
     }
 
 
+_STATUS_LINE_RE = re.compile(r"^(?P<status>.{2}) (?P<path>.*)$")
+
+
 def _changed_files(*, status_short: str, diff_names: str) -> list[str]:
     names: set[str] = set()
     for raw_line in status_short.splitlines():
-        line = raw_line.rstrip()
+        line = raw_line.rstrip("\n")
         if not line:
             continue
-        name = line[3:] if len(line) > 3 else line
-        if " -> " in name:
-            name = name.split(" -> ", 1)[1]
-        if name:
-            names.add(name)
+        match = _STATUS_LINE_RE.match(line)
+        if match is None:
+            continue
+        status = match.group("status")
+        path = match.group("path")
+        if status[0] in {"R", "C"} and " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path:
+            names.add(path)
     for raw_line in diff_names.splitlines():
         name = raw_line.strip()
         if name:
@@ -739,7 +756,7 @@ def _next_allowed_actions(*, ready_for_branch_push_review: bool) -> list[str]:
     ]
 
 
-def _package_warnings(
+def _blocking_warnings(
     *,
     review_summary: dict[str, Any],
     git_result: dict[str, Any],
@@ -747,8 +764,11 @@ def _package_warnings(
     task_repo_path: str | None,
 ) -> list[str]:
     warnings: list[str] = []
-    if not review_summary["ready_for_human_review"]:
-        warnings.extend(review_summary["blocking_warnings"])
+    warnings.extend(
+        warning
+        for warning in review_summary["blocking_warnings"]
+        if warning != "No approval/review evidence is present yet"
+    )
     if task_repo_path and Path(task_repo_path).resolve() != repo_path.resolve():
         warnings.append("Provided repo_path does not match the task repo_path")
     if not git_result["available"]:
@@ -859,7 +879,7 @@ def _git(worktree_path: Path, args: list[str]) -> str:
     allowed = {
         ("rev-parse", "HEAD"),
         ("rev-parse", "--abbrev-ref", "HEAD"),
-        ("status", "--short", "--untracked-files=all"),
+        ("status", "--porcelain=v1", "--untracked-files=all"),
         ("diff", "--name-only"),
         ("diff", "--stat"),
         ("log", "--oneline", "-n", "5"),

@@ -247,6 +247,31 @@ class CreatePrHandoffPackageScriptTests(unittest.TestCase):
         package_dir = self.package_root / "pr_handoff_package" / "AT-HANDOFF-PKG-CLI"
         self.assertFalse(package_dir.exists())
 
+    def test_script_readme_changed_file_is_not_truncated(self) -> None:
+        for name in ("a-change.txt", "z-change.txt"):
+            path = self.worktree / name
+            if path.exists():
+                path.unlink()
+        (self.worktree / "README.md").write_text(
+            "# handoff package cli\nupdated\n",
+            encoding="utf-8",
+        )
+
+        result = self._run(
+            "--task-key",
+            "AT-HANDOFF-PKG-CLI",
+            "--repo-path",
+            str(self.repo),
+            "--db-path",
+            str(self.db_path),
+            "--json",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["git"]["changed_files"], ["README.md"])
+        self.assertNotIn("EADME.md", payload["git"]["changed_files"])
+
     def test_script_non_dry_run_writes_local_handoff_artifact_and_event(self) -> None:
         result = self._run(
             "--task-key",
