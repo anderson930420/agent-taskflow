@@ -140,6 +140,14 @@ approve, clean up, delete branches or worktrees, run background workers, or run
 automatically from dispatcher, ingestion, workspace preparation, validators, PR
 handoff, or draft PR creation.
 
+The Explicit Branch Push Confirm command (`scripts/confirm_branch_push.py`)
+adds the Phase 5C operator gate. It reuses the waiting-approval handoff and
+branch-readiness evidence, runs a `git push --dry-run origin HEAD:<branch>`
+validation, and only performs `git push origin HEAD:<branch>` when
+`--confirm-branch-push` is present. It records branch-push evidence only after
+the actual push succeeds. It does not create PRs, merge, approve, clean up, or
+delete branches/worktrees.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:

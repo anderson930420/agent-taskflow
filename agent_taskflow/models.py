@@ -51,6 +51,7 @@ TASK_EVENT_TYPES = {
     "pr_handoff_package_created",
     "draft_pr_created",
     "branch_pushed",
+    "branch_push_completed",
     "worktree_recorded",
     "cleanup_recorded",
     "note",
