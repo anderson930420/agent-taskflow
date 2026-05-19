@@ -424,7 +424,12 @@ class LocalCleanupConfirmTests(unittest.TestCase):
         self.assertFalse(result["local_branch"]["exists_after"])
         self.assertTrue(result["evidence"]["artifact_recorded"])
         self.assertTrue(result["evidence"]["event_recorded"])
-        self.assertTrue((self.artifact_root / "local_cleanup" / self.task_key / "local_cleanup.json").exists())
+        artifact_path = self.artifact_root / "local_cleanup" / self.task_key / "local_cleanup.json"
+        self.assertTrue(artifact_path.exists())
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        self.assertFalse(payload["task_completed"])
+        self.assertFalse(payload["remote_branch_deleted"])
+        self.assertFalse(payload["issue_closed"])
 
     def test_partial_cleanup_reports_branch_skip_accurately(self) -> None:
         self._seed_task()
