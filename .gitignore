@@ -22,3 +22,6 @@ id_ed25519.pub
 # Pi Agent local/project state
 .pi/*
 !.pi/settings.json
+
+# Local Agent Taskflow runtime state
+.agent-taskflow/
