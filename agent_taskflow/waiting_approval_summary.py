@@ -594,16 +594,16 @@ def _build_artifact_summary(
                     "name": summary["name"],
                     "path": path,
                     "available": True,
-                    "source": "filesystem",
-                    "created_at": None,
-                    "size_bytes": summary["size_bytes"],
-                    "preview_available": summary["preview_available"],
-                    "preview_reason": summary["preview_reason"],
-                    "is_executor_log": summary["is_executor_log"],
-                    "is_validator_log": summary["is_validator_log"],
-                    "is_mission_contract": summary["is_mission_contract"],
-                }
-            )
+                        "source": "filesystem",
+                        "created_at": None,
+                        "size_bytes": summary["size_bytes"],
+                        "preview_available": summary["preview_available"],
+                        "preview_reason": summary.get("preview_reason"),
+                        "is_executor_log": summary["is_executor_log"],
+                        "is_validator_log": summary["is_validator_log"],
+                        "is_mission_contract": summary["is_mission_contract"],
+                    }
+                )
 
     items.sort(key=lambda item: (str(item.get("kind")), str(item.get("path")), str(item.get("source", ""))))
     return items
