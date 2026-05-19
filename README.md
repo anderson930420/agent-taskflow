@@ -43,22 +43,18 @@ not let workers self-approve, and does not perform automatic cleanup.
 
 The current dogfood loop is operator-driven and semi-automatic:
 
-1. A human writes or selects a GitHub Issue/spec.
-2. The operator explicitly ingests the issue into the local SQLite mirror.
-3. The operator explicitly prepares an isolated worktree.
-4. The operator runs the dispatcher with a selected bounded executor and
-   validators.
-5. Deterministic validators record proof-of-work.
-6. The task reaches `waiting_approval` for human review when validation passes.
-7. The operator may generate local PR handoff evidence.
-8. Branch push is explicit through `scripts/push_task_branch.py`.
-9. Draft PR creation is explicit through `scripts/create_draft_pr.py`.
+1. A human discovers or selects a GitHub Issue/spec.
+2. The operator explicitly ingests the selected issue into the local SQLite mirror.
+3. The operator runs queued-task recommendation and explicitly selects the task key to run.
+4. The operator runs an explicitly approved task execution in an isolated worktree.
+5. Deterministic validators record proof-of-work and the task reaches `waiting_approval` when validation passes.
+6. The operator generates a waiting-approval review summary and local PR handoff package.
+7. Branch push is explicit and requires confirmation.
+8. Draft PR creation is explicit and requires confirmation.
+9. After merge, cleanup is explicit: first a cleanup recommendation, then local cleanup confirmation, then remote branch cleanup confirmation.
 10. A human reviews the evidence and decides what happens next.
 
-The explicit branch push and draft PR creation scripts are dry-run by default
-and require confirmation flags before they mutate GitHub. They do not merge,
-approve, clean up, delete branches, delete worktrees, or run automatically from
-the dispatcher.
+The explicit branch push and draft PR creation commands are dry-run by default and require confirmation flags before they mutate GitHub. They do not merge, approve, clean up, delete branches, delete worktrees, or run automatically from the dispatcher.
 
 ## Deferred Automation
 
