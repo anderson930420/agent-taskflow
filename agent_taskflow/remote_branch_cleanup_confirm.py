@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
-import re
 from pathlib import Path
 import subprocess
 from typing import Any, Callable, Protocol
@@ -20,6 +19,24 @@ from agent_taskflow.models import TaskRecord, utc_now_iso
 from agent_taskflow.post_merge_cleanup_recommendation import (
     PostMergeCleanupRecommendationRequest,
     recommend_post_merge_cleanup,
+)
+from agent_taskflow.remote_branch_cleanup_confirm_helpers import (
+    PROTECTED_BRANCHES,
+    LOCAL_ARTIFACT_KIND,
+    LOCAL_EVENT_TYPE,
+    LOCAL_CONFIRM_FLAG,
+    build_git_ls_remote_heads_command,
+    build_git_push_delete_command,
+    cleanup_recommendation_snapshot as _cleanup_recommendation_snapshot,
+    dedupe_preserve_order as _dedupe_preserve_order,
+    empty_cleanup_recommendation as _empty_cleanup_recommendation,
+    empty_draft_pr_evidence as _empty_draft_pr_evidence,
+    empty_local_cleanup_evidence as _empty_local_cleanup_evidence,
+    empty_remote_branch as _empty_remote_branch,
+    latest_event_payload as _latest_event_payload,
+    normalize_branch_name as _normalize_branch_name,
+    safety_block as _safety_block,
+    validate_branch_name as _validate_branch_name,
 )
 from agent_taskflow.store import TaskMirrorStore, default_db_path
 from agent_taskflow.tasks import normalize_task_key
@@ -31,10 +48,6 @@ EVENT_TYPE = "remote_branch_cleanup_completed"
 SOURCE = "remote_branch_cleanup_confirm"
 DEFAULT_REMOTE = "origin"
 EXPECTED_CONFIRM_FLAG = "--confirm-remote-branch-delete"
-LOCAL_ARTIFACT_KIND = "local_cleanup"
-LOCAL_EVENT_TYPE = "local_cleanup_completed"
-LOCAL_CONFIRM_FLAG = "--confirm-local-cleanup"
-PROTECTED_BRANCHES = {"main", "master", "trunk"}
 
 
 class RemoteBranchCleanupConfirmError(RuntimeError):
@@ -467,35 +480,6 @@ def _resolve_branch_name(
     return branch, warnings, None
 
 
-def _validate_branch_name(branch: str) -> str | None:
-    if not branch:
-        return "Branch name is missing"
-    if branch.startswith("-"):
-        return "Branch name must not start with '-'"
-    if any(ch.isspace() for ch in branch):
-        return "Branch name must not contain whitespace"
-    if ".." in branch:
-        return "Branch name must not contain '..'"
-    if ":" in branch:
-        return "Branch name must not contain ':'"
-    if "*" in branch:
-        return "Branch name must not contain '*'"
-    if any(ch in branch for ch in {"?", "[", "]", "\\", "^", "~"}):
-        return "Branch name contains unsupported git ref characters"
-    if branch.endswith(".lock"):
-        return "Branch name must not end with .lock"
-    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?", branch):
-        return "Branch name is not a safe task branch name"
-    return None
-
-
-def _normalize_branch_name(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    return normalized or None
-
-
 def _readiness_issues(
     *,
     request: RemoteBranchCleanupConfirmRequest,
@@ -566,7 +550,7 @@ def _inspect_remote_branch(
     runner: Runner | None,
 ) -> dict[str, Any]:
     completed = _run_git(
-        ["git", "ls-remote", "--heads", remote, branch],
+        build_git_ls_remote_heads_command(remote, branch),
         cwd=repo_path,
         runner=runner,
     )
@@ -604,7 +588,7 @@ def _remote_branch_exists(
     runner: Runner | None,
 ) -> bool | None:
     completed = _run_git(
-        ["git", "ls-remote", "--heads", remote, branch],
+        build_git_ls_remote_heads_command(remote, branch),
         cwd=repo_path,
         runner=runner,
     )
@@ -620,7 +604,7 @@ def _delete_remote_branch(
     runner: Runner | None,
 ) -> tuple[bool, str | None]:
     completed = _run_git(
-        ["git", "push", request.remote, "--delete", branch],
+        build_git_push_delete_command(request.remote, branch),
         cwd=request.repo_path,
         runner=runner,
     )
@@ -713,30 +697,6 @@ def _read_local_cleanup_evidence(store: TaskMirrorStore, task_key: str) -> dict[
     }
 
 
-def _cleanup_recommendation_snapshot(result: Any) -> dict[str, Any]:
-    remote_cleanup_item = next(
-        (
-            item
-            for item in result.recommended_cleanup
-            if isinstance(item, dict) and item.get("action") == "delete_remote_branch"
-        ),
-        None,
-    )
-    return {
-        "available": bool(getattr(result, "ok", False)),
-        "status": result.status,
-        "merged": bool(result.summary.get("merged")),
-        "remote_branch_cleanup_recommended": bool(remote_cleanup_item and remote_cleanup_item.get("recommended")),
-        "recommended_cleanup": result.recommended_cleanup,
-        "blocking_warnings": list(result.blocking_warnings),
-        "non_blocking_warnings": list(result.non_blocking_warnings),
-        "next_allowed_actions": list(result.next_allowed_actions),
-        "actions_not_performed": list(result.actions_not_performed),
-        "summary": result.summary,
-        "safety": result.safety,
-    }
-
-
 def _remote_branch_cleanup_evidence(
     *,
     task_key: str,
@@ -826,21 +786,6 @@ def _load_json_object(path: Path) -> dict[str, Any]:
         raise OSError(f"Could not read JSON file {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise json.JSONDecodeError("JSON object required", doc="", pos=0)
-    return payload
-
-
-def _latest_event_payload(events: list[Any]) -> dict[str, Any]:
-    if not events:
-        return {}
-    payload_json = events[-1].payload_json
-    if not payload_json:
-        return {}
-    try:
-        payload = json.loads(payload_json)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(payload, dict):
-        return {}
     return payload
 
 
@@ -1174,121 +1119,3 @@ def _not_found_result(
     )
 
 
-def _empty_cleanup_recommendation() -> dict[str, Any]:
-    return {
-        "available": False,
-        "status": None,
-        "merged": False,
-        "remote_branch_cleanup_recommended": False,
-        "recommended_cleanup": [],
-        "blocking_warnings": [],
-        "non_blocking_warnings": [],
-        "next_allowed_actions": [],
-        "actions_not_performed": [],
-        "summary": {},
-        "safety": {},
-    }
-
-
-def _empty_draft_pr_evidence() -> dict[str, Any]:
-    return {
-        "available": False,
-        "artifact_recorded": False,
-        "event_recorded": False,
-        "artifact_path": None,
-        "repo": None,
-        "pr_number": None,
-        "pr_url": None,
-        "base_branch": None,
-        "head_branch": None,
-        "merged": None,
-        "cleanup_performed": None,
-        "issue_closed": None,
-        "requires_human_confirmation": None,
-        "warnings": ["Draft PR evidence is missing"],
-    }
-
-
-def _empty_local_cleanup_evidence() -> dict[str, Any]:
-    return {
-        "available": False,
-        "artifact_recorded": False,
-        "event_recorded": False,
-        "artifact_path": None,
-        "event_type": LOCAL_EVENT_TYPE,
-        "artifact_kind": LOCAL_ARTIFACT_KIND,
-        "payload": {},
-        "local_branch": None,
-        "cleanup_scope": None,
-        "worktree_removed": None,
-        "local_branch_deleted": None,
-        "remote_branch_deleted": None,
-        "issue_closed": None,
-        "task_status_changed": None,
-        "task_completed": None,
-        "task_archived": None,
-        "requires_human_confirmation": None,
-        "confirmation_flag": LOCAL_CONFIRM_FLAG,
-        "task_status": None,
-        "warnings": ["Local cleanup evidence is missing"],
-    }
-
-
-def _empty_remote_branch(remote: str, branch: str | None = None) -> dict[str, Any]:
-    return {
-        "available": False,
-        "remote": remote,
-        "name": branch,
-        "base_branch": None,
-        "exists_before": False,
-        "exists_after": False,
-        "safe_to_delete": False,
-        "deleted": False,
-        "delete_attempted": False,
-        "delete_error": None,
-        "protected": False,
-        "is_empty": False,
-        "warnings": [],
-    }
-
-
-def _dedupe_preserve_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
-
-
-def _safety_block(
-    *,
-    human_confirmation_confirmed: bool,
-    remote_branch_cleanup_performed: bool,
-    remote_branch_deleted: bool,
-) -> dict[str, Any]:
-    return {
-        "human_confirmation_required": True,
-        "human_confirmation_confirmed": human_confirmation_confirmed,
-        "task_status_changed": False,
-        "workspace_prepared": False,
-        "executor_started": False,
-        "validators_started": False,
-        "local_cleanup_performed": False,
-        "worktree_removed": False,
-        "local_branch_deleted": False,
-        "remote_branch_cleanup_performed": remote_branch_cleanup_performed,
-        "remote_branch_deleted": remote_branch_deleted,
-        "github_issue_mutated": False,
-        "issue_closed": False,
-        "task_archived": False,
-        "task_completed": False,
-        "merged": False,
-        "approved": False,
-        "force_delete": False,
-        "background_worker_started": False,
-        "webhook_started": False,
-        "polling_loop_started": False,
-    }
