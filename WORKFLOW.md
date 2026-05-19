@@ -157,6 +157,14 @@ creation, checks for an existing open PR on the head branch, and records draft
 PR evidence only after the draft PR is created successfully. It does not merge,
 approve, clean up, delete branches/worktrees, or start background workers.
 
+The Explicit Local Cleanup Confirm command (`scripts/confirm_local_cleanup.py`)
+adds the Phase 6B operator gate. It consumes the Phase 6A merged cleanup
+recommendation plus draft PR evidence, verifies the local worktree and branch
+state, and may remove the verified local worktree and safely delete the local
+task branch with `git branch -d` only after explicit confirmation. It does not
+delete remote branches, close issues, archive tasks, merge, approve, update
+task status, or run in the background.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
