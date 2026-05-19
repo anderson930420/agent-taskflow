@@ -132,6 +132,35 @@ class DraftPrConfirmTests(unittest.TestCase):
             updated_at="2026-05-02T00:00:00Z",
         )
 
+    def _gh_view_stdout(
+        self,
+        *,
+        number: int,
+        files: list[str] | None = None,
+        commits: list[str] | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        head: str | None = None,
+        base: str = "main",
+        state: str = "OPEN",
+        is_draft: bool = True,
+        url: str | None = None,
+    ) -> str:
+        return json.dumps(
+            {
+                "url": url or f"https://github.com/anderson930420/agent-taskflow/pull/{number}",
+                "number": number,
+                "headRefName": head or self.branch,
+                "baseRefName": base,
+                "isDraft": is_draft,
+                "title": title or "AT-DF-CONFIRM-001: Draft PR confirm task",
+                "body": body or "Task: AT-DF-CONFIRM-001\n",
+                "state": state,
+                "commits": [{"oid": oid} for oid in (commits or [self.head_sha])],
+                "files": [{"path": path} for path in (files or ["feature.txt"])],
+            }
+        )
+
     def _seed_task(
         self,
         *,
@@ -369,6 +398,9 @@ class DraftPrConfirmTests(unittest.TestCase):
         self.assertFalse(result.evidence["artifact_recorded"])
         self.assertFalse(result.evidence["event_recorded"])
         self.assertTrue(result.handoff["ready_for_draft_pr_review"])
+        self.assertTrue(result.verification_preview["post_create_verification_required"])
+        self.assertEqual(result.verification_preview["expected_files"], ["feature.txt"])
+        self.assertEqual(result.verification_preview["expected_commits"], [self.head_sha])
         self.assertEqual(before_artifacts, len(self.store.list_task_artifacts(self.task_key)))
         self.assertEqual(before_events, len(self.store.list_task_events(self.task_key)))
         self.assertTrue(any(call["args"][:3] == ["gh", "pr", "list"] for call in runner.calls))
@@ -404,18 +436,7 @@ class DraftPrConfirmTests(unittest.TestCase):
         runner = FakeGhRunner(
             list_stdout="[]\n",
             create_stdout="https://github.com/anderson930420/agent-taskflow/pull/125\n",
-            view_stdout=json.dumps(
-                {
-                    "url": "https://github.com/anderson930420/agent-taskflow/pull/125",
-                    "number": 125,
-                    "headRefName": self.branch,
-                    "baseRefName": "main",
-                    "isDraft": True,
-                    "title": "AT-DF-CONFIRM-001: Draft PR confirm task",
-                    "body": "Task: AT-DF-CONFIRM-001\n",
-                    "state": "OPEN",
-                }
-            ),
+            view_stdout=self._gh_view_stdout(number=125),
         )
 
         result = confirm_draft_pr(self._request(confirm=True), runner=runner)
@@ -423,6 +444,10 @@ class DraftPrConfirmTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "draft_pr_created")
         self.assertTrue(result.draft_pr["created"])
+        self.assertTrue(result.draft_pr["verified"])
+        self.assertTrue(result.verification["passed"])
+        self.assertTrue(result.summary["verified"])
+        self.assertTrue(result.evidence["verification_recorded"])
         self.assertFalse(
             any("approval/review evidence" in warning for warning in result.warnings)
         )
@@ -491,15 +516,24 @@ class DraftPrConfirmTests(unittest.TestCase):
                     }
                 ]
             )
-            + "\n"
+            + "\n",
+            view_stdout=self._gh_view_stdout(
+                number=7,
+                url="https://github.com/anderson930420/agent-taskflow/pull/7",
+                title="AT-DF-CONFIRM-001: Draft PR confirm task",
+            ),
         )
 
         result = confirm_draft_pr(self._request(dry_run=True), runner=runner)
 
         self.assertTrue(result.ok)
-        self.assertEqual(result.status, "already_exists")
+        self.assertEqual(result.status, "already_exists_verified")
         self.assertTrue(result.existing_pr["exists"])
         self.assertEqual(result.existing_pr["number"], 7)
+        self.assertTrue(result.verification["passed"])
+        self.assertTrue(result.summary["verified"])
+        self.assertEqual(result.verification["expected_files"], ["feature.txt"])
+        self.assertEqual(result.verification["actual_files"], ["feature.txt"])
         self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
 
     def test_ready_task_with_confirmation_creates_draft_pr(self) -> None:
@@ -509,18 +543,7 @@ class DraftPrConfirmTests(unittest.TestCase):
         runner = FakeGhRunner(
             list_stdout="[]\n",
             create_stdout="https://github.com/anderson930420/agent-taskflow/pull/123\n",
-            view_stdout=json.dumps(
-                {
-                    "url": "https://github.com/anderson930420/agent-taskflow/pull/123",
-                    "number": 123,
-                    "headRefName": self.branch,
-                    "baseRefName": "main",
-                    "isDraft": True,
-                    "title": "AT-DF-CONFIRM-001: Draft PR confirm task",
-                    "body": "Task: AT-DF-CONFIRM-001\n",
-                    "state": "OPEN",
-                }
-            ),
+            view_stdout=self._gh_view_stdout(number=123),
         )
 
         result = confirm_draft_pr(self._request(confirm=True), runner=runner)
@@ -528,8 +551,13 @@ class DraftPrConfirmTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "draft_pr_created")
         self.assertTrue(result.draft_pr["created"])
+        self.assertTrue(result.draft_pr["verified"])
+        self.assertTrue(result.verification["passed"])
+        self.assertTrue(result.summary["verified"])
+        self.assertTrue(result.evidence["verification_recorded"])
         self.assertTrue(result.safety["pr_created"])
         self.assertTrue(result.safety["draft_pr"])
+        self.assertTrue(result.safety["draft_pr_verified"])
         self.assertFalse(result.safety["merged"])
         self.assertFalse(result.safety["approved"])
         self.assertFalse(result.safety["cleanup_performed"])
@@ -551,6 +579,99 @@ class DraftPrConfirmTests(unittest.TestCase):
                 for event in self.store.list_task_events(self.task_key)
             )
         )
+
+    def test_created_pr_verification_failure_blocks_recording(self) -> None:
+        self._seed_task()
+        before_artifacts = len(self.store.list_task_artifacts(self.task_key))
+        before_events = len(self.store.list_task_events(self.task_key))
+        runner = FakeGhRunner(
+            list_stdout="[]\n",
+            create_stdout="https://github.com/anderson930420/agent-taskflow/pull/126\n",
+            view_stdout=self._gh_view_stdout(
+                number=126,
+                files=[
+                    "README.md",
+                    "agent_taskflow/draft_pr_confirm.py",
+                    "tests/test_draft_pr_confirm.py",
+                ],
+                commits=[
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    self.head_sha,
+                ],
+            ),
+        )
+
+        result = confirm_draft_pr(self._request(confirm=True), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "pr_created_verification_failed")
+        self.assertFalse(result.evidence["artifact_recorded"])
+        self.assertFalse(result.evidence["event_recorded"])
+        self.assertFalse(result.evidence["verification_recorded"])
+        self.assertTrue(result.safety["pr_created"])
+        self.assertFalse(result.safety["draft_pr_verified"])
+        self.assertFalse(result.summary["verified"])
+        self.assertEqual(before_artifacts, len(self.store.list_task_artifacts(self.task_key)))
+        self.assertEqual(before_events, len(self.store.list_task_events(self.task_key)))
+        self.assertEqual(
+            sorted(result.verification["unexpected_files"]),
+            [
+                "README.md",
+                "agent_taskflow/draft_pr_confirm.py",
+                "tests/test_draft_pr_confirm.py",
+            ],
+        )
+        self.assertEqual(result.verification["missing_files"], ["feature.txt"])
+        self.assertEqual(
+            result.verification["unexpected_commits"],
+            ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        )
+        self.assertFalse(result.summary["verified"])
+        self.assertIn("GitHub PR files do not match handoff changed_files", result.warnings)
+        self.assertIn("GitHub PR commits do not match expected branch diff", result.warnings)
+
+    def test_existing_pr_verification_failure_blocks_duplicate_creation(self) -> None:
+        self._seed_task()
+        runner = FakeGhRunner(
+            list_stdout=json.dumps(
+                [
+                    {
+                        "number": 8,
+                        "url": "https://github.com/anderson930420/agent-taskflow/pull/8",
+                        "state": "OPEN",
+                        "isDraft": True,
+                        "title": "Existing stale PR",
+                    }
+                ]
+            )
+            + "\n",
+            view_stdout=self._gh_view_stdout(
+                number=8,
+                url="https://github.com/anderson930420/agent-taskflow/pull/8",
+                title="AT-DF-CONFIRM-001: Draft PR confirm task",
+                files=[
+                    "README.md",
+                    "agent_taskflow/draft_pr_confirm.py",
+                    "tests/test_draft_pr_confirm.py",
+                ],
+                commits=[
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    self.head_sha,
+                ],
+            ),
+        )
+
+        result = confirm_draft_pr(self._request(dry_run=True), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "existing_pr_verification_failed")
+        self.assertTrue(result.existing_pr["exists"])
+        self.assertFalse(result.evidence["artifact_recorded"])
+        self.assertFalse(result.evidence["event_recorded"])
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+        self.assertFalse(result.summary["verified"])
+        self.assertIn("unexpected_files", result.verification)
+        self.assertIn("unexpected_commits", result.verification)
 
     def test_failed_gh_pr_create_does_not_record_draft_pr_evidence(self) -> None:
         self._seed_task()
@@ -581,18 +702,7 @@ class DraftPrConfirmTests(unittest.TestCase):
         runner = FakeGhRunner(
             list_stdout="[]\n",
             create_stdout="https://github.com/anderson930420/agent-taskflow/pull/124\n",
-            view_stdout=json.dumps(
-                {
-                    "url": "https://github.com/anderson930420/agent-taskflow/pull/124",
-                    "number": 124,
-                    "headRefName": self.branch,
-                    "baseRefName": "main",
-                    "isDraft": True,
-                    "title": "AT-DF-CONFIRM-001: Draft PR confirm task",
-                    "body": "Task: AT-DF-CONFIRM-001\n",
-                    "state": "OPEN",
-                }
-            ),
+            view_stdout=self._gh_view_stdout(number=124),
         )
 
         result = confirm_draft_pr(self._request(confirm=True), runner=runner)
@@ -600,8 +710,10 @@ class DraftPrConfirmTests(unittest.TestCase):
         self.assertTrue(result.evidence["artifact_recorded"])
         self.assertTrue(result.evidence["event_recorded"])
         self.assertTrue(result.evidence["branch_push_verified"])
+        self.assertTrue(result.evidence["verification_recorded"])
         self.assertTrue(result.draft_pr["created"])
         self.assertTrue(result.draft_pr["draft"])
+        self.assertTrue(result.draft_pr["verified"])
         self.assertEqual(result.draft_pr["number"], 124)
         self.assertTrue(result.draft_pr["url"].endswith("/pull/124"))
         self.assertTrue(result.draft_pr["artifact_path"])
@@ -611,6 +723,8 @@ class DraftPrConfirmTests(unittest.TestCase):
         self.assertEqual(payload["artifact_type"], "draft_pr")
         self.assertEqual(payload["kind"], "draft_pr_created")
         self.assertTrue(payload["branch_push_verified"])
+        self.assertTrue(payload["verified"])
+        self.assertTrue(payload["verification"]["passed"])
         self.assertFalse(payload["issue_closed"])
 
     def test_non_waiting_actual_creation_is_blocked_even_with_allow_non_waiting(self) -> None:

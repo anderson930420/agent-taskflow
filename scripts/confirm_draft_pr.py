@@ -146,34 +146,7 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:
         )
         return 1
 
-    payload = result.to_dict()
-    if not result.ok:
-        payload = {
-            "ok": False,
-            "status": result.status,
-            "task_key": result.task_key,
-            "task_status": result.task_status,
-            "repo": result.repo,
-            "base": result.base,
-            "head": result.head,
-            "title": result.title,
-            "body_preview": result.body_preview,
-            "handoff": result.handoff,
-            "branch_push": result.branch_push,
-            "existing_pr": result.existing_pr,
-            "draft_pr": result.draft_pr,
-            "evidence": result.evidence,
-            "next_allowed_actions": result.next_allowed_actions,
-            "actions_not_performed": result.actions_not_performed,
-            "summary": result.summary,
-            "safety": result.safety,
-            "warnings": result.warnings,
-            "performed": result.performed,
-            "dry_run": result.dry_run,
-            "confirmation_required": result.confirmation_required,
-            "error": result.error,
-        }
-    _emit_json(payload, compact=args.json and not args.pretty)
+    _emit_json(result.to_dict(), compact=args.json and not args.pretty)
     return 0 if result.ok else 1
 
 

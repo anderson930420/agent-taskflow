@@ -117,6 +117,8 @@ class DraftPrConfirmResult:
     branch_push: dict[str, Any]
     existing_pr: dict[str, Any]
     draft_pr: dict[str, Any]
+    verification_preview: dict[str, Any]
+    verification: dict[str, Any]
     evidence: dict[str, Any]
     next_allowed_actions: list[str]
     actions_not_performed: list[str]
@@ -143,6 +145,8 @@ class DraftPrConfirmResult:
             "branch_push": self.branch_push,
             "existing_pr": self.existing_pr,
             "draft_pr": self.draft_pr,
+            "verification_preview": self.verification_preview,
+            "verification": self.verification,
             "evidence": self.evidence,
             "next_allowed_actions": self.next_allowed_actions,
             "actions_not_performed": self.actions_not_performed,
@@ -222,6 +226,8 @@ def confirm_draft_pr(
 
     branch_push = _empty_branch_push()
     existing_pr = _empty_existing_pr()
+    verification_preview: dict[str, Any] = _empty_verification_preview()
+    verified_pr: dict[str, Any] = _empty_verification_result(expected=verification_preview)
     preview_text: str | None = None
     resolved: dict[str, str] | None = None
     try:
@@ -266,6 +272,14 @@ def confirm_draft_pr(
                 warnings=list(handoff.warnings) + branch_push["warnings"],
             )
 
+        verification_preview = _build_verification_preview(
+            request=request,
+            worktree=worktree,
+            handoff=handoff,
+            resolved=resolved,
+        )
+        verified_pr = _empty_verification_result(expected=verification_preview)
+
         preview_command = _build_gh_create_command(
             repo=request.repo,
             base=resolved["base"],
@@ -281,12 +295,36 @@ def confirm_draft_pr(
             runner=runner,
         )
         if existing_pr["exists"]:
+            verified_pr = _view_and_verify_pr(
+                repo=request.repo,
+                pr_ref=existing_pr["url"] or existing_pr["number"],
+                expected=verification_preview,
+                runner=runner,
+            )
+            if verified_pr["passed"]:
+                return _already_exists_verified_result(
+                    request=request,
+                    task=task,
+                    handoff=handoff,
+                    branch_push=branch_push,
+                    existing_pr=existing_pr,
+                    verification_preview=verification_preview,
+                    verification=verified_pr,
+                    base=resolved["base"],
+                    head=resolved["head"],
+                    title=resolved["title"],
+                    body=resolved["body"],
+                    preview_text=preview_text,
+                    warnings=list(handoff.warnings) + branch_push["warnings"],
+                )
             return _already_exists_result(
                 request=request,
                 task=task,
                 handoff=handoff,
                 branch_push=branch_push,
                 existing_pr=existing_pr,
+                verification_preview=verification_preview,
+                verification=verified_pr,
                 base=resolved["base"],
                 head=resolved["head"],
                 title=resolved["title"],
@@ -302,6 +340,7 @@ def confirm_draft_pr(
                 handoff=handoff,
                 branch_push=branch_push,
                 existing_pr=existing_pr,
+                verification_preview=verification_preview,
                 base=resolved["base"],
                 head=resolved["head"],
                 title=resolved["title"],
@@ -354,38 +393,29 @@ def confirm_draft_pr(
             )
 
         pr_url = _extract_pr_url(create_completed.stdout)
-        view_completed = _run_command(
-            _build_gh_view_command(request.repo, pr_url),
-            cwd=worktree.worktree_path,
+        verified_pr = _view_and_verify_pr(
+            repo=request.repo,
+            pr_ref=pr_url,
+            expected=verification_preview,
             runner=runner,
         )
-        if view_completed.returncode != 0:
-            return _error_result(
+        if not verified_pr["passed"]:
+            return _verification_failed_result(
                 request=request,
-                status="blocked",
-                error=f"gh pr view failed with {view_completed.returncode}: {view_completed.stderr.strip()}",
-                existing_pr=existing_pr,
+                task=task,
+                handoff=handoff,
                 branch_push=branch_push,
-                handoff=_handoff_snapshot(handoff),
-                warnings=list(handoff.warnings) + branch_push["warnings"],
-                preview_text=preview_text,
+                existing_pr=existing_pr,
+                verification_preview=verification_preview,
+                verification=verified_pr,
                 base=resolved["base"],
                 head=resolved["head"],
                 title=resolved["title"],
                 body=resolved["body"],
+                preview_text=preview_text,
+                pr_url=pr_url,
             )
-
-        view_payload = _parse_json_object(view_completed.stdout, source="gh pr view")
-        _validate_view_payload(
-            view_payload,
-            repo=request.repo,
-            expected_url=pr_url,
-            base=resolved["base"],
-            head=resolved["head"],
-            title=resolved["title"],
-            body=resolved["body"],
-        )
-        pr_number = view_payload.get("number")
+        pr_number = verified_pr.get("actual_number")
         if not isinstance(pr_number, int):
             return _error_result(
                 request=request,
@@ -400,6 +430,8 @@ def confirm_draft_pr(
                 head=resolved["head"],
                 title=resolved["title"],
                 body=resolved["body"],
+                verification_preview=verification_preview,
+                verification=verified_pr,
             )
     except DraftPrConfirmError as exc:
         return _error_result(
@@ -415,6 +447,8 @@ def confirm_draft_pr(
             head=resolved["head"] if resolved else None,
             title=resolved["title"] if resolved else None,
             body=resolved["body"] if resolved else None,
+            verification_preview=verification_preview,
+            verification=verified_pr,
         )
 
     artifact_path = _draft_pr_path(
@@ -432,6 +466,7 @@ def confirm_draft_pr(
         pr_number=pr_number,
         pr_url=pr_url,
         branch_push=branch_push,
+        verification=verified_pr,
         created_at=utc_now_iso(),
         body_file=request.body_file,
     )
@@ -456,6 +491,8 @@ def confirm_draft_pr(
         handoff=handoff,
         branch_push=branch_push,
         existing_pr=existing_pr,
+        verification_preview=verification_preview,
+        verification=verified_pr,
         base=resolved["base"],
         head=resolved["head"],
         title=resolved["title"],
@@ -752,8 +789,258 @@ def _build_gh_view_command(repo: str, pr_url: str) -> list[str]:
         "--repo",
         repo,
         "--json",
-        "url,number,headRefName,baseRefName,isDraft,title,body,state",
+        "url,number,headRefName,baseRefName,isDraft,title,body,state,commits,files",
     ]
+
+
+def _build_verification_preview(
+    *,
+    request: DraftPrConfirmRequest,
+    worktree: Any,
+    handoff: Any,
+    resolved: dict[str, str],
+) -> dict[str, Any]:
+    expected_files = list(handoff.git.get("changed_files", []))
+    expected_commits = _expected_commits(
+        worktree_path=worktree.worktree_path,
+        base_sha=str(worktree.base_sha or "").strip(),
+    )
+    return {
+        "required": True,
+        "post_create_verification_required": True,
+        "expected_repo": request.repo,
+        "expected_base": resolved["base"],
+        "expected_head": resolved["head"],
+        "expected_title": resolved["title"],
+        "expected_files": expected_files,
+        "expected_commits": expected_commits,
+        "expected_state": "OPEN",
+        "expected_is_draft": True,
+    }
+
+
+def _view_and_verify_pr(
+    *,
+    repo: str,
+    pr_ref: str | int | None,
+    expected: dict[str, Any],
+    runner: Runner | None,
+) -> dict[str, Any]:
+    if pr_ref is None or (isinstance(pr_ref, str) and not pr_ref.strip()):
+        raise DraftPrConfirmError("GitHub PR reference is missing")
+    pr_ref_text = str(pr_ref)
+    completed = _run_command(
+        _build_gh_view_command(repo, pr_ref_text),
+        cwd=None,
+        runner=runner,
+    )
+    if completed.returncode != 0:
+        raise DraftPrConfirmError(
+            f"gh pr view failed with {completed.returncode}: {completed.stderr.strip()}"
+        )
+    payload = _parse_json_object(completed.stdout, source="gh pr view")
+    _validate_view_payload(
+        payload,
+        repo=repo,
+        expected_url=pr_ref_text if pr_ref_text.startswith("http") else None,
+        base=str(expected["expected_base"]),
+        head=str(expected["expected_head"]),
+        title=str(expected["expected_title"]),
+    )
+    return _verification_result(payload, expected=expected)
+
+
+def _verification_result(
+    payload: dict[str, Any],
+    *,
+    expected: dict[str, Any],
+) -> dict[str, Any]:
+    actual_files = _extract_pr_file_paths(payload.get("files"))
+    actual_commits = _extract_pr_commit_oids(payload.get("commits"))
+    expected_files = sorted(_stringify_list(expected.get("expected_files")))
+    actual_files_sorted = sorted(actual_files)
+    expected_commits = _stringify_list(expected.get("expected_commits"))
+    expected_commits_set = set(expected_commits)
+    actual_commits_set = set(actual_commits)
+    missing_files = [path for path in expected_files if path not in actual_files_sorted]
+    unexpected_files = [path for path in actual_files_sorted if path not in expected_files]
+    missing_commits = [oid for oid in expected_commits if oid not in actual_commits_set]
+    unexpected_commits = [oid for oid in actual_commits if oid not in expected_commits_set]
+    files_match = expected_files == actual_files_sorted
+    commits_match = expected_commits == actual_commits
+    base_match = payload.get("baseRefName") == expected.get("expected_base")
+    head_match = payload.get("headRefName") == expected.get("expected_head")
+    title_match = payload.get("title") == expected.get("expected_title")
+    draft_match = payload.get("isDraft") is True
+    state_match = str(payload.get("state") or "").strip().upper() == "OPEN"
+    passed = all(
+        [
+            files_match,
+            commits_match,
+            base_match,
+            head_match,
+            title_match,
+            draft_match,
+            state_match,
+        ]
+    )
+    blocking_warnings: list[str] = []
+    if not base_match:
+        blocking_warnings.append("GitHub PR baseRefName does not match handoff base")
+    if not head_match:
+        blocking_warnings.append("GitHub PR headRefName does not match handoff head")
+    if not draft_match:
+        blocking_warnings.append("GitHub PR isDraft is not true")
+    if not state_match:
+        blocking_warnings.append("GitHub PR state is not OPEN")
+    if not title_match:
+        blocking_warnings.append("GitHub PR title does not match handoff title")
+    if not files_match:
+        blocking_warnings.append("GitHub PR files do not match handoff changed_files")
+    if not commits_match:
+        blocking_warnings.append("GitHub PR commits do not match expected branch diff")
+    return {
+        "performed": True,
+        "passed": passed,
+        "verified": passed,
+        "actual_number": payload.get("number"),
+        "actual_url": payload.get("url"),
+        "expected_base": expected.get("expected_base"),
+        "actual_base": payload.get("baseRefName"),
+        "expected_head": expected.get("expected_head"),
+        "actual_head": payload.get("headRefName"),
+        "expected_title": expected.get("expected_title"),
+        "actual_title": payload.get("title"),
+        "expected_state": expected.get("expected_state"),
+        "actual_state": payload.get("state"),
+        "expected_is_draft": expected.get("expected_is_draft"),
+        "actual_is_draft": payload.get("isDraft"),
+        "expected_files": expected_files,
+        "actual_files": actual_files_sorted,
+        "missing_files": missing_files,
+        "unexpected_files": unexpected_files,
+        "expected_commits": expected_commits,
+        "actual_commits": actual_commits,
+        "missing_commits": missing_commits,
+        "unexpected_commits": unexpected_commits,
+        "files_match": files_match,
+        "commits_match": commits_match,
+        "base_match": base_match,
+        "head_match": head_match,
+        "title_match": title_match,
+        "draft_match": draft_match,
+        "state_match": state_match,
+        "blocking_warnings": blocking_warnings,
+    }
+
+
+def _extract_pr_file_paths(files_value: Any) -> list[str]:
+    if not isinstance(files_value, list):
+        return []
+    paths: list[str] = []
+    for item in files_value:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        if isinstance(path, str) and path.strip():
+            paths.append(path.strip())
+    return paths
+
+
+def _extract_pr_commit_oids(commits_value: Any) -> list[str]:
+    if not isinstance(commits_value, list):
+        return []
+    oids: list[str] = []
+    for item in commits_value:
+        if not isinstance(item, dict):
+            continue
+        oid = item.get("oid")
+        if isinstance(oid, str) and oid.strip():
+            oids.append(oid.strip())
+    return oids
+
+
+def _expected_commits(*, worktree_path: Path, base_sha: str) -> list[str]:
+    if not base_sha:
+        raise DraftPrConfirmError("Base SHA is unavailable for PR verification")
+    completed = _run_command(
+        [
+            "git",
+            "-C",
+            str(worktree_path),
+            "log",
+            "--format=%H",
+            "--reverse",
+            f"{base_sha}..HEAD",
+        ],
+        cwd=None,
+        runner=None,
+    )
+    if completed.returncode != 0:
+        raise DraftPrConfirmError(
+            f"git log failed with {completed.returncode}: {completed.stderr.strip()}"
+        )
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+def _empty_verification_preview() -> dict[str, Any]:
+    return {
+        "required": True,
+        "post_create_verification_required": True,
+        "expected_repo": None,
+        "expected_base": None,
+        "expected_head": None,
+        "expected_title": None,
+        "expected_files": [],
+        "expected_commits": [],
+        "expected_state": "OPEN",
+        "expected_is_draft": True,
+    }
+
+
+def _empty_verification_result(*, expected: dict[str, Any] | None = None) -> dict[str, Any]:
+    preview = expected or _empty_verification_preview()
+    return {
+        "performed": False,
+        "passed": False,
+        "verified": False,
+        "expected_base": preview.get("expected_base"),
+        "actual_base": None,
+        "expected_head": preview.get("expected_head"),
+        "actual_head": None,
+        "expected_title": preview.get("expected_title"),
+        "actual_title": None,
+        "expected_state": preview.get("expected_state"),
+        "actual_state": None,
+        "expected_is_draft": preview.get("expected_is_draft"),
+        "actual_is_draft": None,
+        "expected_files": list(preview.get("expected_files", [])),
+        "actual_files": [],
+        "missing_files": list(preview.get("expected_files", [])),
+        "unexpected_files": [],
+        "expected_commits": list(preview.get("expected_commits", [])),
+        "actual_commits": [],
+        "missing_commits": list(preview.get("expected_commits", [])),
+        "unexpected_commits": [],
+        "files_match": False,
+        "commits_match": False,
+        "base_match": False,
+        "head_match": False,
+        "title_match": False,
+        "draft_match": False,
+        "state_match": False,
+        "blocking_warnings": [],
+    }
+
+
+def _stringify_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    result: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            result.append(value.strip())
+    return result
 
 
 def _run_command(
@@ -814,29 +1101,11 @@ def _validate_view_payload(
     payload: dict[str, Any],
     *,
     repo: str,
-    expected_url: str,
+    expected_url: str | None,
     base: str,
     head: str,
     title: str,
-    body: str,
 ) -> None:
-    if payload.get("isDraft") is not True:
-        raise DraftPrConfirmError("GitHub response did not confirm a draft PR")
-    verified_url = payload.get("url")
-    if verified_url != expected_url:
-        raise DraftPrConfirmError("GitHub verification URL did not match created PR URL")
-    if payload.get("headRefName") != head:
-        raise DraftPrConfirmError("GitHub response headRefName did not match requested head")
-    if payload.get("baseRefName") != base:
-        raise DraftPrConfirmError("GitHub response baseRefName did not match requested base")
-    if payload.get("title") != title:
-        raise DraftPrConfirmError("GitHub response title did not match requested title")
-    body_value = payload.get("body")
-    if not isinstance(body_value, str) or not body_value.strip():
-        raise DraftPrConfirmError("GitHub response body was missing")
-    state = str(payload.get("state") or "").strip().upper()
-    if state and state != "OPEN":
-        raise DraftPrConfirmError("GitHub response state did not remain open")
     if not repo.strip():
         raise DraftPrConfirmError("repo must not be empty")
 
@@ -867,6 +1136,7 @@ def _draft_pr_evidence(
     pr_number: int,
     pr_url: str,
     branch_push: dict[str, Any],
+    verification: dict[str, Any],
     created_at: str,
     body_file: Path | None,
 ) -> dict[str, Any]:
@@ -885,6 +1155,8 @@ def _draft_pr_evidence(
         "pr_number": pr_number,
         "pr_url": pr_url,
         "branch_push_verified": branch_push["available"],
+        "verified": bool(verification.get("verified")),
+        "verification": verification,
         "branch_push_artifact_path": branch_push.get("artifact_path"),
         "branch_push_event_type": branch_push["event_type"],
         "created_at": created_at,
@@ -997,6 +1269,7 @@ def _preview_result(
     handoff: Any,
     branch_push: dict[str, Any],
     existing_pr: dict[str, Any],
+    verification_preview: dict[str, Any],
     base: str,
     head: str,
     title: str,
@@ -1022,6 +1295,7 @@ def _preview_result(
             "draft": True,
             "number": None,
             "url": None,
+            "verified": False,
             "title": title,
             "body_preview": _body_preview(body),
             "body_path": str(request.body_file) if request.body_file is not None else None,
@@ -1031,10 +1305,13 @@ def _preview_result(
             "artifact_path": None,
             "issue_closed": False,
         },
+        verification_preview=verification_preview,
+        verification=_empty_verification_result(expected=verification_preview),
         evidence={
             "artifact_recorded": False,
             "event_recorded": False,
             "branch_push_verified": branch_push["available"],
+            "verification_recorded": False,
         },
         next_allowed_actions=[
             "manual review of draft PR",
@@ -1051,6 +1328,7 @@ def _preview_result(
         summary={
             "pr_created": False,
             "draft_pr_created": False,
+            "verified": False,
             "merged": False,
             "approved": False,
             "cleanup_performed": False,
@@ -1068,6 +1346,7 @@ def _preview_result(
             "branch_push_required_before_pr": True,
             "pr_created": False,
             "draft_pr": False,
+            "draft_pr_verified": False,
             "merged": False,
             "approved": False,
             "cleanup_performed": False,
@@ -1078,7 +1357,7 @@ def _preview_result(
         },
         warnings=warnings,
         performed=False,
-        dry_run=True,
+        dry_run=request.dry_run,
         confirmation_required=not request.confirm_draft_pr,
         error=None,
     )
@@ -1091,6 +1370,8 @@ def _already_exists_result(
     handoff: Any,
     branch_push: dict[str, Any],
     existing_pr: dict[str, Any],
+    verification_preview: dict[str, Any],
+    verification: dict[str, Any],
     base: str,
     head: str,
     title: str,
@@ -1099,8 +1380,8 @@ def _already_exists_result(
     warnings: list[str],
 ) -> DraftPrConfirmResult:
     return DraftPrConfirmResult(
-        ok=True,
-        status="already_exists",
+        ok=False,
+        status="existing_pr_verification_failed",
         task_key=request.task_key,
         task_status=task.status,
         repo=request.repo,
@@ -1114,8 +1395,9 @@ def _already_exists_result(
         draft_pr={
             "created": False,
             "draft": True,
-            "number": None,
-            "url": None,
+            "number": existing_pr.get("number"),
+            "url": existing_pr.get("url"),
+            "verified": False,
             "title": title,
             "body_preview": _body_preview(body),
             "body_path": str(request.body_file) if request.body_file is not None else None,
@@ -1125,10 +1407,119 @@ def _already_exists_result(
             "artifact_path": None,
             "issue_closed": False,
         },
+        verification_preview=verification_preview,
+        verification=verification,
         evidence={
             "artifact_recorded": False,
             "event_recorded": False,
             "branch_push_verified": branch_push["available"],
+            "verification_recorded": False,
+        },
+        next_allowed_actions=[
+            "manually inspect the open PR",
+            "close the stale PR if needed",
+            "fix branch or base hygiene",
+            "rerun confirm_draft_pr after correction",
+        ],
+        actions_not_performed=[
+            "draft PR creation",
+            "merge",
+            "approval",
+            "cleanup",
+            "branch deletion",
+            "worktree deletion",
+            "issue close",
+            "task status update",
+        ],
+        summary={
+            "pr_created": False,
+            "draft_pr_created": False,
+            "verified": False,
+            "merged": False,
+            "approved": False,
+            "cleanup_performed": False,
+            "requires_human_review": True,
+            "next_phase": "existing_pr_verification_failed",
+        },
+        safety={
+            "human_confirmation_required": True,
+            "human_confirmation_confirmed": False,
+            "task_status_changed": False,
+            "workspace_prepared": False,
+            "executor_started": False,
+            "validators_started": False,
+            "branch_pushed": False,
+            "branch_push_required_before_pr": True,
+            "pr_created": False,
+            "draft_pr": False,
+            "draft_pr_verified": False,
+            "merged": False,
+            "approved": False,
+            "cleanup_performed": False,
+            "issue_closed": False,
+            "branch_deleted": False,
+            "worktree_deleted": False,
+            "background_worker_started": False,
+        },
+        warnings=warnings,
+        performed=False,
+        dry_run=request.dry_run,
+        confirmation_required=not request.confirm_draft_pr,
+        error=None,
+    )
+
+
+def _already_exists_verified_result(
+    *,
+    request: DraftPrConfirmRequest,
+    task: Any,
+    handoff: Any,
+    branch_push: dict[str, Any],
+    existing_pr: dict[str, Any],
+    verification_preview: dict[str, Any],
+    verification: dict[str, Any],
+    base: str,
+    head: str,
+    title: str,
+    body: str,
+    preview_text: str,
+    warnings: list[str],
+) -> DraftPrConfirmResult:
+    return DraftPrConfirmResult(
+        ok=True,
+        status="already_exists_verified",
+        task_key=request.task_key,
+        task_status=task.status,
+        repo=request.repo,
+        base=base,
+        head=head,
+        title=title,
+        body_preview=_body_preview(body),
+        handoff=_handoff_snapshot(handoff),
+        branch_push=branch_push,
+        existing_pr=existing_pr,
+        draft_pr={
+            "created": False,
+            "draft": True,
+            "number": existing_pr.get("number"),
+            "url": existing_pr.get("url"),
+            "verified": True,
+            "title": title,
+            "body_preview": _body_preview(body),
+            "body_path": str(request.body_file) if request.body_file is not None else None,
+            "event_type": EVENT_TYPE,
+            "artifact_kind": ARTIFACT_TYPE,
+            "command_preview": preview_text,
+            "artifact_path": None,
+            "issue_closed": False,
+        },
+        verification_preview=verification_preview,
+        verification=verification,
+        evidence={
+            "artifact_recorded": False,
+            "event_recorded": False,
+            "branch_push_verified": branch_push["available"],
+            "verification_recorded": False,
         },
         next_allowed_actions=[
             "manual review of the existing open PR",
@@ -1142,10 +1533,13 @@ def _already_exists_result(
             "cleanup",
             "branch deletion",
             "worktree deletion",
+            "issue close",
+            "task status update",
         ],
         summary={
             "pr_created": False,
             "draft_pr_created": False,
+            "verified": True,
             "merged": False,
             "approved": False,
             "cleanup_performed": False,
@@ -1163,6 +1557,7 @@ def _already_exists_result(
             "branch_push_required_before_pr": True,
             "pr_created": False,
             "draft_pr": False,
+            "draft_pr_verified": True,
             "merged": False,
             "approved": False,
             "cleanup_performed": False,
@@ -1173,8 +1568,8 @@ def _already_exists_result(
         },
         warnings=warnings,
         performed=False,
-        dry_run=False,
-        confirmation_required=not request.confirm_draft_pr,
+        dry_run=request.dry_run,
+        confirmation_required=False,
         error=None,
     )
 
@@ -1186,6 +1581,8 @@ def _success_result(
     handoff: Any,
     branch_push: dict[str, Any],
     existing_pr: dict[str, Any],
+    verification_preview: dict[str, Any],
+    verification: dict[str, Any],
     base: str,
     head: str,
     title: str,
@@ -1214,6 +1611,7 @@ def _success_result(
             "draft": True,
             "number": pr_number,
             "url": pr_url,
+            "verified": True,
             "title": title,
             "body_preview": _body_preview(body),
             "body_path": str(request.body_file) if request.body_file is not None else None,
@@ -1223,10 +1621,13 @@ def _success_result(
             "artifact_path": str(artifact_path),
             "issue_closed": False,
         },
+        verification_preview=verification_preview,
+        verification=verification,
         evidence={
             "artifact_recorded": True,
             "event_recorded": True,
             "branch_push_verified": branch_push["available"],
+            "verification_recorded": True,
         },
         next_allowed_actions=[
             "manual review of draft PR",
@@ -1243,6 +1644,7 @@ def _success_result(
         summary={
             "pr_created": True,
             "draft_pr_created": True,
+            "verified": True,
             "merged": False,
             "approved": False,
             "cleanup_performed": False,
@@ -1260,6 +1662,7 @@ def _success_result(
             "branch_push_required_before_pr": True,
             "pr_created": True,
             "draft_pr": True,
+            "draft_pr_verified": True,
             "merged": False,
             "approved": False,
             "cleanup_performed": False,
@@ -1269,6 +1672,120 @@ def _success_result(
             "background_worker_started": False,
         },
         warnings=warnings,
+        performed=True,
+        dry_run=False,
+        confirmation_required=False,
+        error=None,
+    )
+
+
+def _verification_failed_result(
+    *,
+    request: DraftPrConfirmRequest,
+    task: Any,
+    handoff: Any,
+    branch_push: dict[str, Any],
+    existing_pr: dict[str, Any],
+    verification_preview: dict[str, Any],
+    verification: dict[str, Any],
+    base: str,
+    head: str,
+    title: str,
+    body: str,
+    preview_text: str,
+    pr_url: str,
+) -> DraftPrConfirmResult:
+    draft_number = verification.get("actual_number")
+    if not isinstance(draft_number, int):
+        draft_number = None
+    return DraftPrConfirmResult(
+        ok=False,
+        status="pr_created_verification_failed",
+        task_key=request.task_key,
+        task_status=task.status,
+        repo=request.repo,
+        base=base,
+        head=head,
+        title=title,
+        body_preview=_body_preview(body),
+        handoff=_handoff_snapshot(handoff),
+        branch_push=branch_push,
+        existing_pr=existing_pr,
+        draft_pr={
+            "created": True,
+            "draft": True,
+            "number": draft_number,
+            "url": pr_url,
+            "verified": False,
+            "title": title,
+            "body_preview": _body_preview(body),
+            "body_path": str(request.body_file) if request.body_file is not None else None,
+            "event_type": EVENT_TYPE,
+            "artifact_kind": ARTIFACT_TYPE,
+            "command_preview": preview_text,
+            "artifact_path": None,
+            "issue_closed": False,
+        },
+        verification_preview=verification_preview,
+        verification=verification,
+        evidence={
+            "artifact_recorded": False,
+            "event_recorded": False,
+            "branch_push_verified": branch_push["available"],
+            "verification_recorded": False,
+        },
+        next_allowed_actions=[
+            "manually inspect the created PR",
+            "close the stale PR if needed",
+            "fix branch or base hygiene",
+            "rerun confirm_draft_pr after correction",
+        ],
+        actions_not_performed=[
+            "draft PR artifact recording",
+            "draft PR event recording",
+            "merge",
+            "approval",
+            "cleanup",
+            "branch deletion",
+            "worktree deletion",
+            "issue close",
+            "task status update",
+        ],
+        summary={
+            "pr_created": True,
+            "draft_pr_created": False,
+            "verified": False,
+            "merged": False,
+            "approved": False,
+            "cleanup_performed": False,
+            "requires_human_review": True,
+            "next_phase": "pr_created_verification_failed",
+        },
+        safety={
+            "human_confirmation_required": True,
+            "human_confirmation_confirmed": True,
+            "task_status_changed": False,
+            "workspace_prepared": False,
+            "executor_started": False,
+            "validators_started": False,
+            "branch_pushed": False,
+            "branch_push_required_before_pr": True,
+            "pr_created": True,
+            "draft_pr": True,
+            "draft_pr_verified": False,
+            "merged": False,
+            "approved": False,
+            "cleanup_performed": False,
+            "issue_closed": False,
+            "branch_deleted": False,
+            "worktree_deleted": False,
+            "background_worker_started": False,
+        },
+        warnings=[
+            *list(handoff.warnings),
+            *branch_push["warnings"],
+            *verification.get("blocking_warnings", []),
+        ],
         performed=True,
         dry_run=False,
         confirmation_required=False,
@@ -1290,6 +1807,8 @@ def _error_result(
     head: str | None = None,
     title: str | None = None,
     body: str | None = None,
+    verification_preview: dict[str, Any] | None = None,
+    verification: dict[str, Any] | None = None,
 ) -> DraftPrConfirmResult:
     resolved_warnings = warnings or []
     body_preview = _body_preview(body) if body is not None else None
@@ -1311,6 +1830,7 @@ def _error_result(
             "draft": True,
             "number": None,
             "url": None,
+            "verified": False,
             "title": title,
             "body_preview": body_preview,
             "body_path": str(request.body_file) if request.body_file is not None else None,
@@ -1320,10 +1840,15 @@ def _error_result(
             "artifact_path": None,
             "issue_closed": False,
         },
+        verification_preview=verification_preview or _empty_verification_preview(),
+        verification=verification or _empty_verification_result(
+            expected=verification_preview or _empty_verification_preview()
+        ),
         evidence={
             "artifact_recorded": False,
             "event_recorded": False,
             "branch_push_verified": branch_push.get("available", False),
+            "verification_recorded": False,
         },
         next_allowed_actions=[
             "resolve blocking warnings",
@@ -1357,6 +1882,7 @@ def _error_result(
             "branch_push_required_before_pr": True,
             "pr_created": False,
             "draft_pr": False,
+            "draft_pr_verified": False,
             "merged": False,
             "approved": False,
             "cleanup_performed": False,

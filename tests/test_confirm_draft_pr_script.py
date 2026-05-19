@@ -130,6 +130,35 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
             updated_at="2026-05-02T00:00:00Z",
         )
 
+    def _gh_view_stdout(
+        self,
+        *,
+        number: int,
+        files: list[str] | None = None,
+        commits: list[str] | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        head: str | None = None,
+        base: str = "main",
+        state: str = "OPEN",
+        is_draft: bool = True,
+        url: str | None = None,
+    ) -> str:
+        return json.dumps(
+            {
+                "url": url or f"https://github.com/anderson930420/agent-taskflow/pull/{number}",
+                "number": number,
+                "headRefName": head or self.branch,
+                "baseRefName": base,
+                "isDraft": is_draft,
+                "title": title or "AT-DF-CLI-001: Draft PR CLI task",
+                "body": body or "Task: AT-DF-CLI-001\n",
+                "state": state,
+                "commits": [{"oid": oid} for oid in (commits or [self.head_sha])],
+                "files": [{"path": path} for path in (files or ["feature.txt"])],
+            }
+        )
+
     def _seed_task(
         self,
         *,
@@ -338,6 +367,9 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "dry_run")
         self.assertFalse(payload["draft_pr"]["created"])
+        self.assertTrue(payload["verification_preview"]["post_create_verification_required"])
+        self.assertEqual(payload["verification_preview"]["expected_files"], ["feature.txt"])
+        self.assertEqual(payload["verification_preview"]["expected_commits"], [self.head_sha])
         self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
 
     def test_script_dry_run_without_review_evidence_still_succeeds(self) -> None:
@@ -359,18 +391,7 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         runner = FakeGhRunner(
             list_stdout="[]\n",
             create_stdout="https://github.com/anderson930420/agent-taskflow/pull/123\n",
-            view_stdout=json.dumps(
-                {
-                    "url": "https://github.com/anderson930420/agent-taskflow/pull/123",
-                    "number": 123,
-                    "headRefName": self.branch,
-                    "baseRefName": "main",
-                    "isDraft": True,
-                    "title": "AT-DF-CLI-001: Draft PR CLI task",
-                    "body": "Task: AT-DF-CLI-001\n",
-                    "state": "OPEN",
-                }
-            ),
+            view_stdout=self._gh_view_stdout(number=123),
         )
         exit_code, stdout, _stderr = self._run_main(
             self._base_args() + ["--confirm-draft-pr"],
@@ -382,23 +403,15 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         self.assertEqual(payload["status"], "draft_pr_created")
         self.assertTrue(payload["draft_pr"]["created"])
         self.assertEqual(payload["draft_pr"]["number"], 123)
+        self.assertTrue(payload["draft_pr"]["verified"])
+        self.assertTrue(payload["summary"]["verified"])
+        self.assertTrue(payload["verification"]["passed"])
 
     def test_script_confirm_without_review_evidence_still_creates_draft_pr(self) -> None:
         runner = FakeGhRunner(
             list_stdout="[]\n",
             create_stdout="https://github.com/anderson930420/agent-taskflow/pull/125\n",
-            view_stdout=json.dumps(
-                {
-                    "url": "https://github.com/anderson930420/agent-taskflow/pull/125",
-                    "number": 125,
-                    "headRefName": self.branch,
-                    "baseRefName": "main",
-                    "isDraft": True,
-                    "title": "AT-DF-CLI-001: Draft PR CLI task",
-                    "body": "Task: AT-DF-CLI-001\n",
-                    "state": "OPEN",
-                }
-            ),
+            view_stdout=self._gh_view_stdout(number=125),
         )
         exit_code, stdout, _stderr = self._run_main(
             self._base_args() + ["--confirm-draft-pr"],
@@ -409,10 +422,89 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "draft_pr_created")
         self.assertTrue(payload["draft_pr"]["created"])
+        self.assertTrue(payload["draft_pr"]["verified"])
+        self.assertTrue(payload["verification"]["passed"])
         self.assertFalse(
             any("approval/review evidence" in warning for warning in payload["warnings"])
         )
         self.assertTrue(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
+    def test_script_existing_open_pr_verifies_without_duplicate_creation(self) -> None:
+        runner = FakeGhRunner(
+            list_stdout=json.dumps(
+                [
+                    {
+                        "number": 7,
+                        "url": "https://github.com/anderson930420/agent-taskflow/pull/7",
+                        "state": "OPEN",
+                        "isDraft": True,
+                        "title": "Existing draft PR",
+                    }
+                ]
+            )
+            + "\n",
+            view_stdout=self._gh_view_stdout(
+                number=7,
+                url="https://github.com/anderson930420/agent-taskflow/pull/7",
+                title="AT-DF-CLI-001: Draft PR CLI task",
+            ),
+        )
+        exit_code, stdout, _stderr = self._run_main(
+            self._base_args() + ["--dry-run"],
+            runner=runner,
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "already_exists_verified")
+        self.assertTrue(payload["summary"]["verified"])
+        self.assertTrue(payload["verification"]["passed"])
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
+    def test_script_existing_pr_verification_failure_blocks_creation(self) -> None:
+        runner = FakeGhRunner(
+            list_stdout=json.dumps(
+                [
+                    {
+                        "number": 8,
+                        "url": "https://github.com/anderson930420/agent-taskflow/pull/8",
+                        "state": "OPEN",
+                        "isDraft": True,
+                        "title": "Existing stale PR",
+                    }
+                ]
+            )
+            + "\n",
+            view_stdout=self._gh_view_stdout(
+                number=8,
+                url="https://github.com/anderson930420/agent-taskflow/pull/8",
+                title="AT-DF-CLI-001: Draft PR CLI task",
+                files=[
+                    "README.md",
+                    "agent_taskflow/draft_pr_confirm.py",
+                    "tests/test_confirm_draft_pr_script.py",
+                ],
+                commits=[
+                    "cccccccccccccccccccccccccccccccccccccccc",
+                    self.head_sha,
+                ],
+            ),
+        )
+        exit_code, stdout, _stderr = self._run_main(
+            self._base_args() + ["--dry-run"],
+            runner=runner,
+        )
+
+        self.assertNotEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "existing_pr_verification_failed")
+        self.assertFalse(payload["summary"]["verified"])
+        self.assertFalse(payload["safety"]["pr_created"])
+        self.assertFalse(payload["evidence"]["artifact_recorded"])
+        self.assertFalse(payload["evidence"]["event_recorded"])
+        self.assertIn("unexpected_files", payload["verification"])
+        self.assertIn("unexpected_commits", payload["verification"])
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
 
     def test_script_rejects_non_waiting_task_by_default(self) -> None:
         self._seed_task(status="blocked")
@@ -452,18 +544,7 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         runner = FakeGhRunner(
             list_stdout="[]\n",
             create_stdout="https://github.com/anderson930420/agent-taskflow/pull/124\n",
-            view_stdout=json.dumps(
-                {
-                    "url": "https://github.com/anderson930420/agent-taskflow/pull/124",
-                    "number": 124,
-                    "headRefName": self.branch,
-                    "baseRefName": "main",
-                    "isDraft": True,
-                    "title": "AT-DF-CLI-001: Draft PR CLI task",
-                    "body": "Task: AT-DF-CLI-001\n",
-                    "state": "OPEN",
-                }
-            ),
+            view_stdout=self._gh_view_stdout(number=124),
         )
         exit_code, stdout, _stderr = self._run_main(
             self._base_args() + ["--confirm-draft-pr"],
@@ -473,6 +554,7 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "draft_pr_created")
+        self.assertTrue(payload["summary"]["verified"])
         self.assertEqual(self.store.get_task(self.task_key).status, "waiting_approval")
         self.assertTrue(
             any(event.event_type == "draft_pr_created" for event in self.store.list_task_events(self.task_key))
