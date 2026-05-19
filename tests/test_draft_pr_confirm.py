@@ -568,6 +568,7 @@ class DraftPrConfirmTests(unittest.TestCase):
         self.assertEqual(payload["artifact_type"], "draft_pr")
         self.assertEqual(payload["kind"], "draft_pr_created")
         self.assertTrue(payload["branch_push_verified"])
+        self.assertFalse(payload["issue_closed"])
 
     def test_non_waiting_actual_creation_is_blocked_even_with_allow_non_waiting(self) -> None:
         self._seed_task(status="blocked")
