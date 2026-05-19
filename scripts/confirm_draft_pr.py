@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Preview or confirm an explicit GitHub draft PR creation."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from agent_taskflow.draft_pr_confirm import (  # noqa: E402
+    DraftPrConfirmError,
+    DraftPrConfirmRequest,
+    confirm_draft_pr,
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Preview or confirm an explicit GitHub draft PR creation.",
+    )
+    parser.add_argument("--task-key", required=True, help="Task key to create a draft PR for.")
+    parser.add_argument(
+        "--db-path",
+        required=True,
+        help="Absolute path to the Agent Taskflow SQLite state DB.",
+    )
+    parser.add_argument(
+        "--repo",
+        required=True,
+        help="GitHub repo, for example anderson930420/agent-taskflow.",
+    )
+    parser.add_argument(
+        "--repo-path",
+        required=True,
+        help="Absolute path to the repository root for the task worktree.",
+    )
+    parser.add_argument(
+        "--artifact-root",
+        help="Optional artifact root used for local draft_pr evidence files.",
+    )
+    parser.add_argument("--base", help="Optional base branch override; must match handoff evidence.")
+    parser.add_argument("--head", help="Optional head branch override; must match handoff evidence.")
+    parser.add_argument("--title", help="Optional PR title override.")
+    parser.add_argument(
+        "--body-file",
+        help="Optional absolute path to a local file containing the PR body override.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Never perform the actual PR creation; only validate and preview the command.",
+    )
+    parser.add_argument(
+        "--confirm-draft-pr",
+        action="store_true",
+        help="Required before the script may perform the actual gh pr create --draft.",
+    )
+    parser.add_argument(
+        "--allow-non-waiting",
+        action="store_true",
+        help="Allow inspection/dry-run on tasks that are not in waiting_approval.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output. This is the default output format.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON output.",
+    )
+    return parser
+
+
+def _resolve_path(value: str | None) -> Path | None:
+    if value is None:
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def _emit_json(payload: dict[str, object], *, compact: bool) -> None:
+    if compact:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _error_payload(task_key: str, message: str) -> dict[str, object]:
+    return {
+        "ok": False,
+        "status": "blocked",
+        "task_key": task_key,
+        "summary": message,
+        "error": message,
+        "safety": {
+            "human_confirmation_required": True,
+            "human_confirmation_confirmed": False,
+            "task_status_changed": False,
+            "workspace_prepared": False,
+            "executor_started": False,
+            "validators_started": False,
+            "branch_pushed": False,
+            "branch_push_required_before_pr": True,
+            "pr_created": False,
+            "draft_pr": False,
+            "merged": False,
+            "approved": False,
+            "cleanup_performed": False,
+            "branch_deleted": False,
+            "worktree_deleted": False,
+            "background_worker_started": False,
+        },
+    }
+
+
+def main(argv: list[str] | None = None, *, runner=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        request = DraftPrConfirmRequest(
+            task_key=args.task_key,
+            repo=args.repo,
+            repo_path=_resolve_path(args.repo_path) or Path(args.repo_path),
+            db_path=_resolve_path(args.db_path),
+            artifact_root=_resolve_path(args.artifact_root),
+            base=args.base,
+            head=args.head,
+            title=args.title,
+            body_file=_resolve_path(args.body_file),
+            dry_run=args.dry_run,
+            confirm_draft_pr=args.confirm_draft_pr,
+            allow_non_waiting=args.allow_non_waiting,
+        )
+        result = confirm_draft_pr(request, runner=runner)
+    except (ValueError, OSError, DraftPrConfirmError) as exc:
+        _emit_json(
+            _error_payload(args.task_key, str(exc)),
+            compact=args.json and not args.pretty,
+        )
+        return 1
+
+    payload = result.to_dict()
+    if not result.ok:
+        payload = {
+            "ok": False,
+            "status": result.status,
+            "task_key": result.task_key,
+            "task_status": result.task_status,
+            "repo": result.repo,
+            "base": result.base,
+            "head": result.head,
+            "title": result.title,
+            "body_preview": result.body_preview,
+            "handoff": result.handoff,
+            "branch_push": result.branch_push,
+            "existing_pr": result.existing_pr,
+            "draft_pr": result.draft_pr,
+            "evidence": result.evidence,
+            "next_allowed_actions": result.next_allowed_actions,
+            "actions_not_performed": result.actions_not_performed,
+            "summary": result.summary,
+            "safety": result.safety,
+            "warnings": result.warnings,
+            "performed": result.performed,
+            "dry_run": result.dry_run,
+            "confirmation_required": result.confirmation_required,
+            "error": result.error,
+        }
+    _emit_json(payload, compact=args.json and not args.pretty)
+    return 0 if result.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

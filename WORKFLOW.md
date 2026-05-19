@@ -148,6 +148,15 @@ validation, and only performs `git push origin HEAD:<branch>` when
 the actual push succeeds. It does not create PRs, merge, approve, clean up, or
 delete branches/worktrees.
 
+The Explicit Draft PR Creation Confirm command (`scripts/confirm_draft_pr.py`)
+adds the Phase 5D operator gate. It requires waiting-approval evidence, the
+Phase 5B PR handoff package, Phase 5C successful branch-push evidence, and an
+explicit `--confirm-draft-pr` before it may call `gh pr create --draft`. It
+verifies the target repo, base branch, head branch, and PR title/body before
+creation, checks for an existing open PR on the head branch, and records draft
+PR evidence only after the draft PR is created successfully. It does not merge,
+approve, clean up, delete branches/worktrees, or start background workers.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
