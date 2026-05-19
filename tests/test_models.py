@@ -10,6 +10,8 @@ from agent_taskflow.models import (
     require_absolute_path,
     utc_now_iso,
     validate_task_status,
+    validate_task_artifact_type,
+    validate_task_event_type,
 )
 
 
@@ -20,6 +22,12 @@ class ModelValidationTests(unittest.TestCase):
     def test_invalid_task_status_raises(self) -> None:
         with self.assertRaisesRegex(ValueError, "Invalid task status"):
             validate_task_status("not-a-real-status")
+
+    def test_task_closeout_event_type_is_accepted(self) -> None:
+        self.assertEqual(validate_task_event_type("task_closeout_completed"), "task_closeout_completed")
+
+    def test_task_closeout_artifact_type_is_accepted(self) -> None:
+        self.assertEqual(validate_task_artifact_type("task_closeout"), "task_closeout")
 
     def test_absolute_path_is_accepted(self) -> None:
         self.assertEqual(
