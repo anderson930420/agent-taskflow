@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+import tempfile
 import unittest
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -13,8 +16,15 @@ class CorsMiddlewareTests(unittest.TestCase):
     """Verify CORS headers are returned for allowed origins."""
 
     def setUp(self) -> None:
-        self.app = create_app()
-        self.client = TestClient(self.app)
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+
+        self._exit_stack = ExitStack()
+        self.addCleanup(self._exit_stack.close)
+
+        self.db_path = Path(self._tmpdir.name) / "cors-test.db"
+        self.app = create_app(db_path=self.db_path)
+        self.client = self._exit_stack.enter_context(TestClient(self.app))
 
     def test_options_health_returns_cors_for_127_0_0_1_3001(self) -> None:
         resp = self.client.options(
