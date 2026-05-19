@@ -33,6 +33,9 @@ class CreatePrHandoffPackageScriptTests(unittest.TestCase):
         self._git(["worktree", "add", "-b", "task/AT-HANDOFF-PKG-CLI", str(self.worktree), "main"])
         (self.worktree / "z-change.txt").write_text("z\n", encoding="utf-8")
         (self.worktree / "a-change.txt").write_text("a\n", encoding="utf-8")
+        self._git(["add", "a-change.txt", "z-change.txt"], cwd=self.worktree)
+        self._git(["commit", "-m", "update handoff worktree"], cwd=self.worktree)
+        self.head_sha = self._git(["rev-parse", "HEAD"], cwd=self.worktree).stdout.strip()
         self._seed_task()
 
     def tearDown(self) -> None:
@@ -247,29 +250,134 @@ class CreatePrHandoffPackageScriptTests(unittest.TestCase):
         package_dir = self.package_root / "pr_handoff_package" / "AT-HANDOFF-PKG-CLI"
         self.assertFalse(package_dir.exists())
 
-    def test_script_readme_changed_file_is_not_truncated(self) -> None:
-        for name in ("a-change.txt", "z-change.txt"):
-            path = self.worktree / name
-            if path.exists():
-                path.unlink()
-        (self.worktree / "README.md").write_text(
-            "# handoff package cli\nupdated\n",
+    def test_script_clean_worktree_with_committed_readme_diff_reports_readme(self) -> None:
+        clean_root = self.root / "clean-readme"
+        repo = clean_root / "repo"
+        worktree = clean_root / "worktree"
+        db_path = clean_root / "state.db"
+        artifact_root = clean_root / "artifacts"
+        store = TaskMirrorStore(db_path)
+        store.init_db()
+
+        def git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=cwd or repo,
+                shell=False,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if completed.returncode != 0:
+                self.fail(f"git {' '.join(args)} failed: {completed.stderr}")
+            return completed
+
+        repo.mkdir(parents=True)
+        git("init")
+        git("config", "user.email", "agent-taskflow@example.invalid")
+        git("config", "user.name", "Agent Taskflow")
+        (repo / "README.md").write_text("# handoff package cli clean\n", encoding="utf-8")
+        git("add", "README.md")
+        git("commit", "-m", "initial")
+        git("branch", "-M", "main")
+        base_sha = git("rev-parse", "main").stdout.strip()
+        git("worktree", "add", "-b", "task/AT-HANDOFF-PKG-CLI-README", str(worktree), "main")
+
+        task_key = "AT-HANDOFF-PKG-CLI-README"
+        artifact_dir = artifact_root / task_key
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        store.upsert_task(
+            TaskRecord(
+                task_key=task_key,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                title="CLI handoff package README task",
+                status="waiting_approval",
+                repo_path=repo,
+                artifact_dir=artifact_dir,
+            )
+        )
+        store.upsert_task_worktree(
+            TaskWorktreeRecord(
+                task_key=task_key,
+                repo_path=repo,
+                worktree_path=worktree,
+                branch=f"task/{task_key}",
+                base_branch="main",
+                base_sha=base_sha,
+                status="active",
+            )
+        )
+        issue_spec_path = artifact_dir / "issue_spec.md"
+        issue_spec_path.write_text(
+            render_issue_spec(
+                repo="anderson930420/agent-taskflow",
+                task_key=task_key,
+                issue=self._issue_snapshot(),
+                ingested_at="2026-05-03T00:00:00Z",
+            ),
             encoding="utf-8",
         )
+        store.record_task_artifact(task_key, "issue_spec", issue_spec_path)
+        contract = build_mission_contract(
+            task_key=task_key,
+            goal="Report committed README diff from CLI",
+            repo_path=repo,
+            worktree_path=worktree,
+            artifact_dir=artifact_dir,
+            executor="noop",
+            required_validators=("pytest",),
+        )
+        write_mission_contract(contract, artifact_dir=artifact_dir)
+        executor_log = artifact_dir / "executor.log"
+        executor_log.write_text("executor log\n", encoding="utf-8")
+        run_id = store.create_executor_run(task_key, "noop")
+        store.finish_executor_run(
+            task_key,
+            run_id,
+            executor="noop",
+            status="completed",
+            exit_code=0,
+            summary="executor summary",
+            log_path=executor_log,
+            artifacts={"log": executor_log},
+        )
+        store.record_task_artifact(task_key, "worker_log", executor_log)
+        validator_log = artifact_dir / "pytest.log"
+        validator_log.write_text("validator log\n", encoding="utf-8")
+        store.record_validation_result(
+            task_key,
+            "pytest",
+            status="passed",
+            exit_code=0,
+            summary="validator summary",
+            log_path=validator_log,
+            artifacts={"log": validator_log},
+        )
+        store.record_task_artifact(task_key, "review_log", validator_log)
+        (worktree / "README.md").write_text(
+            "# handoff package cli clean\nupdated\n",
+            encoding="utf-8",
+        )
+        git("add", "README.md", cwd=worktree)
+        git("commit", "-m", "update README", cwd=worktree)
 
         result = self._run(
             "--task-key",
-            "AT-HANDOFF-PKG-CLI",
+            task_key,
             "--repo-path",
-            str(self.repo),
+            str(repo),
             "--db-path",
-            str(self.db_path),
+            str(db_path),
             "--json",
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["git"]["changed_files"], ["README.md"])
+        self.assertTrue(payload["git"]["worktree_clean"])
+        self.assertNotEqual(payload["git"]["diff_summary"], "(clean)")
         self.assertNotIn("EADME.md", payload["git"]["changed_files"])
 
     def test_script_non_dry_run_writes_local_handoff_artifact_and_event(self) -> None:

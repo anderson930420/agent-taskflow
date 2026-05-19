@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 import json
-import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -461,14 +460,24 @@ def _inspect_git_state(
         head_sha = _git(worktree, ["rev-parse", "HEAD"])
         current_branch = _git(worktree, ["rev-parse", "--abbrev-ref", "HEAD"])
         status_short = _git(worktree, ["status", "--porcelain=v1", "--untracked-files=all"])
-        diff_names = _git(worktree, ["diff", "--name-only"])
-        diff_stat = _git(worktree, ["diff", "--stat"])
         log_output = _git(worktree, ["log", "--oneline", "-n", "5"])
     except PrHandoffPackageError as exc:
         warnings.append(str(exc))
         return _unavailable_git_state(warnings=warnings)
 
-    changed_files = _changed_files(status_short=status_short, diff_names=diff_names)
+    base_sha = str(workspace.get("base_sha") or "").strip()
+    if not base_sha:
+        warnings.append("Base SHA is unavailable; committed diff inspection was skipped")
+        return _unavailable_git_state(warnings=warnings)
+
+    try:
+        diff_names = _git(worktree, ["diff", "--name-only", f"{base_sha}..HEAD"])
+        diff_stat = _git(worktree, ["diff", "--stat", f"{base_sha}..HEAD"])
+    except PrHandoffPackageError as exc:
+        warnings.append(str(exc))
+        return _unavailable_git_state(warnings=warnings)
+
+    changed_files = _changed_files(diff_names=diff_names)
     commit_summary = _commit_summary(log_output)
     command_preview = _branch_push_preview_text(
         branch=str(workspace.get("branch") or current_branch),
@@ -485,7 +494,7 @@ def _inspect_git_state(
         "changed_file_count": len(changed_files),
         "diff_summary": diff_stat if diff_stat else "(clean)",
         "commit_summary": commit_summary,
-        "worktree_clean": not status_short.strip() and not diff_names.strip(),
+        "worktree_clean": not status_short.strip(),
         "branch_push_command_preview": command_preview,
         "warnings": [],
     }
@@ -509,24 +518,8 @@ def _unavailable_git_state(*, warnings: list[str]) -> dict[str, Any]:
     }
 
 
-_STATUS_LINE_RE = re.compile(r"^(?P<status>.{2}) (?P<path>.*)$")
-
-
-def _changed_files(*, status_short: str, diff_names: str) -> list[str]:
+def _changed_files(*, diff_names: str) -> list[str]:
     names: set[str] = set()
-    for raw_line in status_short.splitlines():
-        line = raw_line.rstrip("\n")
-        if not line:
-            continue
-        match = _STATUS_LINE_RE.match(line)
-        if match is None:
-            continue
-        status = match.group("status")
-        path = match.group("path")
-        if status[0] in {"R", "C"} and " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        if path:
-            names.add(path)
     for raw_line in diff_names.splitlines():
         name = raw_line.strip()
         if name:
@@ -880,11 +873,11 @@ def _git(worktree_path: Path, args: list[str]) -> str:
         ("rev-parse", "HEAD"),
         ("rev-parse", "--abbrev-ref", "HEAD"),
         ("status", "--porcelain=v1", "--untracked-files=all"),
-        ("diff", "--name-only"),
-        ("diff", "--stat"),
         ("log", "--oneline", "-n", "5"),
     }
-    if tuple(args) not in allowed:
+    if len(args) == 3 and args[0] == "diff" and args[1] in {"--name-only", "--stat"} and args[2].endswith("..HEAD"):
+        pass
+    elif tuple(args) not in allowed:
         raise PrHandoffPackageError(f"Git command is not allowed: git {' '.join(args)}")
 
     completed = subprocess.run(
