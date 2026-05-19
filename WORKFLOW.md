@@ -165,6 +165,15 @@ task branch with `git branch -d` only after explicit confirmation. It does not
 delete remote branches, close issues, archive tasks, merge, approve, update
 task status, or run in the background.
 
+The Explicit Remote Branch Cleanup Confirm command
+(`scripts/confirm_remote_branch_cleanup.py`) adds the Phase 6C operator gate.
+It consumes the Phase 6A merged cleanup recommendation plus Phase 6B local
+cleanup evidence, verifies the remote task branch against trusted evidence,
+and may delete only the verified remote task branch with `git push
+<remote> --delete <branch>` after explicit confirmation. It does not delete
+local branches or worktrees, close issues, archive tasks, mark tasks complete,
+update task status, merge, approve, or run in the background.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
