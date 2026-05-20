@@ -89,6 +89,62 @@ class ValidatorContextTests(ValidatorTestCase):
                     env={"API_TOKEN": "should-not-be-stored"},
                 )
 
+    def test_validator_context_rejects_empty_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree_path = Path(tmp) / "worktree"
+            artifact_dir = Path(tmp) / "artifacts"
+            worktree_path.mkdir()
+            artifact_dir.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "project must not be empty"):
+                ValidatorContext(
+                    task_key="AT-0006",
+                    project="   ",
+                    worktree_path=worktree_path,
+                    artifact_dir=artifact_dir,
+                )
+
+    def test_validator_context_rejects_non_positive_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                ValueError,
+                "timeout_seconds must be positive when provided",
+            ):
+                self.make_context(Path(tmp), timeout_seconds=0)
+
+    def test_validator_context_rejects_non_string_env_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree_path = Path(tmp) / "worktree"
+            artifact_dir = Path(tmp) / "artifacts"
+            worktree_path.mkdir()
+            artifact_dir.mkdir()
+
+            with self.assertRaisesRegex(TypeError, "env value for 'FOO' must be a string"):
+                ValidatorContext(
+                    task_key="AT-0006",
+                    project="agent-taskflow",
+                    worktree_path=worktree_path,
+                    artifact_dir=artifact_dir,
+                    env={"FOO": 123},  # type: ignore[dict-item]
+                )
+
+    def test_validator_context_preserves_valid_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree_path = Path(tmp) / "worktree"
+            artifact_dir = Path(tmp) / "artifacts"
+            worktree_path.mkdir()
+            artifact_dir.mkdir()
+
+            context = ValidatorContext(
+                task_key="AT-0006",
+                project="agent-taskflow",
+                worktree_path=worktree_path,
+                artifact_dir=artifact_dir,
+                env={"FOO": "bar", " BAZ ": "qux"},
+            )
+
+            self.assertEqual(context.env, {"FOO": "bar", "BAZ": "qux"})
+
 
 class ValidatorResultTests(unittest.TestCase):
     def test_validator_result_rejects_relative_log_path(self) -> None:

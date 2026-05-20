@@ -10,6 +10,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent_taskflow.context_validation import (
+    require_non_empty as _require_non_empty,
+    validate_env as _validate_env,
+    validate_timeout as _validate_timeout,
+)
 from agent_taskflow.models import require_absolute_path
 from agent_taskflow.tasks import normalize_task_key
 
@@ -21,56 +26,12 @@ VALIDATOR_RESULT_STATUSES = {
     "blocked",
 }
 
-_SECRET_ENV_MARKERS = (
-    "KEY",
-    "TOKEN",
-    "SECRET",
-    "PASSWORD",
-    "CREDENTIAL",
-)
-
-
-def _require_non_empty(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must not be empty")
-    return normalized
-
 
 def validate_validator_result_status(status: str) -> str:
     """Return a normalized validator result status or raise ValueError."""
     normalized = _require_non_empty(status, "status")
     if normalized not in VALIDATOR_RESULT_STATUSES:
         raise ValueError(f"Invalid validator result status: {status!r}")
-    return normalized
-
-
-def _validate_timeout(timeout_seconds: int | None) -> int | None:
-    if timeout_seconds is None:
-        return None
-    if timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be positive when provided")
-    return timeout_seconds
-
-
-def _validate_env(env: dict[str, str] | None) -> dict[str, str] | None:
-    if env is None:
-        return None
-
-    normalized: dict[str, str] = {}
-    for key, value in env.items():
-        env_key = _require_non_empty(str(key), "env key")
-        if not isinstance(value, str):
-            raise TypeError(f"env value for {env_key!r} must be a string")
-
-        upper_key = env_key.upper()
-        if any(marker in upper_key for marker in _SECRET_ENV_MARKERS):
-            raise ValueError(
-                f"env must not include secret-like key: {env_key!r}"
-            )
-
-        normalized[env_key] = value
-
     return normalized
 
 
