@@ -4,7 +4,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from agent_taskflow import store as store_module
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore, init_db
 
@@ -196,6 +198,86 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(any("executor_run_started" in payload for payload in payloads))
         self.assertTrue(any("executor_run_finished" in payload for payload in payloads))
         self.assertTrue(any(run_id in payload for payload in payloads))
+
+    def test_create_executor_run_same_timestamp_produces_distinct_run_ids(self) -> None:
+        self.store.upsert_task(self.make_task())
+
+        fixed_ts = "2026-05-21T12:00:00Z"
+        with mock.patch.object(store_module, "utc_now_iso", return_value=fixed_ts):
+            run_id_1 = self.store.create_executor_run(
+                "AT-0003",
+                "noop",
+                model="fake-model",
+                prompt_path="/home/ubuntu/.hermes/task-artifacts/AT-0003/implementation_prompt.md",
+            )
+            run_id_2 = self.store.create_executor_run(
+                "AT-0003",
+                "noop",
+                model="fake-model",
+                prompt_path="/home/ubuntu/.hermes/task-artifacts/AT-0003/implementation_prompt.md",
+            )
+
+        self.assertNotEqual(run_id_1, run_id_2)
+        self.assertTrue(run_id_1.startswith(f"AT-0003:noop:{fixed_ts}:"))
+        self.assertTrue(run_id_2.startswith(f"AT-0003:noop:{fixed_ts}:"))
+
+    def test_list_executor_runs_keeps_same_second_runs_separate(self) -> None:
+        self.store.upsert_task(self.make_task())
+
+        fixed_ts = "2026-05-21T12:00:00Z"
+        with mock.patch.object(store_module, "utc_now_iso", return_value=fixed_ts):
+            run_id_1 = self.store.create_executor_run(
+                "AT-0003",
+                "noop",
+                model="fake-model",
+                prompt_path="/home/ubuntu/.hermes/task-artifacts/AT-0003/prompt_1.md",
+            )
+            run_id_2 = self.store.create_executor_run(
+                "AT-0003",
+                "noop",
+                model="fake-model",
+                prompt_path="/home/ubuntu/.hermes/task-artifacts/AT-0003/prompt_2.md",
+            )
+            self.store.finish_executor_run(
+                "AT-0003",
+                run_id_1,
+                executor="noop",
+                status="completed",
+                exit_code=0,
+                summary="first run summary",
+                log_path="/home/ubuntu/.hermes/task-artifacts/AT-0003/noop_1.log",
+            )
+            self.store.finish_executor_run(
+                "AT-0003",
+                run_id_2,
+                executor="noop",
+                status="failed",
+                exit_code=1,
+                summary="second run summary",
+                log_path="/home/ubuntu/.hermes/task-artifacts/AT-0003/noop_2.log",
+            )
+
+        runs = self.store.list_executor_runs("AT-0003")
+
+        self.assertEqual(len(runs), 2)
+        run_ids = {run["run_id"] for run in runs}
+        self.assertEqual(run_ids, {run_id_1, run_id_2})
+
+        by_run_id = {run["run_id"]: run for run in runs}
+        first = by_run_id[run_id_1]
+        second = by_run_id[run_id_2]
+
+        self.assertEqual(first["summary"], "first run summary")
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(first["exit_code"], 0)
+        self.assertIsNotNone(first["started_at"])
+        self.assertIsNotNone(first["finished_at"])
+
+        self.assertEqual(second["summary"], "second run summary")
+        self.assertEqual(second["status"], "failed")
+        self.assertEqual(second["exit_code"], 1)
+        self.assertIsNotNone(second["started_at"])
+        self.assertIsNotNone(second["finished_at"])
 
     def test_dispatcher_store_events_can_record_validation_result(self) -> None:
         self.store.upsert_task(self.make_task())

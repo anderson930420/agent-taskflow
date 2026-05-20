@@ -10,6 +10,7 @@ import json
 import sqlite3
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from agent_taskflow.models import (
     TaskArtifactRecord,
@@ -605,7 +606,7 @@ class TaskMirrorStore:
         model: str | None = None,
         prompt_path: str | Path | None = None,
     ) -> str:
-        run_id = f"{task_key}:{executor}:{utc_now_iso()}"
+        run_id = f"{task_key}:{executor}:{utc_now_iso()}:{uuid4().hex[:8]}"
         self.record_task_event(
             task_key,
             "note",
