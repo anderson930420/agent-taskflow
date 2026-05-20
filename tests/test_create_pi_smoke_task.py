@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -40,7 +41,7 @@ class TestCreatePiSmokeTask(unittest.TestCase):
 
         env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
         cmd = [
-            "python",
+            sys.executable,
             str(SCRIPT),
             "--task-key",
             self.task_key,
@@ -63,7 +64,7 @@ class TestCreatePiSmokeTask(unittest.TestCase):
         import subprocess
 
         result = subprocess.run(
-            ["python", str(SCRIPT), "--help"],
+            [sys.executable, str(SCRIPT), "--help"],
             capture_output=True,
             text=True,
         )
@@ -83,7 +84,7 @@ class TestCreatePiSmokeTask(unittest.TestCase):
         env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
         result = subprocess.run(
             [
-                "python", str(SCRIPT),
+                sys.executable, str(SCRIPT),
                 "--task-key", self.task_key,
                 "--db-path", "relative_db.db",
                 "--repo-path", str(self.repo_path),
@@ -103,7 +104,7 @@ class TestCreatePiSmokeTask(unittest.TestCase):
         env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
         result = subprocess.run(
             [
-                "python", str(SCRIPT),
+                sys.executable, str(SCRIPT),
                 "--task-key", self.task_key,
                 "--db-path", str(self.db_path),
                 "--repo-path", "relative_repo",
@@ -123,7 +124,7 @@ class TestCreatePiSmokeTask(unittest.TestCase):
         env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
         result = subprocess.run(
             [
-                "python", str(SCRIPT),
+                sys.executable, str(SCRIPT),
                 "--task-key", self.task_key,
                 "--db-path", str(self.db_path),
                 "--repo-path", str(self.repo_path),
