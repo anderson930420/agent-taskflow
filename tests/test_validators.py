@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -190,7 +191,10 @@ class PytestValidatorTests(ValidatorTestCase):
                 result = validator.run(context)
 
             self.assertEqual(result.status, "passed")
-            self.assertEqual(run_mock.call_args.args[0], ["python3", "-m", "pytest"])
+            self.assertEqual(
+                run_mock.call_args.args[0],
+                [sys.executable, "-m", "pytest"],
+            )
             self.assertEqual(run_mock.call_args.kwargs["cwd"], context.worktree_path)
             self.assertEqual(run_mock.call_args.kwargs["shell"], False)
 
@@ -216,7 +220,10 @@ class PytestValidatorTests(ValidatorTestCase):
             self.assertEqual(result.log_path, context.artifact_dir / "pytest.log")
             self.assertTrue(result.log_path.exists())
             log_text = result.log_path.read_text(encoding="utf-8")
-            self.assertIn("Command: ['python3', '-m', 'pytest']", log_text)
+            self.assertIn(
+                f"Command: {[sys.executable, '-m', 'pytest']!r}",
+                log_text,
+            )
             self.assertIn("Environment: not logged", log_text)
             self.assertIn("mock stdout and stderr", log_text)
 
@@ -292,8 +299,39 @@ class PytestValidatorTests(ValidatorTestCase):
 
         self.assertEqual(
             validator.command,
-            ["python3", "-m", "pytest", "tests", "-q"],
+            [sys.executable, "-m", "pytest", "tests", "-q"],
         )
+
+    def test_pytest_validator_defaults_to_sys_executable(self) -> None:
+        # The default interpreter must be the one driving the orchestration
+        # process so the validator inherits the project's .venv pytest
+        # install instead of resolving "python3" against PATH.
+        validator = PytestValidator()
+        self.assertEqual(validator.python_bin, sys.executable)
+        self.assertEqual(validator.command, [sys.executable, "-m", "pytest"])
+
+    def test_pytest_validator_explicit_python_bin_override_is_preserved(
+        self,
+    ) -> None:
+        validator = PytestValidator(python_bin="custom-python")
+        self.assertEqual(validator.python_bin, "custom-python")
+        self.assertEqual(
+            validator.command,
+            ["custom-python", "-m", "pytest"],
+        )
+
+    def test_pytest_validator_registry_default_uses_sys_executable(self) -> None:
+        validator = get_validator("pytest")
+        self.assertIsInstance(validator, PytestValidator)
+        assert isinstance(validator, PytestValidator)  # for type-checker
+        self.assertEqual(validator.python_bin, sys.executable)
+
+    def test_pytest_validator_registry_explicit_python_bin_is_preserved(
+        self,
+    ) -> None:
+        validator = get_validator("pytest", python_bin="custom-python")
+        assert isinstance(validator, PytestValidator)
+        self.assertEqual(validator.python_bin, "custom-python")
 
 
 class OpenSpecValidatorTests(ValidatorTestCase):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -37,12 +38,20 @@ class PytestValidator(Validator):
 
     def __init__(
         self,
-        python_bin: str = "python3",
+        python_bin: str | None = None,
         extra_args: Sequence[str] | None = None,
     ) -> None:
-        self.python_bin = python_bin.strip()
-        if not self.python_bin:
+        # Default to the interpreter running the orchestration process so
+        # the validator inherits the project's .venv pytest install instead
+        # of resolving "python3" against PATH, which may pick a system
+        # interpreter without pytest available.
+        if python_bin is None:
+            resolved = sys.executable
+        else:
+            resolved = python_bin.strip()
+        if not resolved:
             raise ValueError("python_bin must not be empty")
+        self.python_bin = resolved
         self.extra_args = _validate_args(extra_args, "extra_args")
 
     @property

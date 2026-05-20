@@ -23,7 +23,7 @@ def _normalize_name(name: str) -> str:
 def get_validator(
     name: str,
     *,
-    python_bin: str = "python3",
+    python_bin: str | None = None,
     pytest_extra_args: Sequence[str] | None = None,
     openspec_bin: str = "openspec",
     openspec_args: Sequence[str] | None = None,
