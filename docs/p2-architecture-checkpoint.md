@@ -349,3 +349,65 @@ Reasoning:
   Building a scheduler on top of an implicit handoff is exactly the
   inversion the project explicitly rejects. Define the contract first;
   consider automation later, if at all.
+
+## 13. Pi Agent parity
+
+This section documents the Pi Agent parity proof for the local
+self-dogfood chain, mirroring the OpenCode path (GH-9604) using the
+Pi Agent as the bounded coder executor.
+
+### 13.1 Chain overview
+
+The end-to-end self-dogfood chain is:
+
+```
+offline issue/spec
+  -> deterministic intake
+  -> Task Execution Package
+  -> explicit queued-task handoff
+  -> approved_task_runner
+  -> Pi executor
+  -> deterministic validators (pytest, policy, changed-files)
+  -> waiting_approval
+```
+
+### 13.2 Explicit governance statements
+
+- **Pi is used only as the bounded coder executor.**
+  Pi does not own scheduling, task selection, lifecycle state
+  transitions, validation decisions, approval decisions, merge
+  behavior, push behavior, or cleanup behavior.
+- **Validators remain deterministic.**
+  The validator suite (pytest, policy, changed-files, optional
+  openspec) is invoked by deterministic Python orchestration code,
+  not by the Pi Agent. Its results gate the lifecycle transition.
+- **Pi does not approve, merge, push, create PRs, or cleanup.**
+  These actions remain outside Pi's authority and require separate
+  human-controlled or deterministic-policy-controlled gates.
+- **Human review remains the final gate.**
+  Only a designated human approver can approve. Pi cannot
+  self-approve or mark work finally complete.
+
+### 13.3 Strict non-goals (enforced by governance)
+
+
+- no auto-push
+- no auto-PR
+- no auto-merge
+- no auto-cleanup
+
+### 13.4 Required strings for regression testing
+
+The following strings are required to be present in this section to
+pass the deterministic changed-files validator regression test:
+
+- Pi Agent
+- Task Execution Package
+- queued-task handoff
+- approved_task_runner
+- deterministic validators
+- waiting_approval
+- no auto-push
+- no auto-PR
+- no auto-merge
+- no auto-cleanup
