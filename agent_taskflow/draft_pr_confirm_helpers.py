@@ -54,7 +54,7 @@ def build_gh_view_command(repo: str, pr_ref: str) -> list[str]:
         "--repo",
         repo,
         "--json",
-        "url,number,headRefName,baseRefName,isDraft,title,body,state,commits,files",
+        "url,number,headRefName,headRefOid,baseRefName,isDraft,title,body,state,commits,files",
     ]
 
 
@@ -323,8 +323,12 @@ def build_verification_result(
     base_match = payload.get("baseRefName") == expected.get("expected_base")
     head_match = payload.get("headRefName") == expected.get("expected_head")
     title_match = payload.get("title") == expected.get("expected_title")
-    draft_match = payload.get("isDraft") is True
-    state_match = str(payload.get("state") or "").strip().upper() == "OPEN"
+    expected_is_draft = expected.get("expected_is_draft")
+    if expected_is_draft is None:
+        expected_is_draft = True
+    draft_match = bool(payload.get("isDraft")) is bool(expected_is_draft)
+    expected_state = str(expected.get("expected_state") or "OPEN").strip().upper()
+    state_match = str(payload.get("state") or "").strip().upper() == expected_state
     passed = all(
         [
             files_match,
@@ -342,9 +346,11 @@ def build_verification_result(
     if not head_match:
         blocking_warnings.append("GitHub PR headRefName does not match handoff head")
     if not draft_match:
-        blocking_warnings.append("GitHub PR isDraft is not true")
+        blocking_warnings.append(
+            f"GitHub PR isDraft does not match expected {bool(expected_is_draft)}"
+        )
     if not state_match:
-        blocking_warnings.append("GitHub PR state is not OPEN")
+        blocking_warnings.append(f"GitHub PR state is not {expected_state}")
     if not title_match:
         blocking_warnings.append("GitHub PR title does not match handoff title")
     if not files_match:

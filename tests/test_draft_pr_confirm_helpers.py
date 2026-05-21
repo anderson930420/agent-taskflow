@@ -295,7 +295,7 @@ class VerificationResultTests(unittest.TestCase):
         warnings = result["blocking_warnings"]
         self.assertIn("GitHub PR baseRefName does not match handoff base", warnings)
         self.assertIn("GitHub PR headRefName does not match handoff head", warnings)
-        self.assertIn("GitHub PR isDraft is not true", warnings)
+        self.assertIn("GitHub PR isDraft does not match expected True", warnings)
         self.assertIn("GitHub PR state is not OPEN", warnings)
         self.assertIn("GitHub PR title does not match handoff title", warnings)
         self.assertIn("GitHub PR files do not match handoff changed_files", warnings)
