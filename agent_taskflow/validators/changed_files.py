@@ -120,9 +120,21 @@ def collect_changed_files(worktree_path: Path) -> list[ChangedFile]:
 
 
 class ChangedFilesValidator(Validator):
-    """Validate changed files against mission contract path policy."""
+    """Validate changed files against mission contract path policy.
+
+    By default the validator fails when the executor produced zero
+    repository changes. This blocks implementation tasks from reaching
+    waiting_approval vacuously (e.g. when an executor session ended before
+    writing). Pass allow_no_changes=True for tasks that legitimately have no
+    repo output (read-only audits, validation-only reruns).
+    """
 
     name = "changed-files"
+
+    def __init__(self, *, allow_no_changes: bool = False) -> None:
+        if not isinstance(allow_no_changes, bool):
+            raise TypeError("allow_no_changes must be a bool")
+        self.allow_no_changes = allow_no_changes
 
     def _log_path(self, artifact_dir: Path) -> Path:
         return artifact_dir / LOG_ARTIFACT_NAME
@@ -139,6 +151,7 @@ class ChangedFilesValidator(Validator):
         forbidden_paths: list[str],
         changed_files: list[ChangedFile],
         collection_error: str | None = None,
+        allow_no_changes: bool = False,
     ) -> dict[str, Any]:
         violations: list[dict[str, str]] = []
 
@@ -175,7 +188,15 @@ class ChangedFilesValidator(Validator):
                     }
                 )
 
-        status = "blocked" if collection_error else ("failed" if violations else "passed")
+        no_op = not changed_files and not collection_error
+        if collection_error:
+            status = "blocked"
+        elif violations:
+            status = "failed"
+        elif no_op and not allow_no_changes:
+            status = "failed"
+        else:
+            status = "passed"
         return {
             "task_key": task_key,
             "worktree_path": str(worktree_path),
@@ -188,6 +209,8 @@ class ChangedFilesValidator(Validator):
             "violations": violations,
             "collection_error": collection_error,
             "status": status,
+            "no_op": no_op,
+            "allow_no_changes": allow_no_changes,
         }
 
     def run(self, context: ValidatorContext) -> ValidatorResult:
@@ -241,6 +264,7 @@ class ChangedFilesValidator(Validator):
                 forbidden_paths=forbidden_paths,
                 changed_files=changed_files,
                 collection_error=collection_error,
+                allow_no_changes=self.allow_no_changes,
             )
             audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -261,6 +285,22 @@ class ChangedFilesValidator(Validator):
                     "Changed-files validation failed: "
                     f"{len(violations)} path violation(s). "
                     f"First: {first['path']} ({first['reason']})"
+                )
+                log_file.write(f"FAILED: {summary}\n")
+                return ValidatorResult(
+                    validator=self.name,
+                    status="failed",
+                    exit_code=1,
+                    log_path=log_path,
+                    summary=summary,
+                    artifacts={"log": log_path, "audit": audit_path},
+                )
+
+            if audit["no_op"] and not self.allow_no_changes:
+                summary = (
+                    "Changed-files validation failed: no repository changes "
+                    "were produced. Set allow_no_changes=True for "
+                    "validation-only tasks."
                 )
                 log_file.write(f"FAILED: {summary}\n")
                 return ValidatorResult(

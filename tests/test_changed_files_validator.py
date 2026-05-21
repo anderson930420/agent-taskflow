@@ -157,16 +157,41 @@ class ChangedFilesValidatorTests(unittest.TestCase):
         self.assertEqual(audit["violations"][0]["reason"], "forbidden_path")
         self.assertIn("D", audit["changed_files"][0]["status"])
 
-    def test_no_changes_produces_clean_audit(self) -> None:
+    def test_no_changes_fails_by_default(self) -> None:
         self.write_contract(allowed_paths=("src",), forbidden_paths=("config",))
 
         result = ChangedFilesValidator().run(self.make_context())
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("no repository changes were produced", result.summary)
+        audit = self.read_audit()
+        self.assertEqual(audit["changed_files"], [])
+        self.assertEqual(audit["violations"], [])
+        self.assertTrue(audit["no_op"])
+        self.assertFalse(audit["allow_no_changes"])
+        self.assertEqual(audit["status"], "failed")
+
+    def test_no_changes_passes_when_allow_no_changes_true(self) -> None:
+        self.write_contract(allowed_paths=("src",), forbidden_paths=("config",))
+
+        result = ChangedFilesValidator(allow_no_changes=True).run(self.make_context())
 
         self.assertEqual(result.status, "passed")
         audit = self.read_audit()
         self.assertEqual(audit["changed_files"], [])
         self.assertEqual(audit["violations"], [])
+        self.assertTrue(audit["no_op"])
+        self.assertTrue(audit["allow_no_changes"])
         self.assertEqual(audit["status"], "passed")
+
+    def test_constructor_rejects_non_bool_allow_no_changes(self) -> None:
+        with self.assertRaises(TypeError):
+            ChangedFilesValidator(allow_no_changes="true")  # type: ignore[arg-type]
+
+    def test_registry_threads_allow_no_changes(self) -> None:
+        v = get_validator("changed-files", allow_no_changes=True)
+        self.assertIsInstance(v, ChangedFilesValidator)
+        self.assertTrue(v.allow_no_changes)
 
     def test_malformed_allowed_paths_non_string_blocks(self) -> None:
         self.write_raw_contract(allowed_paths=["src", 123])

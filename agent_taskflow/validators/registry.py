@@ -28,6 +28,7 @@ def get_validator(
     openspec_bin: str = "openspec",
     openspec_args: Sequence[str] | None = None,
     scan_artifacts: bool = True,
+    allow_no_changes: bool = False,
 ) -> Validator:
     """Return a built-in validator by name without checking external binaries."""
 
@@ -51,7 +52,7 @@ def get_validator(
         )
 
     if normalized == "changed-files":
-        return ChangedFilesValidator()
+        return ChangedFilesValidator(allow_no_changes=allow_no_changes)
 
     if normalized == "typecheck":
         return TypecheckValidator()

@@ -422,11 +422,11 @@ def _render_source_section(
     title_fallback = source_evidence.get("title_fallback")
 
     if artifact_path or file_path:
-        lines.append("Source reference:")
-        if artifact_path:
-            lines.append(f"- Recorded issue/spec artifact: {artifact_path}")
-        if file_path:
-            lines.append(f"- Local issue/spec file: {file_path}")
+        lines.append(
+            "Source reference: recorded issue/spec artifact is available in "
+            "task_execution_package.json for audit. The source intent is "
+            "already inlined below — do not read external artifact paths."
+        )
         lines.append("")
         lines.append("Executor-visible task content:")
 

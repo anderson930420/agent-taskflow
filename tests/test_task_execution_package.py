@@ -257,16 +257,24 @@ class TaskExecutionPackageTests(unittest.TestCase):
         self.assertEqual(evidence["issue_spec_artifact_path"], str(spec_path))
 
         prompt_text = (self.artifact_dir / IMPLEMENTATION_PROMPT_FILENAME).read_text(encoding="utf-8")
-        # Source reference path preserved for auditability
-        self.assertIn(f"Recorded issue/spec artifact: {spec_path}", prompt_text)
         # Executor-visible inlined content
         self.assertIn("Executor-visible task content:", prompt_text)
         self.assertIn("Title: Inline this title", prompt_text)
         self.assertIn("Body:", prompt_text)
         self.assertIn("Implementation requirement: do X then Y.", prompt_text)
         self.assertIn("Second paragraph.", prompt_text)
-        # Executor should not need to open issue_spec.md to know intent
-        self.assertNotIn("Read this artifact for the full source intent.", prompt_text)
+        # The audit path must NOT be inlined in the executor-visible prompt
+        # (Phase 6E+3.5 — prevent external_directory read temptation).
+        self.assertNotIn(str(spec_path), prompt_text)
+        # The audit-only label and "already inlined" wording must be present.
+        self.assertIn("task_execution_package.json for audit", prompt_text)
+        self.assertIn("already inlined", prompt_text)
+        # The package JSON must still carry the absolute path for auditability.
+        package_payload = result["package"]
+        self.assertEqual(
+            package_payload["source_evidence"]["issue_spec_artifact_path"],
+            str(spec_path),
+        )
 
     # builder inlines body from artifact_dir/issue_spec.md without an artifact record
     def test_inlines_body_from_artifact_dir_issue_spec_file(self) -> None:
@@ -288,9 +296,14 @@ class TaskExecutionPackageTests(unittest.TestCase):
         self.assertEqual(evidence["issue_spec_file_path"], str(spec_path))
 
         prompt_text = (self.artifact_dir / IMPLEMENTATION_PROMPT_FILENAME).read_text(encoding="utf-8")
-        self.assertIn(f"Local issue/spec file: {spec_path}", prompt_text)
         self.assertIn("Title: File-based title", prompt_text)
         self.assertIn("Body discovered via artifact_dir scan.", prompt_text)
+        # No absolute spec path in the executor-visible prompt.
+        self.assertNotIn(str(spec_path), prompt_text)
+        # Audit metadata still carried in source_evidence.
+        self.assertEqual(
+            result["source_evidence"]["issue_spec_file_path"], str(spec_path),
+        )
 
     # long issue body is truncated and includes the truncation notice
     def test_long_issue_body_truncated_with_notice(self) -> None:
