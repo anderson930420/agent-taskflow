@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_taskflow.models import TaskRecord
+from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
 
 
@@ -145,6 +145,136 @@ class ListTaskRecommendationsScriptTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertFalse(payload["ok"])
         self.assertFalse(missing.exists())
+
+    def seed_stale_completed_task(self) -> None:
+        artifact_dir = self.root / "artifacts" / "AT-CLI-WARN"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-CLI-WARN",
+                project="agent-taskflow",
+                board="agent-taskflow",
+                title="Stale worktree task",
+                status="completed",
+                repo_path=self.repo,
+                artifact_dir=artifact_dir,
+            )
+        )
+        missing_path = self.repo / ".worktrees" / "AT-CLI-WARN"
+        self.store.upsert_task_worktree(
+            TaskWorktreeRecord(
+                task_key="AT-CLI-WARN",
+                repo_path=self.repo,
+                worktree_path=missing_path,
+                branch="task/AT-CLI-WARN",
+                base_branch="main",
+                base_sha="base-sha",
+                status="active",
+            )
+        )
+        cleanup_payload = {
+            "kind": "local_cleanup_completed",
+            "artifact_type": "local_cleanup",
+            "task_key": "AT-CLI-WARN",
+            "cleanup_scope": "local",
+        }
+        cleanup_path = artifact_dir / "local_cleanup.json"
+        cleanup_path.write_text(
+            json.dumps(cleanup_payload, sort_keys=True), encoding="utf-8"
+        )
+        self.store.record_task_artifact(
+            "AT-CLI-WARN", "local_cleanup", cleanup_path
+        )
+        self.store.record_task_event(
+            "AT-CLI-WARN",
+            "local_cleanup_completed",
+            "local_cleanup_confirm",
+            payload=cleanup_payload,
+        )
+        remote_payload = {
+            "kind": "remote_branch_cleanup_completed",
+            "artifact_type": "remote_branch_cleanup",
+            "task_key": "AT-CLI-WARN",
+            "cleanup_scope": "remote_branch",
+        }
+        remote_path = artifact_dir / "remote_branch_cleanup.json"
+        remote_path.write_text(
+            json.dumps(remote_payload, sort_keys=True), encoding="utf-8"
+        )
+        self.store.record_task_artifact(
+            "AT-CLI-WARN", "remote_branch_cleanup", remote_path
+        )
+        self.store.record_task_event(
+            "AT-CLI-WARN",
+            "remote_branch_cleanup_completed",
+            "remote_branch_cleanup_confirm",
+            payload=remote_payload,
+        )
+        closeout_payload = {
+            "kind": "task_closeout_completed",
+            "artifact_type": "task_closeout",
+            "task_key": "AT-CLI-WARN",
+        }
+        closeout_path = artifact_dir / "task_closeout.json"
+        closeout_path.write_text(
+            json.dumps(closeout_payload, sort_keys=True), encoding="utf-8"
+        )
+        self.store.record_task_artifact(
+            "AT-CLI-WARN", "task_closeout", closeout_path
+        )
+        self.store.record_task_event(
+            "AT-CLI-WARN",
+            "task_closeout_completed",
+            "task_closeout_confirm",
+            payload=closeout_payload,
+        )
+
+    def test_json_includes_consistency_warnings(self) -> None:
+        self.seed_stale_completed_task()
+
+        result = self.run_script("--json", "--task-key", "AT-CLI-WARN")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        item = payload["items"][0]
+        self.assertEqual(item["task_key"], "AT-CLI-WARN")
+        self.assertEqual(item["recommended_command_kind"], "no_action")
+        self.assertIn("consistency_warnings", item)
+        self.assertTrue(item["consistency_warnings"])
+        self.assertTrue(
+            any(
+                "physical worktree path is missing" in w
+                for w in item["consistency_warnings"]
+            ),
+            item["consistency_warnings"],
+        )
+        self.assertGreater(payload["summary"]["warning_count"], 0)
+
+    def test_pretty_shows_warnings_block_when_present(self) -> None:
+        self.seed_stale_completed_task()
+
+        result = self.run_script("--pretty", "--task-key", "AT-CLI-WARN")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Warnings:", result.stdout)
+        self.assertIn("physical worktree path is missing", result.stdout)
+
+    def test_pretty_omits_warnings_block_when_none(self) -> None:
+        self.seed_queued_task()
+
+        result = self.run_script("--pretty")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Warnings:", result.stdout)
+
+    def test_warning_path_does_not_mutate_db(self) -> None:
+        self.seed_stale_completed_task()
+        before_counts = self.db_counts()
+
+        result = self.run_script("--json", "--task-key", "AT-CLI-WARN")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.db_counts(), before_counts)
 
 
 if __name__ == "__main__":

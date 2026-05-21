@@ -44,6 +44,14 @@ RECOMMENDED_COMMAND_KINDS = frozenset(
     }
 )
 
+WORKTREE_DEPENDENT_COMMAND_KINDS = frozenset(
+    {
+        "pr_handoff_package",
+        "branch_push_review",
+        "draft_pr_review",
+    }
+)
+
 SAFETY_FLAGS: dict[str, bool] = {
     "read_only": True,
     "will_execute": False,
@@ -151,6 +159,7 @@ def list_task_recommendations(
     contexts = _read_contexts(request)
     items = [_recommend_for_context(context) for context in contexts]
     command_counts = Counter(item["recommended_command_kind"] for item in items)
+    warning_count = sum(len(item["consistency_warnings"]) for item in items)
 
     return {
         "ok": True,
@@ -166,6 +175,7 @@ def list_task_recommendations(
         "summary": {
             "recommendation_counts": dict(sorted(command_counts.items())),
             "read_only": True,
+            "warning_count": warning_count,
         },
         "safety_flags": dict(SAFETY_FLAGS),
     }
@@ -364,6 +374,7 @@ def _recommend_for_context(context: _TaskContext) -> dict[str, Any]:
     evidence = _build_evidence(context)
     missing_evidence = _missing_evidence(evidence)
     inconsistent = _inconsistency_reasons(task, evidence)
+    worktree_status = _worktree_status(context.worktree)
 
     if inconsistent:
         decision = _decision(
@@ -404,6 +415,13 @@ def _recommend_for_context(context: _TaskContext) -> dict[str, Any]:
             human_confirmation=False,
         )
 
+    decision = _maybe_override_for_missing_worktree(
+        decision, task, evidence, context.worktree, worktree_status
+    )
+    consistency_warnings = _consistency_warnings(
+        task, evidence, context.worktree, worktree_status
+    )
+
     return {
         "task_key": task["task_key"],
         "project": task["project"],
@@ -421,10 +439,11 @@ def _recommend_for_context(context: _TaskContext) -> dict[str, Any]:
         "evidence_summary": _evidence_summary(evidence),
         "missing_evidence": missing_evidence,
         "related_artifacts": _related_artifacts(context.artifacts),
-        "worktree_status": _worktree_status(context.worktree),
+        "worktree_status": worktree_status,
         "branch_status": _branch_status(evidence, context.worktree),
         "pr_status": _pr_status(evidence),
         "cleanup_status": _cleanup_status(evidence),
+        "consistency_warnings": consistency_warnings,
     }
 
 
@@ -768,6 +787,83 @@ def _inconsistency_reasons(task: dict[str, Any], evidence: _Evidence) -> list[st
     return reasons
 
 
+def _consistency_warnings(
+    task: dict[str, Any],
+    evidence: _Evidence,
+    worktree: dict[str, Any] | None,
+    worktree_status: dict[str, Any],
+) -> list[str]:
+    if not worktree_status.get("available") or worktree is None:
+        return []
+
+    row_active = worktree.get("status") == "active"
+    row_cleaned_at = worktree.get("cleaned_at")
+    physical_present = bool(worktree_status.get("path_exists"))
+    task_completed = task.get("status") in COMPLETED_STATUSES
+
+    warnings: list[str] = []
+
+    if (
+        (row_active or row_cleaned_at is None)
+        and not physical_present
+        and (evidence.any_cleanup or task_completed)
+    ):
+        warnings.append(
+            "Worktree row is still active, but the physical worktree path is "
+            "missing; cleanup evidence may have removed it without updating "
+            "task_worktrees."
+        )
+
+    if (
+        not task_completed
+        and not evidence.any_cleanup
+        and not physical_present
+    ):
+        warnings.append(
+            "task_worktrees row exists but the physical worktree path is "
+            "missing, and no cleanup evidence is present yet."
+        )
+
+    if row_active and evidence.any_cleanup:
+        warnings.append(
+            "Cleanup evidence exists, but task_worktrees row still reports active."
+        )
+
+    return warnings
+
+
+def _maybe_override_for_missing_worktree(
+    decision: dict[str, Any],
+    task: dict[str, Any],
+    evidence: _Evidence,
+    worktree: dict[str, Any] | None,
+    worktree_status: dict[str, Any],
+) -> dict[str, Any]:
+    if worktree is None or not worktree_status.get("available"):
+        return decision
+    if task.get("status") in COMPLETED_STATUSES:
+        return decision
+    if evidence.any_cleanup:
+        return decision
+    if worktree_status.get("path_exists"):
+        return decision
+    if decision["recommended_command_kind"] not in WORKTREE_DEPENDENT_COMMAND_KINDS:
+        return decision
+    return _decision(
+        phase="missing_physical_worktree",
+        action="Inspect task evidence.",
+        kind="inspect_evidence",
+        confidence="high",
+        severity="medium",
+        reason=(
+            "task_worktrees row reports the worktree as active but the physical "
+            "worktree path is missing; cannot safely proceed with the recommended "
+            "action."
+        ),
+        human_confirmation=False,
+    )
+
+
 def _missing_evidence(evidence: _Evidence) -> list[str]:
     missing: list[str] = []
     checks = [
@@ -967,6 +1063,7 @@ __all__ = [
     "SAFETY_FLAGS",
     "TaskRecommendationsError",
     "TaskRecommendationsRequest",
+    "WORKTREE_DEPENDENT_COMMAND_KINDS",
     "list_task_recommendations",
     "recommend_tasks",
 ]

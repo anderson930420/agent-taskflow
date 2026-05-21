@@ -36,6 +36,7 @@ class TaskRecommendationsTests(unittest.TestCase):
         title: str = "Recommendation task",
         blocked_reason: str | None = None,
         worktree: bool = False,
+        worktree_physical: bool = True,
     ) -> Path:
         artifact_dir = self.artifact_root / task_key
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -55,7 +56,8 @@ class TaskRecommendationsTests(unittest.TestCase):
         )
         if worktree:
             worktree_path = self.repo / ".worktrees" / task_key
-            worktree_path.mkdir(parents=True, exist_ok=True)
+            if worktree_physical:
+                worktree_path.mkdir(parents=True, exist_ok=True)
             self.store.upsert_task_worktree(
                 TaskWorktreeRecord(
                     task_key=task_key,
@@ -337,6 +339,154 @@ class TaskRecommendationsTests(unittest.TestCase):
         )
 
         json.dumps(payload, sort_keys=True)
+
+    def test_consistency_warnings_default_empty_when_no_worktree(self) -> None:
+        self.seed_task("AT-REC-013", status="queued")
+
+        item = self.recommend_one("AT-REC-013")
+
+        self.assertEqual(item["consistency_warnings"], [])
+
+    def test_completed_stale_active_row_missing_path_keeps_no_action(self) -> None:
+        self.seed_task(
+            "AT-REC-014",
+            status="completed",
+            worktree=True,
+            worktree_physical=False,
+        )
+        self.record_cleanup("AT-REC-014", closeout=True)
+
+        before_counts = self._db_counts()
+        item = self.recommend_one("AT-REC-014")
+        after_counts = self._db_counts()
+
+        self.assertEqual(item["recommended_command_kind"], "no_action")
+        self.assertEqual(item["current_phase_label"], "closed_out")
+        self.assertEqual(item["safety_flags"], SAFETY_FLAGS)
+        self.assertTrue(item["safety_flags"]["read_only"])
+        for key, value in item["safety_flags"].items():
+            if key != "read_only":
+                self.assertFalse(value, key)
+
+        warnings = item["consistency_warnings"]
+        self.assertIsInstance(warnings, list)
+        self.assertTrue(
+            any("physical worktree path is missing" in w for w in warnings),
+            warnings,
+        )
+        self.assertTrue(
+            any("still reports active" in w for w in warnings),
+            warnings,
+        )
+
+        self.assertFalse(item["worktree_status"]["path_exists"])
+        self.assertEqual(item["worktree_status"]["status"], "active")
+        self.assertIsNone(item["worktree_status"]["cleaned_at"])
+        self.assertEqual(before_counts, after_counts)
+
+    def test_waiting_approval_missing_path_no_cleanup_overrides_to_inspect(self) -> None:
+        self.seed_task(
+            "AT-REC-015",
+            status="waiting_approval",
+            worktree=True,
+            worktree_physical=False,
+        )
+        self.record_executor_and_validators("AT-REC-015")
+
+        item = self.recommend_one("AT-REC-015")
+
+        self.assertEqual(item["recommended_command_kind"], "inspect_evidence")
+        self.assertEqual(item["current_phase_label"], "missing_physical_worktree")
+        self.assertIn(
+            "physical worktree path is missing",
+            item["reason"],
+        )
+        warnings = item["consistency_warnings"]
+        self.assertTrue(
+            any(
+                "no cleanup evidence is present yet" in w for w in warnings
+            ),
+            warnings,
+        )
+        self.assertEqual(item["safety_flags"], SAFETY_FLAGS)
+
+    def test_completed_with_cleanup_and_active_row_present_path_emits_row_warning(
+        self,
+    ) -> None:
+        self.seed_task(
+            "AT-REC-016",
+            status="completed",
+            worktree=True,
+            worktree_physical=True,
+        )
+        self.record_cleanup("AT-REC-016", closeout=True)
+
+        item = self.recommend_one("AT-REC-016")
+
+        self.assertEqual(item["recommended_command_kind"], "no_action")
+        warnings = item["consistency_warnings"]
+        self.assertTrue(
+            any("still reports active" in w for w in warnings),
+            warnings,
+        )
+        self.assertFalse(
+            any("physical worktree path is missing" in w for w in warnings),
+            warnings,
+        )
+
+    def test_warning_count_sums_per_item_warnings(self) -> None:
+        self.seed_task(
+            "AT-REC-017",
+            status="completed",
+            worktree=True,
+            worktree_physical=False,
+        )
+        self.record_cleanup("AT-REC-017", closeout=True)
+
+        payload = list_task_recommendations(
+            TaskRecommendationsRequest(db_path=self.db_path, task_key="AT-REC-017")
+        )
+
+        item = payload["items"][0]
+        self.assertEqual(
+            payload["summary"]["warning_count"],
+            len(item["consistency_warnings"]),
+        )
+        self.assertGreater(payload["summary"]["warning_count"], 0)
+
+    def test_db_counts_unchanged_after_warning_path(self) -> None:
+        self.seed_task(
+            "AT-REC-018",
+            status="completed",
+            worktree=True,
+            worktree_physical=False,
+        )
+        self.record_cleanup("AT-REC-018", closeout=True)
+
+        before = self._db_counts()
+        list_task_recommendations(
+            TaskRecommendationsRequest(db_path=self.db_path, task_key="AT-REC-018")
+        )
+        after = self._db_counts()
+
+        self.assertEqual(before, after)
+
+    def _db_counts(self) -> dict[str, int]:
+        import sqlite3
+
+        with sqlite3.connect(self.db_path) as conn:
+            return {
+                "tasks": conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0],
+                "events": conn.execute(
+                    "SELECT COUNT(*) FROM task_events"
+                ).fetchone()[0],
+                "artifacts": conn.execute(
+                    "SELECT COUNT(*) FROM task_artifacts"
+                ).fetchone()[0],
+                "worktrees": conn.execute(
+                    "SELECT COUNT(*) FROM task_worktrees"
+                ).fetchone()[0],
+            }
 
 
 if __name__ == "__main__":

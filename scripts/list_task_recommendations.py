@@ -127,6 +127,11 @@ def _format_pretty(payload: dict[str, object]) -> str:
         blocked_reason = item.get("blocked_reason")
         if blocked_reason:
             lines.append(f"Blocked reason: {blocked_reason}")
+        warnings = item.get("consistency_warnings")
+        if isinstance(warnings, list) and warnings:
+            lines.append("Warnings:")
+            for warning in warnings:
+                lines.append(f"  - {warning}")
     return "\n".join(lines)
 
 
