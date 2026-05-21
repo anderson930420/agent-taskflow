@@ -741,6 +741,239 @@ class DraftPrConfirmTests(unittest.TestCase):
         self.assertIn("waiting_approval", " ".join(result.warnings))
         self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
 
+    def _rewrite_issue_spec_repo(self, source_repo: str) -> None:
+        issue_spec_path = self.artifact_root / self.task_key / "issue_spec.md"
+        issue_spec_path.write_text(
+            render_issue_spec(
+                repo=source_repo,
+                task_key=self.task_key,
+                issue=self._issue_snapshot(),
+                ingested_at="2026-05-03T00:00:00Z",
+            ),
+            encoding="utf-8",
+        )
+
+    def test_source_repo_mismatch_blocks_without_override(self) -> None:
+        self._seed_task()
+        self._rewrite_issue_spec_repo("agent-taskflow/dogfood")
+        runner = FakeGhRunner()
+
+        result = confirm_draft_pr(
+            self._request(dry_run=True, repo="anderson930420/agent-taskflow"),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("does not match handoff repo", result.error or "")
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+        self.assertEqual(result.evidence.get("source_repo"), "agent-taskflow/dogfood")
+        self.assertEqual(result.evidence.get("target_repo"), "anderson930420/agent-taskflow")
+        self.assertFalse(result.evidence.get("source_repo_overridden"))
+        self.assertFalse(result.evidence.get("source_repo_mismatch_allowed"))
+        self.assertFalse(result.safety.get("source_repo_overridden"))
+
+    def test_source_repo_mismatch_override_dry_run_succeeds(self) -> None:
+        self._seed_task()
+        self._rewrite_issue_spec_repo("agent-taskflow/dogfood")
+        runner = FakeGhRunner(list_stdout="[]\n")
+
+        result = confirm_draft_pr(
+            DraftPrConfirmRequest(
+                task_key=self.task_key,
+                repo="anderson930420/agent-taskflow",
+                target_repo="anderson930420/agent-taskflow",
+                allow_source_repo_mismatch=True,
+                repo_path=self.repo,
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                dry_run=True,
+            ),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "dry_run")
+        self.assertEqual(result.evidence["source_repo"], "agent-taskflow/dogfood")
+        self.assertEqual(result.evidence["target_repo"], "anderson930420/agent-taskflow")
+        self.assertTrue(result.evidence["source_repo_overridden"])
+        self.assertTrue(result.evidence["source_repo_mismatch_allowed"])
+        self.assertTrue(result.safety["source_repo_overridden"])
+        self.assertTrue(result.safety["source_repo_mismatch_allowed"])
+        self.assertTrue(result.safety["human_confirmation_required"])
+        self.assertFalse(result.safety["pr_created"])
+        self.assertFalse(result.summary["pr_created"])
+        self.assertFalse(result.summary["merged"])
+        self.assertFalse(result.summary["approved"])
+        self.assertFalse(result.summary["cleanup_performed"])
+        self.assertIn(
+            "Source repo differs from target repo; override explicitly allowed.",
+            result.warnings,
+        )
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
+    def test_override_without_target_repo_still_blocks(self) -> None:
+        self._seed_task()
+        self._rewrite_issue_spec_repo("agent-taskflow/dogfood")
+        runner = FakeGhRunner()
+
+        result = confirm_draft_pr(
+            DraftPrConfirmRequest(
+                task_key=self.task_key,
+                repo="anderson930420/agent-taskflow",
+                target_repo=None,
+                allow_source_repo_mismatch=True,
+                repo_path=self.repo,
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                dry_run=True,
+            ),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("explicit --target-repo", result.error or "")
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
+    def test_override_dry_run_still_requires_confirm_for_creation(self) -> None:
+        self._seed_task()
+        self._rewrite_issue_spec_repo("agent-taskflow/dogfood")
+        runner = FakeGhRunner()
+
+        result = confirm_draft_pr(
+            DraftPrConfirmRequest(
+                task_key=self.task_key,
+                repo="anderson930420/agent-taskflow",
+                target_repo="anderson930420/agent-taskflow",
+                allow_source_repo_mismatch=True,
+                repo_path=self.repo,
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                dry_run=False,
+                confirm_draft_pr=False,
+            ),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("--confirm-draft-pr", result.error or "")
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
+    def test_target_repo_must_match_repo_when_both_provided(self) -> None:
+        self._seed_task()
+        runner = FakeGhRunner()
+
+        result = confirm_draft_pr(
+            DraftPrConfirmRequest(
+                task_key=self.task_key,
+                repo="anderson930420/agent-taskflow",
+                target_repo="other/repo",
+                allow_source_repo_mismatch=True,
+                repo_path=self.repo,
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                dry_run=True,
+            ),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("does not match repo", result.error or "")
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
+    def test_same_repo_path_still_works_without_override(self) -> None:
+        self._seed_task()
+        runner = FakeGhRunner(list_stdout="[]\n")
+
+        result = confirm_draft_pr(self._request(dry_run=True), runner=runner)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "dry_run")
+        self.assertEqual(result.evidence["target_repo"], "anderson930420/agent-taskflow")
+        self.assertEqual(result.evidence["source_repo"], "anderson930420/agent-taskflow")
+        self.assertFalse(result.evidence["source_repo_overridden"])
+        self.assertFalse(result.evidence["source_repo_mismatch_allowed"])
+        self.assertNotIn(
+            "Source repo differs from target repo; override explicitly allowed.",
+            result.warnings,
+        )
+
+    def test_proposed_pr_body_includes_governance_language(self) -> None:
+        self._seed_task()
+        runner = FakeGhRunner(list_stdout="[]\n")
+
+        result = confirm_draft_pr(self._request(dry_run=True), runner=runner)
+
+        self.assertTrue(result.ok)
+        proposed_body = result.handoff.get("proposed_pr_body") or ""
+        self.assertIn("no auto-merge", proposed_body)
+        self.assertIn("human review required", proposed_body)
+
+    def test_override_confirmed_creation_records_repo_block(self) -> None:
+        self._seed_task()
+        self._rewrite_issue_spec_repo("agent-taskflow/dogfood")
+        runner = FakeGhRunner(
+            list_stdout="[]\n",
+            create_stdout="https://github.com/anderson930420/agent-taskflow/pull/777\n",
+            view_stdout=self._gh_view_stdout(number=777),
+        )
+
+        result = confirm_draft_pr(
+            DraftPrConfirmRequest(
+                task_key=self.task_key,
+                repo="anderson930420/agent-taskflow",
+                target_repo="anderson930420/agent-taskflow",
+                allow_source_repo_mismatch=True,
+                repo_path=self.repo,
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                confirm_draft_pr=True,
+            ),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "draft_pr_created")
+        self.assertTrue(result.draft_pr["created"])
+        self.assertTrue(result.draft_pr["draft"])
+        self.assertFalse(result.summary["merged"])
+        self.assertFalse(result.summary["approved"])
+        self.assertFalse(result.summary["cleanup_performed"])
+        self.assertTrue(result.evidence["source_repo_overridden"])
+        self.assertEqual(result.evidence["source_repo"], "agent-taskflow/dogfood")
+        self.assertEqual(result.evidence["target_repo"], "anderson930420/agent-taskflow")
+        artifact_path = Path(result.draft_pr["artifact_path"])
+        self.assertTrue(artifact_path.is_file())
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        self.assertTrue(payload["source_repo_overridden"])
+        self.assertEqual(payload["source_repo"], "agent-taskflow/dogfood")
+        self.assertEqual(payload["target_repo"], "anderson930420/agent-taskflow")
+        self.assertTrue(payload["source_repo_mismatch_allowed"])
+        self.assertFalse(payload["merged"])
+        self.assertFalse(payload["approved"])
+        self.assertFalse(payload["cleanup_performed"])
+
+    def test_request_rejects_non_bool_allow_source_repo_mismatch(self) -> None:
+        with self.assertRaises(TypeError):
+            DraftPrConfirmRequest(
+                task_key=self.task_key,
+                repo="anderson930420/agent-taskflow",
+                repo_path=self.repo,
+                allow_source_repo_mismatch="yes",  # type: ignore[arg-type]
+            )
+
+    def test_request_rejects_empty_target_repo(self) -> None:
+        with self.assertRaises(ValueError):
+            DraftPrConfirmRequest(
+                task_key=self.task_key,
+                repo="anderson930420/agent-taskflow",
+                repo_path=self.repo,
+                target_repo="   ",
+            )
+
     def test_static_forbidden_commands_are_absent(self) -> None:
         text = Path(draft_pr_confirm_module.__file__).read_text(encoding="utf-8")
         forbidden = [

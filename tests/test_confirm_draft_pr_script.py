@@ -605,6 +605,98 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         self.assertNotIn("delete_branch", text)
         self.assertNotIn("delete_worktree", text)
 
+    def _rewrite_issue_spec_repo(self, source_repo: str) -> None:
+        issue_spec_path = self.artifact_root / self.task_key / "issue_spec.md"
+        issue_spec_path.write_text(
+            render_issue_spec(
+                repo=source_repo,
+                task_key=self.task_key,
+                issue=GitHubIssueSnapshot(
+                    number=1001,
+                    title="Draft PR confirm task",
+                    body="Task body",
+                    state="open",
+                    labels=("ready",),
+                    author="octocat",
+                    url="https://github.com/anderson930420/agent-taskflow/issues/1001",
+                    created_at="2026-05-01T00:00:00Z",
+                    updated_at="2026-05-02T00:00:00Z",
+                ),
+                ingested_at="2026-05-03T00:00:00Z",
+            ),
+            encoding="utf-8",
+        )
+
+    def test_script_source_repo_mismatch_blocks_without_override(self) -> None:
+        self._rewrite_issue_spec_repo("agent-taskflow/dogfood")
+        runner = FakeGhRunner()
+        exit_code, stdout, _stderr = self._run_main(
+            self._base_args() + ["--dry-run"],
+            runner=runner,
+        )
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("does not match handoff repo", payload["error"])
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
+    def test_script_override_dry_run_records_repo_block(self) -> None:
+        self._rewrite_issue_spec_repo("agent-taskflow/dogfood")
+        runner = FakeGhRunner(list_stdout="[]\n")
+        exit_code, stdout, _stderr = self._run_main(
+            self._base_args()
+            + [
+                "--dry-run",
+                "--target-repo",
+                "anderson930420/agent-taskflow",
+                "--allow-source-repo-mismatch",
+            ],
+            runner=runner,
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "dry_run")
+        self.assertEqual(payload["evidence"]["source_repo"], "agent-taskflow/dogfood")
+        self.assertEqual(payload["evidence"]["target_repo"], "anderson930420/agent-taskflow")
+        self.assertTrue(payload["evidence"]["source_repo_overridden"])
+        self.assertTrue(payload["evidence"]["source_repo_mismatch_allowed"])
+        self.assertIn(
+            "Source repo differs from target repo; override explicitly allowed.",
+            payload["warnings"],
+        )
+        self.assertFalse(payload["safety"]["pr_created"])
+        self.assertFalse(payload["summary"]["merged"])
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
+    def test_script_override_without_target_repo_blocks(self) -> None:
+        self._rewrite_issue_spec_repo("agent-taskflow/dogfood")
+        runner = FakeGhRunner()
+        exit_code, stdout, _stderr = self._run_main(
+            self._base_args() + ["--dry-run", "--allow-source-repo-mismatch"],
+            runner=runner,
+        )
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("explicit --target-repo", payload["error"])
+        self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
+
+    def test_script_proposed_body_includes_governance_language(self) -> None:
+        runner = FakeGhRunner(list_stdout="[]\n")
+        exit_code, stdout, _stderr = self._run_main(
+            self._base_args() + ["--dry-run"],
+            runner=runner,
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        body = payload["handoff"].get("proposed_pr_body") or ""
+        self.assertIn("no auto-merge", body)
+        self.assertIn("human review required", body)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -606,6 +606,10 @@ def _proposed_pr_body(
     lines.extend(
         [
             "",
+            "Governance:",
+            "- no auto-merge",
+            "- human review required",
+            "",
             "This package is a local handoff package only. It does not push branches, create pull requests, merge, approve, or clean up.",
         ]
     )

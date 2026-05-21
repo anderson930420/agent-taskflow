@@ -35,6 +35,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="GitHub repo, for example anderson930420/agent-taskflow.",
     )
     parser.add_argument(
+        "--target-repo",
+        help=(
+            "Explicit GitHub target repo for the draft PR. Must equal --repo. "
+            "Providing this flag together with --allow-source-repo-mismatch "
+            "lets dogfood tasks ingested against a synthetic source repo "
+            "target the real GitHub repo. Required for the override path."
+        ),
+    )
+    parser.add_argument(
+        "--allow-source-repo-mismatch",
+        action="store_true",
+        help=(
+            "Allow the draft PR target repo to differ from the handoff source "
+            "repo. Must be paired with --target-repo. Without both, source "
+            "repo mismatch still blocks PR creation."
+        ),
+    )
+    parser.add_argument(
         "--repo-path",
         required=True,
         help="Absolute path to the repository root for the task worktree.",
@@ -127,6 +145,8 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:
         request = DraftPrConfirmRequest(
             task_key=args.task_key,
             repo=args.repo,
+            target_repo=args.target_repo,
+            allow_source_repo_mismatch=args.allow_source_repo_mismatch,
             repo_path=_resolve_path(args.repo_path) or Path(args.repo_path),
             db_path=_resolve_path(args.db_path),
             artifact_root=_resolve_path(args.artifact_root),

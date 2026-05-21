@@ -94,10 +94,19 @@ class DraftPrConfirmRequest:
     confirm_draft_pr: bool = False
     allow_non_waiting: bool = False
     remote: str = DEFAULT_REMOTE
+    target_repo: str | None = None
+    allow_source_repo_mismatch: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
         object.__setattr__(self, "repo", _normalize_repo(self.repo))
+        if self.target_repo is not None:
+            normalized_target = str(self.target_repo).strip()
+            if not normalized_target:
+                raise ValueError("target_repo must not be empty when provided")
+            object.__setattr__(self, "target_repo", _normalize_repo(normalized_target))
+        if not isinstance(self.allow_source_repo_mismatch, bool):
+            raise TypeError("allow_source_repo_mismatch must be a bool")
         object.__setattr__(
             self,
             "repo_path",
@@ -259,6 +268,7 @@ def confirm_draft_pr(
     verified_pr: dict[str, Any] = _empty_verification_result(expected=verification_preview)
     preview_text: str | None = None
     resolved: dict[str, str] | None = None
+    resolved_warnings: list[str] = []
     try:
         validations = _validate_local_readiness(
             request=request,
@@ -283,6 +293,7 @@ def confirm_draft_pr(
             worktree=worktree,
             handoff=handoff,
         )
+        resolved_warnings = list(resolved.get("warnings") or [])
 
         branch_push = _read_branch_push_evidence(
             current_store,
@@ -298,7 +309,7 @@ def confirm_draft_pr(
                 existing_pr=existing_pr,
                 branch_push=branch_push,
                 handoff=_handoff_snapshot(handoff),
-                warnings=list(handoff.warnings) + branch_push["warnings"],
+                warnings=list(handoff.warnings) + branch_push["warnings"] + resolved_warnings,
             )
 
         verification_preview = _build_verification_preview(
@@ -344,7 +355,7 @@ def confirm_draft_pr(
                     title=resolved["title"],
                     body=resolved["body"],
                     preview_text=preview_text,
-                    warnings=list(handoff.warnings) + branch_push["warnings"],
+                    warnings=list(handoff.warnings) + branch_push["warnings"] + resolved_warnings,
                 )
             return _already_exists_result(
                 request=request,
@@ -359,7 +370,7 @@ def confirm_draft_pr(
                 title=resolved["title"],
                 body=resolved["body"],
                 preview_text=preview_text,
-                warnings=list(handoff.warnings) + branch_push["warnings"],
+                warnings=list(handoff.warnings) + branch_push["warnings"] + resolved_warnings,
             )
 
         if request.dry_run:
@@ -375,7 +386,7 @@ def confirm_draft_pr(
                 title=resolved["title"],
                 body=resolved["body"],
                 preview_text=preview_text,
-                warnings=list(handoff.warnings) + branch_push["warnings"],
+                warnings=list(handoff.warnings) + branch_push["warnings"] + resolved_warnings,
             )
 
         if not request.confirm_draft_pr:
@@ -386,7 +397,7 @@ def confirm_draft_pr(
                 existing_pr=existing_pr,
                 branch_push=branch_push,
                 handoff=_handoff_snapshot(handoff),
-                warnings=list(handoff.warnings) + branch_push["warnings"],
+                warnings=list(handoff.warnings) + branch_push["warnings"] + resolved_warnings,
                 preview_text=preview_text,
                 base=resolved["base"],
                 head=resolved["head"],
@@ -413,7 +424,7 @@ def confirm_draft_pr(
                 existing_pr=existing_pr,
                 branch_push=branch_push,
                 handoff=_handoff_snapshot(handoff),
-                warnings=list(handoff.warnings) + branch_push["warnings"],
+                warnings=list(handoff.warnings) + branch_push["warnings"] + resolved_warnings,
                 preview_text=preview_text,
                 base=resolved["base"],
                 head=resolved["head"],
@@ -453,7 +464,7 @@ def confirm_draft_pr(
                 existing_pr=existing_pr,
                 branch_push=branch_push,
                 handoff=_handoff_snapshot(handoff),
-                warnings=list(handoff.warnings) + branch_push["warnings"],
+                warnings=list(handoff.warnings) + branch_push["warnings"] + resolved_warnings,
                 preview_text=preview_text,
                 base=resolved["base"],
                 head=resolved["head"],
@@ -470,7 +481,7 @@ def confirm_draft_pr(
             existing_pr=existing_pr,
             branch_push=branch_push,
             handoff=_handoff_snapshot(handoff),
-            warnings=list(handoff.warnings) + branch_push["warnings"],
+            warnings=list(handoff.warnings) + branch_push["warnings"] + resolved_warnings,
             preview_text=preview_text,
             base=resolved["base"] if resolved else None,
             head=resolved["head"] if resolved else None,
@@ -498,6 +509,7 @@ def confirm_draft_pr(
         verification=verified_pr,
         created_at=utc_now_iso(),
         body_file=request.body_file,
+        target_repo_block=_target_repo_block(request, handoff),
     )
     artifact_path.write_text(
         json.dumps(evidence, indent=2, sort_keys=True) + "\n",
@@ -530,7 +542,7 @@ def confirm_draft_pr(
         pr_number=pr_number,
         pr_url=pr_url,
         artifact_path=artifact_path,
-        warnings=list(handoff.warnings) + branch_push["warnings"],
+        warnings=list(handoff.warnings) + branch_push["warnings"] + resolved_warnings,
     )
 
 
@@ -612,9 +624,27 @@ def _resolve_target(
         raise DraftPrConfirmError("Proposed PR body is required")
 
     repo = request.repo.strip()
+    target_repo = (request.target_repo or "").strip() or repo
+    if request.target_repo and target_repo != repo:
+        raise DraftPrConfirmError(
+            f"target_repo {target_repo!r} does not match repo {repo!r}; pass the same value to --repo and --target-repo"
+        )
     source_repo = str(handoff.source.get("repo") or "").strip()
-    if source_repo and source_repo != repo:
-        raise DraftPrConfirmError(f"Repo target {repo!r} does not match handoff repo {source_repo!r}")
+    source_repo_overridden = False
+    extra_warnings: list[str] = []
+    if source_repo and source_repo != target_repo:
+        if not request.allow_source_repo_mismatch:
+            raise DraftPrConfirmError(
+                f"Repo target {target_repo!r} does not match handoff repo {source_repo!r}"
+            )
+        if request.target_repo is None:
+            raise DraftPrConfirmError(
+                "Source repo mismatch override requires explicit --target-repo"
+            )
+        source_repo_overridden = True
+        extra_warnings.append(
+            "Source repo differs from target repo; override explicitly allowed."
+        )
 
     if Path(task.repo_path).resolve() != request.repo_path.resolve():
         raise DraftPrConfirmError(
@@ -626,6 +656,11 @@ def _resolve_target(
         "head": head,
         "title": title,
         "body": body,
+        "source_repo": source_repo,
+        "target_repo": target_repo,
+        "source_repo_overridden": source_repo_overridden,
+        "source_repo_mismatch_allowed": bool(request.allow_source_repo_mismatch),
+        "warnings": extra_warnings,
     }
 
 
@@ -899,8 +934,31 @@ def _draft_pr_evidence(
     verification: dict[str, Any],
     created_at: str,
     body_file: Path | None,
+    target_repo_block: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    block = dict(target_repo_block or {})
+    safety = {
+        "human_confirmation_required": True,
+        "human_confirmation_confirmed": True,
+        "task_status_changed": False,
+        "workspace_prepared": False,
+        "executor_started": False,
+        "validators_started": False,
+        "branch_pushed": False,
+        "branch_push_required_before_pr": True,
+        "pr_created": True,
+        "draft_pr": True,
+        "merged": False,
+        "approved": False,
+        "cleanup_performed": False,
+        "issue_closed": False,
+        "branch_deleted": False,
+        "worktree_deleted": False,
+        "background_worker_started": False,
+    }
+    for key, value in block.items():
+        safety.setdefault(key, value)
+    evidence = {
         "kind": EVENT_TYPE,
         "artifact_type": ARTIFACT_TYPE,
         "task_key": task_key,
@@ -927,26 +985,10 @@ def _draft_pr_evidence(
         "cleanup_performed": False,
         "issue_closed": False,
         "requires_human_confirmation": True,
-        "safety": {
-            "human_confirmation_required": True,
-            "human_confirmation_confirmed": True,
-            "task_status_changed": False,
-            "workspace_prepared": False,
-            "executor_started": False,
-            "validators_started": False,
-            "branch_pushed": False,
-            "branch_push_required_before_pr": True,
-            "pr_created": True,
-            "draft_pr": True,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "issue_closed": False,
-            "branch_deleted": False,
-            "worktree_deleted": False,
-            "background_worker_started": False,
-        },
+        "safety": safety,
     }
+    evidence.update(block)
+    return evidence
 
 
 def _handoff_snapshot(handoff: Any) -> dict[str, Any]:
@@ -955,6 +997,7 @@ def _handoff_snapshot(handoff: Any) -> dict[str, Any]:
         "ready_for_branch_push_review": bool(handoff.summary.get("ready_for_branch_push_review")),
         "blocking_warnings": list(handoff.review_summary.get("blocking_warnings", [])),
         "source_available": bool(handoff.source.get("available")),
+        "source_repo": str(handoff.source.get("repo") or "").strip(),
         "workspace_available": bool(handoff.workspace.get("available")),
         "executor_available": bool(handoff.executor.get("available")),
         "executor_finished_ok": bool(handoff.executor.get("finished_ok")),
@@ -965,6 +1008,57 @@ def _handoff_snapshot(handoff: Any) -> dict[str, Any]:
         "proposed_pr_base": handoff.handoff.get("proposed_pr_base"),
         "proposed_pr_head": handoff.handoff.get("proposed_pr_head"),
     }
+
+
+def _target_repo_block(request: DraftPrConfirmRequest, handoff: Any) -> dict[str, Any]:
+    """Return a small {source_repo, target_repo, override flags} dict.
+
+    Accepts either a full PrHandoffPackageResult-shaped object (with
+    `.source` attr) or the flat dict returned by `_handoff_snapshot`.
+    """
+
+    target_repo = (request.target_repo or request.repo).strip()
+    source_repo = ""
+    if handoff is not None:
+        if isinstance(handoff, dict):
+            source_repo = str(handoff.get("source_repo") or "").strip()
+            if not source_repo:
+                source = handoff.get("source") if isinstance(handoff.get("source"), dict) else None
+                if source is not None:
+                    source_repo = str(source.get("repo") or "").strip()
+        else:
+            source = getattr(handoff, "source", None)
+            if isinstance(source, dict):
+                source_repo = str(source.get("repo") or "").strip()
+    mismatch = bool(source_repo) and source_repo != target_repo
+    overridden = (
+        mismatch
+        and bool(request.allow_source_repo_mismatch)
+        and request.target_repo is not None
+    )
+    return {
+        "source_repo": source_repo,
+        "target_repo": target_repo,
+        "source_repo_overridden": overridden,
+        "source_repo_mismatch_allowed": bool(request.allow_source_repo_mismatch),
+    }
+
+
+def _augment_with_target_repo_block(
+    result: "DraftPrConfirmResult",
+    *,
+    request: DraftPrConfirmRequest,
+    handoff: Any,
+) -> "DraftPrConfirmResult":
+    """Merge target-repo fields into result.evidence and result.safety."""
+
+    block = _target_repo_block(request, handoff)
+    if isinstance(result.evidence, dict):
+        result.evidence.update(block)
+    if isinstance(result.safety, dict):
+        for key, value in block.items():
+            result.safety.setdefault(key, value)
+    return result
 
 
 def _empty_existing_pr() -> dict[str, Any]:
@@ -1017,90 +1111,91 @@ def _preview_result(
     preview_text: str,
     warnings: list[str],
 ) -> DraftPrConfirmResult:
-    return DraftPrConfirmResult(
-        ok=True,
-        status="dry_run",
-        task_key=request.task_key,
-        task_status=task.status,
-        repo=request.repo,
-        base=base,
-        head=head,
-        title=title,
-        body_preview=_body_preview(body),
-        handoff=_handoff_snapshot(handoff),
-        branch_push=branch_push,
-        existing_pr=existing_pr,
-        draft_pr={
-            "created": False,
-            "draft": True,
-            "number": None,
-            "url": None,
-            "verified": False,
-            "title": title,
-            "body_preview": _body_preview(body),
-            "body_path": str(request.body_file) if request.body_file is not None else None,
-            "event_type": EVENT_TYPE,
-            "artifact_kind": ARTIFACT_TYPE,
-            "command_preview": preview_text,
-            "artifact_path": None,
-            "issue_closed": False,
-        },
-        verification_preview=verification_preview,
-        verification=_empty_verification_result(expected=verification_preview),
-        evidence={
-            "artifact_recorded": False,
-            "event_recorded": False,
-            "branch_push_verified": branch_push["available"],
-            "verification_recorded": False,
-        },
-        next_allowed_actions=[
-            "manual review of draft PR",
-            "human merge decision outside Agent Taskflow",
-            "post-merge cleanup recommendation in later phase",
-        ],
-        actions_not_performed=[
-            "merge",
-            "approval",
-            "cleanup",
-            "branch deletion",
-            "worktree deletion",
-        ],
-        summary={
-            "pr_created": False,
-            "draft_pr_created": False,
-            "verified": False,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "requires_human_review": True,
-            "next_phase": "manual_review_of_draft_pr",
-        },
-        safety={
-            "human_confirmation_required": True,
-            "human_confirmation_confirmed": False,
-            "task_status_changed": False,
-            "workspace_prepared": False,
-            "executor_started": False,
-            "validators_started": False,
-            "branch_pushed": False,
-            "branch_push_required_before_pr": True,
-            "pr_created": False,
-            "draft_pr": False,
-            "draft_pr_verified": False,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "issue_closed": False,
-            "branch_deleted": False,
-            "worktree_deleted": False,
-            "background_worker_started": False,
-        },
-        warnings=warnings,
-        performed=False,
-        dry_run=request.dry_run,
-        confirmation_required=not request.confirm_draft_pr,
-        error=None,
-    )
+    result = DraftPrConfirmResult(
+            ok=True,
+            status="dry_run",
+            task_key=request.task_key,
+            task_status=task.status,
+            repo=request.repo,
+            base=base,
+            head=head,
+            title=title,
+            body_preview=_body_preview(body),
+            handoff=_handoff_snapshot(handoff),
+            branch_push=branch_push,
+            existing_pr=existing_pr,
+            draft_pr={
+                "created": False,
+                "draft": True,
+                "number": None,
+                "url": None,
+                "verified": False,
+                "title": title,
+                "body_preview": _body_preview(body),
+                "body_path": str(request.body_file) if request.body_file is not None else None,
+                "event_type": EVENT_TYPE,
+                "artifact_kind": ARTIFACT_TYPE,
+                "command_preview": preview_text,
+                "artifact_path": None,
+                "issue_closed": False,
+            },
+            verification_preview=verification_preview,
+            verification=_empty_verification_result(expected=verification_preview),
+            evidence={
+                "artifact_recorded": False,
+                "event_recorded": False,
+                "branch_push_verified": branch_push["available"],
+                "verification_recorded": False,
+            },
+            next_allowed_actions=[
+                "manual review of draft PR",
+                "human merge decision outside Agent Taskflow",
+                "post-merge cleanup recommendation in later phase",
+            ],
+            actions_not_performed=[
+                "merge",
+                "approval",
+                "cleanup",
+                "branch deletion",
+                "worktree deletion",
+            ],
+            summary={
+                "pr_created": False,
+                "draft_pr_created": False,
+                "verified": False,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "requires_human_review": True,
+                "next_phase": "manual_review_of_draft_pr",
+            },
+            safety={
+                "human_confirmation_required": True,
+                "human_confirmation_confirmed": False,
+                "task_status_changed": False,
+                "workspace_prepared": False,
+                "executor_started": False,
+                "validators_started": False,
+                "branch_pushed": False,
+                "branch_push_required_before_pr": True,
+                "pr_created": False,
+                "draft_pr": False,
+                "draft_pr_verified": False,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "issue_closed": False,
+                "branch_deleted": False,
+                "worktree_deleted": False,
+                "background_worker_started": False,
+            },
+            warnings=warnings,
+            performed=False,
+            dry_run=request.dry_run,
+            confirmation_required=not request.confirm_draft_pr,
+            error=None,
+        )
+    return _augment_with_target_repo_block(result, request=request, handoff=handoff)
 
 
 def _already_exists_result(
@@ -1119,94 +1214,95 @@ def _already_exists_result(
     preview_text: str,
     warnings: list[str],
 ) -> DraftPrConfirmResult:
-    return DraftPrConfirmResult(
-        ok=False,
-        status="existing_pr_verification_failed",
-        task_key=request.task_key,
-        task_status=task.status,
-        repo=request.repo,
-        base=base,
-        head=head,
-        title=title,
-        body_preview=_body_preview(body),
-        handoff=_handoff_snapshot(handoff),
-        branch_push=branch_push,
-        existing_pr=existing_pr,
-        draft_pr={
-            "created": False,
-            "draft": True,
-            "number": existing_pr.get("number"),
-            "url": existing_pr.get("url"),
-            "verified": False,
-            "title": title,
-            "body_preview": _body_preview(body),
-            "body_path": str(request.body_file) if request.body_file is not None else None,
-            "event_type": EVENT_TYPE,
-            "artifact_kind": ARTIFACT_TYPE,
-            "command_preview": preview_text,
-            "artifact_path": None,
-            "issue_closed": False,
-        },
-        verification_preview=verification_preview,
-        verification=verification,
-        evidence={
-            "artifact_recorded": False,
-            "event_recorded": False,
-            "branch_push_verified": branch_push["available"],
-            "verification_recorded": False,
-        },
-        next_allowed_actions=[
-            "manually inspect the open PR",
-            "close the stale PR if needed",
-            "fix branch or base hygiene",
-            "rerun confirm_draft_pr after correction",
-        ],
-        actions_not_performed=[
-            "draft PR creation",
-            "merge",
-            "approval",
-            "cleanup",
-            "branch deletion",
-            "worktree deletion",
-            "issue close",
-            "task status update",
-        ],
-        summary={
-            "pr_created": False,
-            "draft_pr_created": False,
-            "verified": False,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "requires_human_review": True,
-            "next_phase": "existing_pr_verification_failed",
-        },
-        safety={
-            "human_confirmation_required": True,
-            "human_confirmation_confirmed": False,
-            "task_status_changed": False,
-            "workspace_prepared": False,
-            "executor_started": False,
-            "validators_started": False,
-            "branch_pushed": False,
-            "branch_push_required_before_pr": True,
-            "pr_created": False,
-            "draft_pr": False,
-            "draft_pr_verified": False,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "issue_closed": False,
-            "branch_deleted": False,
-            "worktree_deleted": False,
-            "background_worker_started": False,
-        },
-        warnings=warnings,
-        performed=False,
-        dry_run=request.dry_run,
-        confirmation_required=not request.confirm_draft_pr,
-        error=None,
-    )
+    result = DraftPrConfirmResult(
+            ok=False,
+            status="existing_pr_verification_failed",
+            task_key=request.task_key,
+            task_status=task.status,
+            repo=request.repo,
+            base=base,
+            head=head,
+            title=title,
+            body_preview=_body_preview(body),
+            handoff=_handoff_snapshot(handoff),
+            branch_push=branch_push,
+            existing_pr=existing_pr,
+            draft_pr={
+                "created": False,
+                "draft": True,
+                "number": existing_pr.get("number"),
+                "url": existing_pr.get("url"),
+                "verified": False,
+                "title": title,
+                "body_preview": _body_preview(body),
+                "body_path": str(request.body_file) if request.body_file is not None else None,
+                "event_type": EVENT_TYPE,
+                "artifact_kind": ARTIFACT_TYPE,
+                "command_preview": preview_text,
+                "artifact_path": None,
+                "issue_closed": False,
+            },
+            verification_preview=verification_preview,
+            verification=verification,
+            evidence={
+                "artifact_recorded": False,
+                "event_recorded": False,
+                "branch_push_verified": branch_push["available"],
+                "verification_recorded": False,
+            },
+            next_allowed_actions=[
+                "manually inspect the open PR",
+                "close the stale PR if needed",
+                "fix branch or base hygiene",
+                "rerun confirm_draft_pr after correction",
+            ],
+            actions_not_performed=[
+                "draft PR creation",
+                "merge",
+                "approval",
+                "cleanup",
+                "branch deletion",
+                "worktree deletion",
+                "issue close",
+                "task status update",
+            ],
+            summary={
+                "pr_created": False,
+                "draft_pr_created": False,
+                "verified": False,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "requires_human_review": True,
+                "next_phase": "existing_pr_verification_failed",
+            },
+            safety={
+                "human_confirmation_required": True,
+                "human_confirmation_confirmed": False,
+                "task_status_changed": False,
+                "workspace_prepared": False,
+                "executor_started": False,
+                "validators_started": False,
+                "branch_pushed": False,
+                "branch_push_required_before_pr": True,
+                "pr_created": False,
+                "draft_pr": False,
+                "draft_pr_verified": False,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "issue_closed": False,
+                "branch_deleted": False,
+                "worktree_deleted": False,
+                "background_worker_started": False,
+            },
+            warnings=warnings,
+            performed=False,
+            dry_run=request.dry_run,
+            confirmation_required=not request.confirm_draft_pr,
+            error=None,
+        )
+    return _augment_with_target_repo_block(result, request=request, handoff=handoff)
 
 
 def _already_exists_verified_result(
@@ -1225,93 +1321,94 @@ def _already_exists_verified_result(
     preview_text: str,
     warnings: list[str],
 ) -> DraftPrConfirmResult:
-    return DraftPrConfirmResult(
-        ok=True,
-        status="already_exists_verified",
-        task_key=request.task_key,
-        task_status=task.status,
-        repo=request.repo,
-        base=base,
-        head=head,
-        title=title,
-        body_preview=_body_preview(body),
-        handoff=_handoff_snapshot(handoff),
-        branch_push=branch_push,
-        existing_pr=existing_pr,
-        draft_pr={
-            "created": False,
-            "draft": True,
-            "number": existing_pr.get("number"),
-            "url": existing_pr.get("url"),
-            "verified": True,
-            "title": title,
-            "body_preview": _body_preview(body),
-            "body_path": str(request.body_file) if request.body_file is not None else None,
-            "event_type": EVENT_TYPE,
-            "artifact_kind": ARTIFACT_TYPE,
-            "command_preview": preview_text,
-            "artifact_path": None,
-            "issue_closed": False,
-        },
-        verification_preview=verification_preview,
-        verification=verification,
-        evidence={
-            "artifact_recorded": False,
-            "event_recorded": False,
-            "branch_push_verified": branch_push["available"],
-            "verification_recorded": False,
-        },
-        next_allowed_actions=[
-            "manual review of the existing open PR",
-            "human merge decision outside Agent Taskflow",
-            "post-merge cleanup recommendation in later phase",
-        ],
-        actions_not_performed=[
-            "draft PR creation",
-            "merge",
-            "approval",
-            "cleanup",
-            "branch deletion",
-            "worktree deletion",
-            "issue close",
-            "task status update",
-        ],
-        summary={
-            "pr_created": False,
-            "draft_pr_created": False,
-            "verified": True,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "requires_human_review": True,
-            "next_phase": "manual_review_of_existing_pr",
-        },
-        safety={
-            "human_confirmation_required": True,
-            "human_confirmation_confirmed": False,
-            "task_status_changed": False,
-            "workspace_prepared": False,
-            "executor_started": False,
-            "validators_started": False,
-            "branch_pushed": False,
-            "branch_push_required_before_pr": True,
-            "pr_created": False,
-            "draft_pr": False,
-            "draft_pr_verified": True,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "issue_closed": False,
-            "branch_deleted": False,
-            "worktree_deleted": False,
-            "background_worker_started": False,
-        },
-        warnings=warnings,
-        performed=False,
-        dry_run=request.dry_run,
-        confirmation_required=False,
-        error=None,
-    )
+    result = DraftPrConfirmResult(
+            ok=True,
+            status="already_exists_verified",
+            task_key=request.task_key,
+            task_status=task.status,
+            repo=request.repo,
+            base=base,
+            head=head,
+            title=title,
+            body_preview=_body_preview(body),
+            handoff=_handoff_snapshot(handoff),
+            branch_push=branch_push,
+            existing_pr=existing_pr,
+            draft_pr={
+                "created": False,
+                "draft": True,
+                "number": existing_pr.get("number"),
+                "url": existing_pr.get("url"),
+                "verified": True,
+                "title": title,
+                "body_preview": _body_preview(body),
+                "body_path": str(request.body_file) if request.body_file is not None else None,
+                "event_type": EVENT_TYPE,
+                "artifact_kind": ARTIFACT_TYPE,
+                "command_preview": preview_text,
+                "artifact_path": None,
+                "issue_closed": False,
+            },
+            verification_preview=verification_preview,
+            verification=verification,
+            evidence={
+                "artifact_recorded": False,
+                "event_recorded": False,
+                "branch_push_verified": branch_push["available"],
+                "verification_recorded": False,
+            },
+            next_allowed_actions=[
+                "manual review of the existing open PR",
+                "human merge decision outside Agent Taskflow",
+                "post-merge cleanup recommendation in later phase",
+            ],
+            actions_not_performed=[
+                "draft PR creation",
+                "merge",
+                "approval",
+                "cleanup",
+                "branch deletion",
+                "worktree deletion",
+                "issue close",
+                "task status update",
+            ],
+            summary={
+                "pr_created": False,
+                "draft_pr_created": False,
+                "verified": True,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "requires_human_review": True,
+                "next_phase": "manual_review_of_existing_pr",
+            },
+            safety={
+                "human_confirmation_required": True,
+                "human_confirmation_confirmed": False,
+                "task_status_changed": False,
+                "workspace_prepared": False,
+                "executor_started": False,
+                "validators_started": False,
+                "branch_pushed": False,
+                "branch_push_required_before_pr": True,
+                "pr_created": False,
+                "draft_pr": False,
+                "draft_pr_verified": True,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "issue_closed": False,
+                "branch_deleted": False,
+                "worktree_deleted": False,
+                "background_worker_started": False,
+            },
+            warnings=warnings,
+            performed=False,
+            dry_run=request.dry_run,
+            confirmation_required=False,
+            error=None,
+        )
+    return _augment_with_target_repo_block(result, request=request, handoff=handoff)
 
 
 def _success_result(
@@ -1333,90 +1430,91 @@ def _success_result(
     artifact_path: Path,
     warnings: list[str],
 ) -> DraftPrConfirmResult:
-    return DraftPrConfirmResult(
-        ok=True,
-        status="draft_pr_created",
-        task_key=request.task_key,
-        task_status=task.status,
-        repo=request.repo,
-        base=base,
-        head=head,
-        title=title,
-        body_preview=_body_preview(body),
-        handoff=_handoff_snapshot(handoff),
-        branch_push=branch_push,
-        existing_pr=existing_pr,
-        draft_pr={
-            "created": True,
-            "draft": True,
-            "number": pr_number,
-            "url": pr_url,
-            "verified": True,
-            "title": title,
-            "body_preview": _body_preview(body),
-            "body_path": str(request.body_file) if request.body_file is not None else None,
-            "event_type": EVENT_TYPE,
-            "artifact_kind": ARTIFACT_TYPE,
-            "command_preview": preview_text,
-            "artifact_path": str(artifact_path),
-            "issue_closed": False,
-        },
-        verification_preview=verification_preview,
-        verification=verification,
-        evidence={
-            "artifact_recorded": True,
-            "event_recorded": True,
-            "branch_push_verified": branch_push["available"],
-            "verification_recorded": True,
-        },
-        next_allowed_actions=[
-            "manual review of draft PR",
-            "human merge decision outside Agent Taskflow",
-            "post-merge cleanup recommendation in later phase",
-        ],
-        actions_not_performed=[
-            "merge",
-            "approval",
-            "cleanup",
-            "branch deletion",
-            "worktree deletion",
-        ],
-        summary={
-            "pr_created": True,
-            "draft_pr_created": True,
-            "verified": True,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "requires_human_review": True,
-            "next_phase": "post_merge_cleanup_recommendation",
-        },
-        safety={
-            "human_confirmation_required": True,
-            "human_confirmation_confirmed": True,
-            "task_status_changed": False,
-            "workspace_prepared": False,
-            "executor_started": False,
-            "validators_started": False,
-            "branch_pushed": False,
-            "branch_push_required_before_pr": True,
-            "pr_created": True,
-            "draft_pr": True,
-            "draft_pr_verified": True,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "issue_closed": False,
-            "branch_deleted": False,
-            "worktree_deleted": False,
-            "background_worker_started": False,
-        },
-        warnings=warnings,
-        performed=True,
-        dry_run=False,
-        confirmation_required=False,
-        error=None,
-    )
+    result = DraftPrConfirmResult(
+            ok=True,
+            status="draft_pr_created",
+            task_key=request.task_key,
+            task_status=task.status,
+            repo=request.repo,
+            base=base,
+            head=head,
+            title=title,
+            body_preview=_body_preview(body),
+            handoff=_handoff_snapshot(handoff),
+            branch_push=branch_push,
+            existing_pr=existing_pr,
+            draft_pr={
+                "created": True,
+                "draft": True,
+                "number": pr_number,
+                "url": pr_url,
+                "verified": True,
+                "title": title,
+                "body_preview": _body_preview(body),
+                "body_path": str(request.body_file) if request.body_file is not None else None,
+                "event_type": EVENT_TYPE,
+                "artifact_kind": ARTIFACT_TYPE,
+                "command_preview": preview_text,
+                "artifact_path": str(artifact_path),
+                "issue_closed": False,
+            },
+            verification_preview=verification_preview,
+            verification=verification,
+            evidence={
+                "artifact_recorded": True,
+                "event_recorded": True,
+                "branch_push_verified": branch_push["available"],
+                "verification_recorded": True,
+            },
+            next_allowed_actions=[
+                "manual review of draft PR",
+                "human merge decision outside Agent Taskflow",
+                "post-merge cleanup recommendation in later phase",
+            ],
+            actions_not_performed=[
+                "merge",
+                "approval",
+                "cleanup",
+                "branch deletion",
+                "worktree deletion",
+            ],
+            summary={
+                "pr_created": True,
+                "draft_pr_created": True,
+                "verified": True,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "requires_human_review": True,
+                "next_phase": "post_merge_cleanup_recommendation",
+            },
+            safety={
+                "human_confirmation_required": True,
+                "human_confirmation_confirmed": True,
+                "task_status_changed": False,
+                "workspace_prepared": False,
+                "executor_started": False,
+                "validators_started": False,
+                "branch_pushed": False,
+                "branch_push_required_before_pr": True,
+                "pr_created": True,
+                "draft_pr": True,
+                "draft_pr_verified": True,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "issue_closed": False,
+                "branch_deleted": False,
+                "worktree_deleted": False,
+                "background_worker_started": False,
+            },
+            warnings=warnings,
+            performed=True,
+            dry_run=False,
+            confirmation_required=False,
+            error=None,
+        )
+    return _augment_with_target_repo_block(result, request=request, handoff=handoff)
 
 
 def _verification_failed_result(
@@ -1438,99 +1536,100 @@ def _verification_failed_result(
     draft_number = verification.get("actual_number")
     if not isinstance(draft_number, int):
         draft_number = None
-    return DraftPrConfirmResult(
-        ok=False,
-        status="pr_created_verification_failed",
-        task_key=request.task_key,
-        task_status=task.status,
-        repo=request.repo,
-        base=base,
-        head=head,
-        title=title,
-        body_preview=_body_preview(body),
-        handoff=_handoff_snapshot(handoff),
-        branch_push=branch_push,
-        existing_pr=existing_pr,
-        draft_pr={
-            "created": True,
-            "draft": True,
-            "number": draft_number,
-            "url": pr_url,
-            "verified": False,
-            "title": title,
-            "body_preview": _body_preview(body),
-            "body_path": str(request.body_file) if request.body_file is not None else None,
-            "event_type": EVENT_TYPE,
-            "artifact_kind": ARTIFACT_TYPE,
-            "command_preview": preview_text,
-            "artifact_path": None,
-            "issue_closed": False,
-        },
-        verification_preview=verification_preview,
-        verification=verification,
-        evidence={
-            "artifact_recorded": False,
-            "event_recorded": False,
-            "branch_push_verified": branch_push["available"],
-            "verification_recorded": False,
-        },
-        next_allowed_actions=[
-            "manually inspect the created PR",
-            "close the stale PR if needed",
-            "fix branch or base hygiene",
-            "rerun confirm_draft_pr after correction",
-        ],
-        actions_not_performed=[
-            "draft PR artifact recording",
-            "draft PR event recording",
-            "merge",
-            "approval",
-            "cleanup",
-            "branch deletion",
-            "worktree deletion",
-            "issue close",
-            "task status update",
-        ],
-        summary={
-            "pr_created": True,
-            "draft_pr_created": False,
-            "verified": False,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "requires_human_review": True,
-            "next_phase": "pr_created_verification_failed",
-        },
-        safety={
-            "human_confirmation_required": True,
-            "human_confirmation_confirmed": True,
-            "task_status_changed": False,
-            "workspace_prepared": False,
-            "executor_started": False,
-            "validators_started": False,
-            "branch_pushed": False,
-            "branch_push_required_before_pr": True,
-            "pr_created": True,
-            "draft_pr": True,
-            "draft_pr_verified": False,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "issue_closed": False,
-            "branch_deleted": False,
-            "worktree_deleted": False,
-            "background_worker_started": False,
-        },
-        warnings=[
-            *list(handoff.warnings),
-            *branch_push["warnings"],
-            *verification.get("blocking_warnings", []),
-        ],
-        performed=True,
-        dry_run=False,
-        confirmation_required=False,
-        error=None,
-    )
+    result = DraftPrConfirmResult(
+            ok=False,
+            status="pr_created_verification_failed",
+            task_key=request.task_key,
+            task_status=task.status,
+            repo=request.repo,
+            base=base,
+            head=head,
+            title=title,
+            body_preview=_body_preview(body),
+            handoff=_handoff_snapshot(handoff),
+            branch_push=branch_push,
+            existing_pr=existing_pr,
+            draft_pr={
+                "created": True,
+                "draft": True,
+                "number": draft_number,
+                "url": pr_url,
+                "verified": False,
+                "title": title,
+                "body_preview": _body_preview(body),
+                "body_path": str(request.body_file) if request.body_file is not None else None,
+                "event_type": EVENT_TYPE,
+                "artifact_kind": ARTIFACT_TYPE,
+                "command_preview": preview_text,
+                "artifact_path": None,
+                "issue_closed": False,
+            },
+            verification_preview=verification_preview,
+            verification=verification,
+            evidence={
+                "artifact_recorded": False,
+                "event_recorded": False,
+                "branch_push_verified": branch_push["available"],
+                "verification_recorded": False,
+            },
+            next_allowed_actions=[
+                "manually inspect the created PR",
+                "close the stale PR if needed",
+                "fix branch or base hygiene",
+                "rerun confirm_draft_pr after correction",
+            ],
+            actions_not_performed=[
+                "draft PR artifact recording",
+                "draft PR event recording",
+                "merge",
+                "approval",
+                "cleanup",
+                "branch deletion",
+                "worktree deletion",
+                "issue close",
+                "task status update",
+            ],
+            summary={
+                "pr_created": True,
+                "draft_pr_created": False,
+                "verified": False,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "requires_human_review": True,
+                "next_phase": "pr_created_verification_failed",
+            },
+            safety={
+                "human_confirmation_required": True,
+                "human_confirmation_confirmed": True,
+                "task_status_changed": False,
+                "workspace_prepared": False,
+                "executor_started": False,
+                "validators_started": False,
+                "branch_pushed": False,
+                "branch_push_required_before_pr": True,
+                "pr_created": True,
+                "draft_pr": True,
+                "draft_pr_verified": False,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "issue_closed": False,
+                "branch_deleted": False,
+                "worktree_deleted": False,
+                "background_worker_started": False,
+            },
+            warnings=[
+                *list(handoff.warnings),
+                *branch_push["warnings"],
+                *verification.get("blocking_warnings", []),
+            ],
+            performed=True,
+            dry_run=False,
+            confirmation_required=False,
+            error=None,
+        )
+    return _augment_with_target_repo_block(result, request=request, handoff=handoff)
 
 
 def _error_result(
@@ -1552,91 +1651,92 @@ def _error_result(
 ) -> DraftPrConfirmResult:
     resolved_warnings = warnings or []
     body_preview = _body_preview(body) if body is not None else None
-    return DraftPrConfirmResult(
-        ok=False,
-        status=status,
-        task_key=request.task_key,
-        task_status=None,
-        repo=request.repo,
-        base=base,
-        head=head,
-        title=title,
-        body_preview=body_preview,
-        handoff=handoff or _empty_handoff_snapshot(),
-        branch_push=branch_push,
-        existing_pr=existing_pr,
-        draft_pr={
-            "created": False,
-            "draft": True,
-            "number": None,
-            "url": None,
-            "verified": False,
-            "title": title,
-            "body_preview": body_preview,
-            "body_path": str(request.body_file) if request.body_file is not None else None,
-            "event_type": EVENT_TYPE,
-            "artifact_kind": ARTIFACT_TYPE,
-            "command_preview": preview_text,
-            "artifact_path": None,
-            "issue_closed": False,
-        },
-        verification_preview=verification_preview or _empty_verification_preview(),
-        verification=verification or _empty_verification_result(
-            expected=verification_preview or _empty_verification_preview()
-        ),
-        evidence={
-            "artifact_recorded": False,
-            "event_recorded": False,
-            "branch_push_verified": branch_push.get("available", False),
-            "verification_recorded": False,
-        },
-        next_allowed_actions=[
-            "resolve blocking warnings",
-            "rerun the draft PR confirmation command after evidence is complete",
-        ],
-        actions_not_performed=[
-            "draft PR creation",
-            "merge",
-            "approval",
-            "cleanup",
-            "branch deletion",
-            "worktree deletion",
-        ],
-        summary={
-            "pr_created": False,
-            "draft_pr_created": False,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "requires_human_review": True,
-            "next_phase": "draft_pr_readiness_remediation",
-        },
-        safety={
-            "human_confirmation_required": True,
-            "human_confirmation_confirmed": False,
-            "task_status_changed": False,
-            "workspace_prepared": False,
-            "executor_started": False,
-            "validators_started": False,
-            "branch_pushed": False,
-            "branch_push_required_before_pr": True,
-            "pr_created": False,
-            "draft_pr": False,
-            "draft_pr_verified": False,
-            "merged": False,
-            "approved": False,
-            "cleanup_performed": False,
-            "issue_closed": False,
-            "branch_deleted": False,
-            "worktree_deleted": False,
-            "background_worker_started": False,
-        },
-        warnings=resolved_warnings,
-        performed=False,
-        dry_run=request.dry_run,
-        confirmation_required=not request.confirm_draft_pr,
-        error=error,
-    )
+    result = DraftPrConfirmResult(
+            ok=False,
+            status=status,
+            task_key=request.task_key,
+            task_status=None,
+            repo=request.repo,
+            base=base,
+            head=head,
+            title=title,
+            body_preview=body_preview,
+            handoff=handoff or _empty_handoff_snapshot(),
+            branch_push=branch_push,
+            existing_pr=existing_pr,
+            draft_pr={
+                "created": False,
+                "draft": True,
+                "number": None,
+                "url": None,
+                "verified": False,
+                "title": title,
+                "body_preview": body_preview,
+                "body_path": str(request.body_file) if request.body_file is not None else None,
+                "event_type": EVENT_TYPE,
+                "artifact_kind": ARTIFACT_TYPE,
+                "command_preview": preview_text,
+                "artifact_path": None,
+                "issue_closed": False,
+            },
+            verification_preview=verification_preview or _empty_verification_preview(),
+            verification=verification or _empty_verification_result(
+                expected=verification_preview or _empty_verification_preview()
+            ),
+            evidence={
+                "artifact_recorded": False,
+                "event_recorded": False,
+                "branch_push_verified": branch_push.get("available", False),
+                "verification_recorded": False,
+            },
+            next_allowed_actions=[
+                "resolve blocking warnings",
+                "rerun the draft PR confirmation command after evidence is complete",
+            ],
+            actions_not_performed=[
+                "draft PR creation",
+                "merge",
+                "approval",
+                "cleanup",
+                "branch deletion",
+                "worktree deletion",
+            ],
+            summary={
+                "pr_created": False,
+                "draft_pr_created": False,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "requires_human_review": True,
+                "next_phase": "draft_pr_readiness_remediation",
+            },
+            safety={
+                "human_confirmation_required": True,
+                "human_confirmation_confirmed": False,
+                "task_status_changed": False,
+                "workspace_prepared": False,
+                "executor_started": False,
+                "validators_started": False,
+                "branch_pushed": False,
+                "branch_push_required_before_pr": True,
+                "pr_created": False,
+                "draft_pr": False,
+                "draft_pr_verified": False,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+                "issue_closed": False,
+                "branch_deleted": False,
+                "worktree_deleted": False,
+                "background_worker_started": False,
+            },
+            warnings=resolved_warnings,
+            performed=False,
+            dry_run=request.dry_run,
+            confirmation_required=not request.confirm_draft_pr,
+            error=error,
+        )
+    return _augment_with_target_repo_block(result, request=request, handoff=handoff)
 
 
 def _empty_handoff_snapshot() -> dict[str, Any]:
