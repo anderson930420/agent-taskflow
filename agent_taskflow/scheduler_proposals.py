@@ -14,6 +14,7 @@ ran.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,10 @@ PROPOSAL_ARTIFACT_TYPE = "scheduler_proposal"
 PROPOSAL_EVENT_TYPE = "scheduler_proposal_created"
 DEFAULT_POLICY_NAME = "default_read_only_proposal_policy"
 DEFAULT_MAX_ITEMS = 20
+
+HASH_ALGORITHM = "sha256"
+PROPOSAL_HASH_PAYLOAD_VERSION = "scheduler_proposal_hash.v1"
+ITEM_HASH_PAYLOAD_VERSION = "scheduler_proposal_item_hash.v1"
 
 DEFAULT_ACTIONABLE_COMMAND_KINDS: tuple[str, ...] = (
     "create_task_execution_package",
@@ -226,6 +231,9 @@ def create_scheduler_proposal(request: SchedulerProposalRequest) -> dict[str, An
     candidates.sort(key=_sort_key)
     selected = candidates[: request.max_items]
 
+    for item in selected:
+        item["item_hash"] = _compute_item_hash(item)
+
     proposal_id = _make_proposal_id()
     created_at = utc_now_iso()
     mode = "dry_run" if request.dry_run else "confirmed"
@@ -248,6 +256,9 @@ def create_scheduler_proposal(request: SchedulerProposalRequest) -> dict[str, An
         "artifact_root": str(request.artifact_root),
         "artifact_path": str(artifact_path) if artifact_path else None,
         "mode": mode,
+        "hash_algorithm": HASH_ALGORITHM,
+        "proposal_hash_payload_version": PROPOSAL_HASH_PAYLOAD_VERSION,
+        "item_hash_payload_version": ITEM_HASH_PAYLOAD_VERSION,
         "filters": {
             "status": request.status,
             "project": request.project,
@@ -270,6 +281,7 @@ def create_scheduler_proposal(request: SchedulerProposalRequest) -> dict[str, An
         },
         "safety": dict(PROPOSAL_SAFETY_FLAGS),
     }
+    payload["proposal_hash"] = _compute_proposal_hash(payload)
 
     if request.dry_run:
         return payload
@@ -301,9 +313,14 @@ def create_scheduler_proposal(request: SchedulerProposalRequest) -> dict[str, An
                 payload={
                     "kind": PROPOSAL_EVENT_TYPE,
                     "proposal_id": proposal_id,
+                    "proposal_hash": payload["proposal_hash"],
+                    "proposal_item_id": item["proposal_item_id"],
+                    "item_hash": item["item_hash"],
+                    "task_key": item["task_key"],
                     "recommended_command_kind": item["recommended_command_kind"],
                     "executable": item["executable"],
                     "consistency_warning_count": len(item["consistency_warnings"]),
+                    "selected_item_count": len(selected),
                     "artifact_path": str(artifact_path),
                     "schema_version": SCHEMA_VERSION,
                 },
@@ -396,13 +413,19 @@ def _build_candidate(
     consistency_warnings = list(rec_item.get("consistency_warnings") or [])
     executable = kind in EXECUTABLE_COMMAND_KINDS and not consistency_warnings
     priority_rank = COMMAND_KIND_PRIORITY.get(kind, 99)
+    task_key = rec_item["task_key"]
+    current_phase_label = rec_item.get("current_phase_label")
+    missing_evidence = list(rec_item.get("missing_evidence") or [])
 
     return {
-        "task_key": rec_item["task_key"],
+        "task_key": task_key,
         "project": rec_item.get("project"),
         "title": rec_item.get("title"),
         "status": status,
-        "current_phase_label": rec_item.get("current_phase_label"),
+        "expected_status": status,
+        "proposal_item_id": f"{task_key}:{kind}",
+        "current_phase_label": current_phase_label,
+        "expected_phase_label": current_phase_label,
         "recommended_command_kind": kind,
         "proposed_action": rec_item.get("recommended_next_action"),
         "reason": rec_item.get("reason"),
@@ -411,10 +434,153 @@ def _build_candidate(
         "requires_human_confirmation": True,
         "executable": executable,
         "consistency_warnings": consistency_warnings,
-        "missing_evidence": list(rec_item.get("missing_evidence") or []),
+        "missing_evidence": missing_evidence,
+        "expected_evidence_summary": _build_expected_evidence_summary(rec_item),
+        "expected_refs": _build_expected_refs(rec_item),
         "priority_rank": priority_rank,
         "safety_flags": dict(ITEM_SAFETY_FLAGS),
     }
+
+
+def _build_expected_refs(rec_item: dict[str, Any]) -> dict[str, Any]:
+    """Stable, normalized references the future confirmation must revalidate.
+
+    Only fields that can be derived safely from the recommendation item are
+    included. Missing fields are present as ``None`` so the shape is stable.
+    """
+
+    worktree = rec_item.get("worktree_status") or {}
+    branch = rec_item.get("branch_status") or {}
+    pr = rec_item.get("pr_status") or {}
+    return {
+        "worktree_path": worktree.get("worktree_path"),
+        "worktree_exists": worktree.get("path_exists"),
+        "branch": branch.get("branch") or worktree.get("branch"),
+        "base_branch": branch.get("base_branch") or worktree.get("base_branch"),
+        "base_sha": worktree.get("base_sha"),
+        "head_sha": branch.get("head_sha"),
+        "pr_number": pr.get("pr_number"),
+        "pr_url": pr.get("pr_url"),
+        "pr_state": pr.get("state"),
+        "pr_is_draft": pr.get("draft_pr"),
+    }
+
+
+def _build_expected_evidence_summary(rec_item: dict[str, Any]) -> dict[str, Any]:
+    """Stable, normalized subset of recommendation evidence.
+
+    Includes only semantic fields. ``related_artifacts`` is reduced to
+    ``artifact_type``/``path`` and sorted deterministically so artifact
+    discovery order does not affect the hash.
+    """
+
+    related = [
+        {
+            "artifact_type": artifact.get("artifact_type"),
+            "path": artifact.get("path"),
+        }
+        for artifact in (rec_item.get("related_artifacts") or [])
+    ]
+    related.sort(key=lambda r: (r.get("artifact_type") or "", r.get("path") or ""))
+    return {
+        "evidence_summary": dict(rec_item.get("evidence_summary") or {}),
+        "missing_evidence": list(rec_item.get("missing_evidence") or []),
+        "consistency_warnings": list(rec_item.get("consistency_warnings") or []),
+        "worktree_status": dict(rec_item.get("worktree_status") or {}),
+        "branch_status": dict(rec_item.get("branch_status") or {}),
+        "pr_status": dict(rec_item.get("pr_status") or {}),
+        "cleanup_status": dict(rec_item.get("cleanup_status") or {}),
+        "related_artifacts": related,
+    }
+
+
+def _canonical_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _sha256_hex(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _item_hash_payload(item: dict[str, Any]) -> dict[str, Any]:
+    """Semantic fields bound by ``item_hash``.
+
+    Excludes display-only fields (``project``, ``title``), the hash itself,
+    and proposal-level identifiers (``proposal_id`` / ``proposal_hash``) so
+    the same item produced under a different proposal instance hashes the
+    same.
+    """
+
+    return {
+        "proposal_item_id": item["proposal_item_id"],
+        "task_key": item["task_key"],
+        "status": item["status"],
+        "expected_status": item["expected_status"],
+        "recommended_command_kind": item["recommended_command_kind"],
+        "current_phase_label": item["current_phase_label"],
+        "expected_phase_label": item["expected_phase_label"],
+        "proposed_action": item["proposed_action"],
+        "reason": item["reason"],
+        "severity": item["severity"],
+        "confidence": item["confidence"],
+        "requires_human_confirmation": item["requires_human_confirmation"],
+        "executable": item["executable"],
+        "consistency_warnings": list(item["consistency_warnings"]),
+        "missing_evidence": list(item["missing_evidence"]),
+        "expected_evidence_summary": item["expected_evidence_summary"],
+        "expected_refs": item["expected_refs"],
+        "priority_rank": item["priority_rank"],
+        "safety_flags": dict(item["safety_flags"]),
+        "item_hash_payload_version": ITEM_HASH_PAYLOAD_VERSION,
+    }
+
+
+def _compute_item_hash(item: dict[str, Any]) -> str:
+    return _sha256_hex(_item_hash_payload(item))
+
+
+def _proposal_hash_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Semantic fields bound by ``proposal_hash``.
+
+    ``proposal_id`` is intentionally excluded so the hash represents the
+    proposal's semantic contents and not the instance identifier. Future
+    confirmation artifacts bind to both ``proposal_id`` (the instance) AND
+    ``proposal_hash`` (the contents). ``created_at``, ``artifact_path``, and
+    ``mode`` are also excluded so the hash is identical across dry-run and
+    confirmed renderings of the same input.
+    """
+
+    summary = payload.get("summary") or {}
+    semantic_summary = {
+        "item_count": summary.get("item_count"),
+        "candidate_count": summary.get("candidate_count"),
+        "warning_count": summary.get("warning_count"),
+        "executable_count": summary.get("executable_count"),
+    }
+    items_binding = [
+        {
+            "proposal_item_id": item["proposal_item_id"],
+            "task_key": item["task_key"],
+            "recommended_command_kind": item["recommended_command_kind"],
+            "item_hash": item["item_hash"],
+        }
+        for item in payload.get("items", [])
+    ]
+    return {
+        "schema_version": payload["schema_version"],
+        "source": payload["source"],
+        "filters": payload["filters"],
+        "policy": payload["policy"],
+        "summary": semantic_summary,
+        "items": items_binding,
+        "safety": payload["safety"],
+        "hash_algorithm": HASH_ALGORITHM,
+        "proposal_hash_payload_version": PROPOSAL_HASH_PAYLOAD_VERSION,
+    }
+
+
+def _compute_proposal_hash(payload: dict[str, Any]) -> str:
+    return _sha256_hex(_proposal_hash_payload(payload))
 
 
 def _sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
@@ -433,9 +599,12 @@ __all__ = [
     "DEFAULT_MAX_ITEMS",
     "DEFAULT_POLICY_NAME",
     "EXECUTABLE_COMMAND_KINDS",
+    "HASH_ALGORITHM",
+    "ITEM_HASH_PAYLOAD_VERSION",
     "ITEM_SAFETY_FLAGS",
     "PROPOSAL_ARTIFACT_TYPE",
     "PROPOSAL_EVENT_TYPE",
+    "PROPOSAL_HASH_PAYLOAD_VERSION",
     "PROPOSAL_SAFETY_FLAGS",
     "PROPOSAL_SOURCE",
     "SCHEMA_VERSION",

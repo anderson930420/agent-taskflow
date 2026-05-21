@@ -105,6 +105,39 @@ class CreateSchedulerProposalScriptTests(unittest.TestCase):
         kinds = [item["recommended_command_kind"] for item in payload["items"]]
         self.assertIn("create_task_execution_package", kinds)
 
+    def test_json_dry_run_includes_proposal_and_item_hashes(self) -> None:
+        self._seed_queued()
+
+        result = self._run_script("--json")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        proposal_hash = payload["proposal_hash"]
+        self.assertIsInstance(proposal_hash, str)
+        self.assertEqual(len(proposal_hash), 64)
+        int(proposal_hash, 16)
+        self.assertEqual(payload["hash_algorithm"], "sha256")
+        self.assertEqual(
+            payload["proposal_hash_payload_version"],
+            "scheduler_proposal_hash.v1",
+        )
+        self.assertEqual(
+            payload["item_hash_payload_version"],
+            "scheduler_proposal_item_hash.v1",
+        )
+        self.assertTrue(payload["items"])
+        for item in payload["items"]:
+            self.assertEqual(len(item["item_hash"]), 64)
+            int(item["item_hash"], 16)
+            self.assertEqual(
+                item["proposal_item_id"],
+                f"{item['task_key']}:{item['recommended_command_kind']}",
+            )
+            self.assertIn("expected_status", item)
+            self.assertIn("expected_phase_label", item)
+            self.assertIn("expected_evidence_summary", item)
+            self.assertIn("expected_refs", item)
+
     def test_pretty_includes_proposal_id_and_item_command_kind(self) -> None:
         self._seed_queued()
 
@@ -113,6 +146,7 @@ class CreateSchedulerProposalScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Scheduler Proposal", result.stdout)
         self.assertIn("proposal_id:", result.stdout)
+        self.assertIn("proposal_hash:", result.stdout)
         self.assertIn("create_task_execution_package", result.stdout)
         self.assertIn("AT-SPCLI-001", result.stdout)
 
@@ -137,6 +171,15 @@ class CreateSchedulerProposalScriptTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "confirmed")
         artifact_path = Path(payload["artifact_path"])
         self.assertTrue(artifact_path.exists())
+        on_disk = json.loads(artifact_path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["proposal_hash"], payload["proposal_hash"])
+        self.assertEqual(len(on_disk["proposal_hash"]), 64)
+        for item in on_disk["items"]:
+            self.assertEqual(len(item["item_hash"]), 64)
+            self.assertEqual(
+                item["proposal_item_id"],
+                f"{item['task_key']}:{item['recommended_command_kind']}",
+            )
 
         with sqlite3.connect(self.db_path) as conn:
             artifact_types = [

@@ -145,9 +145,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _format_pretty(payload: dict[str, object]) -> str:
+    proposal_hash = payload.get("proposal_hash") or ""
+    proposal_hash_short = proposal_hash[:12] if isinstance(proposal_hash, str) else ""
     lines = [
         "Scheduler Proposal",
         f"  proposal_id:        {payload.get('proposal_id')}",
+        f"  proposal_hash:      {proposal_hash_short}{'…' if proposal_hash_short else ''}",
         f"  schema_version:     {payload.get('schema_version')}",
         f"  mode:               {payload.get('mode')}",
         f"  created_at:         {payload.get('created_at')}",

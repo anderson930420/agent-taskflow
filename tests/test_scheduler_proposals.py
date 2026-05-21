@@ -18,9 +18,12 @@ from agent_taskflow.scheduler_proposals import (
     COMMAND_KIND_PRIORITY,
     DEFAULT_ACTIONABLE_COMMAND_KINDS,
     EXECUTABLE_COMMAND_KINDS,
+    HASH_ALGORITHM,
+    ITEM_HASH_PAYLOAD_VERSION,
     ITEM_SAFETY_FLAGS,
     PROPOSAL_ARTIFACT_TYPE,
     PROPOSAL_EVENT_TYPE,
+    PROPOSAL_HASH_PAYLOAD_VERSION,
     PROPOSAL_SAFETY_FLAGS,
     PROPOSAL_SOURCE,
     SCHEMA_VERSION,
@@ -485,6 +488,253 @@ class SchedulerProposalsTests(unittest.TestCase):
 
         json.dumps(payload, sort_keys=True)
         self.assertEqual(payload["source"], PROPOSAL_SOURCE)
+
+    # --- Hash-binding contract (Phase 6F+2) ---
+
+    @staticmethod
+    def _is_sha256_hex(value: object) -> bool:
+        if not isinstance(value, str) or len(value) != 64:
+            return False
+        try:
+            int(value, 16)
+        except ValueError:
+            return False
+        return True
+
+    def test_every_item_has_proposal_item_id(self) -> None:
+        self._seed_task("AT-SP-HASH-001", status="queued")
+        self._seed_task("AT-SP-HASH-002", status="blocked", blocked_reason="x")
+
+        payload = self._propose()
+
+        self.assertTrue(payload["items"])
+        for item in payload["items"]:
+            expected = f"{item['task_key']}:{item['recommended_command_kind']}"
+            self.assertEqual(item["proposal_item_id"], expected)
+
+    def test_every_item_has_sha256_item_hash(self) -> None:
+        self._seed_task("AT-SP-HASH-003", status="queued")
+
+        payload = self._propose()
+
+        self.assertTrue(payload["items"])
+        for item in payload["items"]:
+            self.assertTrue(
+                self._is_sha256_hex(item.get("item_hash")),
+                f"item_hash not sha256 hex: {item.get('item_hash')!r}",
+            )
+
+    def test_top_level_proposal_has_sha256_proposal_hash(self) -> None:
+        self._seed_task("AT-SP-HASH-004", status="queued")
+
+        payload = self._propose()
+
+        self.assertTrue(self._is_sha256_hex(payload.get("proposal_hash")))
+        self.assertEqual(payload["hash_algorithm"], HASH_ALGORITHM)
+        self.assertEqual(
+            payload["proposal_hash_payload_version"], PROPOSAL_HASH_PAYLOAD_VERSION
+        )
+        self.assertEqual(
+            payload["item_hash_payload_version"], ITEM_HASH_PAYLOAD_VERSION
+        )
+
+    def test_item_hash_is_deterministic_for_same_semantic_input(self) -> None:
+        self._seed_task("AT-SP-HASH-005", status="queued")
+
+        first = self._propose()
+        second = self._propose()
+
+        first_item = first["items"][0]
+        second_item = second["items"][0]
+        self.assertEqual(first_item["item_hash"], second_item["item_hash"])
+
+    def test_proposal_hash_is_deterministic_for_same_semantic_input(self) -> None:
+        self._seed_task("AT-SP-HASH-006", status="queued")
+
+        first = self._propose()
+        second = self._propose()
+
+        self.assertEqual(first["proposal_hash"], second["proposal_hash"])
+        # proposal_id and created_at differ each invocation but must not
+        # affect the semantic hash.
+        self.assertNotEqual(first["proposal_id"], second["proposal_id"])
+
+    def test_changing_recommended_command_kind_changes_item_hash(self) -> None:
+        self._seed_task("AT-SP-HASH-007", status="queued")
+        payload = self._propose()
+        item = payload["items"][0]
+        from agent_taskflow.scheduler_proposals import _compute_item_hash
+
+        mutated = dict(item)
+        mutated["recommended_command_kind"] = "inspect_blocker"
+        mutated["proposal_item_id"] = (
+            f"{mutated['task_key']}:inspect_blocker"
+        )
+        self.assertNotEqual(_compute_item_hash(mutated), item["item_hash"])
+
+    def test_changing_expected_status_changes_item_hash(self) -> None:
+        self._seed_task("AT-SP-HASH-008", status="queued")
+        payload = self._propose()
+        item = payload["items"][0]
+        from agent_taskflow.scheduler_proposals import _compute_item_hash
+
+        mutated = dict(item)
+        mutated["expected_status"] = "blocked"
+        self.assertNotEqual(_compute_item_hash(mutated), item["item_hash"])
+
+    def test_changing_consistency_warnings_changes_item_hash(self) -> None:
+        self._seed_task("AT-SP-HASH-009", status="queued")
+        payload = self._propose()
+        item = payload["items"][0]
+        from agent_taskflow.scheduler_proposals import _compute_item_hash
+
+        mutated = dict(item)
+        mutated["consistency_warnings"] = ["something changed"]
+        self.assertNotEqual(_compute_item_hash(mutated), item["item_hash"])
+
+    def test_changing_item_set_changes_proposal_hash(self) -> None:
+        self._seed_task("AT-SP-HASH-010-A", status="queued")
+        first = self._propose()
+
+        self._seed_task("AT-SP-HASH-010-B", status="queued")
+        second = self._propose()
+
+        self.assertNotEqual(first["proposal_hash"], second["proposal_hash"])
+
+    def test_changing_item_order_changes_proposal_hash(self) -> None:
+        # Build a payload via the public API so all item_hashes exist, then
+        # recompute the proposal_hash with items reversed and confirm the
+        # binding catches that re-ordering.
+        self._seed_task("AT-SP-HASH-011-A", status="queued")
+        self._seed_task("AT-SP-HASH-011-B", status="blocked", blocked_reason="x")
+        payload = self._propose()
+        self.assertGreaterEqual(len(payload["items"]), 2)
+        from agent_taskflow.scheduler_proposals import _compute_proposal_hash
+
+        reversed_payload = dict(payload)
+        reversed_payload["items"] = list(reversed(payload["items"]))
+        self.assertNotEqual(
+            _compute_proposal_hash(reversed_payload), payload["proposal_hash"]
+        )
+
+    def test_created_at_and_artifact_path_excluded_from_proposal_hash(self) -> None:
+        self._seed_task("AT-SP-HASH-012", status="queued")
+        payload = self._propose()
+        from agent_taskflow.scheduler_proposals import _compute_proposal_hash
+
+        mutated = dict(payload)
+        mutated["created_at"] = "1999-01-01T00:00:00Z"
+        mutated["artifact_path"] = "/tmp/nope.json"
+        mutated["proposal_id"] = "proposal-different"
+        mutated["mode"] = "confirmed"
+        # Recomputing the hash from the same semantic contents must match.
+        self.assertEqual(_compute_proposal_hash(mutated), payload["proposal_hash"])
+
+    def test_dry_run_writes_nothing_with_hashes_present(self) -> None:
+        self._seed_task("AT-SP-HASH-013", status="queued")
+        before = self._db_counts()
+
+        payload = self._propose()
+
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertIsNone(payload["artifact_path"])
+        self.assertTrue(self._is_sha256_hex(payload["proposal_hash"]))
+        for item in payload["items"]:
+            self.assertTrue(self._is_sha256_hex(item["item_hash"]))
+        self.assertEqual(self._db_counts(), before)
+        self.assertFalse((self.artifact_root / "scheduler_proposals").exists())
+
+    def test_confirmed_artifact_includes_proposal_hash_and_item_hashes(self) -> None:
+        self._seed_task("AT-SP-HASH-014", status="queued")
+
+        payload = self._propose(dry_run=False, confirm_create_proposal=True)
+
+        artifact_path = Path(payload["artifact_path"])
+        on_disk = json.loads(artifact_path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["proposal_hash"], payload["proposal_hash"])
+        self.assertTrue(self._is_sha256_hex(on_disk["proposal_hash"]))
+        self.assertTrue(on_disk["items"])
+        for item in on_disk["items"]:
+            self.assertTrue(self._is_sha256_hex(item["item_hash"]))
+            self.assertEqual(
+                item["proposal_item_id"],
+                f"{item['task_key']}:{item['recommended_command_kind']}",
+            )
+            self.assertIn("expected_status", item)
+            self.assertIn("expected_phase_label", item)
+            self.assertIn("expected_evidence_summary", item)
+            self.assertIn("expected_refs", item)
+
+    def test_confirmed_event_payload_includes_hashes_per_item(self) -> None:
+        self._seed_task("AT-SP-HASH-015", status="queued")
+
+        payload = self._propose(dry_run=False, confirm_create_proposal=True)
+
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT event_type, payload_json FROM task_events "
+                "WHERE task_key = ?",
+                ("AT-SP-HASH-015",),
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        event_type, payload_json = rows[0]
+        self.assertEqual(event_type, PROPOSAL_EVENT_TYPE)
+        event_payload = json.loads(payload_json)
+        self.assertEqual(event_payload["kind"], PROPOSAL_EVENT_TYPE)
+        self.assertEqual(event_payload["proposal_id"], payload["proposal_id"])
+        self.assertEqual(event_payload["proposal_hash"], payload["proposal_hash"])
+        self.assertEqual(event_payload["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(event_payload["selected_item_count"], len(payload["items"]))
+        item = payload["items"][0]
+        self.assertEqual(event_payload["proposal_item_id"], item["proposal_item_id"])
+        self.assertEqual(event_payload["item_hash"], item["item_hash"])
+        self.assertEqual(event_payload["task_key"], item["task_key"])
+        self.assertEqual(
+            event_payload["recommended_command_kind"],
+            item["recommended_command_kind"],
+        )
+
+    def test_confirmed_artifact_event_types_remain_disjoint_from_actions(self) -> None:
+        self._seed_task("AT-SP-HASH-016", status="queued")
+
+        self._propose(dry_run=False, confirm_create_proposal=True)
+
+        with sqlite3.connect(self.db_path) as conn:
+            artifact_types = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT artifact_type FROM task_artifacts WHERE task_key = ?",
+                    ("AT-SP-HASH-016",),
+                ).fetchall()
+            ]
+            event_types = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT event_type FROM task_events WHERE task_key = ?",
+                    ("AT-SP-HASH-016",),
+                ).fetchall()
+            ]
+        self.assertEqual(artifact_types, [PROPOSAL_ARTIFACT_TYPE])
+        self.assertEqual(event_types, [PROPOSAL_EVENT_TYPE])
+
+    def test_confirmed_does_not_mutate_task_status_with_hashes(self) -> None:
+        self._seed_task("AT-SP-HASH-017", status="queued")
+        before_status = self.store.get_task("AT-SP-HASH-017").status
+
+        self._propose(dry_run=False, confirm_create_proposal=True)
+
+        self.assertEqual(self.store.get_task("AT-SP-HASH-017").status, before_status)
+
+    def test_safety_flags_remain_mutation_false_with_hashes(self) -> None:
+        self._seed_task("AT-SP-HASH-018", status="queued")
+
+        dry = self._propose()
+        confirmed = self._propose(dry_run=False, confirm_create_proposal=True)
+
+        for payload in (dry, confirmed):
+            self.assertEqual(payload["safety"], PROPOSAL_SAFETY_FLAGS)
+            for item in payload["items"]:
+                self.assertEqual(item["safety_flags"], ITEM_SAFETY_FLAGS)
 
 
 if __name__ == "__main__":
