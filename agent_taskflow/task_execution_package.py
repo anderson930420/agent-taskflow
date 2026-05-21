@@ -57,6 +57,11 @@ DEFAULT_REQUIRED_VALIDATORS: tuple[str, ...] = (
     "changed-files",
 )
 
+MAX_INLINE_SOURCE_CHARS = 12000
+TRUNCATION_NOTICE = (
+    f"\n[source truncated after {MAX_INLINE_SOURCE_CHARS} characters]"
+)
+
 
 class TaskExecutionPackageError(RuntimeError):
     """Raised when a task execution package cannot be built."""
@@ -161,10 +166,12 @@ def create_task_execution_package(
         )
 
     source_evidence = _discover_source_evidence(current_store, task, artifact_dir)
+    source_intent = _load_source_intent(source_evidence)
     prompt_text = _render_implementation_prompt(
         task=task,
         artifact_dir=artifact_dir,
         source_evidence=source_evidence,
+        source_intent=source_intent,
         required_validators=request.required_validators,
     )
     package_payload = _build_package_payload(
@@ -308,12 +315,13 @@ def _render_implementation_prompt(
     task: TaskRecord,
     artifact_dir: Path,
     source_evidence: dict[str, Any],
+    source_intent: dict[str, str | None],
     required_validators: tuple[str, ...],
 ) -> str:
     """Render the deterministic implementation prompt markdown."""
 
     title = task.title or task.task_key
-    source_section = _render_source_section(source_evidence)
+    source_section = _render_source_section(source_evidence, source_intent)
     validators_line = ", ".join(required_validators) if required_validators else "(none)"
 
     return "\n".join(
@@ -342,7 +350,7 @@ def _render_implementation_prompt(
             "  workspace policy, changed-files or path policy, approval/blocking",
             "  behavior, Mission Control review semantics, or governance rules.",
             "",
-            "## Source context",
+            "## Source intent",
             "",
             source_section,
             "",
@@ -403,19 +411,45 @@ def _render_implementation_prompt(
     )
 
 
-def _render_source_section(source_evidence: dict[str, Any]) -> str:
+def _render_source_section(
+    source_evidence: dict[str, Any],
+    source_intent: dict[str, str | None],
+) -> str:
     lines: list[str] = []
     artifact_path = source_evidence.get("issue_spec_artifact_path")
     file_path = source_evidence.get("issue_spec_file_path")
     event = source_evidence.get("github_issue_ingested_event")
     title_fallback = source_evidence.get("title_fallback")
 
-    if artifact_path:
-        lines.append(f"- Recorded issue/spec artifact: {artifact_path}")
-        lines.append("- Read this artifact for the full source intent.")
-    elif file_path:
-        lines.append(f"- Local issue/spec file: {file_path}")
-        lines.append("- Read this file for the full source intent.")
+    if artifact_path or file_path:
+        lines.append("Source reference:")
+        if artifact_path:
+            lines.append(f"- Recorded issue/spec artifact: {artifact_path}")
+        if file_path:
+            lines.append(f"- Local issue/spec file: {file_path}")
+        lines.append("")
+        lines.append("Executor-visible task content:")
+
+        intent_title = source_intent.get("title")
+        intent_body = source_intent.get("body")
+        intent_excerpt = source_intent.get("excerpt")
+
+        if intent_title:
+            lines.append(f"Title: {intent_title}")
+        else:
+            lines.append("Title: (no title extracted)")
+
+        if intent_body:
+            lines.append("")
+            lines.append("Body:")
+            lines.append(_truncate_inline_source(intent_body))
+        elif intent_excerpt:
+            lines.append("")
+            lines.append("Source excerpt (no parsed body section found):")
+            lines.append(_truncate_inline_source(intent_excerpt))
+        else:
+            lines.append("")
+            lines.append("Body: (no inline content could be extracted)")
     elif event:
         repo = event.get("repo") or "(unknown repo)"
         issue_number = event.get("issue_number")
@@ -431,6 +465,75 @@ def _render_source_section(source_evidence: dict[str, Any]) -> str:
     else:
         lines.append("- No source context available beyond this prompt.")
     return "\n".join(lines)
+
+
+def _load_source_intent(
+    source_evidence: dict[str, Any],
+) -> dict[str, str | None]:
+    """Read inline source intent (title/body) from issue_spec.md when available."""
+
+    intent: dict[str, str | None] = {
+        "title": None,
+        "body": None,
+        "excerpt": None,
+    }
+
+    source_path_str = (
+        source_evidence.get("issue_spec_artifact_path")
+        or source_evidence.get("issue_spec_file_path")
+    )
+    if not source_path_str:
+        return intent
+
+    path = Path(str(source_path_str))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return intent
+
+    parsed = _parse_issue_spec(text)
+    intent["title"] = parsed["title"]
+    intent["body"] = parsed["body"]
+    if not parsed["body"]:
+        excerpt = text.strip()
+        intent["excerpt"] = excerpt or None
+    return intent
+
+
+def _parse_issue_spec(text: str) -> dict[str, str | None]:
+    """Extract Title metadata and Body section from issue_spec.md text."""
+
+    title: str | None = None
+    body: str | None = None
+
+    lines = text.splitlines()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("- Title:"):
+            candidate = stripped[len("- Title:"):].strip()
+            title = candidate or None
+            break
+
+    for index, line in enumerate(lines):
+        if line.strip() == "## Body":
+            body_lines = lines[index + 1:]
+            while body_lines and not body_lines[0].strip():
+                body_lines.pop(0)
+            while body_lines and not body_lines[-1].strip():
+                body_lines.pop()
+            if body_lines:
+                body_text = "\n".join(body_lines).strip()
+                if body_text and body_text != "(empty)":
+                    body = body_text
+            break
+
+    return {"title": title, "body": body}
+
+
+def _truncate_inline_source(text: str) -> str:
+    if len(text) <= MAX_INLINE_SOURCE_CHARS:
+        return text
+    return text[:MAX_INLINE_SOURCE_CHARS] + TRUNCATION_NOTICE
 
 
 def _build_package_payload(
@@ -581,6 +684,8 @@ __all__ = [
     "EVENT_SOURCE",
     "EVENT_TYPE",
     "IMPLEMENTATION_PROMPT_FILENAME",
+    "ISSUE_SPEC_FILENAME",
+    "MAX_INLINE_SOURCE_CHARS",
     "PACKAGE_ARTIFACT_TYPE",
     "PACKAGE_FILENAME",
     "PROMPT_ARTIFACT_TYPE",

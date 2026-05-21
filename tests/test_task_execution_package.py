@@ -11,6 +11,8 @@ from agent_taskflow.task_execution_package import (
     EVENT_SOURCE,
     EVENT_TYPE,
     IMPLEMENTATION_PROMPT_FILENAME,
+    ISSUE_SPEC_FILENAME,
+    MAX_INLINE_SOURCE_CHARS,
     PACKAGE_FILENAME,
     PACKAGE_ARTIFACT_TYPE,
     PROMPT_ARTIFACT_TYPE,
@@ -18,6 +20,27 @@ from agent_taskflow.task_execution_package import (
     TaskExecutionPackageRequest,
     create_task_execution_package,
 )
+
+
+def _issue_spec_text(*, title: str = "Add widget", body: str = "Do the thing.") -> str:
+    return "\n".join(
+        [
+            "# GitHub Issue Spec",
+            "",
+            "- Task key: AT-EXEC-1",
+            "- Repository: example/repo",
+            "- Issue number: 42",
+            "- Issue URL: https://example.invalid/issues/42",
+            "- Issue state: open",
+            f"- Title: {title}",
+            "- Labels: (none)",
+            "",
+            "## Body",
+            "",
+            body,
+            "",
+        ]
+    )
 
 
 class TaskExecutionPackageTests(unittest.TestCase):
@@ -213,6 +236,105 @@ class TaskExecutionPackageTests(unittest.TestCase):
         prompt_text = (self.artifact_dir / IMPLEMENTATION_PROMPT_FILENAME).read_text(encoding="utf-8")
         self.assertIn("anthropic-experimental/agent-taskflow#42", prompt_text)
         self.assertIn("Add widget", prompt_text)
+
+    # builder inlines issue body from recorded issue_spec artifact
+    def test_inlines_body_from_recorded_issue_spec_artifact(self) -> None:
+        self._seed_task(title=None)
+        self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        spec_path = self.artifact_dir / ISSUE_SPEC_FILENAME
+        spec_path.write_text(
+            _issue_spec_text(
+                title="Inline this title",
+                body="Implementation requirement: do X then Y.\nSecond paragraph.",
+            ),
+            encoding="utf-8",
+        )
+        self.store.record_task_artifact("AT-EXEC-1", "issue_spec", spec_path)
+
+        result = create_task_execution_package(self._request(dry_run=False, confirm=True))
+        self.assertTrue(result["ok"])
+        evidence = result["source_evidence"]
+        self.assertEqual(evidence["issue_spec_artifact_path"], str(spec_path))
+
+        prompt_text = (self.artifact_dir / IMPLEMENTATION_PROMPT_FILENAME).read_text(encoding="utf-8")
+        # Source reference path preserved for auditability
+        self.assertIn(f"Recorded issue/spec artifact: {spec_path}", prompt_text)
+        # Executor-visible inlined content
+        self.assertIn("Executor-visible task content:", prompt_text)
+        self.assertIn("Title: Inline this title", prompt_text)
+        self.assertIn("Body:", prompt_text)
+        self.assertIn("Implementation requirement: do X then Y.", prompt_text)
+        self.assertIn("Second paragraph.", prompt_text)
+        # Executor should not need to open issue_spec.md to know intent
+        self.assertNotIn("Read this artifact for the full source intent.", prompt_text)
+
+    # builder inlines body from artifact_dir/issue_spec.md without an artifact record
+    def test_inlines_body_from_artifact_dir_issue_spec_file(self) -> None:
+        self._seed_task(title=None)
+        self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        spec_path = self.artifact_dir / ISSUE_SPEC_FILENAME
+        spec_path.write_text(
+            _issue_spec_text(
+                title="File-based title",
+                body="Body discovered via artifact_dir scan.",
+            ),
+            encoding="utf-8",
+        )
+
+        result = create_task_execution_package(self._request(dry_run=False, confirm=True))
+        self.assertTrue(result["ok"])
+        evidence = result["source_evidence"]
+        self.assertIsNone(evidence["issue_spec_artifact_path"])
+        self.assertEqual(evidence["issue_spec_file_path"], str(spec_path))
+
+        prompt_text = (self.artifact_dir / IMPLEMENTATION_PROMPT_FILENAME).read_text(encoding="utf-8")
+        self.assertIn(f"Local issue/spec file: {spec_path}", prompt_text)
+        self.assertIn("Title: File-based title", prompt_text)
+        self.assertIn("Body discovered via artifact_dir scan.", prompt_text)
+
+    # long issue body is truncated and includes the truncation notice
+    def test_long_issue_body_truncated_with_notice(self) -> None:
+        self._seed_task(title=None)
+        self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        long_body = "A" * (MAX_INLINE_SOURCE_CHARS + 5000)
+        spec_path = self.artifact_dir / ISSUE_SPEC_FILENAME
+        spec_path.write_text(
+            _issue_spec_text(title="Long body", body=long_body),
+            encoding="utf-8",
+        )
+        self.store.record_task_artifact("AT-EXEC-1", "issue_spec", spec_path)
+
+        result = create_task_execution_package(self._request(dry_run=False, confirm=True))
+        self.assertTrue(result["ok"])
+        prompt_text = (self.artifact_dir / IMPLEMENTATION_PROMPT_FILENAME).read_text(encoding="utf-8")
+
+        self.assertIn(
+            f"[source truncated after {MAX_INLINE_SOURCE_CHARS} characters]",
+            prompt_text,
+        )
+        # Full untruncated body should not be present
+        self.assertNotIn("A" * (MAX_INLINE_SOURCE_CHARS + 1), prompt_text)
+        # But the truncated prefix should be present
+        self.assertIn("A" * 1000, prompt_text)
+
+    # bounded excerpt fallback when issue_spec exists but has no parseable body
+    def test_bounded_excerpt_when_body_missing(self) -> None:
+        self._seed_task(title=None)
+        self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        spec_path = self.artifact_dir / ISSUE_SPEC_FILENAME
+        # Spec without "## Body" section
+        spec_path.write_text(
+            "# GitHub Issue Spec\n\n- Title: Just metadata\n",
+            encoding="utf-8",
+        )
+        self.store.record_task_artifact("AT-EXEC-1", "issue_spec", spec_path)
+
+        result = create_task_execution_package(self._request(dry_run=False, confirm=True))
+        self.assertTrue(result["ok"])
+        prompt_text = (self.artifact_dir / IMPLEMENTATION_PROMPT_FILENAME).read_text(encoding="utf-8")
+        self.assertIn("Title: Just metadata", prompt_text)
+        self.assertIn("Source excerpt", prompt_text)
+        self.assertIn("# GitHub Issue Spec", prompt_text)
 
     # 10. builder can fallback to TaskRecord title when no issue artifact/event exists
     def test_falls_back_to_task_title(self) -> None:
