@@ -18,6 +18,7 @@ from agent_taskflow.draft_pr_confirm_helpers import (
     DraftPrConfirmError,
     PROTECTED_HEAD_BRANCHES,
     body_preview as _body_preview,
+    build_gh_compare_command as _build_gh_compare_command,
     build_gh_create_command as _build_gh_create_command,
     build_gh_list_open_pr_command as _build_gh_list_open_pr_command,
     build_gh_view_command as _build_gh_view_command,
@@ -26,6 +27,8 @@ from agent_taskflow.draft_pr_confirm_helpers import (
     dedupe_preserve_order as _dedupe_preserve_order,
     empty_verification_preview as _empty_verification_preview,
     empty_verification_result as _empty_verification_result,
+    extract_compare_commit_shas as _extract_compare_commit_shas,
+    extract_compare_file_paths as _extract_compare_file_paths,
     extract_pr_commit_oids as _extract_pr_commit_oids,
     extract_pr_file_paths as _extract_pr_file_paths,
     extract_pr_url as _extract_pr_url,
@@ -852,7 +855,50 @@ def _view_and_verify_pr(
         head=str(expected["expected_head"]),
         title=str(expected["expected_title"]),
     )
+    compare_payload = _fetch_compare_payload(
+        repo=repo,
+        base=str(expected["expected_base"]),
+        head=str(expected["expected_head"]),
+        runner=runner,
+    )
+    # PR view metadata is authoritative for state/title/base/head/draft.
+    # ``gh pr view`` files/commits can be stale (e.g. after origin/main fast-
+    # forwards) so we replace them with the current target-repo compare diff
+    # (ahead commits / ahead files) before metadata verification. This makes
+    # diverged-but-correct PRs pass.
+    payload["files"] = [
+        {"path": path} for path in _extract_compare_file_paths(compare_payload.get("files"))
+    ]
+    payload["commits"] = [
+        {"oid": sha} for sha in _extract_compare_commit_shas(compare_payload.get("commits"))
+    ]
     return _verification_result(payload, expected=expected)
+
+
+def _fetch_compare_payload(
+    *,
+    repo: str,
+    base: str,
+    head: str,
+    runner: Runner | None,
+) -> dict[str, Any]:
+    """Run ``gh api .../compare/{base}...{head}`` and return the parsed payload.
+
+    The compare endpoint never pushes, merges, approves, or cleans up; it is a
+    read-only GitHub API call used to determine the current ahead-of-base
+    commits and files for the task head branch.
+    """
+
+    completed = _run_command(
+        _build_gh_compare_command(repo=repo, base=base, head=head),
+        cwd=None,
+        runner=runner,
+    )
+    if completed.returncode != 0:
+        raise DraftPrConfirmError(
+            f"gh api compare failed with {completed.returncode}: {completed.stderr.strip()}"
+        )
+    return _parse_json_object(completed.stdout, source="gh api compare")
 
 
 def _expected_commits(*, worktree_path: Path, base_sha: str) -> list[str]:

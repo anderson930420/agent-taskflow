@@ -74,6 +74,28 @@ def build_gh_list_open_pr_command(*, repo: str, head: str) -> list[str]:
     ]
 
 
+def build_gh_compare_command(*, repo: str, base: str, head: str) -> list[str]:
+    """Build a ``gh api repos/{repo}/compare/{base}...{head}`` command.
+
+    Used to fetch the ahead-commits / ahead-files diff between the target
+    repo's base branch and the task head branch for PR verification. The
+    compare endpoint is authoritative when ``gh pr view`` returns stale
+    commits/files (for example after base-branch fast-forwards on origin).
+    """
+
+    if not repo.strip():
+        raise DraftPrConfirmError("repo must not be empty for compare")
+    if not base.strip():
+        raise DraftPrConfirmError("base must not be empty for compare")
+    if not head.strip():
+        raise DraftPrConfirmError("head must not be empty for compare")
+    return [
+        "gh",
+        "api",
+        f"repos/{repo}/compare/{base}...{head}",
+    ]
+
+
 def command_preview(command: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
@@ -108,6 +130,36 @@ def extract_pr_commit_oids(commits_value: Any) -> list[str]:
         if isinstance(oid, str) and oid.strip():
             oids.append(oid.strip())
     return oids
+
+
+def extract_compare_file_paths(files_value: Any) -> list[str]:
+    """Extract changed-file paths from a ``gh api .../compare/...`` response."""
+
+    if not isinstance(files_value, list):
+        return []
+    paths: list[str] = []
+    for item in files_value:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("filename")
+        if isinstance(path, str) and path.strip():
+            paths.append(path.strip())
+    return paths
+
+
+def extract_compare_commit_shas(commits_value: Any) -> list[str]:
+    """Extract commit SHAs from a ``gh api .../compare/...`` response."""
+
+    if not isinstance(commits_value, list):
+        return []
+    shas: list[str] = []
+    for item in commits_value:
+        if not isinstance(item, dict):
+            continue
+        sha = item.get("sha")
+        if isinstance(sha, str) and sha.strip():
+            shas.append(sha.strip())
+    return shas
 
 
 def stringify_list(values: Any) -> list[str]:

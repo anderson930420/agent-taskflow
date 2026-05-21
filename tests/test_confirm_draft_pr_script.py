@@ -31,6 +31,34 @@ class FakeCompletedProcess:
     stderr: str = ""
 
 
+def _compare_stdout_from_view(view_stdout: str) -> str:
+    if not view_stdout.strip():
+        return json.dumps({"commits": [], "files": [], "status": "identical", "ahead_by": 0, "behind_by": 0})
+    try:
+        view = json.loads(view_stdout)
+    except json.JSONDecodeError:
+        return json.dumps({"commits": [], "files": [], "status": "identical", "ahead_by": 0, "behind_by": 0})
+    files = []
+    for item in view.get("files") or []:
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            files.append({"filename": item["path"], "status": "modified"})
+    commits = []
+    for item in view.get("commits") or []:
+        if isinstance(item, dict) and isinstance(item.get("oid"), str):
+            commits.append({"sha": item["oid"]})
+    return json.dumps(
+        {
+            "url": "https://api.github.com/repos/anderson930420/agent-taskflow/compare/main...task",
+            "status": "ahead" if commits else "identical",
+            "ahead_by": len(commits),
+            "behind_by": 0,
+            "total_commits": len(commits),
+            "commits": commits,
+            "files": files,
+        }
+    )
+
+
 class FakeGhRunner:
     def __init__(
         self,
@@ -42,6 +70,9 @@ class FakeGhRunner:
         view_stdout: str = "",
         view_returncode: int = 0,
         view_stderr: str = "",
+        compare_stdout: str | None = None,
+        compare_returncode: int = 0,
+        compare_stderr: str = "",
     ) -> None:
         self.list_stdout = list_stdout
         self.create_stdout = create_stdout
@@ -50,6 +81,13 @@ class FakeGhRunner:
         self.view_stdout = view_stdout
         self.view_returncode = view_returncode
         self.view_stderr = view_stderr
+        self.compare_stdout = (
+            compare_stdout
+            if compare_stdout is not None
+            else _compare_stdout_from_view(view_stdout)
+        )
+        self.compare_returncode = compare_returncode
+        self.compare_stderr = compare_stderr
         self.calls: list[dict[str, Any]] = []
 
     def __call__(self, args: list[str], **kwargs: Any) -> FakeCompletedProcess:
@@ -67,6 +105,17 @@ class FakeGhRunner:
                 returncode=self.view_returncode,
                 stdout=self.view_stdout,
                 stderr=self.view_stderr,
+            )
+        if (
+            len(args) >= 3
+            and args[:2] == ["gh", "api"]
+            and isinstance(args[2], str)
+            and "/compare/" in args[2]
+        ):
+            return FakeCompletedProcess(
+                returncode=self.compare_returncode,
+                stdout=self.compare_stdout,
+                stderr=self.compare_stderr,
             )
         raise AssertionError(f"unexpected command: {args}")
 

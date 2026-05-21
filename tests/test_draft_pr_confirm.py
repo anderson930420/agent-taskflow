@@ -29,6 +29,41 @@ class FakeCompletedProcess:
     stderr: str = ""
 
 
+def _compare_stdout_from_view(view_stdout: str) -> str:
+    """Build a default ``gh api .../compare/...`` stdout from a view stdout.
+
+    Tests that don't explicitly stub the compare endpoint inherit the same
+    files/commits the view stub provides, translated into the compare
+    response shape (``filename``/``sha`` instead of ``path``/``oid``).
+    """
+
+    if not view_stdout.strip():
+        return json.dumps({"commits": [], "files": [], "status": "identical", "ahead_by": 0, "behind_by": 0})
+    try:
+        view = json.loads(view_stdout)
+    except json.JSONDecodeError:
+        return json.dumps({"commits": [], "files": [], "status": "identical", "ahead_by": 0, "behind_by": 0})
+    files = []
+    for item in view.get("files") or []:
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            files.append({"filename": item["path"], "status": "modified"})
+    commits = []
+    for item in view.get("commits") or []:
+        if isinstance(item, dict) and isinstance(item.get("oid"), str):
+            commits.append({"sha": item["oid"]})
+    return json.dumps(
+        {
+            "url": "https://api.github.com/repos/anderson930420/agent-taskflow/compare/main...task",
+            "status": "ahead" if commits else "identical",
+            "ahead_by": len(commits),
+            "behind_by": 0,
+            "total_commits": len(commits),
+            "commits": commits,
+            "files": files,
+        }
+    )
+
+
 class FakeGhRunner:
     def __init__(
         self,
@@ -41,6 +76,9 @@ class FakeGhRunner:
         view_stdout: str = "",
         view_returncode: int = 0,
         view_stderr: str = "",
+        compare_stdout: str | None = None,
+        compare_returncode: int = 0,
+        compare_stderr: str = "",
     ) -> None:
         self.list_stdout = list_stdout
         self.list_returncode = list_returncode
@@ -50,6 +88,13 @@ class FakeGhRunner:
         self.view_stdout = view_stdout
         self.view_returncode = view_returncode
         self.view_stderr = view_stderr
+        self.compare_stdout = (
+            compare_stdout
+            if compare_stdout is not None
+            else _compare_stdout_from_view(view_stdout)
+        )
+        self.compare_returncode = compare_returncode
+        self.compare_stderr = compare_stderr
         self.calls: list[dict[str, Any]] = []
 
     def __call__(self, args: list[str], **kwargs: Any) -> FakeCompletedProcess:
@@ -70,6 +115,17 @@ class FakeGhRunner:
                 returncode=self.view_returncode,
                 stdout=self.view_stdout,
                 stderr=self.view_stderr,
+            )
+        if (
+            len(args) >= 3
+            and args[:2] == ["gh", "api"]
+            and isinstance(args[2], str)
+            and "/compare/" in args[2]
+        ):
+            return FakeCompletedProcess(
+                returncode=self.compare_returncode,
+                stdout=self.compare_stdout,
+                stderr=self.compare_stderr,
             )
         raise AssertionError(f"unexpected command: {args}")
 
@@ -561,10 +617,18 @@ class DraftPrConfirmTests(unittest.TestCase):
         self.assertFalse(result.safety["merged"])
         self.assertFalse(result.safety["approved"])
         self.assertFalse(result.safety["cleanup_performed"])
-        self.assertEqual(len(runner.calls), 3)
+        self.assertEqual(len(runner.calls), 4)
         self.assertTrue(any(call["args"][:3] == ["gh", "pr", "list"] for call in runner.calls))
         self.assertTrue(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
         self.assertTrue(any(call["args"][:3] == ["gh", "pr", "view"] for call in runner.calls))
+        self.assertTrue(
+            any(
+                call["args"][:2] == ["gh", "api"]
+                and isinstance(call["args"][2], str)
+                and "/compare/" in call["args"][2]
+                for call in runner.calls
+            )
+        )
         self.assertGreater(len(self.store.list_task_artifacts(self.task_key)), before_artifacts)
         self.assertGreater(len(self.store.list_task_events(self.task_key)), before_events)
         self.assertTrue(
@@ -973,6 +1037,183 @@ class DraftPrConfirmTests(unittest.TestCase):
                 repo_path=self.repo,
                 target_repo="   ",
             )
+
+    def _diverged_compare_stdout(
+        self,
+        *,
+        commits: list[str] | None = None,
+        files: list[str] | None = None,
+        ahead_by: int = 1,
+        behind_by: int = 1,
+    ) -> str:
+        commit_list = commits if commits is not None else [self.head_sha]
+        file_list = files if files is not None else ["feature.txt"]
+        return json.dumps(
+            {
+                "url": "https://api.github.com/repos/anderson930420/agent-taskflow/compare/main...task/AT-DF-CONFIRM-001",
+                "status": "diverged",
+                "ahead_by": ahead_by,
+                "behind_by": behind_by,
+                "total_commits": len(commit_list),
+                "commits": [{"sha": sha} for sha in commit_list],
+                "files": [{"filename": p, "status": "modified"} for p in file_list],
+            }
+        )
+
+    def test_verification_uses_compare_when_view_files_commits_are_stale(self) -> None:
+        """PR view returning stale files/commits is fine when compare is correct."""
+
+        self._seed_task()
+        runner = FakeGhRunner(
+            list_stdout="[]\n",
+            create_stdout="https://github.com/anderson930420/agent-taskflow/pull/29\n",
+            view_stdout=self._gh_view_stdout(
+                number=29,
+                files=[
+                    "agent_taskflow/draft_pr_confirm.py",
+                    "tests/test_draft_pr_confirm.py",
+                    "README.md",
+                ],
+                commits=[
+                    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                    self.head_sha,
+                ],
+                title="AT-DF-CONFIRM-001: Draft PR confirm task",
+                base="main",
+            ),
+            compare_stdout=self._diverged_compare_stdout(),
+        )
+
+        result = confirm_draft_pr(self._request(confirm=True), runner=runner)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "draft_pr_created")
+        self.assertTrue(result.draft_pr["verified"])
+        self.assertTrue(result.verification["passed"])
+        self.assertEqual(result.verification["actual_files"], ["feature.txt"])
+        self.assertEqual(result.verification["actual_commits"], [self.head_sha])
+        self.assertEqual(result.verification["missing_files"], [])
+        self.assertEqual(result.verification["unexpected_files"], [])
+        self.assertTrue(
+            any(
+                call["args"][:2] == ["gh", "api"]
+                and isinstance(call["args"][2], str)
+                and "/compare/main...task/AT-DF-CONFIRM-001" in call["args"][2]
+                for call in runner.calls
+            )
+        )
+
+    def test_verification_fails_when_compare_returns_unexpected_files(self) -> None:
+        self._seed_task()
+        runner = FakeGhRunner(
+            list_stdout="[]\n",
+            create_stdout="https://github.com/anderson930420/agent-taskflow/pull/30\n",
+            view_stdout=self._gh_view_stdout(number=30),
+            compare_stdout=self._diverged_compare_stdout(
+                files=[
+                    "feature.txt",
+                    "unexpected/extra.md",
+                ],
+            ),
+        )
+
+        result = confirm_draft_pr(self._request(confirm=True), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "pr_created_verification_failed")
+        self.assertFalse(result.draft_pr["verified"])
+        self.assertFalse(result.verification["passed"])
+        self.assertIn("unexpected/extra.md", result.verification["unexpected_files"])
+        self.assertIn(
+            "GitHub PR files do not match handoff changed_files",
+            result.warnings,
+        )
+
+    def test_verification_fails_when_compare_returns_unexpected_commits(self) -> None:
+        self._seed_task()
+        runner = FakeGhRunner(
+            list_stdout="[]\n",
+            create_stdout="https://github.com/anderson930420/agent-taskflow/pull/31\n",
+            view_stdout=self._gh_view_stdout(number=31),
+            compare_stdout=self._diverged_compare_stdout(
+                commits=[
+                    self.head_sha,
+                    "cafebabecafebabecafebabecafebabecafebabe",
+                ],
+            ),
+        )
+
+        result = confirm_draft_pr(self._request(confirm=True), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "pr_created_verification_failed")
+        self.assertFalse(result.draft_pr["verified"])
+        self.assertFalse(result.verification["passed"])
+        self.assertIn(
+            "cafebabecafebabecafebabecafebabecafebabe",
+            result.verification["unexpected_commits"],
+        )
+        self.assertIn(
+            "GitHub PR commits do not match expected branch diff",
+            result.warnings,
+        )
+
+    def test_verification_passes_when_compare_status_is_diverged_with_behind_by(self) -> None:
+        """Diverged-with-behind_by>0 must pass when ahead commits/files match."""
+
+        self._seed_task()
+        runner = FakeGhRunner(
+            list_stdout=json.dumps(
+                [
+                    {
+                        "number": 29,
+                        "url": "https://github.com/anderson930420/agent-taskflow/pull/29",
+                        "state": "OPEN",
+                        "isDraft": True,
+                        "title": "AT-DF-CONFIRM-001: Draft PR confirm task",
+                    }
+                ]
+            )
+            + "\n",
+            view_stdout=self._gh_view_stdout(
+                number=29,
+                url="https://github.com/anderson930420/agent-taskflow/pull/29",
+                title="AT-DF-CONFIRM-001: Draft PR confirm task",
+                files=[
+                    "agent_taskflow/draft_pr_confirm.py",
+                    "README.md",
+                ],
+                commits=[
+                    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                ],
+            ),
+            compare_stdout=self._diverged_compare_stdout(behind_by=3, ahead_by=1),
+        )
+
+        result = confirm_draft_pr(self._request(dry_run=True), runner=runner)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "already_exists_verified")
+        self.assertTrue(result.verification["passed"])
+        self.assertEqual(result.verification["actual_files"], ["feature.txt"])
+        self.assertEqual(result.verification["actual_commits"], [self.head_sha])
+
+    def test_gh_api_compare_failure_blocks_verification(self) -> None:
+        self._seed_task()
+        runner = FakeGhRunner(
+            list_stdout="[]\n",
+            create_stdout="https://github.com/anderson930420/agent-taskflow/pull/32\n",
+            view_stdout=self._gh_view_stdout(number=32),
+            compare_returncode=1,
+            compare_stderr="api error\n",
+            compare_stdout="",
+        )
+
+        result = confirm_draft_pr(self._request(confirm=True), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("gh api compare failed", result.error or "")
 
     def test_static_forbidden_commands_are_absent(self) -> None:
         text = Path(draft_pr_confirm_module.__file__).read_text(encoding="utf-8")
