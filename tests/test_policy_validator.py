@@ -895,6 +895,303 @@ class PolicyValidatorRunTests(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------
+# Phase 6E+3.3 — role-based scanning regression tests
+#
+# These verify the false-positive classes seen during Phase 6E+3 real
+# OpenCode self-dogfood:
+# 1. implementation_prompt.md governance prohibitions must not fail policy.
+# 2. opencode-events.jsonl model reasoning / read-tool output must not fail.
+# 3. Actual changed files / executor-written scripts with dangerous
+#    behavior MUST still fail.
+# ----------------------------------------------------------------------
+
+
+def _governance_prompt_text() -> str:
+    return (
+        "# Implementation Prompt — GH-9601\n\n"
+        "## Governance constraints\n\n"
+        "Do not do any of the following unless a human reviewer explicitly asks:\n\n"
+        "- create commits\n"
+        "- push\n"
+        "- merge\n"
+        "- create PRs\n"
+        "- approve, reject, or mark work finally complete\n"
+        "- delete branches or worktrees\n"
+        "- run destructive cleanup\n"
+    )
+
+
+def _opencode_events_with_governance_in_read_output() -> str:
+    # A read tool returns file content that quotes governance text. Model
+    # reasoning text repeats the prohibitions. No actual shell command runs
+    # any of these actions.
+    lines = [
+        json.dumps({
+            "type": "tool_use",
+            "part": {
+                "type": "tool",
+                "tool": "read",
+                "state": {
+                    "status": "completed",
+                    "input": {"filePath": "/repo/AGENTS.md"},
+                    "output": (
+                        "Do not push, merge, approve, or run git push --force. "
+                        "Do not delete branches or worktrees. "
+                        "Do not approve task work without human review."
+                    ),
+                },
+            },
+        }),
+        json.dumps({
+            "type": "assistant_message",
+            "part": {
+                "type": "text",
+                "text": (
+                    "I will not git push or approve task. I will only modify "
+                    "docs/tests as instructed."
+                ),
+            },
+        }),
+        json.dumps({
+            "type": "tool_use",
+            "part": {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                    "status": "completed",
+                    "input": {"command": "git status"},
+                    "output": "On branch task/GH-9601",
+                },
+            },
+        }),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _opencode_events_with_actual_executed_push() -> str:
+    lines = [
+        json.dumps({
+            "type": "tool_use",
+            "part": {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                    "status": "completed",
+                    "input": {"command": "git push origin HEAD:task/GH-9601"},
+                    "output": "",
+                },
+            },
+        }),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+class PolicyInstructionArtifactExemptionTests(unittest.TestCase):
+    """Instruction/spec artifacts must not trigger suspicious-action scan."""
+
+    def _run_with_artifact(self, filename: str, content: str) -> object:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            ctx = make_context(tmp)
+            write_contract(ctx.artifact_dir, make_contract())
+            (ctx.artifact_dir / filename).write_text(content, encoding="utf-8")
+            return PolicyCheckValidator().run(ctx)
+
+    def test_implementation_prompt_governance_text_does_not_fail(self) -> None:
+        result = self._run_with_artifact(
+            "implementation_prompt.md",
+            _governance_prompt_text(),
+        )
+        self.assertEqual(result.status, "passed", result.summary)
+
+    def test_task_execution_package_metadata_does_not_fail(self) -> None:
+        payload = {
+            "schema_version": "task_execution_package.v1",
+            "task_key": "GH-9601",
+            "implementation_prompt_path": "/x/implementation_prompt.md",
+            "source_evidence": {
+                "issue_spec_artifact_path": "/x/issue_spec.md",
+            },
+            "safety": {
+                "branch_pushed": False,
+                "pr_created": False,
+                "merged": False,
+                "approved": False,
+                "cleanup_performed": False,
+            },
+            "notes": "Do not push, merge, approve, or delete branches.",
+        }
+        result = self._run_with_artifact(
+            "task_execution_package.json",
+            json.dumps(payload, indent=2),
+        )
+        self.assertEqual(result.status, "passed", result.summary)
+
+    def test_issue_spec_with_forbidden_phrases_does_not_fail(self) -> None:
+        body = (
+            "# GitHub Issue Spec\n\n"
+            "- Title: Do not push, do not merge\n\n"
+            "## Body\n\n"
+            "Operator must approve task before any git push or git merge.\n"
+        )
+        result = self._run_with_artifact("issue_spec.md", body)
+        self.assertEqual(result.status, "passed", result.summary)
+
+
+class PolicyExecutorEventLogTests(unittest.TestCase):
+    """opencode-events.jsonl: scan executed shell commands, not reasoning."""
+
+    def _run_with_event_log(self, content: str) -> object:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            ctx = make_context(tmp)
+            write_contract(ctx.artifact_dir, make_contract())
+            (ctx.artifact_dir / "opencode-events.jsonl").write_text(
+                content, encoding="utf-8",
+            )
+            return PolicyCheckValidator().run(ctx)
+
+    def test_reasoning_and_read_output_with_forbidden_phrases_passes(self) -> None:
+        result = self._run_with_event_log(
+            _opencode_events_with_governance_in_read_output()
+        )
+        self.assertEqual(result.status, "passed", result.summary)
+
+    def test_executed_git_push_command_still_fails(self) -> None:
+        result = self._run_with_event_log(
+            _opencode_events_with_actual_executed_push()
+        )
+        self.assertEqual(result.status, "failed")
+        self.assertIn("suspicious action", result.summary)
+
+
+class PolicyChangedFileStillScannedTests(unittest.TestCase):
+    """Actual executor-written files outside the exempt set are still scanned."""
+
+    def _run_with_artifact(self, filename: str, content: str) -> object:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            ctx = make_context(tmp)
+            write_contract(ctx.artifact_dir, make_contract())
+            (ctx.artifact_dir / filename).write_text(content, encoding="utf-8")
+            return PolicyCheckValidator().run(ctx)
+
+    def test_diff_introducing_git_push_still_fails(self) -> None:
+        diff = (
+            "diff --git a/scripts/danger.sh b/scripts/danger.sh\n"
+            "+++ b/scripts/danger.sh\n"
+            "+git push --force origin main\n"
+        )
+        result = self._run_with_artifact("diff-after-opencode.patch", diff)
+        self.assertEqual(result.status, "failed")
+        self.assertIn("suspicious action", result.summary)
+
+    def test_executor_written_script_with_gh_pr_merge_still_fails(self) -> None:
+        script = (
+            "#!/bin/bash\n"
+            "gh pr merge 123 --merge --auto\n"
+        )
+        result = self._run_with_artifact("auto_merge.sh", script)
+        self.assertEqual(result.status, "failed")
+        self.assertIn("suspicious action", result.summary)
+
+    def test_executor_written_script_with_branch_delete_still_fails(self) -> None:
+        script = (
+            "#!/bin/bash\n"
+            "# Cleanup completed; delete worktree and delete branch\n"
+        )
+        result = self._run_with_artifact("cleanup.sh", script)
+        self.assertEqual(result.status, "failed")
+        self.assertIn("suspicious action", result.summary)
+
+
+class PolicyDocsTestsGovernanceProseTests(unittest.TestCase):
+    """A docs/tests-only changed-file set with governance prose should pass."""
+
+    def test_docs_and_test_prose_in_diff_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            ctx = make_context(tmp)
+            write_contract(ctx.artifact_dir, make_contract())
+
+            # Captured executor diff: only docs/tests changed; the diff body
+            # contains governance prose that names forbidden actions as
+            # prohibitions but introduces no executable code that performs
+            # them.
+            diff = (
+                "diff --git a/docs/p2-architecture-checkpoint.md b/docs/p2-architecture-checkpoint.md\n"
+                "+++ b/docs/p2-architecture-checkpoint.md\n"
+                "+- **no auto-push** — branch push requires explicit confirm\n"
+                "+- **no auto-PR** — draft PR creation requires explicit confirm\n"
+                "+- **no auto-merge** — merge is a manual GitHub-side action\n"
+                "+- **no auto-cleanup** — cleanup requires explicit confirm\n"
+                "diff --git a/tests/test_doc.py b/tests/test_doc.py\n"
+                "+++ b/tests/test_doc.py\n"
+                "+    self.assertIn(\"no auto-push\", content)\n"
+                "+    self.assertIn(\"no auto-merge\", content)\n"
+            )
+            (ctx.artifact_dir / "diff-after-opencode.patch").write_text(
+                diff, encoding="utf-8",
+            )
+            (ctx.artifact_dir / "git-status-after-opencode.txt").write_text(
+                " M docs/p2-architecture-checkpoint.md\n"
+                "?? tests/test_doc.py\n",
+                encoding="utf-8",
+            )
+
+            result = PolicyCheckValidator().run(ctx)
+            self.assertEqual(result.status, "passed", result.summary)
+
+
+class PolicyPhase6E3RegressionTests(unittest.TestCase):
+    """Reproduce the exact Phase 6E+3 false-positive bundle and assert pass."""
+
+    def test_full_phase_6e3_evidence_bundle_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            ctx = make_context(tmp)
+            write_contract(ctx.artifact_dir, make_contract())
+
+            (ctx.artifact_dir / "implementation_prompt.md").write_text(
+                _governance_prompt_text(), encoding="utf-8",
+            )
+            (ctx.artifact_dir / "issue_spec.md").write_text(
+                "# GitHub Issue Spec\n\n"
+                "- Title: Self-dogfood note\n\n"
+                "## Body\n\n"
+                "Do not push, do not merge, do not approve task.\n",
+                encoding="utf-8",
+            )
+            (ctx.artifact_dir / "task_execution_package.json").write_text(
+                json.dumps({
+                    "schema_version": "task_execution_package.v1",
+                    "task_key": "GH-9601",
+                    "notes": "Do not push, merge, or delete branches.",
+                }, indent=2),
+                encoding="utf-8",
+            )
+            (ctx.artifact_dir / "opencode-events.jsonl").write_text(
+                _opencode_events_with_governance_in_read_output(),
+                encoding="utf-8",
+            )
+            (ctx.artifact_dir / "git-status-after-opencode.txt").write_text(
+                " M docs/p2-architecture-checkpoint.md\n"
+                "?? tests/test_local_self_dogfood_chain_doc.py\n",
+                encoding="utf-8",
+            )
+            (ctx.artifact_dir / "diff-after-opencode.patch").write_text(
+                "diff --git a/docs/p2-architecture-checkpoint.md b/docs/p2-architecture-checkpoint.md\n"
+                "+++ b/docs/p2-architecture-checkpoint.md\n"
+                "+- **no auto-push** — explicit confirm required\n"
+                "+- **no auto-merge** — explicit confirm required\n",
+                encoding="utf-8",
+            )
+
+            result = PolicyCheckValidator().run(ctx)
+            self.assertEqual(result.status, "passed", result.summary)
+
+
+# ----------------------------------------------------------------------
 # Registry tests
 # ----------------------------------------------------------------------
 

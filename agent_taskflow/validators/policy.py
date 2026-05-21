@@ -109,6 +109,40 @@ _SUSPICIOUS_ACTION_PATTERNS = (
 # Maximum file size to scan (1 MB). Files larger than this are skipped.
 _MAX_SCAN_SIZE = 1024 * 1024
 
+# Validator-own logs: skip entirely (would self-trigger on their own output).
+_VALIDATOR_OWN_LOGS = frozenset({
+    "policy-validate.log",
+    "pytest.log",
+    "openspec-validate.log",
+})
+
+# Instruction/spec artifacts. Their purpose is to document forbidden actions
+# as governance prohibitions and to carry source intent. Mentioning a
+# forbidden action here is not evidence that it was executed. Scan for
+# secret leakage only.
+_INSTRUCTION_ARTIFACT_NAMES = frozenset({
+    "mission_contract.json",
+    "implementation_prompt.md",
+    "task_execution_package.json",
+    "issue_spec.md",
+    "pi_mission_prompt.md",
+    "pi_mission_plan.json",
+})
+
+# Structured executor event logs. Free-text reasoning and embedded file-read
+# output can mention forbidden phrases verbatim without representing an
+# executed action. Suspicious-action regex runs only against extracted
+# shell-tool command strings; the whole file is still scanned for secrets.
+_EXECUTOR_EVENT_LOGS = frozenset({
+    "opencode-events.jsonl",
+})
+
+# Plain-text executor logs whose payload is dominated by the embedded prompt
+# argument and worker reasoning. Scan for secrets only.
+_EXECUTOR_TEXT_LOGS = frozenset({
+    "pi-executor.log",
+})
+
 
 def _contract_path(artifact_dir: Path) -> Path:
     """Return the path to the mission contract file."""
@@ -193,11 +227,76 @@ def _find_suspicious_actions(text: str) -> list[str]:
     return findings
 
 
-def _scan_artifact_file(path: Path) -> tuple[list[str], list[str]]:
+# Tool-call kinds in structured executor event logs that represent actual
+# shell/command execution. Anything outside this set is treated as model
+# reasoning or read-file output and not scanned for suspicious actions.
+_EXECUTOR_SHELL_TOOLS = frozenset({"bash", "shell", "run", "exec", "execute"})
+
+
+def _extract_executed_commands_from_event_log(text: str) -> str:
+    """Extract executed shell-tool command strings from a JSONL event log.
+
+    Structured executor event logs (e.g. opencode-events.jsonl) interleave
+    model reasoning, file-read tool output, and shell-tool calls. Free-text
+    reasoning and embedded file content can mention forbidden phrases verbatim
+    without representing an executed action. Only the command string passed to
+    a shell tool is signal for suspicious-action detection.
+
+    Returns the executed command strings joined by newlines. Lines that are
+    not valid JSON or do not describe a shell-tool call are skipped.
+    """
+
+    commands: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        part = event.get("part")
+        if not isinstance(part, dict):
+            continue
+        tool = part.get("tool")
+        if not isinstance(tool, str) or tool.lower() not in _EXECUTOR_SHELL_TOOLS:
+            continue
+        state = part.get("state")
+        if not isinstance(state, dict):
+            continue
+        inp = state.get("input")
+        if not isinstance(inp, dict):
+            continue
+        cmd = inp.get("command")
+        if isinstance(cmd, str):
+            commands.append(cmd)
+    return "\n".join(commands)
+
+
+def _scan_artifact_file(
+    path: Path,
+    *,
+    scan_suspicious_actions: bool = True,
+    suspicious_action_source: str | None = None,
+) -> tuple[list[str], list[str]]:
     """Scan a single artifact file for secrets and suspicious actions.
 
     Returns (secret_findings, suspicious_findings).
     Skips binary files and files larger than MAX_SCAN_SIZE.
+
+    Parameters
+    ----------
+    scan_suspicious_actions:
+        When False, only the secret scan runs. Suspicious-action scanning is
+        skipped entirely. Use for instruction/spec artifacts whose purpose is
+        to enumerate forbidden actions as prohibitions.
+    suspicious_action_source:
+        When provided, suspicious-action regex runs against this string
+        instead of the raw file contents. Use for structured event logs where
+        only specific extracted fields (e.g. executed shell-tool commands)
+        are signal.
     """
     # Skip obviously binary files
     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".ico",
@@ -219,7 +318,12 @@ def _scan_artifact_file(path: Path) -> tuple[list[str], list[str]]:
         return [], []
 
     secrets = _find_secret_assignments(raw)
-    actions = _find_suspicious_actions(raw)
+    if not scan_suspicious_actions:
+        actions: list[str] = []
+    elif suspicious_action_source is not None:
+        actions = _find_suspicious_actions(suspicious_action_source)
+    else:
+        actions = _find_suspicious_actions(raw)
     return secrets, actions
 
 
@@ -316,35 +420,29 @@ class PolicyCheckValidator(Validator):
     def _scan_artifacts(self, artifact_dir: Path) -> list[str]:
         """Scan artifact files for forbidden actions and secret leakage.
 
-        Scans executor-produced logs and worker output artifacts. Skips:
-        - The mission contract itself (it documents forbidden actions as part of
-          governance, not as evidence of a violation).
-        - The policy validator's own log (avoid false positives on its failure summary).
-        - Other validator logs (pytest.log, openspec-validate.log).
-        - pi_mission_prompt.md and pi_mission_plan.json (system-generated governance
-          documents that contain governance rules in plain text).
-        - pi-executor.log (contains the full command including embedded governance text
-          as the command argument; the actual worker output follows "Environment:").
-        - Binary files and files exceeding max_scan_size.
+        Files are classified by role and scanned accordingly:
+
+        - Validator-own logs (policy-validate.log, pytest.log,
+          openspec-validate.log): skipped entirely.
+        - Instruction/spec artifacts (mission_contract.json,
+          implementation_prompt.md, task_execution_package.json,
+          issue_spec.md, pi_mission_prompt.md, pi_mission_plan.json):
+          scan for secrets only. These artifacts document forbidden actions
+          as governance prohibitions — mentioning them is not a violation.
+        - Structured executor event logs (opencode-events.jsonl): scan for
+          secrets; suspicious-action regex runs only against extracted
+          shell-tool command strings, not against free-text reasoning or
+          embedded file-read output.
+        - Plain-text executor logs (pi-executor.log): scan for secrets only.
+          The historical reason matches the rule above — these logs embed
+          governance text as a command argument and as worker reasoning.
+        - All other artifact files (executor-produced output, captured
+          git status/diff, worker-written files): full scan for both
+          secrets and suspicious actions.
+
+        Binary files and files exceeding max_scan_size are skipped.
         """
         failures: list[str] = []
-
-        # Files produced by validators or by the system as governance/control-plane
-        # artifacts — skip these to avoid false positives on system-generated content.
-        # The pi-executor.log is skipped because it contains the full command with
-        # embedded prompt text that includes governance rules ("do not approve",
-        # "do not push", etc.). The worker's actual output (handoff summary) follows
-        # "Environment:" on a different line and would be the source of any real
-        # violation — but real violations will be caught by artifact files the worker
-        # actually creates (e.g. worktree state, git status), not by log metadata.
-        _SKIP_FILES = frozenset({
-            "policy-validate.log",
-            "pytest.log",
-            "openspec-validate.log",
-            "pi_mission_prompt.md",   # system-generated governance document
-            "pi_mission_plan.json",    # system-generated plan metadata
-            "pi-executor.log",        # contains embedded governance text in command arg
-        })
 
         try:
             files = list(artifact_dir.iterdir())
@@ -353,13 +451,8 @@ class PolicyCheckValidator(Validator):
             return failures
 
         for file_path in files:
-            # Skip mission contract (it documents governance rules, not violations)
-            if file_path.name == "mission_contract.json":
+            if file_path.name in _VALIDATOR_OWN_LOGS:
                 continue
-            # Skip validator logs to avoid false positives on their own output
-            if file_path.name in _SKIP_FILES:
-                continue
-            # Skip binary files (images, compressed archives, etc.)
             if file_path.suffix.lower() in {
                 ".png", ".jpg", ".jpeg", ".gif", ".ico",
                 ".pdf", ".zip", ".tar", ".gz", ".whl",
@@ -372,7 +465,24 @@ class PolicyCheckValidator(Validator):
             except OSError:
                 continue
 
-            secrets, suspicious = _scan_artifact_file(file_path)
+            scan_suspicious = True
+            suspicious_source: str | None = None
+            if file_path.name in _INSTRUCTION_ARTIFACT_NAMES:
+                scan_suspicious = False
+            elif file_path.name in _EXECUTOR_TEXT_LOGS:
+                scan_suspicious = False
+            elif file_path.name in _EXECUTOR_EVENT_LOGS:
+                try:
+                    raw = file_path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    raw = ""
+                suspicious_source = _extract_executed_commands_from_event_log(raw)
+
+            secrets, suspicious = _scan_artifact_file(
+                file_path,
+                scan_suspicious_actions=scan_suspicious,
+                suspicious_action_source=suspicious_source,
+            )
             for finding in secrets:
                 failures.append(f"{file_path.name}: {finding}")
             for finding in suspicious:
