@@ -310,7 +310,6 @@ def create_app(
         current_store: TaskMirrorStore = Depends(get_store),
     ) -> JSONResponse:
         task = task_or_404(task_key, current_store)
-        _ = request
         return JSONResponse(
             status_code=501,
             content=action_response(
