@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel
 
 from agent_taskflow.models import TaskArtifactRecord, TaskRecord
+
+OPERATOR_CLI_DECIDED_BY = "operator_cli"
+LEGACY_HUMAN_DECIDED_BY = "human"
+OPERATOR_ATTESTED_DECIDED_BY_VALUES = frozenset(
+    {OPERATOR_CLI_DECIDED_BY, LEGACY_HUMAN_DECIDED_BY}
+)
 
 
 class CreateTaskRequest(BaseModel):
@@ -54,19 +60,20 @@ class PrepareWorkspaceRequest(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
-    """Request body for accepting a waiting task after human review.
+    """Request body for accepting a waiting task after operator review.
 
-    The ``decided_by`` field is restricted to the single value ``"human"``.
-    This enforces the governance principle that a worker or automated agent
-    cannot self-approve a task.  Human approval is the final gate.
+    ``decided_by`` is an operator attestation value, not an authenticated human
+    identity. New API clients should use ``"operator_cli"``. The legacy
+    ``"human"`` value remains accepted by the route guard for old clients and
+    stored payload compatibility.
     """
 
-    decided_by: Literal["human"]
+    decided_by: str
     notes: str | None = None
 
 
 class RejectRequest(BaseModel):
-    """Request body for rejecting a task after human review."""
+    """Request body for rejecting a task after operator review."""
 
     decided_by: str
     notes: str | None = None

@@ -146,7 +146,7 @@ export function ActionPanel({ task }: { task: Task }) {
         <div className="action-card">
           <h3>Approve / Reject</h3>
           <p className="muted">
-            Records a human decision through the backend action API.
+            Records an operator-attested decision through the backend action API.
           </p>
 
           <div
@@ -160,8 +160,9 @@ export function ActionPanel({ task }: { task: Task }) {
               color: "var(--yellow)",
             }}
           >
-            <strong>Human approval is the final gate.</strong> Worker cannot self-approve.
-            Approving does not push, merge, or cleanup.
+            <strong>Human approval remains the final gate.</strong> This action records
+            operator attestation; it does not authenticate identity. Workers cannot
+            self-approve, and approving does not push, merge, or cleanup.
           </div>
 
           <label>
@@ -180,7 +181,7 @@ export function ActionPanel({ task }: { task: Task }) {
               label="Approve task"
               onConfirm={() =>
                 approveTask(task.task_key, {
-                  decided_by: "human",
+                  decided_by: "operator_cli",
                   notes: notes.trim() || undefined
                 })
               }
@@ -194,7 +195,7 @@ export function ActionPanel({ task }: { task: Task }) {
               label="Reject task"
               onConfirm={() =>
                 rejectTask(task.task_key, {
-                  decided_by: "human",
+                  decided_by: "operator_cli",
                   notes: notes.trim() || undefined
                 })
               }

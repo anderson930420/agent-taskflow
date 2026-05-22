@@ -294,12 +294,17 @@ class TestMissionControlUIStateModelDocs(unittest.TestCase):
     def test_truncated_preview_documented(self):
         self.assertIn("truncation notice", self.doc.lower())
 
-    # Human Approval Identity Enforcement (Phase 52)
-    def test_human_approval_identity_enforcement_section_exists(self):
-        self.assertIn("Human Approval Identity Enforcement", self.doc)
+    # Operator-Attested Approval Enforcement (Phase 52)
+    def test_operator_attested_approval_enforcement_section_exists(self):
+        self.assertIn("Operator-Attested Approval Enforcement", self.doc)
 
-    def test_approval_requires_decided_by_human(self):
+    def test_approval_uses_operator_cli_attestation(self):
+        self.assertIn('decided_by: "operator_cli"', self.doc)
+        self.assertIn("does not authenticate human identity", self.doc)
+
+    def test_legacy_human_decided_by_compatibility_documented(self):
         self.assertIn('decided_by: "human"', self.doc)
+        self.assertIn("remain accepted for compatibility", self.doc)
 
     def test_worker_approval_rejected_in_docs(self):
         self.assertIn('"worker"` — rejected', self.doc)
