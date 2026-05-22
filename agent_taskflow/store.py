@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from agent_taskflow.models import (
@@ -45,11 +45,89 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+SCHEMA_MIGRATIONS = (
+    "tasks_blocked_reason",
+    "tasks_executor_selection",
+    "task_worktrees_base_sha",
+)
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    if column_name not in _table_columns(conn, table_name):
+        conn.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"
+        )
+
+
+def _apply_migration(
+    conn: sqlite3.Connection,
+    name: str,
+    fn: Callable[[sqlite3.Connection], None],
+) -> None:
+    """Apply a named idempotent migration and record it once."""
+    existing = conn.execute(
+        """
+        SELECT 1
+        FROM schema_migrations
+        WHERE name = ?
+        """,
+        (name,),
+    ).fetchone()
+    if existing is not None:
+        return
+
+    fn(conn)
+    conn.execute(
+        """
+        INSERT INTO schema_migrations (name, applied_at)
+        VALUES (?, ?)
+        """,
+        (name, utc_now_iso()),
+    )
+
+
+def _migrate_tasks_blocked_reason(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "tasks", "blocked_reason", "TEXT")
+
+
+def _migrate_tasks_executor_selection(conn: sqlite3.Connection) -> None:
+    for column_name in ("executor", "model", "provider", "tools", "pi_bin"):
+        _add_column_if_missing(conn, "tasks", column_name, "TEXT")
+
+
+def _migrate_task_worktrees_base_sha(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "task_worktrees", "base_sha", "TEXT")
+
+
+_MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (
+    ("tasks_blocked_reason", _migrate_tasks_blocked_reason),
+    ("tasks_executor_selection", _migrate_tasks_executor_selection),
+    ("task_worktrees_base_sha", _migrate_task_worktrees_base_sha),
+)
+
+
 def init_db(path: str | Path | None = None) -> None:
     """Initialize the mirror database. Safe to run repeatedly."""
     with connect(path) as conn:
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS tasks (
                 task_key TEXT PRIMARY KEY,
                 project TEXT NOT NULL,
@@ -59,7 +137,6 @@ def init_db(path: str | Path | None = None) -> None:
                 status TEXT NOT NULL,
                 repo_path TEXT NOT NULL,
                 artifact_dir TEXT,
-                blocked_reason TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_synced_at TEXT
@@ -91,7 +168,6 @@ def init_db(path: str | Path | None = None) -> None:
                 worktree_path TEXT NOT NULL,
                 branch TEXT NOT NULL,
                 base_branch TEXT,
-                base_sha TEXT,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 cleaned_at TEXT,
@@ -100,31 +176,8 @@ def init_db(path: str | Path | None = None) -> None:
             """
         )
 
-        task_columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
-        }
-        # Phase 12: blocked_reason migration
-        if "blocked_reason" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN blocked_reason TEXT")
-        # Phase 13: executor selection migrations (idempotent)
-        if "executor" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN executor TEXT")
-        if "model" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN model TEXT")
-        if "provider" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN provider TEXT")
-        if "tools" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN tools TEXT")
-        if "pi_bin" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN pi_bin TEXT")
-
-        worktree_columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(task_worktrees)").fetchall()
-        }
-        if "base_sha" not in worktree_columns:
-            conn.execute("ALTER TABLE task_worktrees ADD COLUMN base_sha TEXT")
+        for name, migration in _MIGRATIONS:
+            _apply_migration(conn, name, migration)
 
 
 def _row_to_task(row: sqlite3.Row) -> TaskRecord:
@@ -359,12 +412,51 @@ class TaskMirrorStore:
             return {}
         return payload
 
+    def _list_task_events_filtered(
+        self,
+        task_key: str,
+        *,
+        event_types: tuple[str, ...],
+        payload_markers: tuple[str, ...] = (),
+    ) -> list[TaskEventRecord]:
+        """Return task events filtered in SQL before payload reconstruction."""
+        if not event_types:
+            return []
+
+        event_type_placeholders = ", ".join("?" for _ in event_types)
+        params: list[Any] = [task_key, *event_types]
+        payload_clause = ""
+
+        if payload_markers:
+            marker_clauses = " OR ".join("payload_json LIKE ?" for _ in payload_markers)
+            payload_clause = f"AND payload_json IS NOT NULL AND ({marker_clauses})"
+            params.extend(f"%{marker}%" for marker in payload_markers)
+
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM task_events
+                WHERE task_key = ?
+                  AND event_type IN ({event_type_placeholders})
+                  {payload_clause}
+                ORDER BY id ASC
+                """,
+                params,
+            ).fetchall()
+
+        return [_row_to_event(row) for row in rows]
+
     def list_executor_runs(self, task_key: str) -> list[dict[str, Any]]:
         """Return executor run metadata reconstructed from dispatcher events."""
         runs: dict[str, dict[str, Any]] = {}
         ordered_run_ids: list[str] = []
 
-        for event in self.list_task_events(task_key):
+        for event in self._list_task_events_filtered(
+            task_key,
+            event_types=("note",),
+            payload_markers=("executor_run_started", "executor_run_finished"),
+        ):
             payload = self._event_payload(event)
             kind = payload.get("kind")
             if kind not in {"executor_run_started", "executor_run_finished"}:
@@ -413,7 +505,11 @@ class TaskMirrorStore:
         """Return validator result metadata reconstructed from dispatcher events."""
         results: list[dict[str, Any]] = []
 
-        for event in self.list_task_events(task_key):
+        for event in self._list_task_events_filtered(
+            task_key,
+            event_types=("note",),
+            payload_markers=("validation_result",),
+        ):
             payload = self._event_payload(event)
             if payload.get("kind") != "validation_result":
                 continue
@@ -442,7 +538,11 @@ class TaskMirrorStore:
         """
         decisions: list[dict[str, Any]] = []
 
-        for event in self.list_task_events(task_key):
+        for event in self._list_task_events_filtered(
+            task_key,
+            event_types=("note",),
+            payload_markers=("approval_decision", "approval_recorded"),
+        ):
             payload = self._event_payload(event)
             if payload.get("kind") not in {"approval_decision", "approval_recorded"}:
                 continue
@@ -606,7 +706,7 @@ class TaskMirrorStore:
         model: str | None = None,
         prompt_path: str | Path | None = None,
     ) -> str:
-        run_id = f"{task_key}:{executor}:{utc_now_iso()}:{uuid4().hex[:8]}"
+        run_id = f"run-{uuid4().hex}"
         self.record_task_event(
             task_key,
             "note",
