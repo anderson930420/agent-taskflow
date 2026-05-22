@@ -18,6 +18,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -594,6 +595,38 @@ def compute_item_hash(item: dict[str, Any]) -> str:
     return _compute_item_hash(item)
 
 
+def build_proposal_candidate(
+    rec_item: dict[str, Any],
+    *,
+    include_completed: bool = True,
+    include_no_action: bool = True,
+    include_unknown: bool = True,
+    include_command_kinds: tuple[str, ...] | None = None,
+    exclude_command_kinds: tuple[str, ...] = (),
+) -> dict[str, Any] | None:
+    """Build a single proposal candidate item from a recommendation row.
+
+    Exposes the same per-item construction used by
+    :func:`create_scheduler_proposal` for read-only callers (e.g. the
+    scheduler confirmation verifier) that need to recompute item-level
+    semantics from current recommendation state. Returns ``None`` if the
+    recommendation row is filtered out under the supplied policy.
+
+    Read-only: never mutates ``rec_item``, never persists anything, and
+    never returns the per-item ``item_hash`` field (callers compute the
+    hash separately via :func:`compute_item_hash`).
+    """
+
+    filters = SimpleNamespace(
+        include_completed=include_completed,
+        include_no_action=include_no_action,
+        include_unknown=include_unknown,
+        include_command_kinds=include_command_kinds,
+        exclude_command_kinds=exclude_command_kinds,
+    )
+    return _build_candidate(rec_item, filters)
+
+
 def compute_proposal_hash(payload: dict[str, Any]) -> str:
     """Recompute the sha256 ``proposal_hash`` for a scheduler proposal payload.
 
@@ -704,6 +737,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "SchedulerProposalError",
     "SchedulerProposalRequest",
+    "build_proposal_candidate",
     "compute_item_hash",
     "compute_proposal_hash",
     "create_scheduler_proposal",
