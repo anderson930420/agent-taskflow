@@ -50,6 +50,7 @@ class StoreTests(unittest.TestCase):
             ).fetchall()
 
         table_names = {row[0] for row in rows}
+        self.assertIn("schema_migrations", table_names)
         self.assertIn("tasks", table_names)
         self.assertIn("task_events", table_names)
         self.assertIn("task_artifacts", table_names)
@@ -63,6 +64,102 @@ class StoreTests(unittest.TestCase):
             count = conn.execute("SELECT count(*) FROM tasks").fetchone()[0]
 
         self.assertEqual(count, 0)
+
+    def test_schema_migrations_records_applied_migration_names(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT name
+                FROM schema_migrations
+                ORDER BY name ASC
+                """
+            ).fetchall()
+
+        self.assertEqual(
+            {row[0] for row in rows},
+            set(store_module.SCHEMA_MIGRATIONS),
+        )
+
+    def test_init_db_records_migrations_when_legacy_targets_already_exist(self) -> None:
+        legacy_db = Path(self.tmp.name) / "legacy-existing-targets.db"
+        with sqlite3.connect(legacy_db) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE tasks (
+                    task_key TEXT PRIMARY KEY,
+                    project TEXT NOT NULL,
+                    board TEXT,
+                    hermes_task_id TEXT,
+                    title TEXT,
+                    status TEXT NOT NULL,
+                    repo_path TEXT NOT NULL,
+                    artifact_dir TEXT,
+                    blocked_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_synced_at TEXT,
+                    executor TEXT,
+                    model TEXT,
+                    provider TEXT,
+                    tools TEXT,
+                    pi_bin TEXT
+                );
+
+                CREATE TABLE task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_key TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    message TEXT,
+                    payload_json TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(task_key) REFERENCES tasks(task_key)
+                );
+
+                CREATE TABLE task_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_key TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(task_key) REFERENCES tasks(task_key)
+                );
+
+                CREATE TABLE task_worktrees (
+                    task_key TEXT PRIMARY KEY,
+                    repo_path TEXT NOT NULL,
+                    worktree_path TEXT NOT NULL,
+                    branch TEXT NOT NULL,
+                    base_branch TEXT,
+                    base_sha TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    cleaned_at TEXT,
+                    FOREIGN KEY(task_key) REFERENCES tasks(task_key)
+                );
+                """
+            )
+
+        init_db(legacy_db)
+
+        with sqlite3.connect(legacy_db) as conn:
+            migration_names = {
+                row[0]
+                for row in conn.execute("SELECT name FROM schema_migrations").fetchall()
+            }
+            task_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            worktree_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(task_worktrees)").fetchall()
+            }
+
+        self.assertEqual(migration_names, set(store_module.SCHEMA_MIGRATIONS))
+        for column in ("blocked_reason", "executor", "model", "provider", "tools", "pi_bin"):
+            self.assertIn(column, task_columns)
+        self.assertIn("base_sha", worktree_columns)
 
     def test_task_can_be_upserted_and_read_back(self) -> None:
         self.store.upsert_task(self.make_task())
@@ -218,8 +315,13 @@ class StoreTests(unittest.TestCase):
             )
 
         self.assertNotEqual(run_id_1, run_id_2)
-        self.assertTrue(run_id_1.startswith(f"AT-0003:noop:{fixed_ts}:"))
-        self.assertTrue(run_id_2.startswith(f"AT-0003:noop:{fixed_ts}:"))
+        self.assertRegex(run_id_1, r"^run-[0-9a-f]{32}$")
+        self.assertRegex(run_id_2, r"^run-[0-9a-f]{32}$")
+        self.assertNotIn(":", run_id_1)
+        self.assertNotIn(":", run_id_2)
+        self.assertNotIn("AT-0003", run_id_1)
+        self.assertNotIn("noop", run_id_1)
+        self.assertNotIn(fixed_ts, run_id_1)
 
     def test_list_executor_runs_keeps_same_second_runs_separate(self) -> None:
         self.store.upsert_task(self.make_task())
@@ -279,6 +381,60 @@ class StoreTests(unittest.TestCase):
         self.assertIsNotNone(second["started_at"])
         self.assertIsNotNone(second["finished_at"])
 
+    def test_list_executor_runs_reads_new_and_old_format_run_ids(self) -> None:
+        self.store.upsert_task(self.make_task())
+
+        new_run_id = self.store.create_executor_run("AT-0003", "noop")
+        self.store.finish_executor_run(
+            "AT-0003",
+            new_run_id,
+            executor="noop",
+            status="completed",
+            exit_code=0,
+            summary="new run",
+        )
+
+        old_run_id = "AT-0003:noop:2026-05-21T12:00:00Z:abc123ef"
+        self.store.record_task_event(
+            "AT-0003",
+            "note",
+            "dispatcher",
+            message="Executor noop started",
+            payload={
+                "kind": "executor_run_started",
+                "run_id": old_run_id,
+                "executor": "noop",
+                "model": "legacy-model",
+                "prompt_path": "/tmp/legacy-prompt.md",
+            },
+        )
+        self.store.record_task_event(
+            "AT-0003",
+            "note",
+            "dispatcher",
+            message="Executor noop finished with status failed",
+            payload={
+                "kind": "executor_run_finished",
+                "run_id": old_run_id,
+                "executor": "noop",
+                "status": "failed",
+                "exit_code": 1,
+                "summary": "old run",
+                "log_path": "/tmp/legacy.log",
+                "artifacts": {"log": "/tmp/legacy.log"},
+            },
+        )
+
+        runs = self.store.list_executor_runs("AT-0003")
+        by_run_id = {run["run_id"]: run for run in runs}
+
+        self.assertEqual(set(by_run_id), {new_run_id, old_run_id})
+        self.assertNotIn(":", new_run_id)
+        self.assertIn(":", old_run_id)
+        self.assertEqual(by_run_id[new_run_id]["summary"], "new run")
+        self.assertEqual(by_run_id[old_run_id]["summary"], "old run")
+        self.assertEqual(by_run_id[old_run_id]["status"], "failed")
+
     def test_dispatcher_store_events_can_record_validation_result(self) -> None:
         self.store.upsert_task(self.make_task())
 
@@ -297,6 +453,80 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(events[-1].source, "dispatcher")
         self.assertIn("validation_result", events[-1].payload_json or "")
         self.assertIn("pytest", events[-1].payload_json or "")
+
+    def test_list_validation_results_returns_expected_records(self) -> None:
+        self.store.upsert_task(self.make_task())
+        self.store.record_task_event(
+            "AT-0003",
+            "status_changed",
+            "dispatcher",
+            message="irrelevant status event",
+            payload={"kind": "status_changed", "status": "validating"},
+        )
+        self.store.record_task_event(
+            "AT-0003",
+            "note",
+            "tester",
+            message="irrelevant note",
+            payload={"kind": "not_validation_result", "validator": "ignore"},
+        )
+        self.store.record_validation_result(
+            "AT-0003",
+            "pytest",
+            status="passed",
+            exit_code=0,
+            summary="tests passed",
+            log_path="/tmp/pytest.log",
+            artifacts={"log": "/tmp/pytest.log"},
+        )
+
+        results = self.store.list_validation_results("AT-0003")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["task_key"], "AT-0003")
+        self.assertEqual(results[0]["validator"], "pytest")
+        self.assertEqual(results[0]["status"], "passed")
+        self.assertEqual(results[0]["exit_code"], 0)
+        self.assertEqual(results[0]["summary"], "tests passed")
+        self.assertEqual(results[0]["log_path"], "/tmp/pytest.log")
+        self.assertEqual(results[0]["artifacts"], {"log": "/tmp/pytest.log"})
+
+    def test_list_approval_decisions_returns_expected_records(self) -> None:
+        self.store.upsert_task(self.make_task())
+        self.store.record_task_event(
+            "AT-0003",
+            "status_changed",
+            "dispatcher",
+            message="irrelevant status event",
+            payload={"kind": "status_changed", "status": "waiting_approval"},
+        )
+        self.store.record_task_event(
+            "AT-0003",
+            "note",
+            "tester",
+            message="irrelevant note",
+            payload={"kind": "not_approval_decision", "decision": "accepted"},
+        )
+        self.store.record_approval_decision(
+            "AT-0003",
+            "accepted",
+            decided_by="human",
+            notes="approved",
+        )
+        self.store.record_approval_decision(
+            "AT-0003",
+            "rejected",
+            decided_by="reviewer",
+            notes="needs changes",
+        )
+
+        decisions = self.store.list_approval_decisions("AT-0003")
+
+        self.assertEqual([decision["decision"] for decision in decisions], ["accepted", "rejected"])
+        self.assertEqual(decisions[0]["decided_by"], "human")
+        self.assertEqual(decisions[0]["notes"], "approved")
+        self.assertEqual(decisions[1]["decided_by"], "reviewer")
+        self.assertEqual(decisions[1]["notes"], "needs changes")
 
     def test_update_missing_task_status_raises_key_error(self) -> None:
         with self.assertRaisesRegex(KeyError, "Task not found"):
