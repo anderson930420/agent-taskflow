@@ -8,6 +8,8 @@ of the public agent-taskflow API.
 
 from __future__ import annotations
 
+from agent_taskflow._helpers import require_non_empty
+
 
 SECRET_ENV_MARKERS = (
     "KEY",
@@ -16,13 +18,6 @@ SECRET_ENV_MARKERS = (
     "PASSWORD",
     "CREDENTIAL",
 )
-
-
-def require_non_empty(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must not be empty")
-    return normalized
 
 
 def validate_timeout(timeout_seconds: int | None) -> int | None:

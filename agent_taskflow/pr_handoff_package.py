@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from agent_taskflow._helpers import dedupe_preserve_order as _dedupe_preserve_order
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -927,17 +928,6 @@ def _safety_block(
         "webhook_started": False,
         "polling_loop_started": False,
     }
-
-
-def _dedupe_preserve_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
 
 
 def _error_result(task_key: str, *, status: str, error: str) -> PrHandoffPackageResult:

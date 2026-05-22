@@ -15,6 +15,9 @@ from pathlib import Path
 import subprocess
 from typing import Any, Callable, Protocol
 
+from agent_taskflow._helpers import (
+    dedupe_non_empty_preserve_order as _dedupe_preserve_order,
+)
 from agent_taskflow.models import TaskRecord, utc_now_iso, validate_task_status
 from agent_taskflow.store import TaskMirrorStore, default_db_path
 from agent_taskflow.tasks import normalize_task_key
@@ -1473,17 +1476,6 @@ def _empty_remote_branch_state() -> dict[str, Any]:
         "exists_after": None,
         "warnings": [],
     }
-
-
-def _dedupe_preserve_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
 
 
 def _safety_block(

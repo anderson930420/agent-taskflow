@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from agent_taskflow.task_recommendation import (  # noqa: E402
+from agent_taskflow.task_recommendations import (  # noqa: E402
     TaskRecommendationError,
     TaskRecommendationRequest,
     recommend_next_tasks,

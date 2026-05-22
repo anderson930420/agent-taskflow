@@ -1,8 +1,9 @@
-"""Deterministic GitHub Issue intake gate into the local task mirror.
+"""GitHub Issue intake policy, gating, and eligibility checks.
 
-This module only mirrors selected GitHub Issues into SQLite. It does not write
-issue-spec artifacts, create worktrees, run executors, run validators, push
-branches, or create PRs.
+This module owns deterministic checks before intake or handoff, including
+already-intaken issue detection and selected-issue eligibility. It stays
+separate from ``github_issue_intake`` discovery/intake mechanics and does not
+create worktrees, run executors, run validators, push branches, or create PRs.
 """
 
 from __future__ import annotations

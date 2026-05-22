@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_taskflow._helpers import require_non_empty as _require_non_empty
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.worktree import ensure_absolute_path
 from agent_taskflow.workflow_policy_artifacts import (
@@ -105,13 +106,6 @@ def utc_now_iso() -> str:
 def require_absolute_path(path: str | Path, field_name: str) -> Path:
     """Return an absolute path or raise ValueError."""
     return ensure_absolute_path(path, name=field_name)
-
-
-def _require_non_empty(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must not be empty")
-    return normalized
 
 
 def validate_task_status(status: str) -> str:

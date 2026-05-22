@@ -1,4 +1,10 @@
-"""Selected GitHub Issue intake into the local task mirror."""
+"""GitHub Issue discovery, intake, and local mirroring logic.
+
+This module owns selected issue fetch/intake behavior and local task mirror
+writes for issue-spec artifacts. Policy and eligibility gating stays in
+``github_issue_intake_gate`` so intake mechanics remain separate from
+handoff/readiness decisions.
+"""
 
 from __future__ import annotations
 
