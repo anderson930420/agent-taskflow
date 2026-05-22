@@ -393,12 +393,12 @@ Creating a task record only registers it in the local mirror store. It does not:
 
 The dispatch flow ends with the task reaching `waiting_approval`. The task detail page directs the user to the **Approve / Reject** action in the ActionPanel. Workers cannot approve themselves — human review is required.
 
-### Human Approval Identity Enforcement
+### Operator-Attested Approval Enforcement
 
-The approval endpoint (`POST /api/tasks/{task_key}/approve`) enforces that `decided_by` must be the literal value `"human"`. This is enforced at two layers:
+The approval endpoint (`POST /api/tasks/{task_key}/approve`) records an operator attestation, not an authenticated human identity. New clients send `decided_by: "operator_cli"`. Legacy clients that still send `decided_by: "human"` remain accepted for compatibility with existing records and tests.
 
-- **Schema layer:** `ApprovalRequest.decided_by` is typed as `Literal["human"]` — Pydantic rejects any other value at parsing time with a clear validation error.
-- **Runtime layer:** The endpoint also contains an explicit guard that returns HTTP 422 if `decided_by != "human"`, providing a defence-in-depth message that is human-readable: `"Approval requires decided_by='human'. Worker or system self-approval is not allowed."`
+- **Schema layer:** `ApprovalRequest.decided_by` is required, but it is not treated as an authenticated identity claim.
+- **Runtime layer:** The endpoint returns HTTP 422 unless `decided_by` is `"operator_cli"` or legacy `"human"`. The human-readable error states that the API records operator attestation only and does not authenticate human identity.
 
 All other `decided_by` values are rejected:
 
@@ -409,7 +409,7 @@ All other `decided_by` values are rejected:
 - `""` (empty) — rejected (missing identity)
 - missing field — rejected (absent identity)
 
-The UI always sends `decided_by: "human"` for both the Approve and Reject actions. The `decided_by` field is not user-editable in the UI — it is hard-coded to `"human"`. This ensures the governance principle is upheld regardless of who operates the UI.
+The UI always sends `decided_by: "operator_cli"` for both the Approve and Reject actions. The `decided_by` field is not user-editable in the UI. This keeps the API semantics explicit: Mission Control records an operator-attested action, while external review and repository governance remain the true human gate.
 
 Approval does not push, merge, or clean up any branch or worktree. Human approval remains the final gate.
 

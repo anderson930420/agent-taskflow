@@ -428,8 +428,8 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         self.assertIn("PASSED", content)
         self.assertIn("Policy check PASSED", content)
 
-    def test_approve_requires_human_identity(self) -> None:
-        """Approve endpoint rejects non-human decided_by."""
+    def test_approve_requires_operator_attestation_identity(self) -> None:
+        """Approve endpoint rejects worker/system decided_by values."""
         self.client.post(
             "/api/tasks",
             json={
@@ -470,8 +470,8 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
                 assert task is not None
                 self.assertEqual(task.status, "waiting_approval")
 
-    def test_approve_with_human_identity_accepts_task(self) -> None:
-        """Approve with decided_by='human' accepts the task."""
+    def test_approve_with_operator_cli_attestation_accepts_task(self) -> None:
+        """Approve with decided_by='operator_cli' accepts the task."""
         self.client.post(
             "/api/tasks",
             json={
@@ -492,7 +492,7 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/tasks/AT-UI-DOGFOOD-59/approve",
-            json={"decided_by": "human", "notes": "dogfood test approval"},
+            json={"decided_by": "operator_cli", "notes": "dogfood test approval"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -509,11 +509,11 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         approvals = self.store.list_approval_decisions("AT-UI-DOGFOOD-59")
         self.assertEqual(len(approvals), 1)
         self.assertEqual(approvals[-1]["decision"], "accepted")
-        self.assertEqual(approvals[-1]["decided_by"], "human")
+        self.assertEqual(approvals[-1]["decided_by"], "operator_cli")
         self.assertEqual(approvals[-1]["notes"], "dogfood test approval")
 
-    def test_reject_requires_human_identity(self) -> None:
-        """Reject with decided_by='human' works."""
+    def test_reject_with_operator_cli_attestation_works(self) -> None:
+        """Reject with decided_by='operator_cli' works."""
         self.client.post(
             "/api/tasks",
             json={
@@ -534,7 +534,7 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/tasks/AT-UI-DOGFOOD-59/reject",
-            json={"decided_by": "human", "notes": "needs rework"},
+            json={"decided_by": "operator_cli", "notes": "needs rework"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -549,10 +549,10 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
 
         approvals = self.store.list_approval_decisions("AT-UI-DOGFOOD-59")
         self.assertEqual(approvals[-1]["decision"], "rejected")
-        self.assertEqual(approvals[-1]["decided_by"], "human")
+        self.assertEqual(approvals[-1]["decided_by"], "operator_cli")
 
     def test_full_create_dispatch_approve_flow(self) -> None:
-        """Full flow: create → dispatch → waiting_approval → human approve."""
+        """Full flow: create → dispatch → waiting_approval → operator approve."""
         # 1. Create task
         create_response = self.client.post(
             "/api/tasks",
@@ -594,11 +594,11 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         assert task is not None
         self.assertEqual(task.status, "waiting_approval")
 
-        # 4. Human approves via UI action API
+        # 4. Operator approves via UI action API
         approve_response = self.client.post(
             "/api/tasks/AT-UI-DOGFOOD-59/approve",
             json={
-                "decided_by": "human",
+                "decided_by": "operator_cli",
                 "notes": "Post-v0.1.0 UI create/dispatch dogfood passed",
             },
         )
@@ -617,7 +617,7 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         approvals = self.store.list_approval_decisions("AT-UI-DOGFOOD-59")
         self.assertEqual(len(approvals), 1)
         self.assertEqual(approvals[-1]["decision"], "accepted")
-        self.assertEqual(approvals[-1]["decided_by"], "human")
+        self.assertEqual(approvals[-1]["decided_by"], "operator_cli")
 
         # 6. Verify no forbidden actions were triggered (no push/merge/cleanup logs)
         for artifact in self.artifact_dir.iterdir():
@@ -798,7 +798,7 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         # Task is still queued — approve should fail
         response = self.client.post(
             "/api/tasks/AT-UI-DOGFOOD-59/approve",
-            json={"decided_by": "human"},
+            json={"decided_by": "operator_cli"},
         )
 
         self.assertEqual(response.status_code, 409)

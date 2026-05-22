@@ -361,7 +361,7 @@ class ApiActionTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/tasks/AT-0009/approve",
-            json={"decided_by": "human", "notes": "looks good"},
+            json={"decided_by": "operator_cli", "notes": "looks good"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -374,8 +374,22 @@ class ApiActionTests(unittest.TestCase):
         assert task is not None
         self.assertEqual(task.status, "accepted")
         self.assertEqual(approvals[-1]["decision"], "accepted")
-        self.assertEqual(approvals[-1]["decided_by"], "human")
+        self.assertEqual(approvals[-1]["decided_by"], "operator_cli")
         self.assertEqual(approvals[-1]["notes"], "looks good")
+
+    def test_approve_accepts_legacy_human_decided_by_for_compatibility(self) -> None:
+        self.add_task(status="waiting_approval")
+
+        response = self.client.post(
+            "/api/tasks/AT-0009/approve",
+            json={"decided_by": "human", "notes": "legacy client"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        approvals = self.store.list_approval_decisions("AT-0009")
+        self.assertEqual(approvals[-1]["decision"], "accepted")
+        self.assertEqual(approvals[-1]["decided_by"], "human")
+        self.assertEqual(approvals[-1]["notes"], "legacy client")
 
     def test_approve_rejects_worker_identity(self) -> None:
         self.add_task(status="waiting_approval")
@@ -386,6 +400,8 @@ class ApiActionTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 422)
+        self.assertIn("operator attestation", response.json()["detail"])
+        self.assertIn("does not authenticate human identity", response.json()["detail"])
         task = self.store.get_task("AT-0009")
         approvals = self.store.list_approval_decisions("AT-0009")
         self.assertIsNotNone(task)
@@ -468,12 +484,12 @@ class ApiActionTests(unittest.TestCase):
         self.assertEqual(task.status, "waiting_approval")
         self.assertEqual(self.store.list_approval_decisions("AT-0009"), [])
 
-    def test_reject_still_works_after_human_identity_enforcement(self) -> None:
+    def test_reject_still_works_after_operator_attestation_enforcement(self) -> None:
         self.add_task(status="waiting_approval")
 
         response = self.client.post(
             "/api/tasks/AT-0009/reject",
-            json={"decided_by": "human", "notes": "needs changes"},
+            json={"decided_by": "operator_cli", "notes": "needs changes"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -486,10 +502,26 @@ class ApiActionTests(unittest.TestCase):
         assert task is not None
         self.assertEqual(task.status, "rejected")
         self.assertEqual(approvals[-1]["decision"], "rejected")
-        self.assertEqual(approvals[-1]["decided_by"], "human")
+        self.assertEqual(approvals[-1]["decided_by"], "operator_cli")
         self.assertEqual(approvals[-1]["notes"], "needs changes")
 
-    def test_block_still_works_after_human_identity_enforcement(self) -> None:
+    def test_reject_rejects_worker_identity(self) -> None:
+        self.add_task(status="waiting_approval")
+
+        response = self.client.post(
+            "/api/tasks/AT-0009/reject",
+            json={"decided_by": "worker", "notes": "sabotage"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("operator attestation", response.json()["detail"])
+        task = self.store.get_task("AT-0009")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "waiting_approval")
+        self.assertEqual(self.store.list_approval_decisions("AT-0009"), [])
+
+    def test_block_still_works_after_operator_attestation_enforcement(self) -> None:
         self.add_task(status="queued")
 
         response = self.client.post(
@@ -512,7 +544,7 @@ class ApiActionTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/tasks/AT-0009/approve",
-            json={"decided_by": "human", "notes": "not ready"},
+            json={"decided_by": "operator_cli", "notes": "not ready"},
         )
 
         self.assertEqual(response.status_code, 409)
@@ -528,7 +560,7 @@ class ApiActionTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/tasks/AT-0009/reject",
-            json={"decided_by": "human", "notes": "blocked too long"},
+            json={"decided_by": "operator_cli", "notes": "blocked too long"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -578,7 +610,11 @@ class ApiActionTests(unittest.TestCase):
         payload = response.json()
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["action"], "validate")
-        self.assertIn("not implemented", payload["message"])
+        self.assertEqual(
+            payload["message"],
+            "Validation trigger is intentionally not implemented; "
+            "validators run through dispatcher/operator workflow only.",
+        )
         self.assertEqual(self.dispatcher_factory_calls, [])
 
     def test_prepare_workspace_success_records_worktree_with_base_sha(self) -> None:

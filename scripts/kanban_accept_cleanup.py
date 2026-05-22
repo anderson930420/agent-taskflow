@@ -200,7 +200,7 @@ def write_decision_md(artifact_dir: str, data: dict) -> str:
             f.write(f"- pr_number: {data['pr_number']}\n")
         if data.get("merged_commit"):
             f.write(f"- merged_commit: {data['merged_commit']}\n")
-        f.write(f"- decided_by: {data.get('decided_by', 'human')}\n")
+        f.write(f"- decided_by: {data.get('decided_by', 'operator_cli')}\n")
         f.write(f"- recorded_by: kanban_accept_cleanup.py\n")
         f.write(f"- recorded_at: {data.get('recorded_at', '')}\n")
         f.write("\n## Notes\n\n")
@@ -216,11 +216,14 @@ def write_decision_md(artifact_dir: str, data: dict) -> str:
                 merged_commit = data.get("merged_commit")
                 has_pr_info = bool(pr_url or pr_number or merged_commit)
                 if has_pr_info:
-                    f.write("Human review accepted. PR has been merged to main.\n")
+                    f.write("Operator-attested review accepted. PR has been merged to main.\n")
                 else:
-                    f.write("Human review accepted. No PR was required because this task produced no repo changes.\n")
+                    f.write(
+                        "Operator-attested review accepted. No PR was required "
+                        "because this task produced no repo changes.\n"
+                    )
             elif data["decision"] == "rejected":
-                f.write("Human review rejected.\n")
+                f.write("Operator-attested review rejected.\n")
             elif data["decision"] == "abandoned":
                 f.write("Task was abandoned.\n")
     return path
@@ -432,7 +435,7 @@ def build_decision_data(args: argparse.Namespace, artifact_dir: str) -> dict:
         "pr_url": args.pr_url,
         "pr_number": args.pr_number,
         "merged_commit": args.merged_commit,
-        "decided_by": "human",
+        "decided_by": "operator_cli",
         "recorded_by": "kanban_accept_cleanup.py",
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "artifact_dir": artifact_dir,

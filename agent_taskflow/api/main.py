@@ -21,6 +21,9 @@ from agent_taskflow.api.schemas import (
     RejectRequest,
     StartTaskRequest,
     ValidateTaskRequest,
+    LEGACY_HUMAN_DECIDED_BY,
+    OPERATOR_ATTESTED_DECIDED_BY_VALUES,
+    OPERATOR_CLI_DECIDED_BY,
     action_response,
     approval_decision_to_dict,
     artifact_preview_to_dict,
@@ -67,6 +70,25 @@ DEFAULT_CORS_ORIGINS = [
 ]
 
 DispatcherFactory = Callable[[TaskMirrorStore, Sequence[str]], Any]
+
+
+def require_operator_attested_decided_by(decided_by: str, *, action: str) -> None:
+    """Reject worker/system identities without claiming API authentication."""
+    if decided_by not in OPERATOR_ATTESTED_DECIDED_BY_VALUES:
+        allowed_values = ", ".join(
+            repr(value) for value in sorted(OPERATOR_ATTESTED_DECIDED_BY_VALUES)
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{action} requires decided_by={OPERATOR_CLI_DECIDED_BY!r} "
+                f"(legacy {LEGACY_HUMAN_DECIDED_BY!r} is accepted for compatibility; "
+                f"allowed values: {allowed_values}). "
+                "This records operator attestation only; the API does not "
+                "authenticate human identity, and worker/system self-approval "
+                "is not allowed."
+            ),
+        )
 
 
 def create_app(
@@ -296,7 +318,10 @@ def create_app(
                 action="validate",
                 task_key=task.task_key,
                 status=task.status,
-                message="validation-only endpoint is not implemented yet",
+                message=(
+                    "Validation trigger is intentionally not implemented; "
+                    "validators run through dispatcher/operator workflow only."
+                ),
                 item=task_to_dict(task),
             ),
         )
@@ -338,14 +363,7 @@ def create_app(
         current_store: TaskMirrorStore = Depends(get_store),
     ) -> dict[str, object] | JSONResponse:
         task = task_or_404(task_key, current_store)
-        if request.decided_by != "human":
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Approval requires decided_by='human'. "
-                    "Worker or system self-approval is not allowed."
-                ),
-            )
+        require_operator_attested_decided_by(request.decided_by, action="Approval")
 
         if task.status != "waiting_approval":
             return conflict(
@@ -388,6 +406,8 @@ def create_app(
         current_store: TaskMirrorStore = Depends(get_store),
     ) -> dict[str, object] | JSONResponse:
         task = task_or_404(task_key, current_store)
+        require_operator_attested_decided_by(request.decided_by, action="Rejection")
+
         if task.status not in {"waiting_approval", "blocked"}:
             return conflict(
                 "reject",
