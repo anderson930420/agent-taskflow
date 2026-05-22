@@ -131,7 +131,9 @@ class _Base(unittest.TestCase):
 
 
 class VerifierHappyPathTests(_Base):
-    def test_valid_confirmation_returns_allowed_to_attempt_true(self) -> None:
+    def test_valid_confirmation_marks_eligible_but_never_execution_allowed(
+        self,
+    ) -> None:
         proposal = self._proposal(["AT-VRF-OK-001"])
         item_id = self._safe_item_id(proposal)
         confirmation = self._confirm(proposal, (item_id,))
@@ -147,7 +149,12 @@ class VerifierHappyPathTests(_Base):
         )
 
         self.assertEqual(report["status"], STATUS_VALID)
-        self.assertTrue(report["allowed_to_attempt"])
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["verification_passed"])
+        self.assertTrue(report["eligible_for_command_specific_confirm"])
+        # A verifier pass is NOT execution permission; these stay false.
+        self.assertFalse(report["execution_allowed"])
+        self.assertFalse(report["allowed_to_attempt"])
         self.assertFalse(report["execution_performed"])
         self.assertFalse(report["action_evidence_created"])
         self.assertEqual(report["schema_version"], VERIFICATION_SCHEMA_VERSION)
@@ -159,9 +166,28 @@ class VerifierHappyPathTests(_Base):
         self.assertEqual(report["safety"], dict(VERIFIER_SAFETY_FLAGS))
         for check in report["checks"]:
             self.assertTrue(check["passed"], check)
+        check_names = [check["name"] for check in report["checks"]]
+        for name in (
+            "bound_proposal_artifact_present",
+            "bound_proposal_artifact_readable",
+            "bound_proposal_schema_supported",
+            "bound_proposal_id_matches",
+            "bound_proposal_hash_matches",
+            "bound_proposal_item_present",
+            "bound_proposal_item_hash_matches",
+        ):
+            self.assertIn(name, check_names)
         self.assertTrue(report["revalidation"]["task_exists"])
         self.assertTrue(report["revalidation"]["current_item_hash_recomputed"])
         self.assertTrue(report["revalidation"]["current_item_hash_matches"])
+        self.assertEqual(
+            report["bound_proposal"]["recomputed_proposal_hash"],
+            report["bound_proposal"]["artifact_proposal_hash"],
+        )
+        self.assertEqual(
+            report["bound_proposal"]["artifact_item_hash"],
+            report["bound_proposal"]["confirmation_item_hash"],
+        )
 
     def test_safety_flags_always_mutation_false(self) -> None:
         proposal = self._proposal(["AT-VRF-SAFE-001"])
@@ -342,7 +368,9 @@ class VerifierBindingTests(_Base):
         )
         self.assertFalse(failed["passed"])
 
-    def test_item_hash_mismatch_blocks_via_current_hash_check(self) -> None:
+    def test_confirmation_item_hash_tamper_blocks_via_bound_proposal_check(
+        self,
+    ) -> None:
         proposal = self._proposal(["AT-VRF-HASH-001"])
         item_id = self._safe_item_id(proposal)
         confirmation = self._confirm(proposal, (item_id,))
@@ -360,12 +388,12 @@ class VerifierBindingTests(_Base):
                 proposal_item_id=item_id,
             )
         )
-        self.assertEqual(report["status"], STATUS_BLOCKED)
+        self.assertEqual(report["status"], STATUS_INVALID)
         names = [c["name"] for c in report["checks"]]
-        self.assertIn("current_item_hash_matches", names)
+        self.assertIn("bound_proposal_item_hash_matches", names)
         failed = next(
             c for c in report["checks"]
-            if c["name"] == "current_item_hash_matches"
+            if c["name"] == "bound_proposal_item_hash_matches"
         )
         self.assertFalse(failed["passed"])
 
@@ -602,8 +630,10 @@ class VerifierExpirationTests(_Base):
         self.assertFalse(failed["passed"])
         self.assertTrue(report["expiration"]["expired"])
         self.assertEqual(
-            report["expiration"]["max_age_source"], "override"
+            report["expiration"]["max_age_source"], "override_tightened"
         )
+        self.assertEqual(report["expiration"]["max_age_minutes_override"], 1)
+        self.assertEqual(report["expiration"]["effective_max_age_minutes"], 1)
 
     def test_unexpired_confirmation_passes_expiration(self) -> None:
         proposal = self._proposal(["AT-VRF-UNEXP-001"])
@@ -771,6 +801,657 @@ class VerifierSelectorTests(_Base):
                 confirmation_artifact_path=Path(
                     confirmation["artifact_path"]  # type: ignore[index]
                 ),
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_VALID)
+
+
+class VerifierBoundProposalArtifactTests(_Base):
+    def _mutate_confirmation(
+        self,
+        confirmation: dict[str, object],
+        mutator,  # type: ignore[no-untyped-def]
+    ) -> Path:
+        path = Path(confirmation["artifact_path"])  # type: ignore[index]
+        on_disk = json.loads(path.read_text())
+        mutator(on_disk)
+        path.write_text(json.dumps(on_disk, indent=2, sort_keys=True))
+        return path
+
+    def _mutate_proposal(
+        self,
+        proposal: dict[str, object],
+        mutator,  # type: ignore[no-untyped-def]
+    ) -> Path:
+        path = Path(proposal["artifact_path"])  # type: ignore[index]
+        on_disk = json.loads(path.read_text())
+        mutator(on_disk)
+        path.write_text(json.dumps(on_disk, indent=2, sort_keys=True))
+        return path
+
+    def test_missing_proposal_artifact_path_rejects(self) -> None:
+        proposal = self._proposal(["AT-VRF-BIND-PATH-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+
+        def drop_path(on_disk: dict[str, object]) -> None:
+            del on_disk["proposal"]["proposal_artifact_path"]  # type: ignore[index]
+
+        self._mutate_confirmation(confirmation, drop_path)
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "bound_proposal_artifact_present"
+        )
+        self.assertFalse(failed["passed"])
+
+    def test_proposal_artifact_file_missing_rejects(self) -> None:
+        proposal = self._proposal(["AT-VRF-BIND-MISS-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+
+        Path(proposal["artifact_path"]).unlink()  # type: ignore[index]
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "bound_proposal_artifact_readable"
+        )
+        self.assertFalse(failed["passed"])
+
+    def test_proposal_artifact_invalid_json_rejects(self) -> None:
+        proposal = self._proposal(["AT-VRF-BIND-JSON-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        Path(proposal["artifact_path"]).write_text(  # type: ignore[index]
+            "not valid json {",
+            encoding="utf-8",
+        )
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "bound_proposal_artifact_readable"
+        )
+        self.assertFalse(failed["passed"])
+
+    def test_proposal_schema_unsupported_rejects(self) -> None:
+        proposal = self._proposal(["AT-VRF-BIND-SCH-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        def bad_schema(on_disk: dict[str, object]) -> None:
+            on_disk["schema_version"] = "scheduler_proposal.v999"
+
+        self._mutate_proposal(proposal, bad_schema)
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "bound_proposal_schema_supported"
+        )
+        self.assertFalse(failed["passed"])
+
+    def test_proposal_id_mismatch_rejects(self) -> None:
+        proposal = self._proposal(["AT-VRF-BIND-PID-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+
+        def swap_pid(on_disk: dict[str, object]) -> None:
+            on_disk["proposal"]["proposal_id"] = (  # type: ignore[index]
+                "proposal-tampered-deadbeef"
+            )
+
+        self._mutate_confirmation(confirmation, swap_pid)
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "bound_proposal_id_matches"
+        )
+        self.assertFalse(failed["passed"])
+
+    def test_proposal_hash_tamper_rejects(self) -> None:
+        proposal = self._proposal(["AT-VRF-BIND-PHASH-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        def tamper_hash(on_disk: dict[str, object]) -> None:
+            on_disk["proposal_hash"] = "f" * 64
+
+        self._mutate_proposal(proposal, tamper_hash)
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "bound_proposal_hash_matches"
+        )
+        self.assertFalse(failed["passed"])
+
+    def test_proposal_item_id_absent_rejects(self) -> None:
+        proposal = self._proposal(["AT-VRF-BIND-ABS-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        def drop_item(on_disk: dict[str, object]) -> None:
+            on_disk["items"] = [
+                entry
+                for entry in on_disk["items"]  # type: ignore[index]
+                if entry.get("proposal_item_id") != item_id  # type: ignore[union-attr]
+            ]
+            on_disk["proposal_hash"] = compute_proposal_hash(on_disk)
+
+        self._mutate_proposal(proposal, drop_item)
+
+        # Re-align confirmation.proposal.proposal_hash to match the
+        # re-hashed proposal artifact so the absent-item check is what
+        # short-circuits, not the proposal_hash check.
+        confirmation_path = next(
+            iter(
+                (self.artifact_root / "scheduler_confirmations").iterdir()
+            )
+        ) / "scheduler_confirmation.json"
+        on_disk_conf = json.loads(confirmation_path.read_text())
+        on_disk_conf["proposal"]["proposal_hash"] = json.loads(
+            Path(proposal["artifact_path"]).read_text()  # type: ignore[index]
+        )["proposal_hash"]
+        confirmation_path.write_text(
+            json.dumps(on_disk_conf, indent=2, sort_keys=True)
+        )
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_BLOCKED)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "bound_proposal_item_present"
+        )
+        self.assertFalse(failed["passed"])
+        self.assertIn("not present", failed["detail"])
+
+    def test_duplicate_proposal_item_id_rejects(self) -> None:
+        proposal = self._proposal(["AT-VRF-BIND-DUP-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        def duplicate(on_disk: dict[str, object]) -> None:
+            items = on_disk["items"]  # type: ignore[index]
+            original = next(
+                entry
+                for entry in items  # type: ignore[union-attr]
+                if entry.get("proposal_item_id") == item_id  # type: ignore[union-attr]
+            )
+            items.append(dict(original))  # type: ignore[union-attr]
+            on_disk["proposal_hash"] = compute_proposal_hash(on_disk)
+
+        self._mutate_proposal(proposal, duplicate)
+
+        # Re-align confirmation.proposal.proposal_hash so the duplicate
+        # check is what short-circuits, not the proposal_hash check.
+        confirmation_path = next(
+            iter(
+                (self.artifact_root / "scheduler_confirmations").iterdir()
+            )
+        ) / "scheduler_confirmation.json"
+        on_disk_conf = json.loads(confirmation_path.read_text())
+        on_disk_conf["proposal"]["proposal_hash"] = json.loads(
+            Path(proposal["artifact_path"]).read_text()  # type: ignore[index]
+        )["proposal_hash"]
+        confirmation_path.write_text(
+            json.dumps(on_disk_conf, indent=2, sort_keys=True)
+        )
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_BLOCKED)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "bound_proposal_item_present"
+        )
+        self.assertFalse(failed["passed"])
+        self.assertIn("duplicated", failed["detail"])
+
+    def test_proposal_item_hash_mismatch_rejects(self) -> None:
+        proposal = self._proposal(["AT-VRF-BIND-ITHASH-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        def tamper_item_hash(on_disk: dict[str, object]) -> None:
+            for entry in on_disk["items"]:  # type: ignore[index]
+                if entry.get("proposal_item_id") == item_id:
+                    entry["item_hash"] = "a" * 64
+            on_disk["proposal_hash"] = compute_proposal_hash(on_disk)
+
+        self._mutate_proposal(proposal, tamper_item_hash)
+
+        # Re-align confirmation.proposal.proposal_hash so the
+        # item_hash mismatch is what short-circuits.
+        confirmation_path = next(
+            iter(
+                (self.artifact_root / "scheduler_confirmations").iterdir()
+            )
+        ) / "scheduler_confirmation.json"
+        on_disk_conf = json.loads(confirmation_path.read_text())
+        on_disk_conf["proposal"]["proposal_hash"] = json.loads(
+            Path(proposal["artifact_path"]).read_text()  # type: ignore[index]
+        )["proposal_hash"]
+        confirmation_path.write_text(
+            json.dumps(on_disk_conf, indent=2, sort_keys=True)
+        )
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "bound_proposal_item_hash_matches"
+        )
+        self.assertFalse(failed["passed"])
+
+
+class VerifierGenericSafetyTests(_Base):
+    def _force_safety(
+        self, confirmation: dict[str, object], key: str, value: object
+    ) -> Path:
+        path = Path(confirmation["artifact_path"])  # type: ignore[index]
+        on_disk = json.loads(path.read_text())
+        on_disk["safety"][key] = value
+        path.write_text(json.dumps(on_disk, indent=2, sort_keys=True))
+        return path
+
+    def test_unknown_will_flag_true_blocks(self) -> None:
+        proposal = self._proposal(["AT-VRF-SAF-WILL-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+        self._force_safety(confirmation, "will_foo", True)
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "confirmation_safety_payload_safe"
+        )
+        self.assertFalse(failed["passed"])
+        self.assertIn("will_foo", failed["detail"])
+
+    def test_unknown_performed_flag_true_blocks(self) -> None:
+        proposal = self._proposal(["AT-VRF-SAF-PERF-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+        self._force_safety(confirmation, "some_action_performed", True)
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+        failed = next(
+            c for c in report["checks"]
+            if c["name"] == "confirmation_safety_payload_safe"
+        )
+        self.assertFalse(failed["passed"])
+        self.assertIn("some_action_performed", failed["detail"])
+
+    def test_truthy_non_bool_will_flag_blocks(self) -> None:
+        proposal = self._proposal(["AT-VRF-SAF-NB-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+        # ``1`` is truthy but ``is False`` short-circuits the legacy
+        # truthy checks above by happening on a key those don't list.
+        self._force_safety(confirmation, "will_smuggle", 1)
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+
+
+class VerifierExpirationHardeningTests(_Base):
+    def test_override_greater_than_default_does_not_loosen_ttl(self) -> None:
+        proposal = self._proposal(["AT-VRF-EXP-CAP-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+
+        # Set created_at to default + 5 minutes in the past. With the
+        # default TTL of 30 minutes the confirmation is fresh; an
+        # attempt to loosen TTL via override=1440 (24h) must NOT make
+        # it last longer than the default.
+        path = Path(confirmation["artifact_path"])  # type: ignore[index]
+        on_disk = json.loads(path.read_text())
+        old = datetime.now(timezone.utc) - timedelta(
+            minutes=DEFAULT_EXPIRATION_MINUTES["create_task_execution_package"]
+            + 5
+        )
+        on_disk["created_at"] = (
+            old.isoformat().replace("+00:00", "Z")
+        )
+        path.write_text(json.dumps(on_disk, indent=2, sort_keys=True))
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+                max_age_minutes=24 * 60,  # absurdly long override
+            )
+        )
+        self.assertEqual(report["status"], STATUS_BLOCKED)
+        self.assertTrue(report["expiration"]["expired"])
+        self.assertEqual(
+            report["expiration"]["max_age_source"], "default_capped_override"
+        )
+        self.assertEqual(
+            report["expiration"]["effective_max_age_minutes"],
+            DEFAULT_EXPIRATION_MINUTES["create_task_execution_package"],
+        )
+        self.assertEqual(
+            report["expiration"]["default_max_age_minutes"],
+            DEFAULT_EXPIRATION_MINUTES["create_task_execution_package"],
+        )
+        self.assertEqual(
+            report["expiration"]["max_age_minutes_override"], 24 * 60
+        )
+
+    def test_override_less_than_default_tightens_ttl(self) -> None:
+        proposal = self._proposal(["AT-VRF-EXP-TIGHT-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+
+        # created_at is 10 minutes ago; default TTL=30 → fresh.
+        # Override TTL to 5 minutes → expired.
+        path = Path(confirmation["artifact_path"])  # type: ignore[index]
+        on_disk = json.loads(path.read_text())
+        old = datetime.now(timezone.utc) - timedelta(minutes=10)
+        on_disk["created_at"] = old.isoformat().replace("+00:00", "Z")
+        path.write_text(json.dumps(on_disk, indent=2, sort_keys=True))
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+                max_age_minutes=5,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_BLOCKED)
+        self.assertTrue(report["expiration"]["expired"])
+        self.assertEqual(
+            report["expiration"]["max_age_source"], "override_tightened"
+        )
+        self.assertEqual(
+            report["expiration"]["effective_max_age_minutes"], 5
+        )
+
+    def test_future_created_at_rejects(self) -> None:
+        proposal = self._proposal(["AT-VRF-EXP-FUT-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        path = Path(confirmation["artifact_path"])  # type: ignore[index]
+        on_disk = json.loads(path.read_text())
+        on_disk["created_at"] = future.isoformat().replace("+00:00", "Z")
+        path.write_text(json.dumps(on_disk, indent=2, sort_keys=True))
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_BLOCKED)
+        self.assertTrue(report["expiration"]["expired"])
+        self.assertEqual(
+            report["expiration"]["detail"],
+            "confirmation.created_at is in the future",
+        )
+
+
+class VerifierOutputSemanticTests(_Base):
+    def test_all_outcomes_always_disclaim_execution(self) -> None:
+        # Cover three statuses: VALID, BLOCKED, NOT_FOUND.
+        proposal = self._proposal(["AT-VRF-OUT-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        valid = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        blocked = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id="nonexistent",
+            )
+        )
+        # Build a fresh DB to force NOT_FOUND.
+        empty_db = self.root / "empty.db"
+        TaskMirrorStore(empty_db).init_db()
+        not_found = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=empty_db,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+
+        for report in (valid, blocked, not_found):
+            self.assertFalse(report["execution_allowed"], report)
+            self.assertFalse(report["execution_performed"], report)
+            self.assertFalse(report["action_evidence_created"], report)
+            self.assertFalse(report["allowed_to_attempt"], report)
+
+        self.assertEqual(valid["status"], STATUS_VALID)
+        self.assertTrue(valid["verification_passed"])
+        self.assertTrue(valid["eligible_for_command_specific_confirm"])
+        self.assertTrue(valid["ok"])
+
+        self.assertEqual(blocked["status"], STATUS_BLOCKED)
+        self.assertFalse(blocked["verification_passed"])
+        self.assertFalse(blocked["eligible_for_command_specific_confirm"])
+        self.assertFalse(blocked["ok"])
+
+        self.assertEqual(not_found["status"], STATUS_NOT_FOUND)
+        self.assertFalse(not_found["verification_passed"])
+        self.assertFalse(not_found["eligible_for_command_specific_confirm"])
+        self.assertFalse(not_found["ok"])
+
+    def test_ok_is_false_for_invalid_status(self) -> None:
+        proposal = self._proposal(["AT-VRF-OUT-OKINV-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+
+        # Corrupt the schema_version so the confirmation is INVALID.
+        path = Path(confirmation["artifact_path"])  # type: ignore[index]
+        on_disk = json.loads(path.read_text())
+        on_disk["schema_version"] = "scheduler_confirmation.v999"
+        path.write_text(json.dumps(on_disk, indent=2, sort_keys=True))
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_INVALID)
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["verification_passed"])
+        self.assertFalse(report["eligible_for_command_specific_confirm"])
+
+    def test_verifier_writes_no_db_events_or_artifacts(self) -> None:
+        proposal = self._proposal(["AT-VRF-OUT-NOWRITE-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        before_counts = self._db_counts()
+        with sqlite3.connect(self.db_path) as conn:
+            before_event_ids = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT id FROM task_events"
+                ).fetchall()
+            }
+            before_artifact_ids = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT id FROM task_artifacts"
+                ).fetchall()
+            }
+
+        verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                latest=True,
+                proposal_item_id=item_id,
+            )
+        )
+
+        with sqlite3.connect(self.db_path) as conn:
+            after_event_ids = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT id FROM task_events"
+                ).fetchall()
+            }
+            after_artifact_ids = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT id FROM task_artifacts"
+                ).fetchall()
+            }
+
+        self.assertEqual(self._db_counts(), before_counts)
+        self.assertEqual(before_event_ids, after_event_ids)
+        self.assertEqual(before_artifact_ids, after_artifact_ids)
+
+
+class VerifierConfirmationLookupTests(_Base):
+    def test_confirmation_id_lookup_ignores_unrelated_artifacts(self) -> None:
+        proposal_a = self._proposal(["AT-VRF-LK-A-001"])
+        item_a = self._safe_item_id(proposal_a)
+        confirmation_a = self._confirm(proposal_a, (item_a,))
+
+        proposal_b = self._proposal(["AT-VRF-LK-B-001"])
+        item_b = self._safe_item_id(proposal_b)
+        confirmation_b = self._confirm(proposal_b, (item_b,))
+
+        # Use the confirmation_id of A while querying — verifier must
+        # pick A's artifact even though B has been recorded later.
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                confirmation_id=confirmation_a["confirmation_id"],  # type: ignore[index]
+                proposal_item_id=item_a,
+            )
+        )
+        self.assertEqual(report["status"], STATUS_VALID)
+        self.assertEqual(
+            report["confirmation_id"],
+            confirmation_a["confirmation_id"],  # type: ignore[index]
+        )
+        self.assertNotEqual(
+            report["confirmation_id"],
+            confirmation_b["confirmation_id"],  # type: ignore[index]
+        )
+
+    def test_confirmation_id_lookup_skips_unreadable_candidate(self) -> None:
+        proposal = self._proposal(["AT-VRF-LK-SKIP-001"])
+        item_id = self._safe_item_id(proposal)
+        confirmation = self._confirm(proposal, (item_id,))
+
+        # Insert a stale artifact row that points to a missing file
+        # under the confirmation artifact type so the verifier sees
+        # both the unreadable candidate and the real one.
+        bogus = self.artifact_root / "scheduler_confirmations" / "missing.json"
+        self.store.record_task_artifact(
+            "AT-VRF-LK-SKIP-001",
+            "scheduler_confirmation",
+            bogus,
+        )
+
+        report = verify_scheduler_confirmation_item(
+            SchedulerConfirmationVerificationRequest(
+                db_path=self.db_path,
+                confirmation_id=confirmation["confirmation_id"],  # type: ignore[index]
                 proposal_item_id=item_id,
             )
         )

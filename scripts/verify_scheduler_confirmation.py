@@ -200,7 +200,10 @@ def _format_pretty(payload: dict[str, Any]) -> str:
         "Scheduler Confirmation Verification",
         f"  ok:                    {payload.get('ok')}",
         f"  status:                {payload.get('status')}",
-        f"  allowed_to_attempt:    {payload.get('allowed_to_attempt')}",
+        f"  verification_passed:   {payload.get('verification_passed')}",
+        f"  eligible_for_command_specific_confirm: "
+        f"{payload.get('eligible_for_command_specific_confirm')}",
+        f"  execution_allowed:     {payload.get('execution_allowed')}",
         f"  execution_performed:   {payload.get('execution_performed')}",
         f"  action_evidence_created: {payload.get('action_evidence_created')}",
         f"  schema_version:        {payload.get('schema_version')}",

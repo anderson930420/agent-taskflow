@@ -142,7 +142,11 @@ class CliJsonTests(_CliBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "valid")
-        self.assertTrue(payload["allowed_to_attempt"])
+        self.assertTrue(payload["verification_passed"])
+        self.assertTrue(payload["eligible_for_command_specific_confirm"])
+        # A verifier pass is not execution permission; these stay false.
+        self.assertFalse(payload["execution_allowed"])
+        self.assertFalse(payload["allowed_to_attempt"])
         self.assertFalse(payload["execution_performed"])
         self.assertFalse(payload["action_evidence_created"])
         self.assertEqual(
@@ -176,7 +180,8 @@ class CliJsonTests(_CliBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Scheduler Confirmation Verification", result.stdout)
         self.assertIn(item_id, result.stdout)
-        self.assertIn("allowed_to_attempt:    True", result.stdout)
+        self.assertIn("verification_passed:   True", result.stdout)
+        self.assertIn("execution_allowed:     False", result.stdout)
         self.assertIn("status:                valid", result.stdout)
         self.assertIn(confirmation["confirmation_id"], result.stdout)  # type: ignore[index]
 

@@ -45,8 +45,10 @@ from agent_taskflow.scheduler_confirmations import (
 )
 from agent_taskflow.scheduler_proposals import (
     PROPOSAL_ARTIFACT_TYPE,
+    SCHEMA_VERSION as PROPOSAL_SCHEMA_VERSION,
     build_proposal_candidate,
     compute_item_hash,
+    compute_proposal_hash,
 )
 from agent_taskflow.task_recommendations import (
     TaskRecommendationsError,
@@ -436,6 +438,16 @@ def verify_scheduler_confirmation_item(
             }
         )
 
+    bound_status, bound_checks, bound_report = _verify_bound_proposal_artifact(
+        on_disk=on_disk,
+        selected_item=selected_item,
+    )
+    base["bound_proposal"] = bound_report
+    for bound_check in bound_checks:
+        checks.append(bound_check)
+        if not bound_check["passed"]:
+            return _finalize(base, status=bound_status, checks=checks)
+
     expiration = _check_expiration(
         on_disk_created_at=on_disk.get("created_at"),
         kind=kind,
@@ -510,11 +522,21 @@ def _base_payload(
         "expected_command_kind": request.expected_command_kind,
         "expected_task_key": request.task_key,
         "max_age_minutes_override": request.max_age_minutes,
+        # Output semantic flags. A passing verifier report means only
+        # that the bound confirmation item is eligible for command-
+        # specific operator confirmation. It is NOT execution permission
+        # and must never be interpreted as one by downstream readers.
+        "verification_passed": False,
+        "eligible_for_command_specific_confirm": False,
+        "execution_allowed": False,
+        # Deprecated alias retained for backwards compatibility; always
+        # False so it cannot be misread as execution permission.
         "allowed_to_attempt": False,
         "execution_performed": False,
         "action_evidence_created": False,
         "checks": [],
         "expiration": None,
+        "bound_proposal": None,
         "revalidation": None,
         "safety": dict(VERIFIER_SAFETY_FLAGS),
     }
@@ -532,10 +554,16 @@ def _finalize(
         )
     base["status"] = status
     base["checks"] = checks
-    base["ok"] = status != STATUS_NOT_FOUND
-    base["allowed_to_attempt"] = status == STATUS_VALID
-    # Mutation flags are always false; reassert here so any future
-    # accidental edit gets caught by tests.
+    # ``ok`` reflects strictly that every binding/revalidation check
+    # passed; downstream code must NOT treat any other status as ok.
+    base["ok"] = status == STATUS_VALID
+    base["verification_passed"] = status == STATUS_VALID
+    base["eligible_for_command_specific_confirm"] = status == STATUS_VALID
+    # A verifier pass means the bound item is eligible for the
+    # command-specific operator confirmation step. It NEVER means
+    # execution is allowed. These flags are always false.
+    base["execution_allowed"] = False
+    base["allowed_to_attempt"] = False
     base["execution_performed"] = False
     base["action_evidence_created"] = False
     base["safety"] = dict(VERIFIER_SAFETY_FLAGS)
@@ -557,23 +585,54 @@ def _locate_confirmation_artifact(
 
 
 def _find_confirmation_by_id(db_path: Path, confirmation_id: str) -> Path | None:
-    pattern = (
-        f"%/scheduler_confirmations/{confirmation_id}/scheduler_confirmation.json"
-    )
+    """Locate a scheduler_confirmation artifact by its on-disk ``confirmation_id``.
+
+    Performs a linear scan of ``task_artifacts`` rows whose
+    ``artifact_type`` is ``scheduler_confirmation``, opens each candidate
+    JSON file, and returns the path only when the parsed object's
+    ``confirmation_id`` field exactly matches ``confirmation_id``.
+    Candidates that cannot be opened, do not parse as JSON, or do not
+    parse as an object are skipped silently so a single broken artifact
+    cannot prevent locating an unrelated valid one. If nothing matches,
+    returns ``None`` and the caller finalizes with ``STATUS_NOT_FOUND``.
+
+    This intentionally does not rely on filesystem path conventions
+    (e.g. ``.../scheduler_confirmations/<id>/...``); the on-disk
+    ``confirmation_id`` field is the authoritative identifier. The
+    function is a local-scale linear scan suitable for current artifact
+    volumes; if artifact volume grows, an indexed lookup (e.g. a
+    dedicated ``confirmation_id`` column on ``task_artifacts``) can
+    replace it without changing the caller's contract.
+    """
+
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        row = conn.execute(
+        rows = conn.execute(
             """
-            SELECT path
+            SELECT DISTINCT path
             FROM task_artifacts
             WHERE artifact_type = ?
-              AND path LIKE ?
             ORDER BY id ASC
-            LIMIT 1
             """,
-            (CONFIRMATION_ARTIFACT_TYPE, pattern),
-        ).fetchone()
-    return Path(row["path"]) if row else None
+            (CONFIRMATION_ARTIFACT_TYPE,),
+        ).fetchall()
+
+    seen: set[str] = set()
+    for row in rows:
+        raw_path = row["path"]
+        if not isinstance(raw_path, str) or raw_path in seen:
+            continue
+        seen.add(raw_path)
+        candidate = Path(raw_path)
+        try:
+            on_disk = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(on_disk, dict):
+            continue
+        if on_disk.get("confirmation_id") == confirmation_id:
+            return candidate
+    return None
 
 
 def _find_latest_confirmation(db_path: Path) -> Path | None:
@@ -668,6 +727,24 @@ def _confirmation_safety_error(on_disk: dict[str, Any]) -> str | None:
         return "safety.task_status_changed must be false"
     if safety.get("background_worker_started"):
         return "safety.background_worker_started must be false"
+
+    # Generic hardening: any forward-looking ``will_*`` flag or any
+    # past-tense ``*_performed`` flag in the confirmation safety block
+    # must be EXACTLY False (``is False``), not merely falsy. This
+    # blocks future-added or attacker-added flags that smuggle truthy
+    # non-bool values (1, "true", []-but-non-empty, dict, etc.) past
+    # the explicit allowlist above.
+    for key, value in safety.items():
+        if not isinstance(key, str):
+            continue
+        if key.startswith("will_") and value is not False:
+            return (
+                f"safety.{key} must be exactly False, got {value!r}"
+            )
+        if key.endswith("_performed") and value is not False:
+            return (
+                f"safety.{key} must be exactly False, got {value!r}"
+            )
     return None
 
 
@@ -684,6 +761,345 @@ def _select_item(
     if len(matches) != 1:
         return None
     return matches[0]
+
+
+def _verify_bound_proposal_artifact(
+    *,
+    on_disk: dict[str, Any],
+    selected_item: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """Reload and verify the bound scheduler_proposal artifact.
+
+    The confirmation artifact references its source proposal artifact
+    via ``confirmation.proposal.proposal_artifact_path``. This helper
+    reopens that proposal artifact from disk and verifies that the
+    confirmation's binding is intact:
+
+    1. ``bound_proposal_artifact_present``: the confirmation's
+       ``proposal.proposal_artifact_path`` field exists and is a
+       non-empty absolute string.
+    2. ``bound_proposal_artifact_readable``: the file exists, can be
+       read, and parses as a JSON object.
+    3. ``bound_proposal_schema_supported``: the artifact's
+       ``schema_version`` equals the current proposal schema.
+    4. ``bound_proposal_id_matches``: the artifact's ``proposal_id``
+       equals the confirmation's bound ``proposal.proposal_id``.
+    5. ``bound_proposal_hash_matches``: the confirmation's bound
+       ``proposal.proposal_hash`` equals the artifact's claimed
+       ``proposal_hash`` AND equals the freshly recomputed hash. This
+       rejects both confirmation-side tampering and proposal-side
+       tampering (recomputing the hash would diverge from the claim).
+    6. ``bound_proposal_item_present``: exactly one item in the
+       artifact's ``items`` array has the selected ``proposal_item_id``.
+       Absence and duplication are both rejected as BLOCKED because the
+       selected item is not unambiguously available.
+    7. ``bound_proposal_item_hash_matches``: the proposal artifact item
+       hash equals the confirmation's selected item hash. The current
+       recomputed hash is cross-checked separately during revalidation;
+       all three must match.
+
+    Returns ``(status, checks, report)``. ``status`` is the verifier
+    short-circuit status for the FIRST failing check; if every check
+    passes the caller continues with downstream checks. The returned
+    report is informational and is mirrored into the verifier output as
+    ``bound_proposal``. The function is read-only.
+    """
+
+    report: dict[str, Any] = {
+        "proposal_artifact_path": None,
+        "bound_proposal_id": None,
+        "bound_proposal_hash": None,
+        "artifact_proposal_id": None,
+        "artifact_proposal_hash": None,
+        "recomputed_proposal_hash": None,
+        "artifact_item_hash": None,
+        "confirmation_item_hash": selected_item.get("item_hash"),
+        "schema_version": None,
+    }
+    checks: list[dict[str, Any]] = []
+
+    proposal_block = on_disk.get("proposal")
+    if not isinstance(proposal_block, dict):
+        checks.append(
+            {
+                "name": "bound_proposal_artifact_present",
+                "passed": False,
+                "detail": "confirmation.proposal is missing or not an object",
+            }
+        )
+        return STATUS_INVALID, checks, report
+
+    bound_proposal_id = proposal_block.get("proposal_id")
+    bound_proposal_hash = proposal_block.get("proposal_hash")
+    raw_path = proposal_block.get("proposal_artifact_path")
+    report["bound_proposal_id"] = (
+        bound_proposal_id if isinstance(bound_proposal_id, str) else None
+    )
+    report["bound_proposal_hash"] = (
+        bound_proposal_hash if isinstance(bound_proposal_hash, str) else None
+    )
+
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        checks.append(
+            {
+                "name": "bound_proposal_artifact_present",
+                "passed": False,
+                "detail": (
+                    "confirmation.proposal.proposal_artifact_path is missing "
+                    "or not a non-empty string"
+                ),
+            }
+        )
+        return STATUS_INVALID, checks, report
+
+    proposal_path = Path(raw_path)
+    report["proposal_artifact_path"] = str(proposal_path)
+    checks.append(
+        {
+            "name": "bound_proposal_artifact_present",
+            "passed": True,
+            "detail": str(proposal_path),
+        }
+    )
+
+    if not proposal_path.exists():
+        checks.append(
+            {
+                "name": "bound_proposal_artifact_readable",
+                "passed": False,
+                "detail": (
+                    "bound scheduler_proposal artifact file not found on disk: "
+                    f"{proposal_path}"
+                ),
+            }
+        )
+        return STATUS_INVALID, checks, report
+
+    try:
+        proposal_raw = proposal_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        checks.append(
+            {
+                "name": "bound_proposal_artifact_readable",
+                "passed": False,
+                "detail": (
+                    "could not read bound scheduler_proposal artifact: "
+                    f"{exc}"
+                ),
+            }
+        )
+        return STATUS_INVALID, checks, report
+
+    try:
+        proposal_payload = json.loads(proposal_raw)
+    except json.JSONDecodeError as exc:
+        checks.append(
+            {
+                "name": "bound_proposal_artifact_readable",
+                "passed": False,
+                "detail": (
+                    "could not parse bound scheduler_proposal artifact JSON: "
+                    f"{exc}"
+                ),
+            }
+        )
+        return STATUS_INVALID, checks, report
+
+    if not isinstance(proposal_payload, dict):
+        checks.append(
+            {
+                "name": "bound_proposal_artifact_readable",
+                "passed": False,
+                "detail": (
+                    "bound scheduler_proposal artifact JSON root is not an "
+                    "object"
+                ),
+            }
+        )
+        return STATUS_INVALID, checks, report
+
+    checks.append(
+        {
+            "name": "bound_proposal_artifact_readable",
+            "passed": True,
+            "detail": None,
+        }
+    )
+
+    schema_version = proposal_payload.get("schema_version")
+    report["schema_version"] = (
+        schema_version if isinstance(schema_version, str) else None
+    )
+    if schema_version != PROPOSAL_SCHEMA_VERSION:
+        checks.append(
+            {
+                "name": "bound_proposal_schema_supported",
+                "passed": False,
+                "detail": (
+                    f"bound proposal schema_version must be "
+                    f"{PROPOSAL_SCHEMA_VERSION!r}; got {schema_version!r}"
+                ),
+            }
+        )
+        return STATUS_INVALID, checks, report
+
+    checks.append(
+        {
+            "name": "bound_proposal_schema_supported",
+            "passed": True,
+            "detail": None,
+        }
+    )
+
+    artifact_proposal_id = proposal_payload.get("proposal_id")
+    artifact_proposal_hash = proposal_payload.get("proposal_hash")
+    report["artifact_proposal_id"] = (
+        artifact_proposal_id if isinstance(artifact_proposal_id, str) else None
+    )
+    report["artifact_proposal_hash"] = (
+        artifact_proposal_hash
+        if isinstance(artifact_proposal_hash, str)
+        else None
+    )
+
+    id_ok = (
+        isinstance(artifact_proposal_id, str)
+        and isinstance(bound_proposal_id, str)
+        and artifact_proposal_id == bound_proposal_id
+    )
+    checks.append(
+        {
+            "name": "bound_proposal_id_matches",
+            "passed": id_ok,
+            "detail": (
+                None
+                if id_ok
+                else (
+                    f"confirmation.proposal.proposal_id "
+                    f"{bound_proposal_id!r} does not match bound proposal "
+                    f"artifact proposal_id {artifact_proposal_id!r}"
+                )
+            ),
+        }
+    )
+    if not id_ok:
+        return STATUS_INVALID, checks, report
+
+    try:
+        recomputed_proposal_hash = compute_proposal_hash(proposal_payload)
+    except KeyError as exc:
+        checks.append(
+            {
+                "name": "bound_proposal_hash_matches",
+                "passed": False,
+                "detail": (
+                    "could not recompute proposal_hash from bound artifact: "
+                    f"missing field {exc!r}"
+                ),
+            }
+        )
+        return STATUS_INVALID, checks, report
+
+    report["recomputed_proposal_hash"] = recomputed_proposal_hash
+
+    hash_ok = (
+        isinstance(artifact_proposal_hash, str)
+        and isinstance(bound_proposal_hash, str)
+        and bound_proposal_hash == artifact_proposal_hash
+        and recomputed_proposal_hash == artifact_proposal_hash
+    )
+    checks.append(
+        {
+            "name": "bound_proposal_hash_matches",
+            "passed": hash_ok,
+            "detail": (
+                None
+                if hash_ok
+                else (
+                    "bound proposal_hash mismatch: "
+                    f"confirmation={bound_proposal_hash!r}, "
+                    f"artifact={artifact_proposal_hash!r}, "
+                    f"recomputed={recomputed_proposal_hash!r}"
+                )
+            ),
+        }
+    )
+    if not hash_ok:
+        return STATUS_INVALID, checks, report
+
+    proposal_item_id = selected_item.get("proposal_item_id")
+    matches: list[dict[str, Any]] = []
+    for entry in proposal_payload.get("items") or []:
+        if (
+            isinstance(entry, dict)
+            and entry.get("proposal_item_id") == proposal_item_id
+        ):
+            matches.append(entry)
+
+    if len(matches) == 0:
+        checks.append(
+            {
+                "name": "bound_proposal_item_present",
+                "passed": False,
+                "detail": (
+                    f"selected proposal_item_id {proposal_item_id!r} not "
+                    "present in bound scheduler_proposal artifact"
+                ),
+            }
+        )
+        return STATUS_BLOCKED, checks, report
+    if len(matches) > 1:
+        checks.append(
+            {
+                "name": "bound_proposal_item_present",
+                "passed": False,
+                "detail": (
+                    f"selected proposal_item_id {proposal_item_id!r} is "
+                    "duplicated in bound scheduler_proposal artifact"
+                ),
+            }
+        )
+        return STATUS_BLOCKED, checks, report
+
+    bound_item = matches[0]
+    artifact_item_hash = bound_item.get("item_hash")
+    report["artifact_item_hash"] = (
+        artifact_item_hash if isinstance(artifact_item_hash, str) else None
+    )
+
+    checks.append(
+        {
+            "name": "bound_proposal_item_present",
+            "passed": True,
+            "detail": None,
+        }
+    )
+
+    confirmation_item_hash = selected_item.get("item_hash")
+    item_hash_ok = (
+        isinstance(artifact_item_hash, str)
+        and isinstance(confirmation_item_hash, str)
+        and artifact_item_hash == confirmation_item_hash
+    )
+    checks.append(
+        {
+            "name": "bound_proposal_item_hash_matches",
+            "passed": item_hash_ok,
+            "detail": (
+                None
+                if item_hash_ok
+                else (
+                    "bound proposal item_hash mismatch: "
+                    f"confirmation={confirmation_item_hash!r}, "
+                    f"artifact={artifact_item_hash!r}"
+                )
+            ),
+        }
+    )
+    if not item_hash_ok:
+        return STATUS_INVALID, checks, report
+
+    return STATUS_VALID, checks, report
 
 
 def _item_field_error(selected_item: dict[str, Any]) -> str | None:
@@ -711,17 +1127,53 @@ def _check_expiration(
     max_age_minutes_override: int | None,
     now: datetime | None,
 ) -> dict[str, Any]:
-    minutes = (
-        max_age_minutes_override
-        if max_age_minutes_override is not None
-        else DEFAULT_EXPIRATION_MINUTES.get(kind)
-    )
+    """Compute the expiration check for one confirmation item.
+
+    TTL hardening rules:
+
+    * The default max age is ``DEFAULT_EXPIRATION_MINUTES[kind]`` for
+      consumable kinds.
+    * An explicit ``max_age_minutes_override`` may ONLY tighten the
+      effective TTL, never loosen it. The effective max age is
+      ``min(default, override)``.
+    * If the confirmation's ``created_at`` is in the future (i.e.
+      ``age < 0``), the check fails with detail
+      ``"confirmation.created_at is in the future"`` so an attacker
+      cannot bypass the TTL by writing a future timestamp.
+    """
+
+    default_minutes = DEFAULT_EXPIRATION_MINUTES.get(kind)
+    if default_minutes is not None and max_age_minutes_override is not None:
+        effective_minutes = min(default_minutes, max_age_minutes_override)
+        if max_age_minutes_override < default_minutes:
+            source = "override_tightened"
+        elif max_age_minutes_override > default_minutes:
+            source = "default_capped_override"
+        else:
+            source = "default"
+    elif default_minutes is not None:
+        effective_minutes = default_minutes
+        source = "default"
+    elif max_age_minutes_override is not None:
+        # No default policy configured but caller supplied a cap; the
+        # override cannot loosen anything (there is nothing to loosen),
+        # so use it as the effective ceiling.
+        effective_minutes = max_age_minutes_override
+        source = "override_tightened"
+    else:
+        effective_minutes = None
+        source = "default"
+
     report: dict[str, Any] = {
         "kind": kind,
-        "max_age_minutes": minutes,
-        "max_age_source": (
-            "override" if max_age_minutes_override is not None else "default"
-        ),
+        "default_max_age_minutes": default_minutes,
+        "max_age_minutes_override": max_age_minutes_override,
+        "effective_max_age_minutes": effective_minutes,
+        # Legacy alias kept for backwards compatibility with readers
+        # that referenced ``max_age_minutes`` before the override
+        # hardening.
+        "max_age_minutes": effective_minutes,
+        "max_age_source": source,
         "confirmation_created_at": (
             on_disk_created_at if isinstance(on_disk_created_at, str) else None
         ),
@@ -730,12 +1182,6 @@ def _check_expiration(
         "expired": True,
         "detail": None,
     }
-
-    if minutes is None:
-        report["detail"] = (
-            f"no expiration policy configured for command kind {kind!r}"
-        )
-        return report
 
     if not isinstance(on_disk_created_at, str):
         report["detail"] = "confirmation.created_at is missing"
@@ -753,10 +1199,23 @@ def _check_expiration(
     age = (current - created).total_seconds()
     report["now"] = current.isoformat().replace("+00:00", "Z")
     report["age_seconds"] = age
-    report["expired"] = age > minutes * 60
+
+    if age < 0:
+        report["expired"] = True
+        report["detail"] = "confirmation.created_at is in the future"
+        return report
+
+    if effective_minutes is None:
+        report["detail"] = (
+            f"no expiration policy configured for command kind {kind!r}"
+        )
+        return report
+
+    report["expired"] = age > effective_minutes * 60
     if report["expired"]:
         report["detail"] = (
-            f"confirmation is {age:.1f}s old; max age is {minutes * 60}s"
+            f"confirmation is {age:.1f}s old; max age is "
+            f"{effective_minutes * 60}s"
         )
     return report
 
