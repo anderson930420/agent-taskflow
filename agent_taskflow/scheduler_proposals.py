@@ -583,6 +583,100 @@ def _compute_proposal_hash(payload: dict[str, Any]) -> str:
     return _sha256_hex(_proposal_hash_payload(payload))
 
 
+def compute_item_hash(item: dict[str, Any]) -> str:
+    """Recompute the sha256 ``item_hash`` for a scheduler proposal item.
+
+    Stable public entry point for callers (e.g. the review surface) that
+    need to verify hash binding without depending on private helpers. Does
+    not mutate ``item``.
+    """
+
+    return _compute_item_hash(item)
+
+
+def compute_proposal_hash(payload: dict[str, Any]) -> str:
+    """Recompute the sha256 ``proposal_hash`` for a scheduler proposal payload.
+
+    Stable public entry point. Does not mutate ``payload``.
+    """
+
+    return _compute_proposal_hash(payload)
+
+
+def verify_proposal_hashes(payload: dict[str, Any]) -> dict[str, Any]:
+    """Verify ``proposal_hash`` and per-item ``item_hash`` against a recompute.
+
+    Returns a hash verification report. Does not mutate ``payload``. The
+    returned dict has keys:
+
+    - ``hash_algorithm``
+    - ``proposal_hash_payload_version``
+    - ``item_hash_payload_version``
+    - ``proposal_hash_valid`` (bool)
+    - ``expected_proposal_hash`` (recomputed) / ``actual_proposal_hash``
+    - ``items``: per-item reports with ``proposal_item_id``,
+      ``item_hash_valid``, ``expected_item_hash``, ``actual_item_hash``
+
+    The function intentionally cannot distinguish a tampering attacker who
+    re-hashes the entire payload self-consistently; that requires a
+    signature, which is out of scope.
+    """
+
+    items_in = payload.get("items") or []
+    item_reports: list[dict[str, Any]] = []
+    for item in items_in:
+        if not isinstance(item, dict):
+            item_reports.append(
+                {
+                    "proposal_item_id": None,
+                    "item_hash_valid": False,
+                    "expected_item_hash": None,
+                    "actual_item_hash": None,
+                }
+            )
+            continue
+        actual = item.get("item_hash")
+        try:
+            expected = _compute_item_hash(item)
+        except KeyError:
+            item_reports.append(
+                {
+                    "proposal_item_id": item.get("proposal_item_id"),
+                    "item_hash_valid": False,
+                    "expected_item_hash": None,
+                    "actual_item_hash": actual if isinstance(actual, str) else None,
+                }
+            )
+            continue
+        item_reports.append(
+            {
+                "proposal_item_id": item.get("proposal_item_id"),
+                "item_hash_valid": actual == expected,
+                "expected_item_hash": expected,
+                "actual_item_hash": actual if isinstance(actual, str) else None,
+            }
+        )
+
+    actual_proposal = payload.get("proposal_hash")
+    try:
+        expected_proposal = _compute_proposal_hash(payload)
+    except KeyError:
+        expected_proposal = None
+    return {
+        "hash_algorithm": HASH_ALGORITHM,
+        "proposal_hash_payload_version": PROPOSAL_HASH_PAYLOAD_VERSION,
+        "item_hash_payload_version": ITEM_HASH_PAYLOAD_VERSION,
+        "proposal_hash_valid": (
+            isinstance(actual_proposal, str)
+            and isinstance(expected_proposal, str)
+            and actual_proposal == expected_proposal
+        ),
+        "expected_proposal_hash": expected_proposal,
+        "actual_proposal_hash": actual_proposal if isinstance(actual_proposal, str) else None,
+        "items": item_reports,
+    }
+
+
 def _sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
     severity_rank = _SEVERITY_RANK.get(item.get("severity") or "info", 4)
     return (item["priority_rank"], severity_rank, item["task_key"])
@@ -610,6 +704,9 @@ __all__ = [
     "SCHEMA_VERSION",
     "SchedulerProposalError",
     "SchedulerProposalRequest",
+    "compute_item_hash",
+    "compute_proposal_hash",
     "create_scheduler_proposal",
     "propose_tasks",
+    "verify_proposal_hashes",
 ]
