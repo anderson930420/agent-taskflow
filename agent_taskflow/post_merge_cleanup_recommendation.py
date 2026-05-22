@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from agent_taskflow._helpers import dedupe_preserve_order as _dedupe_preserve_order
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore, default_db_path
 from agent_taskflow.tasks import normalize_task_key
@@ -1119,17 +1120,6 @@ def _normalize_repo(repo: str) -> str:
     if normalized.count("/") != 1:
         raise ValueError("repo must be an owner/name string")
     return normalized
-
-
-def _dedupe_preserve_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
 
 
 # ``subprocess.PIPE`` is imported lazily in _run_command to keep the public

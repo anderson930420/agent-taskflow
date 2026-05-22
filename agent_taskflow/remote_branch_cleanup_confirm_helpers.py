@@ -17,6 +17,10 @@ import json
 import re
 from typing import Any
 
+from agent_taskflow._helpers import (
+    dedupe_non_empty_preserve_order as dedupe_preserve_order,
+)
+
 
 PROTECTED_BRANCHES: set[str] = {"main", "master", "trunk"}
 
@@ -54,18 +58,6 @@ def validate_branch_name(branch: str) -> str | None:
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?", branch):
         return "Branch name is not a safe task branch name"
     return None
-
-
-def dedupe_preserve_order(values: list[str]) -> list[str]:
-    """Return values with duplicates and empty strings removed, preserving order."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
 
 
 def build_git_ls_remote_heads_command(remote: str, branch: str) -> list[str]:

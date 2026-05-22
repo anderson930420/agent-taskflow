@@ -16,6 +16,8 @@ import re
 import shlex
 from typing import Any
 
+from agent_taskflow._helpers import dedupe_preserve_order
+
 
 PROTECTED_HEAD_BRANCHES = {"main", "master"}
 
@@ -237,17 +239,6 @@ def normalize_branch_choice(
             f"Provided {field_name} branch {normalized!r} does not match the ready handoff branch {canonical!r}"
         )
     return normalized
-
-
-def dedupe_preserve_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
 
 
 def empty_verification_preview() -> dict[str, Any]:

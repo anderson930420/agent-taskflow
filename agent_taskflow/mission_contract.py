@@ -27,6 +27,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent_taskflow._helpers import require_non_empty as _require_non_empty
 from agent_taskflow.models import require_absolute_path
 
 
@@ -100,13 +101,6 @@ def _dict_has_secret_values(d: dict) -> bool:
         if isinstance(value, dict) and _dict_has_secret_values(value):
             return True
     return False
-
-
-def _require_non_empty(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must not be empty")
-    return normalized
 
 
 def _normalize_path_policy(paths: tuple[str, ...], field_name: str) -> tuple[str, ...]:

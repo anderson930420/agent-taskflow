@@ -14,6 +14,9 @@ from pathlib import Path
 import subprocess
 from typing import Any, Callable, Protocol
 
+from agent_taskflow._helpers import (
+    dedupe_non_empty_preserve_order as _dedupe_preserve_order,
+)
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord, utc_now_iso
 from agent_taskflow.post_merge_cleanup_recommendation import (
     PostMergeCleanupRecommendationError,
@@ -1162,17 +1165,6 @@ def _empty_local_branch() -> dict[str, Any]:
         "deleted": False,
         "warnings": [],
     }
-
-
-def _dedupe_preserve_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
 
 
 def _safety_block(
