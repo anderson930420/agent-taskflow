@@ -215,6 +215,7 @@ def _error_payload(
         "runner_result": None,
         "safety": _safety_for_cli_error(),
         "error": message,
+        "runtime": None,
     }
 
 
