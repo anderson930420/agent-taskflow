@@ -15,6 +15,8 @@ from agent_taskflow.intake_runner_handoff import (
     STATUS_BLOCKED,
     STATUS_CREATED,
     STATUS_PREVIEW,
+    VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+    VERIFIER_REPORT_ARTIFACT_TYPE,
     IntakeRunnerHandoffError,
     IntakeRunnerHandoffRequest,
     create_intake_runner_handoff,
@@ -169,6 +171,30 @@ class DryRunValidTests(_Base):
         self.assertEqual(
             payload["runner_contract"], dict(RUNNER_CONTRACT_FLAGS)
         )
+        verifier_block = payload["verifier_report"]
+        self.assertIsNone(verifier_block["verifier_run_id"])
+        self.assertIsNone(verifier_block["verifier_report_path"])
+        self.assertFalse(verifier_block["persisted"])
+        self.assertEqual(
+            verifier_block["artifact_type"], VERIFIER_REPORT_ARTIFACT_TYPE
+        )
+        self.assertEqual(
+            verifier_block["schema_version"],
+            VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        )
+        self.assertTrue(verifier_block["verification_passed"])
+        self.assertTrue(
+            verifier_block["eligible_for_command_specific_confirm"]
+        )
+        self.assertFalse(verifier_block["execution_allowed"])
+        self.assertFalse(verifier_block["execution_performed"])
+        self.assertFalse(verifier_block["action_evidence_created"])
+        self.assertFalse(
+            (
+                self.artifact_root
+                / "scheduler_confirmation_verifier_reports"
+            ).exists()
+        )
         self.assertEqual(self._db_counts(), before)
 
     def test_dry_run_writes_no_artifact_or_event(self) -> None:
@@ -218,6 +244,12 @@ class DryRunValidTests(_Base):
         self.assertFalse(
             (self.artifact_root / "intake_runner_handoffs").exists()
         )
+        self.assertFalse(
+            (
+                self.artifact_root
+                / "scheduler_confirmation_verifier_reports"
+            ).exists()
+        )
 
 
 class ConfirmedModeTests(_Base):
@@ -262,6 +294,57 @@ class ConfirmedModeTests(_Base):
         self.assertEqual(on_disk["schema_version"], SCHEMA_VERSION)
         self.assertEqual(on_disk["handoff_id"], payload["handoff_id"])
         self.assertEqual(on_disk["status"], STATUS_CREATED)
+
+        verifier_block = on_disk["verifier_report"]
+        self.assertIsInstance(verifier_block["verifier_run_id"], str)
+        self.assertTrue(verifier_block["verifier_run_id"])
+        self.assertIsInstance(verifier_block["verifier_report_path"], str)
+        self.assertTrue(verifier_block["verifier_report_path"])
+        self.assertTrue(verifier_block["persisted"])
+        self.assertEqual(
+            verifier_block["artifact_type"], VERIFIER_REPORT_ARTIFACT_TYPE
+        )
+        self.assertEqual(
+            verifier_block["schema_version"],
+            VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        )
+        self.assertEqual(verifier_block["status"], STATUS_VALID)
+        self.assertTrue(verifier_block["verification_passed"])
+        self.assertTrue(
+            verifier_block["eligible_for_command_specific_confirm"]
+        )
+        self.assertFalse(verifier_block["execution_allowed"])
+        self.assertFalse(verifier_block["execution_performed"])
+        self.assertFalse(verifier_block["action_evidence_created"])
+
+        report_path = Path(verifier_block["verifier_report_path"])
+        self.assertTrue(report_path.exists())
+        report_on_disk = json.loads(report_path.read_text())
+        self.assertEqual(
+            report_on_disk["schema_version"],
+            VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            report_on_disk["verifier_run_id"],
+            verifier_block["verifier_run_id"],
+        )
+        self.assertIn("report", report_on_disk)
+        inner = report_on_disk["report"]
+        self.assertEqual(inner["status"], STATUS_VALID)
+        self.assertTrue(inner["verification_passed"])
+        self.assertFalse(inner["execution_allowed"])
+        self.assertFalse(inner["execution_performed"])
+        self.assertFalse(inner["action_evidence_created"])
+        self.assertIn("checks", inner)
+        self.assertTrue(inner["checks"])
+
+        safety = report_on_disk["safety"]
+        self.assertTrue(safety["dry_run_report_only"])
+        self.assertFalse(safety["execution_allowed"])
+        self.assertFalse(safety["execution_performed"])
+        self.assertFalse(safety["action_evidence_created"])
+        self.assertFalse(safety["executor_started"])
+        self.assertFalse(safety["validators_started"])
 
         with sqlite3.connect(self.db_path) as conn:
             artifact_types_for_task = {
@@ -393,6 +476,22 @@ class ConfirmedModeTests(_Base):
         self.assertFalse(event_payload["action_evidence_created"])
         self.assertTrue(event_payload["requires_future_runtime_gate"])
 
+        self.assertIsInstance(event_payload["verifier_run_id"], str)
+        self.assertTrue(event_payload["verifier_run_id"])
+        self.assertIsInstance(event_payload["verifier_report_path"], str)
+        self.assertTrue(event_payload["verifier_report_path"])
+        self.assertEqual(
+            event_payload["verifier_report_artifact_type"],
+            VERIFIER_REPORT_ARTIFACT_TYPE,
+        )
+        self.assertEqual(
+            event_payload["verifier_report_schema_version"],
+            VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        )
+        self.assertTrue(
+            Path(event_payload["verifier_report_path"]).exists()
+        )
+
 
 class OutputSemanticTests(_Base):
     def test_all_outcomes_disclaim_execution(self) -> None:
@@ -461,6 +560,7 @@ class BlockedDryRunTests(_Base):
         item_id = self._safe_item_id(proposal)
         self._confirm(proposal, (item_id,))
 
+        before = self._db_counts()
         payload = create_intake_runner_handoff(
             IntakeRunnerHandoffRequest(
                 db_path=self.db_path,
@@ -473,6 +573,27 @@ class BlockedDryRunTests(_Base):
         self.assertFalse(payload["ok"])
         self.assertIsNone(payload["artifact_path"])
         self.assertIn("error", payload)
+        verifier_block = payload["verifier_report"]
+        self.assertIsNone(verifier_block["verifier_run_id"])
+        self.assertIsNone(verifier_block["verifier_report_path"])
+        self.assertFalse(verifier_block["persisted"])
+        self.assertEqual(
+            verifier_block["artifact_type"], VERIFIER_REPORT_ARTIFACT_TYPE
+        )
+        self.assertEqual(
+            verifier_block["schema_version"],
+            VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        )
+        self.assertFalse(verifier_block["execution_allowed"])
+        self.assertFalse(verifier_block["execution_performed"])
+        self.assertFalse(verifier_block["action_evidence_created"])
+        self.assertFalse(
+            (
+                self.artifact_root
+                / "scheduler_confirmation_verifier_reports"
+            ).exists()
+        )
+        self.assertEqual(self._db_counts(), before)
 
     def test_blocked_confirmed_mode_refuses_persistence(self) -> None:
         proposal = self._proposal(["AT-IRH-RFS-001"])
@@ -494,6 +615,12 @@ class BlockedDryRunTests(_Base):
         self.assertEqual(self._db_counts(), before)
         self.assertFalse(
             (self.artifact_root / "intake_runner_handoffs").exists()
+        )
+        self.assertFalse(
+            (
+                self.artifact_root
+                / "scheduler_confirmation_verifier_reports"
+            ).exists()
         )
 
     def test_invalid_confirmation_artifact_refuses_persistence(self) -> None:
@@ -520,6 +647,12 @@ class BlockedDryRunTests(_Base):
             )
         self.assertFalse(
             (self.artifact_root / "intake_runner_handoffs").exists()
+        )
+        self.assertFalse(
+            (
+                self.artifact_root
+                / "scheduler_confirmation_verifier_reports"
+            ).exists()
         )
 
     def test_expected_task_key_mismatch_blocks_dry_run(self) -> None:
@@ -688,6 +821,118 @@ class ArtifactEventTypeDisjointTests(_Base):
         }
         self.assertNotIn(HANDOFF_ARTIFACT_TYPE, action_evidence_artifact_types)
         self.assertNotIn(HANDOFF_EVENT_TYPE, action_evidence_event_types)
+
+
+class VerifierReportBindingTests(_Base):
+    def test_verifier_report_path_lives_under_artifact_root(self) -> None:
+        proposal = self._proposal(["AT-IRH-VR-PATH-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        payload = create_intake_runner_handoff(
+            IntakeRunnerHandoffRequest(
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                proposal_item_id=item_id,
+                latest=True,
+                dry_run=False,
+                confirm_create_handoff=True,
+            )
+        )
+        report_path = Path(payload["verifier_report"]["verifier_report_path"])
+        verifier_run_id = payload["verifier_report"]["verifier_run_id"]
+        self.assertEqual(
+            report_path.parent.parent,
+            self.artifact_root / "scheduler_confirmation_verifier_reports",
+        )
+        self.assertEqual(report_path.parent.name, verifier_run_id)
+        self.assertEqual(report_path.name, "verifier_report.json")
+        self.assertTrue(report_path.is_file())
+
+    def test_verifier_report_artifact_does_not_claim_execution(
+        self,
+    ) -> None:
+        proposal = self._proposal(["AT-IRH-VR-SAFETY-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        payload = create_intake_runner_handoff(
+            IntakeRunnerHandoffRequest(
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                proposal_item_id=item_id,
+                latest=True,
+                dry_run=False,
+                confirm_create_handoff=True,
+            )
+        )
+        report_path = Path(payload["verifier_report"]["verifier_report_path"])
+        report_on_disk = json.loads(report_path.read_text())
+
+        safety = report_on_disk["safety"]
+        self.assertTrue(safety["dry_run_report_only"])
+        self.assertFalse(safety["execution_allowed"])
+        self.assertFalse(safety["execution_performed"])
+        self.assertFalse(safety["action_evidence_created"])
+        self.assertFalse(safety["executor_started"])
+        self.assertFalse(safety["validators_started"])
+
+        inner = report_on_disk["report"]
+        self.assertFalse(inner["execution_allowed"])
+        self.assertFalse(inner["execution_performed"])
+        self.assertFalse(inner["action_evidence_created"])
+
+    def test_verifier_run_ids_unique_per_confirmed_call(self) -> None:
+        proposal = self._proposal(
+            ["AT-IRH-VR-UNIQ-001", "AT-IRH-VR-UNIQ-002"]
+        )
+        first_item = None
+        second_item = None
+        for item in proposal["items"]:  # type: ignore[index]
+            if (
+                item["recommended_command_kind"]
+                == "create_task_execution_package"
+                and not item.get("consistency_warnings")
+            ):
+                if first_item is None:
+                    first_item = item["proposal_item_id"]
+                else:
+                    second_item = item["proposal_item_id"]
+                    break
+        self.assertIsNotNone(first_item)
+        self.assertIsNotNone(second_item)
+        self._confirm(proposal, (first_item, second_item))  # type: ignore[arg-type]
+
+        first = create_intake_runner_handoff(
+            IntakeRunnerHandoffRequest(
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                proposal_item_id=first_item,  # type: ignore[arg-type]
+                latest=True,
+                dry_run=False,
+                confirm_create_handoff=True,
+            )
+        )
+        second = create_intake_runner_handoff(
+            IntakeRunnerHandoffRequest(
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                proposal_item_id=second_item,  # type: ignore[arg-type]
+                latest=True,
+                dry_run=False,
+                confirm_create_handoff=True,
+            )
+        )
+
+        first_id = first["verifier_report"]["verifier_run_id"]
+        second_id = second["verifier_report"]["verifier_run_id"]
+        self.assertNotEqual(first_id, second_id)
+        self.assertTrue(first_id.startswith("verifier-run-"))
+        self.assertTrue(second_id.startswith("verifier-run-"))
+        self.assertNotEqual(
+            first["verifier_report"]["verifier_report_path"],
+            second["verifier_report"]["verifier_report_path"],
+        )
 
 
 if __name__ == "__main__":
