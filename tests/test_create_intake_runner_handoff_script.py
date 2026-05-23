@@ -12,6 +12,8 @@ from pathlib import Path
 from agent_taskflow.intake_runner_handoff import (
     HANDOFF_ARTIFACT_TYPE,
     HANDOFF_EVENT_TYPE,
+    VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+    VERIFIER_REPORT_ARTIFACT_TYPE,
 )
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.scheduler_confirmations import (
@@ -173,10 +175,27 @@ class CliJsonDryRunTests(_CliBase):
         self.assertFalse(
             payload["runner_contract"]["action_evidence_created"]
         )
+        verifier_block = payload["verifier_report"]
+        self.assertIsNone(verifier_block["verifier_run_id"])
+        self.assertIsNone(verifier_block["verifier_report_path"])
+        self.assertFalse(verifier_block["persisted"])
+        self.assertEqual(
+            verifier_block["artifact_type"], VERIFIER_REPORT_ARTIFACT_TYPE
+        )
+        self.assertEqual(
+            verifier_block["schema_version"],
+            VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        )
 
         self.assertEqual(self._db_counts(), before)
         self.assertFalse(
             (self.artifact_root / "intake_runner_handoffs").exists()
+        )
+        self.assertFalse(
+            (
+                self.artifact_root
+                / "scheduler_confirmation_verifier_reports"
+            ).exists()
         )
 
 
@@ -201,6 +220,66 @@ class CliConfirmedTests(_CliBase):
         self.assertEqual(payload["mode"], "confirmed")
         artifact_path = Path(payload["artifact_path"])
         self.assertTrue(artifact_path.exists())
+
+        verifier_block = payload["verifier_report"]
+        self.assertIsInstance(verifier_block["verifier_run_id"], str)
+        self.assertTrue(verifier_block["verifier_run_id"])
+        verifier_report_path = Path(verifier_block["verifier_report_path"])
+        self.assertTrue(verifier_report_path.exists())
+        self.assertTrue(verifier_block["persisted"])
+        self.assertEqual(
+            verifier_block["artifact_type"], VERIFIER_REPORT_ARTIFACT_TYPE
+        )
+        self.assertEqual(
+            verifier_block["schema_version"],
+            VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        )
+
+        on_disk = json.loads(artifact_path.read_text())
+        self.assertEqual(
+            on_disk["verifier_report"]["verifier_run_id"],
+            verifier_block["verifier_run_id"],
+        )
+        self.assertEqual(
+            on_disk["verifier_report"]["verifier_report_path"],
+            str(verifier_report_path),
+        )
+
+        report_on_disk = json.loads(verifier_report_path.read_text())
+        self.assertEqual(
+            report_on_disk["schema_version"],
+            VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            report_on_disk["verifier_run_id"],
+            verifier_block["verifier_run_id"],
+        )
+        self.assertIn("report", report_on_disk)
+        self.assertFalse(report_on_disk["report"]["execution_allowed"])
+        self.assertFalse(report_on_disk["safety"]["execution_allowed"])
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM task_events "
+                "WHERE event_type = ? AND task_key = ?",
+                (HANDOFF_EVENT_TYPE, "AT-CLI-IRH-CONF-001"),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        event_payload = json.loads(row[0])
+        self.assertEqual(
+            event_payload["verifier_run_id"], verifier_block["verifier_run_id"]
+        )
+        self.assertEqual(
+            event_payload["verifier_report_path"], str(verifier_report_path)
+        )
+        self.assertEqual(
+            event_payload["verifier_report_artifact_type"],
+            VERIFIER_REPORT_ARTIFACT_TYPE,
+        )
+        self.assertEqual(
+            event_payload["verifier_report_schema_version"],
+            VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        )
 
         with sqlite3.connect(self.db_path) as conn:
             artifact_types = {

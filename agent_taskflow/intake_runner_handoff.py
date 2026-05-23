@@ -19,6 +19,21 @@ The artifact and event types it may record
 (``intake_runner_handoff`` / ``intake_runner_handoff_created``) are
 intentionally disjoint from the workflow's action evidence types and
 from scheduler_confirmation_consumption types.
+
+In confirmed mode, this module ALSO persists the verifier report it
+relied on as a sibling on-disk artifact at
+``artifact_root/scheduler_confirmation_verifier_reports/<verifier_run_id>/verifier_report.json``
+and stamps the handoff artifact + event payload with the
+``verifier_run_id`` and ``verifier_report_path``. This binding lets a
+future runtime preflight stage re-open the exact verifier report rather
+than trusting the handoff artifact's own claim that the verifier
+passed. The verifier report artifact is itself NOT action evidence and
+carries safety flags that explicitly disclaim execution permission.
+
+The scheduler confirmation verifier itself remains dry-run-only and
+read-only; this module is what performs the optional on-disk
+persistence in confirmed mode. In dry-run mode no verifier report
+artifact, no handoff artifact, and no DB event is ever written.
 """
 
 from __future__ import annotations
@@ -45,6 +60,29 @@ SCHEMA_VERSION = "intake_runner_handoff.v1"
 HANDOFF_SOURCE = "intake_runner_handoff"
 HANDOFF_ARTIFACT_TYPE = "intake_runner_handoff"
 HANDOFF_EVENT_TYPE = "intake_runner_handoff_created"
+
+# Persisted verifier report artifact. The on-disk JSON wraps the
+# verifier's in-memory report with binding metadata so a future runtime
+# preflight stage can resolve verifier_report_path / verifier_run_id and
+# verify the exact report still exists and is still valid. The verifier
+# report artifact is NOT action evidence; its safety block explicitly
+# denies execution permission.
+VERIFIER_REPORT_ARTIFACT_TYPE = "scheduler_confirmation_verifier_report"
+VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION = (
+    "scheduler_confirmation_verifier_report_artifact.v1"
+)
+
+# Verifier report artifact safety block. Every flag below is emitted as
+# the exact constant below so a downstream reader cannot misread the
+# persisted verifier report as execution permission.
+VERIFIER_REPORT_ARTIFACT_SAFETY_FLAGS: dict[str, bool] = {
+    "dry_run_report_only": True,
+    "execution_allowed": False,
+    "execution_performed": False,
+    "action_evidence_created": False,
+    "executor_started": False,
+    "validators_started": False,
+}
 
 STATUS_PREVIEW = "preview"
 STATUS_CREATED = "created"
@@ -249,14 +287,50 @@ def create_intake_runner_handoff(
     handoff_id = _make_handoff_id()
     created_at = utc_now_iso()
     mode = "dry_run" if request.dry_run else "confirmed"
-    artifact_path: Path | None = None
-    if not request.dry_run:
-        artifact_path = (
-            request.artifact_root
-            / "intake_runner_handoffs"
-            / handoff_id
-            / "intake_runner_handoff.json"
+
+    if request.dry_run:
+        # Dry-run preview MUST NOT write either the verifier report
+        # artifact or the handoff artifact and MUST NOT touch the DB.
+        # verifier_run_id and verifier_report_path are surfaced as
+        # ``None`` so the preview payload cannot be mistaken for a
+        # persisted handoff.
+        payload = _build_payload(
+            request=request,
+            verifier_report=verifier_report,
+            handoff_id=handoff_id,
+            created_at=created_at,
+            mode=mode,
+            status=STATUS_PREVIEW,
+            artifact_path=None,
+            verifier_run_id=None,
+            verifier_report_path=None,
         )
+        return payload
+
+    verifier_run_id = _make_verifier_run_id()
+    verifier_report_path = (
+        request.artifact_root
+        / "scheduler_confirmation_verifier_reports"
+        / verifier_run_id
+        / "verifier_report.json"
+    )
+    artifact_path = (
+        request.artifact_root
+        / "intake_runner_handoffs"
+        / handoff_id
+        / "intake_runner_handoff.json"
+    )
+
+    verifier_report_artifact = _build_verifier_report_artifact(
+        verifier_report=verifier_report,
+        verifier_run_id=verifier_run_id,
+        created_at=created_at,
+    )
+    verifier_report_path.parent.mkdir(parents=True, exist_ok=True)
+    verifier_report_path.write_text(
+        json.dumps(verifier_report_artifact, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
     payload = _build_payload(
         request=request,
@@ -264,14 +338,12 @@ def create_intake_runner_handoff(
         handoff_id=handoff_id,
         created_at=created_at,
         mode=mode,
-        status=STATUS_CREATED if not request.dry_run else STATUS_PREVIEW,
+        status=STATUS_CREATED,
         artifact_path=artifact_path,
+        verifier_run_id=verifier_run_id,
+        verifier_report_path=verifier_report_path,
     )
 
-    if request.dry_run:
-        return payload
-
-    assert artifact_path is not None
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True),
@@ -312,6 +384,14 @@ def create_intake_runner_handoff(
                 "recommended_command_kind": verifier_report.get(
                     "recommended_command_kind"
                 ),
+                "verifier_run_id": verifier_run_id,
+                "verifier_report_path": str(verifier_report_path),
+                "verifier_report_artifact_type": (
+                    VERIFIER_REPORT_ARTIFACT_TYPE
+                ),
+                "verifier_report_schema_version": (
+                    VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION
+                ),
                 "handoff_only": True,
                 "execution_allowed": False,
                 "execution_performed": False,
@@ -345,6 +425,8 @@ def _build_payload(
     mode: str,
     status: str,
     artifact_path: Path | None,
+    verifier_run_id: str | None,
+    verifier_report_path: Path | None,
 ) -> dict[str, Any]:
     return {
         "ok": status != STATUS_BLOCKED,
@@ -365,6 +447,12 @@ def _build_payload(
         "confirmation": _confirmation_block(verifier_report),
         "runner_contract": dict(RUNNER_CONTRACT_FLAGS),
         "safety": dict(HANDOFF_SAFETY_FLAGS),
+        "verifier_report": _verifier_report_block(
+            verifier_report=verifier_report,
+            verifier_run_id=verifier_run_id,
+            verifier_report_path=verifier_report_path,
+            persisted=status == STATUS_CREATED,
+        ),
         "verifier_report_summary": _verifier_report_summary(verifier_report),
     }
 
@@ -382,9 +470,75 @@ def _blocked_payload(
         mode="dry_run",
         status=STATUS_BLOCKED,
         artifact_path=None,
+        verifier_run_id=None,
+        verifier_report_path=None,
     )
     payload["error"] = _verifier_error_description(verifier_report)
     return payload
+
+
+def _build_verifier_report_artifact(
+    *,
+    verifier_report: dict[str, Any],
+    verifier_run_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """Wrap the verifier's in-memory report with binding metadata.
+
+    The wrapper preserves the entire verifier_report payload under
+    ``report`` so a future runtime preflight stage can re-validate every
+    check the verifier ran. The wrapper itself adds the verifier_run_id,
+    creation timestamp, source, and a safety block that explicitly
+    denies execution permission so the persisted artifact cannot be
+    misread as action evidence.
+    """
+
+    return {
+        "schema_version": VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        "verifier_run_id": verifier_run_id,
+        "created_at": created_at,
+        "source": HANDOFF_SOURCE,
+        "report": dict(verifier_report),
+        "safety": dict(VERIFIER_REPORT_ARTIFACT_SAFETY_FLAGS),
+    }
+
+
+def _verifier_report_block(
+    *,
+    verifier_report: dict[str, Any],
+    verifier_run_id: str | None,
+    verifier_report_path: Path | None,
+    persisted: bool,
+) -> dict[str, Any]:
+    """Construct the handoff artifact's verifier binding block.
+
+    When ``persisted`` is True, ``verifier_run_id`` and
+    ``verifier_report_path`` describe the on-disk verifier report
+    artifact that future runtime preflight must reopen. When False (dry
+    run preview or blocked dry run), both fields are ``None`` because
+    no verifier report artifact was written.
+    """
+
+    return {
+        "verifier_run_id": verifier_run_id,
+        "verifier_report_path": (
+            str(verifier_report_path) if verifier_report_path else None
+        ),
+        "artifact_type": VERIFIER_REPORT_ARTIFACT_TYPE,
+        "schema_version": VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+        "persisted": persisted,
+        "status": verifier_report.get("status"),
+        "verification_passed": bool(
+            verifier_report.get("verification_passed")
+        ),
+        "eligible_for_command_specific_confirm": bool(
+            verifier_report.get("eligible_for_command_specific_confirm")
+        ),
+        "execution_allowed": False,
+        "execution_performed": False,
+        "action_evidence_created": False,
+        "expiration": verifier_report.get("expiration"),
+    }
 
 
 def _proposal_block(verifier_report: dict[str, Any]) -> dict[str, Any]:
@@ -458,6 +612,11 @@ def _make_handoff_id() -> str:
     return f"handoff-{timestamp}-{secrets.token_hex(6)}"
 
 
+def _make_verifier_run_id() -> str:
+    timestamp = _HANDOFF_ID_TIMESTAMP.sub("", utc_now_iso())
+    return f"verifier-run-{timestamp}-{secrets.token_hex(6)}"
+
+
 __all__ = [
     "HANDOFF_ARTIFACT_TYPE",
     "HANDOFF_EVENT_TYPE",
@@ -468,6 +627,9 @@ __all__ = [
     "STATUS_BLOCKED",
     "STATUS_CREATED",
     "STATUS_PREVIEW",
+    "VERIFIER_REPORT_ARTIFACT_SAFETY_FLAGS",
+    "VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION",
+    "VERIFIER_REPORT_ARTIFACT_TYPE",
     "IntakeRunnerHandoffError",
     "IntakeRunnerHandoffRequest",
     "create_intake_runner_handoff",

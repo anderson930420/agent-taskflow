@@ -175,6 +175,7 @@ def _format_pretty(payload: dict[str, Any]) -> str:
     proposal = payload.get("proposal") or {}
     confirmation = payload.get("confirmation") or {}
     runner_contract = payload.get("runner_contract") or {}
+    verifier_report = payload.get("verifier_report") or {}
 
     proposal_hash = proposal.get("proposal_hash") or ""
     proposal_hash_short = (
@@ -236,6 +237,20 @@ def _format_pretty(payload: dict[str, Any]) -> str:
         f"{runner_contract.get('action_evidence_created')}",
         f"  requires_future_runtime_gate:        "
         f"{runner_contract.get('requires_future_runtime_gate')}",
+        "",
+        "Verifier binding:",
+        f"  verifier_run_id:                     "
+        f"{verifier_report.get('verifier_run_id') or '(dry-run; not persisted)'}",
+        f"  verifier_report_path:                "
+        f"{verifier_report.get('verifier_report_path') or '(dry-run; not persisted)'}",
+        f"  schema_version:                      "
+        f"{verifier_report.get('schema_version')}",
+        f"  persisted:                           "
+        f"{verifier_report.get('persisted')}",
+        f"  status:                              "
+        f"{verifier_report.get('status')}",
+        f"  verification_passed:                 "
+        f"{verifier_report.get('verification_passed')}",
     ]
 
     error = payload.get("error")
