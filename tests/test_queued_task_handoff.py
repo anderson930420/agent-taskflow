@@ -14,10 +14,17 @@ from agent_taskflow.intake_runner_handoff import (
     VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
 )
 from agent_taskflow.models import TaskRecord
+from agent_taskflow.approved_task_runner import ApprovedTaskRunnerError
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.queued_task_handoff import (
     APPROVED_TASK_STATUS,
     INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND,
+    RUNTIME_EXECUTION_ARTIFACT_TYPE,
+    RUNTIME_EXECUTION_FINISHED_EVENT_TYPE,
+    RUNTIME_EXECUTION_SCHEMA_VERSION,
+    RUNTIME_EXECUTION_STARTED_EVENT_TYPE,
+    RUNTIME_PREFLIGHT_EVENT_TYPE,
+    RUNTIME_SOURCE,
     QueuedTaskHandoffRequest,
     QueuedTaskHandoffResult,
     run_queued_task_handoff,
@@ -1016,10 +1023,595 @@ class QueuedTaskHandoffResultTests(unittest.TestCase):
             runner_result=None,
             safety={"read_only": True},
             error=None,
+            runtime=None,
         )
         payload = result.to_dict()
         # Must JSON round-trip cleanly
         json.dumps(payload)
+        self.assertIn("runtime", payload)
+        self.assertIsNone(payload["runtime"])
+
+
+def _runtime_event_payloads(
+    store: TaskMirrorStore,
+    task_key: str,
+    event_type: str,
+) -> list[dict[str, Any]]:
+    """Return decoded payloads of runtime audit events for ``task_key``."""
+
+    payloads: list[dict[str, Any]] = []
+    for event in store.list_task_events(task_key):
+        if event.event_type != event_type:
+            continue
+        if event.source != RUNTIME_SOURCE:
+            continue
+        if event.payload_json is None:
+            continue
+        payloads.append(json.loads(event.payload_json))
+    return payloads
+
+
+class QueuedTaskHandoffRuntimeAuditTests(unittest.TestCase):
+    """Phase C runtime audit boundary tests.
+
+    These tests assert what the runtime audit layer must do (record
+    preflight/started/finished events, write the runtime audit
+    artifact, expose runtime references on the result) and what it
+    must NOT do (write runtime evidence in dry-run, invoke the runner
+    when preflight fails, replace validator authority).
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.artifact_root = self.root / "artifacts"
+        self.artifact_dir = self.artifact_root / "AT-HANDOFF-RT-1"
+        self.db_path = self.root / "state.db"
+        self.store = TaskMirrorStore(self.db_path)
+        self.store.init_db()
+        self.task_key = "AT-HANDOFF-RT-1"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _seed_task(self) -> TaskRecord:
+        task = TaskRecord(
+            task_key=self.task_key,
+            project="agent-taskflow",
+            board="agent-taskflow",
+            title="Runtime audit test task",
+            status="queued",
+            repo_path=self.repo,
+            artifact_dir=self.artifact_dir,
+        )
+        self.store.upsert_task(task)
+        return task
+
+    def _create_valid_package(self) -> None:
+        create_task_execution_package(
+            TaskExecutionPackageRequest(
+                task_key=self.task_key,
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                dry_run=False,
+                confirm=True,
+            ),
+            store=self.store,
+        )
+
+    def _fixture(self, **overrides: Any) -> _HandoffFixture:
+        kwargs: dict[str, Any] = {
+            "artifact_root": self.artifact_root,
+            "db_path": self.db_path,
+            "task_key": self.task_key,
+        }
+        kwargs.update(overrides)
+        return _HandoffFixture(**kwargs)
+
+    def _request(self, **overrides: Any) -> QueuedTaskHandoffRequest:
+        kwargs: dict[str, Any] = {
+            "task_key": self.task_key,
+            "executor": "shell",
+            "repo_path": self.repo,
+            "db_path": self.db_path,
+            "artifact_root": self.artifact_root,
+            "worktree_root": self.root / "worktrees",
+            "base_branch": "main",
+            "validators": ("pytest",),
+            "command": ("echo", "noop"),
+            "preflight": False,
+            "dry_run": True,
+            "confirm_handoff": False,
+        }
+        kwargs.update(overrides)
+        return QueuedTaskHandoffRequest(**kwargs)
+
+    def _runtime_dir(self) -> Path:
+        return self.artifact_dir / "runtime_handoff_executions"
+
+    # 1. Dry-run without a handoff path writes no runtime events/artifacts.
+    def test_dry_run_without_handoff_writes_no_runtime_evidence(self) -> None:
+        self._seed_task()
+        self._create_valid_package()
+        spy = _RunnerSpy(
+            _waiting_approval_runner_result(self.task_key, "shell")
+        )
+        result = run_queued_task_handoff(self._request(), approved_task_runner=spy)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "preview")
+        self.assertIsNone(result.runtime)
+        self.assertEqual(spy.calls, [])
+        for event_type in (
+            RUNTIME_PREFLIGHT_EVENT_TYPE,
+            RUNTIME_EXECUTION_STARTED_EVENT_TYPE,
+            RUNTIME_EXECUTION_FINISHED_EVENT_TYPE,
+        ):
+            self.assertEqual(
+                _runtime_event_payloads(self.store, self.task_key, event_type),
+                [],
+            )
+        self.assertFalse(self._runtime_dir().exists())
+
+    # 2. Dry-run with a valid handoff path runs preflight preview only;
+    #    writes no runtime evidence and calls no runner.
+    def test_dry_run_with_valid_handoff_writes_no_runtime_evidence(self) -> None:
+        self._seed_task()
+        self._create_valid_package()
+        fixture = self._fixture()
+        handoff_path = fixture.write()
+        spy = _RunnerSpy(
+            _waiting_approval_runner_result(self.task_key, "shell")
+        )
+        result = run_queued_task_handoff(
+            self._request(intake_runner_handoff_artifact_path=handoff_path),
+            approved_task_runner=spy,
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "preview")
+        self.assertIsNone(result.runtime)
+        self.assertTrue(result.handoff["intake_runner_handoff_verified"])
+        self.assertEqual(spy.calls, [])
+        for event_type in (
+            RUNTIME_PREFLIGHT_EVENT_TYPE,
+            RUNTIME_EXECUTION_STARTED_EVENT_TYPE,
+            RUNTIME_EXECUTION_FINISHED_EVENT_TYPE,
+        ):
+            self.assertEqual(
+                _runtime_event_payloads(self.store, self.task_key, event_type),
+                [],
+            )
+        self.assertFalse(self._runtime_dir().exists())
+
+    # 3. Confirmed mode with missing handoff path blocks at request
+    #    construction; runtime evidence is not even reachable.
+    def test_confirmed_mode_missing_handoff_path_blocks_before_runtime(
+        self,
+    ) -> None:
+        self._seed_task()
+        self._create_valid_package()
+        with self.assertRaises(ValueError):
+            self._request(
+                dry_run=False,
+                confirm_handoff=True,
+            )
+        for event_type in (
+            RUNTIME_PREFLIGHT_EVENT_TYPE,
+            RUNTIME_EXECUTION_STARTED_EVENT_TYPE,
+            RUNTIME_EXECUTION_FINISHED_EVENT_TYPE,
+        ):
+            self.assertEqual(
+                _runtime_event_payloads(self.store, self.task_key, event_type),
+                [],
+            )
+
+    # 4. Confirmed mode with an invalid handoff artifact (schema_version
+    #    bogus): preflight event is recorded with passed=false; no
+    #    execution_started/finished events; runtime artifact says
+    #    approved_task_runner.invoked=false; runner is not called.
+    def test_confirmed_mode_invalid_handoff_records_failed_preflight(
+        self,
+    ) -> None:
+        self._seed_task()
+        self._create_valid_package()
+        fixture = self._fixture()
+        handoff_path = fixture.write(
+            handoff_overrides={"schema_version": "intake_runner_handoff.vBOGUS"}
+        )
+        spy = _RunnerSpy(
+            _waiting_approval_runner_result(self.task_key, "shell")
+        )
+        result = run_queued_task_handoff(
+            self._request(
+                dry_run=False,
+                confirm_handoff=True,
+                intake_runner_handoff_artifact_path=handoff_path,
+            ),
+            approved_task_runner=spy,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.phase, "handoff_verification")
+        self.assertEqual(spy.calls, [])
+        preflight_events = _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_PREFLIGHT_EVENT_TYPE
+        )
+        self.assertEqual(len(preflight_events), 1)
+        self.assertFalse(preflight_events[0]["preflight_passed"])
+        self.assertTrue(preflight_events[0]["package_verified"])
+        self.assertFalse(
+            preflight_events[0]["intake_runner_handoff_verified"]
+        )
+        self.assertFalse(
+            preflight_events[0]["approved_task_runner_invoked"]
+        )
+        self.assertTrue(preflight_events[0]["not_action_evidence"])
+        self.assertEqual(
+            _runtime_event_payloads(
+                self.store,
+                self.task_key,
+                RUNTIME_EXECUTION_STARTED_EVENT_TYPE,
+            ),
+            [],
+        )
+        self.assertEqual(
+            _runtime_event_payloads(
+                self.store,
+                self.task_key,
+                RUNTIME_EXECUTION_FINISHED_EVENT_TYPE,
+            ),
+            [],
+        )
+        self.assertIsNotNone(result.runtime)
+        artifact_path = Path(result.runtime["runtime_execution_artifact_path"])
+        self.assertTrue(artifact_path.exists())
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            artifact["schema_version"], RUNTIME_EXECUTION_SCHEMA_VERSION
+        )
+        self.assertFalse(artifact["preflight"]["passed"])
+        self.assertFalse(artifact["approved_task_runner"]["invoked"])
+        self.assertTrue(artifact["safety"]["runtime_audit_only"])
+        self.assertTrue(artifact["safety"]["not_action_evidence"])
+        self.assertFalse(artifact["safety"]["background_worker_started"])
+
+    # 5. Confirmed mode with an expired verifier TTL: preflight event
+    #    records expiration_still_valid=false; runner is not called.
+    def test_confirmed_mode_expired_ttl_records_preflight_failed(self) -> None:
+        self._seed_task()
+        self._create_valid_package()
+        old = _utc_now_iso(offset_seconds=-30 * 60)
+        fixture = self._fixture(
+            confirmation_created_at=old,
+            effective_max_age_minutes=15,
+        )
+        handoff_path = fixture.write()
+        spy = _RunnerSpy(
+            _waiting_approval_runner_result(self.task_key, "shell")
+        )
+        result = run_queued_task_handoff(
+            self._request(
+                dry_run=False,
+                confirm_handoff=True,
+                intake_runner_handoff_artifact_path=handoff_path,
+            ),
+            approved_task_runner=spy,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "handoff_verification")
+        self.assertEqual(spy.calls, [])
+        preflight_events = _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_PREFLIGHT_EVENT_TYPE
+        )
+        self.assertEqual(len(preflight_events), 1)
+        self.assertFalse(preflight_events[0]["preflight_passed"])
+        self.assertFalse(preflight_events[0]["expiration_still_valid"])
+        self.assertEqual(
+            _runtime_event_payloads(
+                self.store,
+                self.task_key,
+                RUNTIME_EXECUTION_STARTED_EVENT_TYPE,
+            ),
+            [],
+        )
+
+    # 6. Confirmed mode with valid handoff and successful runner records
+    #    all three runtime events; writes runtime audit artifact;
+    #    invokes runner exactly once; surfaces runtime references on
+    #    result.
+    def test_confirmed_mode_valid_runner_success_records_full_runtime(
+        self,
+    ) -> None:
+        self._seed_task()
+        self._create_valid_package()
+        fixture = self._fixture()
+        handoff_path = fixture.write()
+        spy = _RunnerSpy(
+            _waiting_approval_runner_result(self.task_key, "shell")
+        )
+        result = run_queued_task_handoff(
+            self._request(
+                dry_run=False,
+                confirm_handoff=True,
+                intake_runner_handoff_artifact_path=handoff_path,
+            ),
+            approved_task_runner=spy,
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
+        self.assertEqual(len(spy.calls), 1)
+
+        preflight = _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_PREFLIGHT_EVENT_TYPE
+        )
+        started = _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_EXECUTION_STARTED_EVENT_TYPE
+        )
+        finished = _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_EXECUTION_FINISHED_EVENT_TYPE
+        )
+        self.assertEqual(len(preflight), 1)
+        self.assertEqual(len(started), 1)
+        self.assertEqual(len(finished), 1)
+        self.assertTrue(preflight[0]["preflight_passed"])
+        self.assertTrue(preflight[0]["intake_runner_handoff_verified"])
+        self.assertTrue(started[0]["approved_task_runner_invoked"])
+        self.assertTrue(finished[0]["runner_returned"])
+        self.assertTrue(finished[0]["runner_ok"])
+        self.assertEqual(finished[0]["runner_status"], APPROVED_TASK_STATUS)
+        self.assertTrue(finished[0]["not_validation_authority"])
+        self.assertTrue(finished[0]["not_action_evidence"])
+
+        # All three events share the same runtime_execution_id.
+        runtime_execution_id = preflight[0]["runtime_execution_id"]
+        self.assertEqual(started[0]["runtime_execution_id"], runtime_execution_id)
+        self.assertEqual(finished[0]["runtime_execution_id"], runtime_execution_id)
+
+        self.assertIsNotNone(result.runtime)
+        self.assertEqual(
+            result.runtime["runtime_execution_id"], runtime_execution_id
+        )
+        self.assertTrue(result.runtime["not_action_evidence"])
+        self.assertTrue(result.runtime["not_validation_authority"])
+        artifact_path = Path(result.runtime["runtime_execution_artifact_path"])
+        self.assertTrue(artifact_path.exists())
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            artifact["schema_version"], RUNTIME_EXECUTION_SCHEMA_VERSION
+        )
+        self.assertEqual(artifact["runtime_execution_id"], runtime_execution_id)
+        self.assertEqual(artifact["verifier_run_id"], "verifier-run-test-0001")
+        self.assertIsNotNone(artifact["verifier_report_path"])
+        self.assertEqual(artifact["proposal_hash"], fixture.proposal_hash)
+        self.assertEqual(artifact["item_hash"], fixture.item_hash)
+        self.assertTrue(artifact["preflight"]["passed"])
+        self.assertTrue(artifact["approved_task_runner"]["invoked"])
+        self.assertTrue(artifact["approved_task_runner"]["ok"])
+        self.assertEqual(
+            artifact["approved_task_runner"]["status"],
+            APPROVED_TASK_STATUS,
+        )
+        self.assertIsNotNone(artifact["runner_result_summary"])
+        self.assertEqual(
+            artifact["runner_result_summary"]["status"], APPROVED_TASK_STATUS
+        )
+        for flag in (
+            "runtime_audit_only",
+            "not_action_evidence",
+            "not_validation_authority",
+        ):
+            self.assertTrue(artifact["safety"][flag])
+        for flag in (
+            "auto_selected_task",
+            "batch_execution",
+            "background_worker_started",
+            "github_mutated_by_runtime",
+            "approved",
+            "rejected",
+            "merged",
+            "cleanup_performed",
+        ):
+            self.assertFalse(artifact["safety"][flag])
+
+        # The runtime artifact is recorded as a task artifact too.
+        recorded_types = {
+            a.artifact_type
+            for a in self.store.list_task_artifacts(self.task_key)
+        }
+        self.assertIn(RUNTIME_EXECUTION_ARTIFACT_TYPE, recorded_types)
+
+    # 7. Confirmed mode where approved_task_runner raises
+    #    ApprovedTaskRunnerError: preflight + started + finished events
+    #    are recorded; finished event marks runner_ok=False and
+    #    runner_returned=False; runtime artifact is written; result is
+    #    blocked.
+    def test_confirmed_mode_runner_exception_records_finished_event(
+        self,
+    ) -> None:
+        self._seed_task()
+        self._create_valid_package()
+        fixture = self._fixture()
+        handoff_path = fixture.write()
+
+        def _raising_runner(_request: Any, **_kwargs: Any) -> Any:
+            raise ApprovedTaskRunnerError("simulated runner failure")
+
+        result = run_queued_task_handoff(
+            self._request(
+                dry_run=False,
+                confirm_handoff=True,
+                intake_runner_handoff_artifact_path=handoff_path,
+            ),
+            approved_task_runner=_raising_runner,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.phase, "runner")
+        self.assertIn("simulated runner failure", result.error or "")
+        preflight = _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_PREFLIGHT_EVENT_TYPE
+        )
+        started = _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_EXECUTION_STARTED_EVENT_TYPE
+        )
+        finished = _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_EXECUTION_FINISHED_EVENT_TYPE
+        )
+        self.assertEqual(len(preflight), 1)
+        self.assertEqual(len(started), 1)
+        self.assertEqual(len(finished), 1)
+        self.assertFalse(finished[0]["runner_returned"])
+        self.assertFalse(finished[0]["runner_ok"])
+        self.assertIn(
+            "simulated runner failure", finished[0]["runner_error"] or ""
+        )
+        self.assertFalse(finished[0]["approved"])
+        self.assertFalse(finished[0]["merged"])
+        self.assertFalse(finished[0]["cleanup_performed"])
+        self.assertIsNotNone(result.runtime)
+        artifact_path = Path(result.runtime["runtime_execution_artifact_path"])
+        self.assertTrue(artifact_path.exists())
+        self.assertTrue(result.runtime["not_action_evidence"])
+        self.assertTrue(result.runtime["not_validation_authority"])
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        self.assertTrue(artifact["approved_task_runner"]["invoked"])
+        self.assertFalse(artifact["approved_task_runner"]["ok"])
+        self.assertIsNotNone(artifact["runner_result_summary"])
+        self.assertFalse(artifact["runner_result_summary"]["returned"])
+        self.assertIn(
+            "simulated runner failure",
+            artifact["runner_result_summary"]["error"] or "",
+        )
+
+    # 8. runtime_execution_finished is not validation authority: it
+    #    summarizes runner status but does not write
+    #    validation_result events itself, and does not claim
+    #    validation passed beyond the runner summary.
+    def test_runtime_execution_finished_is_not_validation_authority(
+        self,
+    ) -> None:
+        self._seed_task()
+        self._create_valid_package()
+        fixture = self._fixture()
+        handoff_path = fixture.write()
+        spy = _RunnerSpy(
+            _waiting_approval_runner_result(self.task_key, "shell")
+        )
+        result = run_queued_task_handoff(
+            self._request(
+                dry_run=False,
+                confirm_handoff=True,
+                intake_runner_handoff_artifact_path=handoff_path,
+            ),
+            approved_task_runner=spy,
+        )
+        self.assertTrue(result.ok)
+        finished = _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_EXECUTION_FINISHED_EVENT_TYPE
+        )
+        self.assertEqual(len(finished), 1)
+        self.assertTrue(finished[0]["not_validation_authority"])
+        self.assertTrue(finished[0]["not_action_evidence"])
+
+        # The runtime layer must not have invented validation_result
+        # events on its own. The fake runner did not produce any
+        # validator output, so we expect no validation_result events.
+        self.assertEqual(self.store.list_validation_results(self.task_key), [])
+
+    # 9. Every runtime event/artifact carries the action-disclaimer
+    #    safety flags (background_worker_started=false, approved=false,
+    #    merged=false, cleanup_performed=false, not_action_evidence=
+    #    true).
+    def test_runtime_safety_flags_are_consistent(self) -> None:
+        self._seed_task()
+        self._create_valid_package()
+        fixture = self._fixture()
+        handoff_path = fixture.write()
+        spy = _RunnerSpy(
+            _waiting_approval_runner_result(self.task_key, "shell")
+        )
+        result = run_queued_task_handoff(
+            self._request(
+                dry_run=False,
+                confirm_handoff=True,
+                intake_runner_handoff_artifact_path=handoff_path,
+            ),
+            approved_task_runner=spy,
+        )
+        self.assertTrue(result.ok)
+        # Events
+        for event_type in (
+            RUNTIME_PREFLIGHT_EVENT_TYPE,
+            RUNTIME_EXECUTION_STARTED_EVENT_TYPE,
+            RUNTIME_EXECUTION_FINISHED_EVENT_TYPE,
+        ):
+            for payload in _runtime_event_payloads(
+                self.store, self.task_key, event_type
+            ):
+                self.assertTrue(payload.get("not_action_evidence"))
+        for payload in _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_EXECUTION_STARTED_EVENT_TYPE
+        ) + _runtime_event_payloads(
+            self.store, self.task_key, RUNTIME_EXECUTION_FINISHED_EVENT_TYPE
+        ):
+            self.assertFalse(payload["background_worker_started"])
+            self.assertFalse(payload["approved"])
+            self.assertFalse(payload["merged"])
+            self.assertFalse(payload["cleanup_performed"])
+        # Artifact
+        artifact_path = Path(result.runtime["runtime_execution_artifact_path"])
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        for flag in (
+            "background_worker_started",
+            "approved",
+            "rejected",
+            "merged",
+            "cleanup_performed",
+            "github_mutated_by_runtime",
+            "auto_selected_task",
+            "batch_execution",
+        ):
+            self.assertFalse(artifact["safety"][flag])
+
+    # 10. Selection / package_verification failures do NOT write
+    #     runtime artifacts or events. Per the Phase C minimal-safe
+    #     policy: when no artifact_dir is resolvable or task context
+    #     is missing, we skip runtime evidence.
+    def test_selection_failure_writes_no_runtime_evidence(self) -> None:
+        # Do not seed the task; selection will fail.
+        result = run_queued_task_handoff(
+            self._request(
+                dry_run=False,
+                confirm_handoff=True,
+                intake_runner_handoff_artifact_path=(
+                    self.artifact_root / "absent_handoff.json"
+                ),
+            ),
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "selection")
+        self.assertIsNone(result.runtime)
+        self.assertFalse(self._runtime_dir().exists())
+
+    def test_package_verification_failure_writes_no_runtime_evidence(
+        self,
+    ) -> None:
+        self._seed_task()
+        # Do NOT create the package; package_verification will fail.
+        result = run_queued_task_handoff(
+            self._request(
+                dry_run=False,
+                confirm_handoff=True,
+                intake_runner_handoff_artifact_path=(
+                    self.artifact_root / "absent_handoff.json"
+                ),
+            ),
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "package_verification")
+        self.assertIsNone(result.runtime)
+        self.assertFalse(self._runtime_dir().exists())
 
 
 if __name__ == "__main__":

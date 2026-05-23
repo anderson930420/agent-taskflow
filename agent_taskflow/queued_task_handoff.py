@@ -36,6 +36,8 @@ execution permission, and confirmed mode never calls
 from __future__ import annotations
 
 import json
+import re
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,7 +57,7 @@ from agent_taskflow.intake_runner_handoff import (
     STATUS_CREATED as INTAKE_RUNNER_HANDOFF_STATUS_CREATED,
     VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
 )
-from agent_taskflow.models import TaskRecord, require_absolute_path
+from agent_taskflow.models import TaskRecord, require_absolute_path, utc_now_iso
 from agent_taskflow.store import TaskMirrorStore, default_db_path
 from agent_taskflow.task_execution_package import (
     IMPLEMENTATION_PROMPT_FILENAME,
@@ -71,6 +73,25 @@ TASK_QUEUE_STATUS = "queued"
 RUNNER_BLOCKED_STATUS = "blocked"
 INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND = "queued_task_handoff"
 VERIFIER_REPORT_STATUS_VALID = "valid"
+
+# Phase C runtime audit boundary constants. These are intentionally
+# disjoint from validator events (validation_result), executor events
+# (executor_run_started / executor_run_finished), and the Phase A
+# intake_runner_handoff_created event. Runtime audit evidence describes
+# the runtime/queued handoff boundary itself: "why this runtime/queued
+# handoff was allowed to start, when the runner was invoked, and what
+# the runner returned." It is NOT action evidence and is NOT a second
+# source of validator/approval truth.
+RUNTIME_SOURCE = "queued_task_handoff_runtime"
+RUNTIME_PREFLIGHT_EVENT_TYPE = "runtime_preflight_finished"
+RUNTIME_EXECUTION_STARTED_EVENT_TYPE = "runtime_execution_started"
+RUNTIME_EXECUTION_FINISHED_EVENT_TYPE = "runtime_execution_finished"
+RUNTIME_EXECUTION_ARTIFACT_TYPE = "runtime_handoff_execution"
+RUNTIME_EXECUTION_SCHEMA_VERSION = "runtime_handoff_execution.v1"
+RUNTIME_EXECUTION_ARTIFACT_FILENAME = "runtime_handoff_execution.json"
+RUNTIME_EXECUTION_DIRNAME = "runtime_handoff_executions"
+
+_RUNTIME_EXECUTION_ID_TIMESTAMP = re.compile(r"[:\-Z]")
 
 
 ApprovedTaskRunnerCallable = Callable[..., ApprovedTaskRunResult]
@@ -201,6 +222,7 @@ class QueuedTaskHandoffResult:
     runner_result: dict[str, Any] | None
     safety: dict[str, Any]
     error: str | None = None
+    runtime: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -215,6 +237,7 @@ class QueuedTaskHandoffResult:
             "runner_result": self.runner_result,
             "safety": self.safety,
             "error": self.error,
+            "runtime": self.runtime,
         }
 
 
@@ -256,6 +279,7 @@ def _blocked(
     error: str,
     package: dict[str, Any] | None = None,
     handoff_view: dict[str, Any] | None = None,
+    runtime: dict[str, Any] | None = None,
 ) -> QueuedTaskHandoffResult:
     return QueuedTaskHandoffResult(
         ok=False,
@@ -278,6 +302,7 @@ def _blocked(
             runner_started=False,
         ),
         error=error,
+        runtime=runtime,
     )
 
 
@@ -854,6 +879,272 @@ def _resolve_artifact_dir(
     return None
 
 
+def _make_runtime_execution_id() -> str:
+    timestamp = _RUNTIME_EXECUTION_ID_TIMESTAMP.sub("", utc_now_iso())
+    return f"runtime-execution-{timestamp}-{secrets.token_hex(6)}"
+
+
+def _runtime_artifact_path(
+    artifact_dir: Path,
+    runtime_execution_id: str,
+) -> Path:
+    return (
+        artifact_dir
+        / RUNTIME_EXECUTION_DIRNAME
+        / runtime_execution_id
+        / RUNTIME_EXECUTION_ARTIFACT_FILENAME
+    )
+
+
+def _runtime_safety_block() -> dict[str, Any]:
+    """Return the safety flags embedded in every runtime audit record.
+
+    These flags exist to make it impossible to mistake a runtime audit
+    artifact or runtime audit event for action evidence, validator
+    authority, scheduler loop output, or background-worker output. Every
+    flag is fixed because Phase C explicitly does not add any of these
+    behaviors; the runtime audit boundary is observation, not action.
+    """
+
+    return {
+        "runtime_audit_only": True,
+        "not_action_evidence": True,
+        "not_validation_authority": True,
+        "auto_selected_task": False,
+        "batch_execution": False,
+        "background_worker_started": False,
+        "github_mutated_by_runtime": False,
+        "approved": False,
+        "rejected": False,
+        "merged": False,
+        "cleanup_performed": False,
+    }
+
+
+def _runtime_handoff_summary(
+    request: QueuedTaskHandoffRequest,
+    handoff_view: dict[str, Any] | None,
+) -> dict[str, Any]:
+    binding = _empty_handoff_view()
+    if request.intake_runner_handoff_artifact_path is not None:
+        binding["intake_runner_handoff_artifact_path"] = str(
+            request.intake_runner_handoff_artifact_path
+        )
+    if handoff_view is not None:
+        for key in binding:
+            if key in handoff_view:
+                binding[key] = handoff_view[key]
+    return binding
+
+
+def _build_runtime_artifact_payload(
+    *,
+    request: QueuedTaskHandoffRequest,
+    handoff_view: dict[str, Any] | None,
+    runtime_execution_id: str,
+    created_at: str,
+    preflight: dict[str, Any],
+    approved_task_runner_block: dict[str, Any],
+    runner_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Assemble the runtime_handoff_execution artifact payload.
+
+    The artifact is runtime audit evidence: it records the runtime/queued
+    handoff boundary decisions (preflight passed/failed, runner invoked
+    or not, what the runner returned) so that a reader can audit *why*
+    the queued handoff was allowed to start without needing to replay the
+    DB events. The artifact intentionally summarizes - rather than
+    duplicates - the runner's own validator records; validators remain
+    authoritative via approved_task_runner / validation_result.
+    """
+
+    binding = _runtime_handoff_summary(request, handoff_view)
+    return {
+        "schema_version": RUNTIME_EXECUTION_SCHEMA_VERSION,
+        "runtime_execution_id": runtime_execution_id,
+        "created_at": created_at,
+        "source": RUNTIME_SOURCE,
+        "task_key": request.task_key,
+        "executor": request.executor,
+        "dry_run": False,
+        "intake_runner_handoff_artifact_path": binding[
+            "intake_runner_handoff_artifact_path"
+        ],
+        "verifier_run_id": binding["verifier_run_id"],
+        "verifier_report_path": binding["verifier_report_path"],
+        "proposal_hash": binding["proposal_hash"],
+        "proposal_item_id": binding["proposal_item_id"],
+        "item_hash": binding["item_hash"],
+        "confirmation_id": binding["confirmation_id"],
+        "confirmation_artifact_path": binding["confirmation_artifact_path"],
+        "expiration_still_valid": binding["expiration_still_valid"],
+        "preflight": preflight,
+        "approved_task_runner": approved_task_runner_block,
+        "runner_result_summary": runner_summary,
+        "safety": _runtime_safety_block(),
+    }
+
+
+def _write_runtime_artifact(
+    *,
+    artifact_dir: Path,
+    runtime_execution_id: str,
+    payload: dict[str, Any],
+) -> Path:
+    artifact_path = _runtime_artifact_path(artifact_dir, runtime_execution_id)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return artifact_path
+
+
+def _runtime_preflight_event_payload(
+    *,
+    request: QueuedTaskHandoffRequest,
+    handoff_view: dict[str, Any] | None,
+    runtime_execution_id: str,
+    preflight_passed: bool,
+    package_verified: bool,
+    intake_runner_handoff_verified: bool,
+    error: str | None,
+) -> dict[str, Any]:
+    binding = _runtime_handoff_summary(request, handoff_view)
+    return {
+        "kind": RUNTIME_PREFLIGHT_EVENT_TYPE,
+        "schema_version": RUNTIME_EXECUTION_SCHEMA_VERSION,
+        "runtime_execution_id": runtime_execution_id,
+        "task_key": request.task_key,
+        "executor": request.executor,
+        "preflight_passed": preflight_passed,
+        "package_verified": package_verified,
+        "intake_runner_handoff_verified": intake_runner_handoff_verified,
+        "expiration_still_valid": binding["expiration_still_valid"],
+        "intake_runner_handoff_artifact_path": binding[
+            "intake_runner_handoff_artifact_path"
+        ],
+        "verifier_run_id": binding["verifier_run_id"],
+        "verifier_report_path": binding["verifier_report_path"],
+        "proposal_hash": binding["proposal_hash"],
+        "proposal_item_id": binding["proposal_item_id"],
+        "item_hash": binding["item_hash"],
+        "confirmation_id": binding["confirmation_id"],
+        "error": error,
+        "approved_task_runner_invoked": False,
+        "executor_started": False,
+        "validators_started": False,
+        "action_evidence_created": False,
+        "not_action_evidence": True,
+    }
+
+
+def _runtime_execution_started_event_payload(
+    *,
+    request: QueuedTaskHandoffRequest,
+    handoff_view: dict[str, Any] | None,
+    runtime_execution_id: str,
+) -> dict[str, Any]:
+    binding = _runtime_handoff_summary(request, handoff_view)
+    return {
+        "kind": RUNTIME_EXECUTION_STARTED_EVENT_TYPE,
+        "schema_version": RUNTIME_EXECUTION_SCHEMA_VERSION,
+        "runtime_execution_id": runtime_execution_id,
+        "task_key": request.task_key,
+        "executor": request.executor,
+        "approved_task_runner_invoked": True,
+        "intake_runner_handoff_artifact_path": binding[
+            "intake_runner_handoff_artifact_path"
+        ],
+        "verifier_run_id": binding["verifier_run_id"],
+        "verifier_report_path": binding["verifier_report_path"],
+        "proposal_hash": binding["proposal_hash"],
+        "proposal_item_id": binding["proposal_item_id"],
+        "item_hash": binding["item_hash"],
+        "confirmation_id": binding["confirmation_id"],
+        "not_action_evidence": True,
+        "approved": False,
+        "merged": False,
+        "cleanup_performed": False,
+        "background_worker_started": False,
+    }
+
+
+def _runtime_execution_finished_event_payload(
+    *,
+    request: QueuedTaskHandoffRequest,
+    handoff_view: dict[str, Any] | None,
+    runtime_execution_id: str,
+    runner_returned: bool,
+    runner_ok: bool,
+    runner_status: str | None,
+    runner_phase: str | None,
+    final_status: str,
+    runner_error: str | None,
+    workspace_prepared: bool | None,
+    executor_started: bool | None,
+    validators_started: bool | None,
+    db_written_by_runner: bool | None,
+    artifact_written_by_runner: bool | None,
+) -> dict[str, Any]:
+    binding = _runtime_handoff_summary(request, handoff_view)
+    return {
+        "kind": RUNTIME_EXECUTION_FINISHED_EVENT_TYPE,
+        "schema_version": RUNTIME_EXECUTION_SCHEMA_VERSION,
+        "runtime_execution_id": runtime_execution_id,
+        "task_key": request.task_key,
+        "executor": request.executor,
+        "runner_returned": runner_returned,
+        "runner_ok": runner_ok,
+        "runner_status": runner_status,
+        "runner_phase": runner_phase,
+        "final_status": final_status,
+        "runner_error": runner_error,
+        "workspace_prepared": workspace_prepared,
+        "executor_started": executor_started,
+        "validators_started": validators_started,
+        "db_written_by_runner": db_written_by_runner,
+        "artifact_written_by_runner": artifact_written_by_runner,
+        "intake_runner_handoff_artifact_path": binding[
+            "intake_runner_handoff_artifact_path"
+        ],
+        "verifier_run_id": binding["verifier_run_id"],
+        "verifier_report_path": binding["verifier_report_path"],
+        "not_validation_authority": True,
+        "not_action_evidence": True,
+        "approved": False,
+        "merged": False,
+        "cleanup_performed": False,
+        "background_worker_started": False,
+    }
+
+
+def _runtime_reference_block(
+    *,
+    runtime_execution_id: str,
+    runtime_artifact_path: Path | None,
+    preflight_event_recorded: bool,
+    execution_started_event_recorded: bool,
+    execution_finished_event_recorded: bool,
+) -> dict[str, Any]:
+    return {
+        "runtime_execution_id": runtime_execution_id,
+        "runtime_execution_artifact_path": (
+            str(runtime_artifact_path) if runtime_artifact_path else None
+        ),
+        "runtime_preflight_event_recorded": preflight_event_recorded,
+        "runtime_execution_started_event_recorded": (
+            execution_started_event_recorded
+        ),
+        "runtime_execution_finished_event_recorded": (
+            execution_finished_event_recorded
+        ),
+        "runtime_audit_only": True,
+        "not_action_evidence": True,
+        "not_validation_authority": True,
+    }
+
+
 def run_queued_task_handoff(
     request: QueuedTaskHandoffRequest,
     *,
@@ -903,12 +1194,21 @@ def run_queued_task_handoff(
     assert package_view["verified"] is True
 
     handoff_view: dict[str, Any] | None = None
+    handoff_error: str | None = None
     if request.intake_runner_handoff_artifact_path is not None:
         handoff_view, handoff_error = _verify_intake_runner_handoff(
             request=request,
             task=task,
             package_view=package_view,
         )
+
+    if request.dry_run:
+        # Dry-run is preview-only. Phase C explicitly does NOT write any
+        # runtime events or runtime audit artifact in dry-run because
+        # the runtime boundary has not been crossed: approved_task_runner
+        # is never invoked. The handoff_verification short-circuit below
+        # mirrors confirmed mode so previews still surface why confirmed
+        # execution would be blocked.
         if handoff_error is not None:
             return _blocked(
                 request,
@@ -917,8 +1217,6 @@ def run_queued_task_handoff(
                 package=package_view,
                 handoff_view=handoff_view,
             )
-
-    if request.dry_run:
         return QueuedTaskHandoffResult(
             ok=True,
             status="preview",
@@ -940,16 +1238,149 @@ def run_queued_task_handoff(
                 runner_started=False,
             ),
             error=None,
+            runtime=None,
         )
 
-    # Confirmed mode: __post_init__ already guaranteed an absolute
-    # intake_runner_handoff_artifact_path was supplied and the helper
-    # above already returned blocked if the artifact or its verifier
-    # report was invalid.
+    # Confirmed mode below. __post_init__ already guaranteed an
+    # absolute intake_runner_handoff_artifact_path was supplied. From
+    # here on we record runtime audit evidence at every runtime
+    # boundary: preflight outcome, runner invocation, runner return /
+    # exception. The runtime artifact + events are NOT action evidence
+    # and they do NOT replace validator authority - the validator
+    # authority remains approved_task_runner / validation_result.
     assert request.intake_runner_handoff_artifact_path is not None
-    assert handoff_view is not None and handoff_view[
-        "intake_runner_handoff_verified"
-    ] is True
+    artifact_dir = _resolve_artifact_dir(task, request)
+    if artifact_dir is None:
+        # Confirmed mode without a resolvable artifact_dir is not
+        # supportable: we cannot persist runtime audit evidence, so
+        # block before invoking the runner. This is defensive; the
+        # CLI path always supplies artifact_root and task.artifact_dir
+        # is set by ingestion.
+        return _blocked(
+            request,
+            phase="handoff_verification",
+            error=(
+                "Confirmed queued handoff requires a resolvable "
+                "artifact_dir; supply --artifact-root or ensure "
+                "task.artifact_dir is set"
+            ),
+            package=package_view,
+            handoff_view=handoff_view,
+        )
+
+    runtime_execution_id = _make_runtime_execution_id()
+    created_at = utc_now_iso()
+
+    intake_runner_handoff_verified = bool(
+        handoff_view is not None
+        and handoff_view.get("intake_runner_handoff_verified")
+    )
+    expiration_still_valid = (
+        handoff_view.get("expiration_still_valid")
+        if handoff_view is not None
+        else None
+    )
+    preflight_passed = handoff_error is None and intake_runner_handoff_verified
+
+    # 1. Record runtime_preflight_finished event.
+    preflight_payload = _runtime_preflight_event_payload(
+        request=request,
+        handoff_view=handoff_view,
+        runtime_execution_id=runtime_execution_id,
+        preflight_passed=preflight_passed,
+        package_verified=True,
+        intake_runner_handoff_verified=intake_runner_handoff_verified,
+        error=handoff_error,
+    )
+    current_store.record_task_event(
+        request.task_key,
+        RUNTIME_PREFLIGHT_EVENT_TYPE,
+        RUNTIME_SOURCE,
+        message=(
+            f"Runtime preflight {'passed' if preflight_passed else 'failed'} "
+            f"for {request.task_key} (runtime_execution_id={runtime_execution_id})"
+        ),
+        payload=preflight_payload,
+    )
+
+    if not preflight_passed:
+        # Handoff verification failed. Persist the runtime audit
+        # artifact so the operator has a single readable record of
+        # why the runner was not invoked, and return blocked. The
+        # runner is NOT called; approved_task_runner.invoked is False.
+        runtime_artifact_payload = _build_runtime_artifact_payload(
+            request=request,
+            handoff_view=handoff_view,
+            runtime_execution_id=runtime_execution_id,
+            created_at=created_at,
+            preflight={
+                "passed": False,
+                "package_verified": True,
+                "intake_runner_handoff_verified": (
+                    intake_runner_handoff_verified
+                ),
+                "expiration_still_valid": expiration_still_valid,
+                "error": handoff_error,
+            },
+            approved_task_runner_block={
+                "invoked": False,
+                "ok": None,
+                "status": None,
+                "phase": None,
+                "executor_started": False,
+                "validators_started": False,
+            },
+            runner_summary=None,
+        )
+        runtime_artifact_path = _write_runtime_artifact(
+            artifact_dir=artifact_dir,
+            runtime_execution_id=runtime_execution_id,
+            payload=runtime_artifact_payload,
+        )
+        current_store.record_task_artifact(
+            request.task_key,
+            RUNTIME_EXECUTION_ARTIFACT_TYPE,
+            runtime_artifact_path,
+        )
+        runtime_block = _runtime_reference_block(
+            runtime_execution_id=runtime_execution_id,
+            runtime_artifact_path=runtime_artifact_path,
+            preflight_event_recorded=True,
+            execution_started_event_recorded=False,
+            execution_finished_event_recorded=False,
+        )
+        return _blocked(
+            request,
+            phase="handoff_verification",
+            error=handoff_error or "intake_runner_handoff preflight failed",
+            package=package_view,
+            handoff_view=handoff_view,
+            runtime=runtime_block,
+        )
+
+    assert handoff_view is not None
+
+    # 2. Record runtime_execution_started event immediately before
+    #    calling approved_task_runner. This event records ONLY that
+    #    runtime preflight passed and the runner invocation is about
+    #    to begin; it does not assert anything about executor or
+    #    validator success.
+    execution_started_payload = _runtime_execution_started_event_payload(
+        request=request,
+        handoff_view=handoff_view,
+        runtime_execution_id=runtime_execution_id,
+    )
+    current_store.record_task_event(
+        request.task_key,
+        RUNTIME_EXECUTION_STARTED_EVENT_TYPE,
+        RUNTIME_SOURCE,
+        message=(
+            f"Runtime preflight passed for {request.task_key}; "
+            f"invoking approved_task_runner "
+            f"(runtime_execution_id={runtime_execution_id})"
+        ),
+        payload=execution_started_payload,
+    )
 
     runner_request = ApprovedTaskRunRequest(
         task_key=request.task_key,
@@ -974,9 +1405,89 @@ def run_queued_task_handoff(
     if preflight_runner is not None:
         runner_kwargs["preflight_runner"] = preflight_runner
 
+    runner_exception: ApprovedTaskRunnerError | None = None
+    runner_dict: dict[str, Any] | None = None
     try:
         runner_result = approved_task_runner(runner_request, **runner_kwargs)
     except ApprovedTaskRunnerError as exc:
+        runner_exception = exc
+    else:
+        runner_dict = _runner_result_to_dict(runner_result)
+
+    if runner_exception is not None:
+        # Runner raised before producing a structured result. Record
+        # the runtime audit terminus and return blocked.
+        finished_payload = _runtime_execution_finished_event_payload(
+            request=request,
+            handoff_view=handoff_view,
+            runtime_execution_id=runtime_execution_id,
+            runner_returned=False,
+            runner_ok=False,
+            runner_status=None,
+            runner_phase=None,
+            final_status="blocked",
+            runner_error=str(runner_exception),
+            workspace_prepared=None,
+            executor_started=None,
+            validators_started=None,
+            db_written_by_runner=None,
+            artifact_written_by_runner=None,
+        )
+        current_store.record_task_event(
+            request.task_key,
+            RUNTIME_EXECUTION_FINISHED_EVENT_TYPE,
+            RUNTIME_SOURCE,
+            message=(
+                f"approved_task_runner raised for {request.task_key} "
+                f"(runtime_execution_id={runtime_execution_id})"
+            ),
+            payload=finished_payload,
+        )
+        runtime_artifact_payload = _build_runtime_artifact_payload(
+            request=request,
+            handoff_view=handoff_view,
+            runtime_execution_id=runtime_execution_id,
+            created_at=created_at,
+            preflight={
+                "passed": True,
+                "package_verified": True,
+                "intake_runner_handoff_verified": True,
+                "expiration_still_valid": expiration_still_valid,
+                "error": None,
+            },
+            approved_task_runner_block={
+                "invoked": True,
+                "ok": False,
+                "status": None,
+                "phase": None,
+                "executor_started": None,
+                "validators_started": None,
+            },
+            runner_summary={
+                "ok": False,
+                "status": None,
+                "phase": None,
+                "error": str(runner_exception),
+                "returned": False,
+            },
+        )
+        runtime_artifact_path = _write_runtime_artifact(
+            artifact_dir=artifact_dir,
+            runtime_execution_id=runtime_execution_id,
+            payload=runtime_artifact_payload,
+        )
+        current_store.record_task_artifact(
+            request.task_key,
+            RUNTIME_EXECUTION_ARTIFACT_TYPE,
+            runtime_artifact_path,
+        )
+        runtime_block = _runtime_reference_block(
+            runtime_execution_id=runtime_execution_id,
+            runtime_artifact_path=runtime_artifact_path,
+            preflight_event_recorded=True,
+            execution_started_event_recorded=True,
+            execution_finished_event_recorded=True,
+        )
         return QueuedTaskHandoffResult(
             ok=False,
             status="blocked",
@@ -997,15 +1508,97 @@ def run_queued_task_handoff(
                 handoff_confirmed=True,
                 runner_started=True,
             ),
-            error=str(exc),
+            error=str(runner_exception),
+            runtime=runtime_block,
         )
 
-    runner_dict = _runner_result_to_dict(runner_result)
+    assert runner_dict is not None
     runner_safety = runner_dict.get("safety") or {}
     runner_status = runner_dict.get("status")
-    ok = bool(runner_dict.get("ok")) and runner_status == APPROVED_TASK_STATUS
+    runner_phase = runner_dict.get("phase")
+    runner_ok_flag = bool(runner_dict.get("ok"))
+    ok = runner_ok_flag and runner_status == APPROVED_TASK_STATUS
     status = APPROVED_TASK_STATUS if ok else "blocked"
     phase = APPROVED_TASK_STATUS if ok else "runner"
+
+    workspace_prepared = bool(runner_safety.get("workspace_prepared"))
+    executor_started = bool(runner_safety.get("executor_started"))
+    validators_started = bool(runner_safety.get("validators_started"))
+    db_written_by_runner = bool(runner_safety.get("db_written"))
+    artifact_written_by_runner = bool(runner_safety.get("artifact_written"))
+
+    finished_payload = _runtime_execution_finished_event_payload(
+        request=request,
+        handoff_view=handoff_view,
+        runtime_execution_id=runtime_execution_id,
+        runner_returned=True,
+        runner_ok=runner_ok_flag,
+        runner_status=runner_status if isinstance(runner_status, str) else None,
+        runner_phase=runner_phase if isinstance(runner_phase, str) else None,
+        final_status=status,
+        runner_error=runner_dict.get("error"),
+        workspace_prepared=workspace_prepared,
+        executor_started=executor_started,
+        validators_started=validators_started,
+        db_written_by_runner=db_written_by_runner,
+        artifact_written_by_runner=artifact_written_by_runner,
+    )
+    current_store.record_task_event(
+        request.task_key,
+        RUNTIME_EXECUTION_FINISHED_EVENT_TYPE,
+        RUNTIME_SOURCE,
+        message=(
+            f"approved_task_runner returned status={runner_status!r} for "
+            f"{request.task_key} (runtime_execution_id={runtime_execution_id})"
+        ),
+        payload=finished_payload,
+    )
+
+    runtime_artifact_payload = _build_runtime_artifact_payload(
+        request=request,
+        handoff_view=handoff_view,
+        runtime_execution_id=runtime_execution_id,
+        created_at=created_at,
+        preflight={
+            "passed": True,
+            "package_verified": True,
+            "intake_runner_handoff_verified": True,
+            "expiration_still_valid": expiration_still_valid,
+            "error": None,
+        },
+        approved_task_runner_block={
+            "invoked": True,
+            "ok": runner_ok_flag,
+            "status": runner_status if isinstance(runner_status, str) else None,
+            "phase": runner_phase if isinstance(runner_phase, str) else None,
+            "executor_started": executor_started,
+            "validators_started": validators_started,
+        },
+        runner_summary={
+            "ok": runner_ok_flag,
+            "status": runner_status if isinstance(runner_status, str) else None,
+            "phase": runner_phase if isinstance(runner_phase, str) else None,
+            "error": runner_dict.get("error"),
+            "returned": True,
+        },
+    )
+    runtime_artifact_path = _write_runtime_artifact(
+        artifact_dir=artifact_dir,
+        runtime_execution_id=runtime_execution_id,
+        payload=runtime_artifact_payload,
+    )
+    current_store.record_task_artifact(
+        request.task_key,
+        RUNTIME_EXECUTION_ARTIFACT_TYPE,
+        runtime_artifact_path,
+    )
+    runtime_block = _runtime_reference_block(
+        runtime_execution_id=runtime_execution_id,
+        runtime_artifact_path=runtime_artifact_path,
+        preflight_event_recorded=True,
+        execution_started_event_recorded=True,
+        execution_finished_event_recorded=True,
+    )
 
     return QueuedTaskHandoffResult(
         ok=ok,
@@ -1026,13 +1619,14 @@ def run_queued_task_handoff(
             package_verified=True,
             handoff_confirmed=True,
             runner_started=True,
-            workspace_prepared=bool(runner_safety.get("workspace_prepared")),
-            executor_started=bool(runner_safety.get("executor_started")),
-            validators_started=bool(runner_safety.get("validators_started")),
-            db_written=bool(runner_safety.get("db_written")),
-            artifact_written=bool(runner_safety.get("artifact_written")),
+            workspace_prepared=workspace_prepared,
+            executor_started=executor_started,
+            validators_started=validators_started,
+            db_written=db_written_by_runner,
+            artifact_written=artifact_written_by_runner,
         ),
         error=runner_dict.get("error") if not ok else None,
+        runtime=runtime_block,
     )
 
 
@@ -1053,6 +1647,12 @@ def _runner_result_to_dict(result: Any) -> dict[str, Any]:
 __all__ = [
     "APPROVED_TASK_STATUS",
     "DEFAULT_BASE_BRANCH",
+    "RUNTIME_EXECUTION_ARTIFACT_TYPE",
+    "RUNTIME_EXECUTION_FINISHED_EVENT_TYPE",
+    "RUNTIME_EXECUTION_SCHEMA_VERSION",
+    "RUNTIME_EXECUTION_STARTED_EVENT_TYPE",
+    "RUNTIME_PREFLIGHT_EVENT_TYPE",
+    "RUNTIME_SOURCE",
     "QueuedTaskHandoffError",
     "QueuedTaskHandoffRequest",
     "QueuedTaskHandoffResult",

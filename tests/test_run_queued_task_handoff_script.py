@@ -286,6 +286,11 @@ class RunQueuedTaskHandoffScriptTests(unittest.TestCase):
         self.assertFalse(payload["safety"]["approved_task_runner_started"])
         self.assertFalse(payload["safety"]["workspace_prepared"])
         self.assertFalse(payload["safety"]["executor_started"])
+        # Phase C: dry-run never produces runtime audit evidence.
+        self.assertIsNone(payload["runtime"])
+        self.assertFalse(
+            (self.artifact_dir / "runtime_handoff_executions").exists()
+        )
         # The prompt and package files exist (the package writer placed them).
         self.assertTrue((self.artifact_dir / IMPLEMENTATION_PROMPT_FILENAME).exists())
         self.assertTrue((self.artifact_dir / PACKAGE_FILENAME).exists())
@@ -360,6 +365,12 @@ class RunQueuedTaskHandoffScriptTests(unittest.TestCase):
         self.assertFalse(
             payload["handoff"]["intake_runner_handoff_verified"]
         )
+        # Phase C: short-circuit at CLI parse stage produces no
+        # runtime execution evidence.
+        self.assertIsNone(payload["runtime"])
+        self.assertFalse(
+            (self.artifact_dir / "runtime_handoff_executions").exists()
+        )
 
     # 7. Default dry-run output reports the handoff path is required.
     def test_default_dry_run_reports_handoff_required(self) -> None:
@@ -420,6 +431,30 @@ class RunQueuedTaskHandoffScriptTests(unittest.TestCase):
             payload["handoff"]["verifier_run_id"],
             "verifier-run-cli-test-0001",
         )
+        # Phase C: once the CLI reaches the runtime audit boundary in
+        # confirmed mode, runtime references must be surfaced on the
+        # result so the operator can locate the runtime audit
+        # artifact and confirm the runtime_execution_id.
+        self.assertIsNotNone(payload["runtime"])
+        self.assertIsInstance(
+            payload["runtime"]["runtime_execution_id"], str
+        )
+        self.assertTrue(
+            payload["runtime"]["runtime_execution_id"].startswith(
+                "runtime-execution-"
+            )
+        )
+        artifact_path_str = payload["runtime"][
+            "runtime_execution_artifact_path"
+        ]
+        self.assertIsNotNone(artifact_path_str)
+        artifact_path = Path(artifact_path_str)
+        self.assertTrue(artifact_path.exists())
+        self.assertTrue(
+            payload["runtime"]["runtime_preflight_event_recorded"]
+        )
+        self.assertTrue(payload["runtime"]["not_action_evidence"])
+        self.assertTrue(payload["runtime"]["not_validation_authority"])
 
 
 if __name__ == "__main__":
