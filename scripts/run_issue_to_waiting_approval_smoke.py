@@ -37,6 +37,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from datetime import datetime, timezone  # noqa: E402
+
 from agent_taskflow.executors.base import (  # noqa: E402
     Executor,
     ExecutorContext,
@@ -47,8 +49,14 @@ from agent_taskflow.github_issue_intake_gate import (  # noqa: E402
     GitHubIssueIntakeRequest,
     intake_selected_github_issues,
 )
+from agent_taskflow.intake_runner_handoff import (  # noqa: E402
+    SCHEMA_VERSION as INTAKE_RUNNER_HANDOFF_SCHEMA_VERSION,
+    STATUS_CREATED as INTAKE_RUNNER_HANDOFF_STATUS_CREATED,
+    VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+)
 from agent_taskflow.queued_task_handoff import (  # noqa: E402
     APPROVED_TASK_STATUS,
+    INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND,
     QueuedTaskHandoffRequest,
     run_queued_task_handoff,
 )
@@ -267,6 +275,203 @@ def _prepare_chain_paths(workspace_root: Path) -> _ChainPaths:
     )
 
 
+def _utc_now_iso_smoke() -> str:
+    now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+    return now.isoformat().replace("+00:00", "Z")
+
+
+def _write_smoke_intake_runner_handoff_pair(
+    *,
+    artifact_root: Path,
+    db_path: Path,
+    task_key: str,
+) -> Path:
+    """Write a synthetic Phase A handoff + verifier_report pair.
+
+    The smoke does not exercise the full scheduler proposal /
+    confirmation pipeline, so this helper produces the on-disk
+    artifacts in the exact shape ``create_intake_runner_handoff``
+    would have produced in confirmed mode. The pair satisfies every
+    check in ``_verify_intake_runner_handoff`` so the smoke can
+    continue to reach ``approved_task_runner``.
+    """
+
+    now = _utc_now_iso_smoke()
+    verifier_run_id = f"verifier-run-smoke-{task_key}"
+    handoff_id = f"handoff-smoke-{task_key}"
+    expiration = {
+        "kind": INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND,
+        "default_max_age_minutes": 15,
+        "max_age_minutes_override": None,
+        "effective_max_age_minutes": 15,
+        "max_age_minutes": 15,
+        "max_age_source": "default",
+        "confirmation_created_at": now,
+        "now": now,
+        "age_seconds": 0,
+        "expired": False,
+        "detail": None,
+    }
+    report = {
+        "ok": True,
+        "status": "valid",
+        "schema_version": "scheduler_confirmation_verifier_report.v1",
+        "source": "scheduler_confirmation_verifier",
+        "verification_passed": True,
+        "eligible_for_command_specific_confirm": True,
+        "execution_allowed": False,
+        "allowed_to_attempt": False,
+        "execution_performed": False,
+        "action_evidence_created": False,
+        "task_key": task_key,
+        "recommended_command_kind": (
+            INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND
+        ),
+        "proposal_id": f"proposal-smoke-{task_key}",
+        "proposal_hash": f"proposal-hash-smoke-{task_key}",
+        "proposal_artifact_path": "/abs/smoke/proposal.json",
+        "proposal_item_id": f"proposal-item-smoke-{task_key}",
+        "item_hash": f"item-hash-smoke-{task_key}",
+        "confirmation_id": f"confirmation-smoke-{task_key}",
+        "confirmation_artifact_path": "/abs/smoke/confirmation.json",
+        "confirmation_created_at": now,
+        "expiration": expiration,
+        "checks": [{"name": "smoke", "passed": True}],
+        "safety": {
+            "verifier_dry_run": True,
+            "execution_allowed": False,
+            "execution_performed": False,
+            "action_evidence_created": False,
+        },
+    }
+    verifier_report_path = (
+        artifact_root
+        / "scheduler_confirmation_verifier_reports"
+        / verifier_run_id
+        / "verifier_report.json"
+    )
+    verifier_report_path.parent.mkdir(parents=True, exist_ok=True)
+    verifier_report_path.write_text(
+        json.dumps(
+            {
+                "schema_version": VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+                "verifier_run_id": verifier_run_id,
+                "created_at": now,
+                "source": "intake_runner_handoff",
+                "report": report,
+                "safety": {
+                    "dry_run_report_only": True,
+                    "execution_allowed": False,
+                    "execution_performed": False,
+                    "action_evidence_created": False,
+                    "executor_started": False,
+                    "validators_started": False,
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    handoff_path = (
+        artifact_root
+        / "intake_runner_handoffs"
+        / handoff_id
+        / "intake_runner_handoff.json"
+    )
+    handoff_payload = {
+        "ok": True,
+        "status": INTAKE_RUNNER_HANDOFF_STATUS_CREATED,
+        "schema_version": INTAKE_RUNNER_HANDOFF_SCHEMA_VERSION,
+        "handoff_id": handoff_id,
+        "created_at": now,
+        "source": "intake_runner_handoff",
+        "mode": "confirmed",
+        "db_path": str(db_path),
+        "artifact_root": str(artifact_root),
+        "artifact_path": str(handoff_path),
+        "task_key": task_key,
+        "recommended_command_kind": (
+            INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND
+        ),
+        "proposal": {
+            "proposal_id": report["proposal_id"],
+            "proposal_hash": report["proposal_hash"],
+            "proposal_artifact_path": report["proposal_artifact_path"],
+            "proposal_item_id": report["proposal_item_id"],
+            "item_hash": report["item_hash"],
+        },
+        "confirmation": {
+            "confirmation_id": report["confirmation_id"],
+            "confirmation_artifact_path": (
+                report["confirmation_artifact_path"]
+            ),
+            "verification_status": "valid",
+            "verification_passed": True,
+            "eligible_for_command_specific_confirm": True,
+        },
+        "runner_contract": {
+            "runner_may_start": False,
+            "execution_allowed": False,
+            "execution_performed": False,
+            "executor_started": False,
+            "validators_started": False,
+            "action_evidence_created": False,
+            "requires_future_runtime_gate": True,
+        },
+        "safety": {
+            "handoff_only": True,
+            "will_execute": False,
+            "will_push": False,
+            "will_create_pr": False,
+            "will_merge": False,
+            "will_approve": False,
+            "will_reject": False,
+            "will_cleanup": False,
+            "will_delete_branch": False,
+            "will_delete_worktree": False,
+            "will_mutate_github": False,
+            "will_mutate_db_as_action": False,
+            "will_start_background_worker": False,
+        },
+        "verifier_report": {
+            "verifier_run_id": verifier_run_id,
+            "verifier_report_path": str(verifier_report_path),
+            "artifact_type": "scheduler_confirmation_verifier_report",
+            "schema_version": VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+            "persisted": True,
+            "status": "valid",
+            "verification_passed": True,
+            "eligible_for_command_specific_confirm": True,
+            "execution_allowed": False,
+            "execution_performed": False,
+            "action_evidence_created": False,
+            "expiration": expiration,
+        },
+        "verifier_report_summary": {
+            "schema_version": (
+                "scheduler_confirmation_verifier_report.v1"
+            ),
+            "status": "valid",
+            "verification_passed": True,
+            "eligible_for_command_specific_confirm": True,
+            "execution_allowed": False,
+            "execution_performed": False,
+            "action_evidence_created": False,
+            "failed_check_count": 0,
+            "failed_check_names": [],
+            "expiration": expiration,
+        },
+    }
+    handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    handoff_path.write_text(
+        json.dumps(handoff_payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return handoff_path
+
+
 # --------------------------------------------------------------------- main flow
 
 
@@ -358,7 +563,20 @@ def run_smoke(
         f"expected one task_execution_package_created event, got {len(package_events)}",
     )
 
-    # 3. Phase 6E+1 explicit handoff to approved_task_runner, with injected
+    # 3. Synthesize a Phase A intake_runner_handoff binding for this
+    #    queued task. The smoke does not exercise the full scheduler
+    #    proposal/confirmation pipeline, so this helper writes the
+    #    handoff artifact + persisted verifier report artifact pair on
+    #    disk in the exact shape Phase A would have produced. Phase B's
+    #    queued handoff preflight re-opens both artifacts and rejects
+    #    the run if anything is malformed.
+    handoff_artifact_path = _write_smoke_intake_runner_handoff_pair(
+        artifact_root=paths.artifact_root,
+        db_path=paths.db_path,
+        task_key=task_key,
+    )
+
+    # 4. Phase 6E+1 explicit handoff to approved_task_runner, with injected
     #    fake executor and fake validator. preflight=False keeps the smoke
     #    hermetic (no real Pi/OpenCode/pytest check).
     handoff_result = run_queued_task_handoff(
@@ -374,6 +592,7 @@ def run_smoke(
             preflight=False,
             dry_run=False,
             confirm_handoff=True,
+            intake_runner_handoff_artifact_path=handoff_artifact_path,
         ),
         store=store,
         executor_registry={EXECUTOR_NAME: FakeLocalSmokeExecutor()},

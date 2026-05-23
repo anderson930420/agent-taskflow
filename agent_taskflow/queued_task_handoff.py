@@ -14,12 +14,30 @@ task key, gated by an explicit confirmation flag. It stops at the
 runner's own final status (waiting_approval on success, blocked on
 failure); it never continues into PR handoff, branch push, draft PR
 creation, merge, approval, or cleanup.
+
+Runtime preflight binding
+-------------------------
+
+In confirmed mode this module additionally REQUIRES an
+``intake_runner_handoff`` artifact (produced by
+``agent_taskflow.intake_runner_handoff``) and re-opens the verifier
+report artifact bound to it. The handoff artifact's own claim that
+the verifier passed is NOT trusted on its own; the queued handoff
+re-validates the persisted verifier report at execution time. This
+overlap between the verifier (verification time) and the queued
+handoff (execution time) is intentional: it closes the TOCTOU gap
+between the moment the verifier ran and the moment the runner is
+asked to start. The handoff artifact itself is never treated as
+execution permission, and confirmed mode never calls
+``approved_task_runner`` unless every check in
+:func:`_verify_intake_runner_handoff` passes.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -32,6 +50,11 @@ from agent_taskflow.approved_task_runner import (
 )
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS
 from agent_taskflow.executors.base import Executor
+from agent_taskflow.intake_runner_handoff import (
+    SCHEMA_VERSION as INTAKE_RUNNER_HANDOFF_SCHEMA_VERSION,
+    STATUS_CREATED as INTAKE_RUNNER_HANDOFF_STATUS_CREATED,
+    VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
+)
 from agent_taskflow.models import TaskRecord, require_absolute_path
 from agent_taskflow.store import TaskMirrorStore, default_db_path
 from agent_taskflow.task_execution_package import (
@@ -46,6 +69,8 @@ from agent_taskflow.validators.base import Validator
 DEFAULT_BASE_BRANCH = "main"
 TASK_QUEUE_STATUS = "queued"
 RUNNER_BLOCKED_STATUS = "blocked"
+INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND = "queued_task_handoff"
+VERIFIER_REPORT_STATUS_VALID = "valid"
 
 
 ApprovedTaskRunnerCallable = Callable[..., ApprovedTaskRunResult]
@@ -78,6 +103,7 @@ class QueuedTaskHandoffRequest:
     preflight: bool = True
     dry_run: bool = True
     confirm_handoff: bool = False
+    intake_runner_handoff_artifact_path: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
@@ -137,6 +163,26 @@ class QueuedTaskHandoffRequest:
         if not self.dry_run and not self.confirm_handoff:
             raise ValueError(
                 "confirmed handoff requires confirm_handoff=True"
+            )
+
+        if self.intake_runner_handoff_artifact_path is not None:
+            path = Path(self.intake_runner_handoff_artifact_path).expanduser()
+            if not path.is_absolute():
+                raise ValueError(
+                    "intake_runner_handoff_artifact_path must be an absolute "
+                    "path"
+                )
+            object.__setattr__(
+                self, "intake_runner_handoff_artifact_path", path
+            )
+        elif self.confirm_handoff:
+            # Confirmed queued handoff MUST be bound to an
+            # intake_runner_handoff artifact so the runtime preflight
+            # has a verifier report artifact to re-open. Dry-run is
+            # permitted to omit the binding for previewing.
+            raise ValueError(
+                "confirmed queued task handoff requires "
+                "intake_runner_handoff_artifact_path; dry-run may omit it"
             )
 
 
@@ -209,6 +255,7 @@ def _blocked(
     phase: str,
     error: str,
     package: dict[str, Any] | None = None,
+    handoff_view: dict[str, Any] | None = None,
 ) -> QueuedTaskHandoffResult:
     return QueuedTaskHandoffResult(
         ok=False,
@@ -218,15 +265,11 @@ def _blocked(
         executor=request.executor,
         dry_run=request.dry_run,
         package=package or _empty_package_view(),
-        handoff={
-            "confirmed": False,
-            "approved_task_runner_invoked": False,
-            "executor": request.executor,
-            "base_branch": request.base_branch,
-            "validators": list(request.validators),
-            "command": list(request.command) if request.command else None,
-            "preflight": request.preflight,
-        },
+        handoff=_handoff_meta(
+            request,
+            handoff_view=handoff_view,
+            approved_task_runner_invoked=False,
+        ),
         runner_result=None,
         safety=_safety_block(
             dry_run=request.dry_run,
@@ -236,6 +279,59 @@ def _blocked(
         ),
         error=error,
     )
+
+
+def _empty_handoff_view() -> dict[str, Any]:
+    """Return the default handoff-binding fields surfaced on every result.
+
+    These fields make it explicit that confirmed execution always
+    requires an intake_runner_handoff artifact and a re-validated
+    persisted verifier report. When no handoff path is provided (or the
+    handoff fails verification), ``intake_runner_handoff_verified`` is
+    False and the remaining binding fields are ``None``.
+    """
+
+    return {
+        "intake_runner_handoff_required_for_confirmed_execution": True,
+        "intake_runner_handoff_artifact_path": None,
+        "intake_runner_handoff_verified": False,
+        "verifier_run_id": None,
+        "verifier_report_path": None,
+        "proposal_hash": None,
+        "proposal_item_id": None,
+        "item_hash": None,
+        "confirmation_id": None,
+        "confirmation_artifact_path": None,
+        "expiration_still_valid": None,
+    }
+
+
+def _handoff_meta(
+    request: QueuedTaskHandoffRequest,
+    *,
+    handoff_view: dict[str, Any] | None,
+    approved_task_runner_invoked: bool,
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "confirmed": bool(request.confirm_handoff),
+        "approved_task_runner_invoked": approved_task_runner_invoked,
+        "executor": request.executor,
+        "base_branch": request.base_branch,
+        "validators": list(request.validators),
+        "command": list(request.command) if request.command else None,
+        "preflight": request.preflight,
+    }
+    binding = _empty_handoff_view()
+    if request.intake_runner_handoff_artifact_path is not None:
+        binding["intake_runner_handoff_artifact_path"] = str(
+            request.intake_runner_handoff_artifact_path
+        )
+    if handoff_view is not None:
+        for key in binding:
+            if key in handoff_view:
+                binding[key] = handoff_view[key]
+    meta.update(binding)
+    return meta
 
 
 def _empty_package_view() -> dict[str, Any]:
@@ -341,6 +437,412 @@ def _verify_package(
     return view, None
 
 
+def _verify_intake_runner_handoff(
+    *,
+    request: QueuedTaskHandoffRequest,
+    task: TaskRecord,
+    package_view: dict[str, Any],
+    now: datetime | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Verify the intake_runner_handoff artifact and its bound verifier report.
+
+    Returns ``(handoff_view, error)``. On success, ``error`` is None
+    and ``handoff_view`` carries the persisted binding fields the
+    queued handoff result surfaces. On failure, ``handoff_view``
+    contains any binding fields that were successfully decoded before
+    the failure was detected so the result remains diagnosable, and
+    ``error`` is a human-readable description of the failed check.
+
+    All checks must pass before the caller may invoke
+    ``approved_task_runner`` in confirmed mode. The check set is
+    intentionally a superset of the verifier's own checks because the
+    verifier ran at verification time; this helper re-runs at
+    execution time to close the TOCTOU gap between verification and
+    runner invocation.
+    """
+
+    view = _empty_handoff_view()
+    handoff_path = request.intake_runner_handoff_artifact_path
+    assert handoff_path is not None
+    view["intake_runner_handoff_artifact_path"] = str(handoff_path)
+
+    if not handoff_path.exists():
+        return view, (
+            "intake_runner_handoff artifact does not exist: "
+            f"{handoff_path}"
+        )
+
+    try:
+        raw = handoff_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return view, (
+            f"could not read intake_runner_handoff artifact: {exc}"
+        )
+
+    try:
+        handoff = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return view, (
+            "intake_runner_handoff artifact is not valid JSON: "
+            f"{exc}"
+        )
+
+    if not isinstance(handoff, dict):
+        return view, (
+            "intake_runner_handoff artifact must be a JSON object"
+        )
+
+    schema_version = handoff.get("schema_version")
+    if schema_version != INTAKE_RUNNER_HANDOFF_SCHEMA_VERSION:
+        return view, (
+            "intake_runner_handoff artifact schema_version must be "
+            f"{INTAKE_RUNNER_HANDOFF_SCHEMA_VERSION!r}, got "
+            f"{schema_version!r}"
+        )
+
+    if handoff.get("status") != INTAKE_RUNNER_HANDOFF_STATUS_CREATED:
+        return view, (
+            "intake_runner_handoff artifact status must be "
+            f"{INTAKE_RUNNER_HANDOFF_STATUS_CREATED!r}, got "
+            f"{handoff.get('status')!r}"
+        )
+
+    if handoff.get("mode") != "confirmed":
+        return view, (
+            "intake_runner_handoff artifact mode must be 'confirmed', "
+            f"got {handoff.get('mode')!r}"
+        )
+
+    handoff_task_key = handoff.get("task_key")
+    if handoff_task_key != request.task_key:
+        return view, (
+            "intake_runner_handoff artifact task_key "
+            f"{handoff_task_key!r} does not match requested task_key "
+            f"{request.task_key!r}"
+        )
+
+    if (
+        handoff.get("recommended_command_kind")
+        != INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND
+    ):
+        return view, (
+            "intake_runner_handoff artifact recommended_command_kind "
+            "must be "
+            f"{INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND!r}, got "
+            f"{handoff.get('recommended_command_kind')!r}"
+        )
+
+    declared_artifact_path = handoff.get("artifact_path")
+    if (
+        declared_artifact_path is not None
+        and Path(declared_artifact_path) != handoff_path
+    ):
+        return view, (
+            "intake_runner_handoff artifact_path "
+            f"{declared_artifact_path!r} does not match the file the "
+            f"queued handoff was given: {str(handoff_path)!r}"
+        )
+
+    runner_contract = handoff.get("runner_contract")
+    contract_error = _verify_runner_contract_flags(runner_contract)
+    if contract_error is not None:
+        return view, contract_error
+
+    safety = handoff.get("safety")
+    safety_error = _verify_handoff_safety_flags(safety)
+    if safety_error is not None:
+        return view, safety_error
+
+    proposal = handoff.get("proposal") or {}
+    confirmation = handoff.get("confirmation") or {}
+    verifier_block = handoff.get("verifier_report") or {}
+
+    proposal_hash = proposal.get("proposal_hash")
+    proposal_item_id = proposal.get("proposal_item_id")
+    item_hash = proposal.get("item_hash")
+    confirmation_id = confirmation.get("confirmation_id")
+    confirmation_artifact_path = confirmation.get(
+        "confirmation_artifact_path"
+    )
+    verifier_run_id = verifier_block.get("verifier_run_id")
+    verifier_report_path_raw = verifier_block.get("verifier_report_path")
+
+    view["proposal_hash"] = proposal_hash
+    view["proposal_item_id"] = proposal_item_id
+    view["item_hash"] = item_hash
+    view["confirmation_id"] = confirmation_id
+    view["confirmation_artifact_path"] = confirmation_artifact_path
+    view["verifier_run_id"] = verifier_run_id
+    view["verifier_report_path"] = verifier_report_path_raw
+
+    for label, value in (
+        ("proposal.proposal_hash", proposal_hash),
+        ("proposal.proposal_item_id", proposal_item_id),
+        ("proposal.item_hash", item_hash),
+        (
+            "confirmation.confirmation_artifact_path",
+            confirmation_artifact_path,
+        ),
+        ("verifier_report.verifier_run_id", verifier_run_id),
+        ("verifier_report.verifier_report_path", verifier_report_path_raw),
+    ):
+        if not isinstance(value, str) or not value:
+            return view, (
+                f"intake_runner_handoff artifact {label} must be a "
+                "non-empty string"
+            )
+
+    verifier_report_path = Path(verifier_report_path_raw)
+    if not verifier_report_path.exists():
+        return view, (
+            "verifier report artifact does not exist: "
+            f"{verifier_report_path}"
+        )
+
+    try:
+        report_raw = verifier_report_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return view, (
+            f"could not read verifier report artifact: {exc}"
+        )
+
+    try:
+        report_artifact = json.loads(report_raw)
+    except json.JSONDecodeError as exc:
+        return view, (
+            "verifier report artifact is not valid JSON: "
+            f"{exc}"
+        )
+
+    if not isinstance(report_artifact, dict):
+        return view, "verifier report artifact must be a JSON object"
+
+    if (
+        report_artifact.get("schema_version")
+        != VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION
+    ):
+        return view, (
+            "verifier report artifact schema_version must be "
+            f"{VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION!r}, got "
+            f"{report_artifact.get('schema_version')!r}"
+        )
+
+    if report_artifact.get("verifier_run_id") != verifier_run_id:
+        return view, (
+            "verifier report artifact verifier_run_id "
+            f"{report_artifact.get('verifier_run_id')!r} does not match "
+            f"handoff verifier_run_id {verifier_run_id!r}"
+        )
+
+    report = report_artifact.get("report")
+    if not isinstance(report, dict):
+        return view, (
+            "verifier report artifact must contain a 'report' object"
+        )
+
+    if report.get("status") != VERIFIER_REPORT_STATUS_VALID:
+        return view, (
+            "verifier report status must be "
+            f"{VERIFIER_REPORT_STATUS_VALID!r}, got "
+            f"{report.get('status')!r}"
+        )
+    if report.get("verification_passed") is not True:
+        return view, (
+            "verifier report verification_passed must be True"
+        )
+    if report.get("eligible_for_command_specific_confirm") is not True:
+        return view, (
+            "verifier report eligible_for_command_specific_confirm "
+            "must be True"
+        )
+    if report.get("execution_allowed") is not False:
+        return view, (
+            "verifier report execution_allowed must be False"
+        )
+    if report.get("execution_performed") is not False:
+        return view, (
+            "verifier report execution_performed must be False"
+        )
+    if report.get("action_evidence_created") is not False:
+        return view, (
+            "verifier report action_evidence_created must be False"
+        )
+    if report.get("task_key") != request.task_key:
+        return view, (
+            "verifier report task_key "
+            f"{report.get('task_key')!r} does not match requested "
+            f"task_key {request.task_key!r}"
+        )
+    if (
+        report.get("recommended_command_kind")
+        != INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND
+    ):
+        return view, (
+            "verifier report recommended_command_kind must be "
+            f"{INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND!r}, got "
+            f"{report.get('recommended_command_kind')!r}"
+        )
+
+    for label, handoff_value, report_value in (
+        (
+            "proposal_hash",
+            proposal_hash,
+            report.get("proposal_hash"),
+        ),
+        (
+            "proposal_item_id",
+            proposal_item_id,
+            report.get("proposal_item_id"),
+        ),
+        ("item_hash", item_hash, report.get("item_hash")),
+        (
+            "confirmation_artifact_path",
+            confirmation_artifact_path,
+            report.get("confirmation_artifact_path"),
+        ),
+        (
+            "confirmation_id",
+            confirmation_id,
+            report.get("confirmation_id"),
+        ),
+    ):
+        if handoff_value != report_value:
+            return view, (
+                f"verifier report {label} {report_value!r} does not "
+                f"match handoff {label} {handoff_value!r}"
+            )
+
+    expiration = report.get("expiration")
+    expiration_ok, expiration_error = _handoff_expiration_still_valid(
+        expiration, now=now
+    )
+    view["expiration_still_valid"] = expiration_ok
+    if not expiration_ok:
+        return view, (
+            f"verifier report expiration is no longer valid: "
+            f"{expiration_error}"
+        )
+
+    view["intake_runner_handoff_verified"] = True
+    return view, None
+
+
+def _verify_runner_contract_flags(
+    runner_contract: Any,
+) -> str | None:
+    if not isinstance(runner_contract, dict):
+        return (
+            "intake_runner_handoff artifact runner_contract must be a "
+            "JSON object"
+        )
+    expectations = {
+        "requires_future_runtime_gate": True,
+        "runner_may_start": False,
+        "execution_allowed": False,
+        "execution_performed": False,
+        "executor_started": False,
+        "validators_started": False,
+        "action_evidence_created": False,
+    }
+    for key, expected in expectations.items():
+        actual = runner_contract.get(key)
+        if actual is not expected:
+            return (
+                "intake_runner_handoff artifact runner_contract."
+                f"{key} must be {expected!r}, got {actual!r}"
+            )
+    return None
+
+
+def _verify_handoff_safety_flags(safety: Any) -> str | None:
+    if not isinstance(safety, dict):
+        return (
+            "intake_runner_handoff artifact safety must be a JSON object"
+        )
+    expectations = {
+        "handoff_only": True,
+        "will_execute": False,
+        "will_start_background_worker": False,
+        "will_mutate_github": False,
+    }
+    for key, expected in expectations.items():
+        actual = safety.get(key)
+        if actual is not expected:
+            return (
+                "intake_runner_handoff artifact safety."
+                f"{key} must be {expected!r}, got {actual!r}"
+            )
+    return None
+
+
+def _handoff_expiration_still_valid(
+    expiration: Any,
+    *,
+    now: datetime | None = None,
+) -> tuple[bool, str | None]:
+    """Re-check the verifier-report TTL at execution time.
+
+    Phase B intentionally does NOT trust the verifier report's own
+    ``expired`` flag because that was computed at verification time.
+    This helper recomputes the age from
+    ``confirmation_created_at`` and the effective TTL and rejects any
+    expiration block that is missing those fields or is now stale.
+    """
+
+    if not isinstance(expiration, dict):
+        return False, "expiration block is missing or not an object"
+
+    created_at_raw = expiration.get("confirmation_created_at")
+    if not isinstance(created_at_raw, str) or not created_at_raw:
+        return False, "expiration.confirmation_created_at is missing"
+
+    effective = expiration.get("effective_max_age_minutes")
+    if effective is None:
+        effective = expiration.get("max_age_minutes")
+    if not isinstance(effective, int) or effective < 0:
+        return (
+            False,
+            "expiration.effective_max_age_minutes must be a non-negative "
+            "integer",
+        )
+
+    try:
+        created = _parse_iso8601_utc(created_at_raw)
+    except ValueError as exc:
+        return False, f"could not parse confirmation_created_at: {exc}"
+
+    current = now or datetime.now(tz=timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    age = (current - created).total_seconds()
+    if age < 0:
+        return False, "confirmation_created_at is in the future"
+    max_age_seconds = effective * 60
+    if age > max_age_seconds:
+        return False, (
+            f"confirmation is {age:.1f}s old at execution time; "
+            f"max age is {max_age_seconds}s"
+        )
+    return True, None
+
+
+def _parse_iso8601_utc(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp the verifier produces.
+
+    The verifier writes ``...Z`` suffixed timestamps. We normalize to
+    ``+00:00`` so :func:`datetime.fromisoformat` accepts the input on
+    older Python versions where ``Z`` parsing was added in 3.11.
+    """
+
+    text = value
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _resolve_artifact_dir(
     task: TaskRecord,
     request: QueuedTaskHandoffRequest,
@@ -400,15 +902,21 @@ def run_queued_task_handoff(
     assert package_view is not None
     assert package_view["verified"] is True
 
-    handoff_meta = {
-        "confirmed": bool(request.confirm_handoff),
-        "approved_task_runner_invoked": False,
-        "executor": request.executor,
-        "base_branch": request.base_branch,
-        "validators": list(request.validators),
-        "command": list(request.command) if request.command else None,
-        "preflight": request.preflight,
-    }
+    handoff_view: dict[str, Any] | None = None
+    if request.intake_runner_handoff_artifact_path is not None:
+        handoff_view, handoff_error = _verify_intake_runner_handoff(
+            request=request,
+            task=task,
+            package_view=package_view,
+        )
+        if handoff_error is not None:
+            return _blocked(
+                request,
+                phase="handoff_verification",
+                error=handoff_error,
+                package=package_view,
+                handoff_view=handoff_view,
+            )
 
     if request.dry_run:
         return QueuedTaskHandoffResult(
@@ -419,7 +927,11 @@ def run_queued_task_handoff(
             executor=request.executor,
             dry_run=True,
             package=package_view,
-            handoff=handoff_meta,
+            handoff=_handoff_meta(
+                request,
+                handoff_view=handoff_view,
+                approved_task_runner_invoked=False,
+            ),
             runner_result=None,
             safety=_safety_block(
                 dry_run=True,
@@ -429,6 +941,15 @@ def run_queued_task_handoff(
             ),
             error=None,
         )
+
+    # Confirmed mode: __post_init__ already guaranteed an absolute
+    # intake_runner_handoff_artifact_path was supplied and the helper
+    # above already returned blocked if the artifact or its verifier
+    # report was invalid.
+    assert request.intake_runner_handoff_artifact_path is not None
+    assert handoff_view is not None and handoff_view[
+        "intake_runner_handoff_verified"
+    ] is True
 
     runner_request = ApprovedTaskRunRequest(
         task_key=request.task_key,
@@ -464,7 +985,11 @@ def run_queued_task_handoff(
             executor=request.executor,
             dry_run=False,
             package=package_view,
-            handoff={**handoff_meta, "approved_task_runner_invoked": True},
+            handoff=_handoff_meta(
+                request,
+                handoff_view=handoff_view,
+                approved_task_runner_invoked=True,
+            ),
             runner_result=None,
             safety=_safety_block(
                 dry_run=False,
@@ -490,7 +1015,11 @@ def run_queued_task_handoff(
         executor=request.executor,
         dry_run=False,
         package=package_view,
-        handoff={**handoff_meta, "approved_task_runner_invoked": True},
+        handoff=_handoff_meta(
+            request,
+            handoff_view=handoff_view,
+            approved_task_runner_invoked=True,
+        ),
         runner_result=runner_dict,
         safety=_safety_block(
             dry_run=False,
