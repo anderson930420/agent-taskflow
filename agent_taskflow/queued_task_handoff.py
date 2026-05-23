@@ -1141,6 +1141,7 @@ def _runtime_reference_block(
         ),
         "runtime_audit_only": True,
         "not_action_evidence": True,
+        "not_validation_authority": True,
     }
 
 

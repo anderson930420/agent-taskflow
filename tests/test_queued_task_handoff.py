@@ -1372,6 +1372,8 @@ class QueuedTaskHandoffRuntimeAuditTests(unittest.TestCase):
         self.assertEqual(
             result.runtime["runtime_execution_id"], runtime_execution_id
         )
+        self.assertTrue(result.runtime["not_action_evidence"])
+        self.assertTrue(result.runtime["not_validation_authority"])
         artifact_path = Path(result.runtime["runtime_execution_artifact_path"])
         self.assertTrue(artifact_path.exists())
         artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -1470,6 +1472,8 @@ class QueuedTaskHandoffRuntimeAuditTests(unittest.TestCase):
         self.assertIsNotNone(result.runtime)
         artifact_path = Path(result.runtime["runtime_execution_artifact_path"])
         self.assertTrue(artifact_path.exists())
+        self.assertTrue(result.runtime["not_action_evidence"])
+        self.assertTrue(result.runtime["not_validation_authority"])
         artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
         self.assertTrue(artifact["approved_task_runner"]["invoked"])
         self.assertFalse(artifact["approved_task_runner"]["ok"])

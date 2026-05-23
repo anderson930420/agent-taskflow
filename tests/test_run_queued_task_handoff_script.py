@@ -453,6 +453,8 @@ class RunQueuedTaskHandoffScriptTests(unittest.TestCase):
         self.assertTrue(
             payload["runtime"]["runtime_preflight_event_recorded"]
         )
+        self.assertTrue(payload["runtime"]["not_action_evidence"])
+        self.assertTrue(payload["runtime"]["not_validation_authority"])
 
 
 if __name__ == "__main__":
