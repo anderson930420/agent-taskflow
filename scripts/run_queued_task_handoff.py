@@ -120,6 +120,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--intake-runner-handoff-artifact-path",
+        dest="intake_runner_handoff_artifact_path",
+        help=(
+            "Absolute path to the intake_runner_handoff artifact bound to "
+            "this task. REQUIRED for --confirm-handoff. In dry-run, "
+            "providing this path also runs runtime preflight checks; "
+            "omitting it produces a preview that explicitly notes that "
+            "confirmed execution would be blocked."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit compact JSON output.",
@@ -189,6 +200,17 @@ def _error_payload(
             "validators": None,
             "command": None,
             "preflight": None,
+            "intake_runner_handoff_required_for_confirmed_execution": True,
+            "intake_runner_handoff_artifact_path": None,
+            "intake_runner_handoff_verified": False,
+            "verifier_run_id": None,
+            "verifier_report_path": None,
+            "proposal_hash": None,
+            "proposal_item_id": None,
+            "item_hash": None,
+            "confirmation_id": None,
+            "confirmation_artifact_path": None,
+            "expiration_still_valid": None,
         },
         "runner_result": None,
         "safety": _safety_for_cli_error(),
@@ -217,6 +239,27 @@ def main(argv: list[str] | None = None) -> int:
     confirm_handoff = bool(args.confirm_handoff)
     dry_run = not confirm_handoff
 
+    intake_runner_handoff_artifact_path = _resolve_path(
+        args.intake_runner_handoff_artifact_path
+    )
+
+    if confirm_handoff and intake_runner_handoff_artifact_path is None:
+        _emit(
+            _error_payload(
+                args.task_key,
+                args.executor,
+                phase="cli",
+                message=(
+                    "--confirm-handoff requires "
+                    "--intake-runner-handoff-artifact-path; confirmed "
+                    "queued task handoff must be bound to an "
+                    "intake_runner_handoff artifact"
+                ),
+            ),
+            compact=compact,
+        )
+        return 2
+
     try:
         request = QueuedTaskHandoffRequest(
             task_key=args.task_key,
@@ -231,6 +274,9 @@ def main(argv: list[str] | None = None) -> int:
             preflight=args.preflight,
             dry_run=dry_run,
             confirm_handoff=confirm_handoff,
+            intake_runner_handoff_artifact_path=(
+                intake_runner_handoff_artifact_path
+            ),
         )
         result = run_queued_task_handoff(request)
     except (ValueError, OSError, QueuedTaskHandoffError) as exc:
