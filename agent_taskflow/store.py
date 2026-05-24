@@ -530,6 +530,123 @@ class TaskMirrorStore:
 
         return results
 
+    def list_runtime_audit_events(self, task_key: str) -> list[dict[str, Any]]:
+        """Return runtime audit events recorded by queued_task_handoff.
+
+        Read-only observability helper for Phase D readback. Returns
+        runtime_preflight_finished, runtime_execution_started, and
+        runtime_execution_finished events normalized into JSON-friendly
+        dicts.
+
+        These events are runtime audit evidence only. They are not action
+        evidence and are not validation authority. ``validation_result``
+        events remain the authoritative validator record.
+
+        This method does not mutate the database. Older databases without
+        any runtime audit events return an empty list.
+        """
+        runtime_event_types = (
+            "runtime_preflight_finished",
+            "runtime_execution_started",
+            "runtime_execution_finished",
+        )
+
+        placeholders = ", ".join("?" for _ in runtime_event_types)
+        params: list[Any] = [task_key, *runtime_event_types]
+
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, task_key, event_type, source, message,
+                       payload_json, created_at
+                FROM task_events
+                WHERE task_key = ?
+                  AND event_type IN ({placeholders})
+                ORDER BY id ASC
+                """,
+                params,
+            ).fetchall()
+
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._event_payload(
+                TaskEventRecord(
+                    task_key=row["task_key"],
+                    event_type=row["event_type"],
+                    source=row["source"],
+                    message=row["message"],
+                    payload_json=row["payload_json"],
+                    created_at=row["created_at"],
+                )
+            )
+
+            def _get(key: str, default: Any = None) -> Any:
+                value = payload.get(key, default)
+                return value
+
+            events.append(
+                {
+                    "id": row["id"],
+                    "task_key": row["task_key"],
+                    "created_at": row["created_at"],
+                    "source": row["source"],
+                    "message": row["message"],
+                    "kind": row["event_type"],
+                    "runtime_execution_id": _get("runtime_execution_id"),
+                    "executor": _get("executor"),
+                    "preflight_passed": _get("preflight_passed"),
+                    "package_verified": _get("package_verified"),
+                    "intake_runner_handoff_verified": _get(
+                        "intake_runner_handoff_verified"
+                    ),
+                    "expiration_still_valid": _get("expiration_still_valid"),
+                    "approved_task_runner_invoked": _get(
+                        "approved_task_runner_invoked"
+                    ),
+                    "runner_returned": _get("runner_returned"),
+                    "runner_ok": _get("runner_ok"),
+                    "runner_status": _get("runner_status"),
+                    "runner_phase": _get("runner_phase"),
+                    "final_status": _get("final_status"),
+                    "runner_error": _get("runner_error"),
+                    "verifier_run_id": _get("verifier_run_id"),
+                    "verifier_report_path": _get("verifier_report_path"),
+                    "intake_runner_handoff_artifact_path": _get(
+                        "intake_runner_handoff_artifact_path"
+                    ),
+                    "proposal_hash": _get("proposal_hash"),
+                    "proposal_item_id": _get("proposal_item_id"),
+                    "item_hash": _get("item_hash"),
+                    "confirmation_id": _get("confirmation_id"),
+                    "runtime_execution_artifact_path": _get(
+                        "runtime_execution_artifact_path"
+                    ),
+                    "not_action_evidence": bool(
+                        _get("not_action_evidence", False)
+                    ),
+                    "not_validation_authority": bool(
+                        _get("not_validation_authority", False)
+                    ),
+                }
+            )
+
+        return events
+
+    def list_runtime_execution_artifacts(
+        self, task_key: str
+    ) -> list[TaskArtifactRecord]:
+        """Return ``runtime_handoff_execution`` artifact records for the task.
+
+        Read-only helper for Phase D readback. Filters
+        ``list_task_artifacts`` by ``artifact_type`` so callers can locate
+        runtime audit artifacts without scanning all artifact types.
+        """
+        return [
+            artifact
+            for artifact in self.list_task_artifacts(task_key)
+            if artifact.artifact_type == "runtime_handoff_execution"
+        ]
+
     def list_approval_decisions(self, task_key: str) -> list[dict[str, Any]]:
         """Return approval decision metadata from local mirror events.
 

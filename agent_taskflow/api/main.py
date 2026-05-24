@@ -33,6 +33,7 @@ from agent_taskflow.api.schemas import (
     executor_run_to_dict,
     list_response,
     project_to_dict,
+    runtime_audit_event_to_dict,
     task_to_dict,
     validation_result_to_dict,
     workspace_preparation_result_to_dict,
@@ -520,6 +521,25 @@ def create_app(
         task = task_or_404(task_key, current_store)
         results = current_store.list_validation_results(task.task_key)
         return list_response([validation_result_to_dict(result) for result in results])
+
+    @app.get("/api/tasks/{task_key}/runtime-audits")
+    def list_runtime_audits(
+        task_key: str,
+        current_store: TaskMirrorStore = Depends(get_store),
+    ) -> dict[str, object]:
+        """List runtime audit events for the task.
+
+        Read-only readback of queued_task_handoff runtime audit evidence.
+        Runtime audit events are observation only. They are not action
+        evidence and are not validation authority; ``validation_result``
+        events remain the authoritative validator record. No runtime
+        action is exposed by this endpoint.
+        """
+        task = task_or_404(task_key, current_store)
+        events = current_store.list_runtime_audit_events(task.task_key)
+        return list_response(
+            [runtime_audit_event_to_dict(event) for event in events]
+        )
 
     @app.get("/api/tasks/{task_key}/approvals")
     def list_approvals(
