@@ -326,6 +326,7 @@ export function TaskBoard({
               Scheduler candidate readback unavailable: {schedulerCandidatesError}.
               NOT execution permission. Read-only discovery.
               Human/operator confirmation required.
+              Mission Control remains read-only.
             </div>
           ) : (
             <>

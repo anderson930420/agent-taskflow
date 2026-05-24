@@ -191,6 +191,66 @@ class TestSchedulerCandidateVisibilityFrontendSource(unittest.TestCase):
         self.assertIn("Human/operator confirmation required", self.panel_src)
         self.assertIn("Mission Control remains read-only", self.panel_src)
 
+    def test_panel_read_only_note_covers_all_four_phrases(self):
+        """The shared READ_ONLY_NOTE constant — used by fallback/unavailable
+        states that do not render <SafetyBanner /> — must include every
+        mandated safety phrase so candidate-present and fallback paths show
+        the same boundary statement."""
+        import re
+
+        match = re.search(
+            r'const READ_ONLY_NOTE\s*=\s*((?:"[^"]*"\s*\+?\s*)+);',
+            self.panel_src,
+        )
+        self.assertIsNotNone(
+            match, "READ_ONLY_NOTE constant must exist in SchedulerCandidatePanel"
+        )
+        note_literal = match.group(1)
+        # Concatenate quoted string fragments into the runtime value.
+        fragments = re.findall(r'"([^"]*)"', note_literal)
+        note_value = "".join(fragments)
+        for phrase in (
+            "NOT execution permission",
+            "Read-only discovery",
+            "Human/operator confirmation required",
+            "Mission Control remains read-only",
+        ):
+            self.assertIn(
+                phrase,
+                note_value,
+                f"READ_ONLY_NOTE must include fallback safety phrase: {phrase}",
+            )
+
+    def test_dashboard_fallback_error_includes_all_four_phrases(self):
+        """Dashboard candidate-fetch failure branch shows every safety phrase."""
+        import re
+
+        # Extract the dashboard error branch where schedulerCandidatesError
+        # is rendered (TaskBoard.tsx empty div).
+        match = re.search(
+            r"schedulerCandidatesError \? \(\s*<div className=\"empty\">"
+            r"(.*?)</div>",
+            self.board_src,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            match,
+            "Dashboard must render an inline empty-state when scheduler "
+            "candidate readback fails",
+        )
+        error_block = match.group(1)
+        for phrase in (
+            "NOT execution permission",
+            "Read-only discovery",
+            "Human/operator confirmation required",
+            "Mission Control remains read-only",
+        ):
+            self.assertIn(
+                phrase,
+                error_block,
+                f"Dashboard candidate failure branch must include: {phrase}",
+            )
+
     def test_panel_has_empty_state(self):
         """Panel shows an empty state when no candidate is available."""
         self.assertIn(

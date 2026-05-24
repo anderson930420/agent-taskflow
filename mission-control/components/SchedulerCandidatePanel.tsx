@@ -6,7 +6,8 @@ import type {
 
 const READ_ONLY_NOTE =
   "Scheduler candidate readback is NOT execution permission. " +
-  "Read-only discovery. Human/operator confirmation required.";
+  "Read-only discovery. Human/operator confirmation required. " +
+  "Mission Control remains read-only.";
 
 function valueOrDash(value?: string | number | null): string {
   if (value === undefined || value === null || value === "") {
