@@ -8,8 +8,12 @@ import {
   TASK_CATEGORIES,
   type TaskStateCategoryKey,
 } from "../lib/taskState";
-import type { Task } from "../lib/types";
+import type { SchedulerCandidateDiscovery, Task } from "../lib/types";
 import { ApiStatusIndicator } from "./ApiStatus";
+import {
+  SchedulerCandidateList,
+  SchedulerCandidateSummary
+} from "./SchedulerCandidatePanel";
 import { TaskBoardFilters } from "./TaskBoardFilters";
 import { TaskCategorySummary } from "./TaskCategorySummary";
 
@@ -192,7 +196,15 @@ function EmptyState({ message }: { message: string }) {
   );
 }
 
-export function TaskBoard({ tasks }: { tasks: Task[] }) {
+export function TaskBoard({
+  tasks,
+  schedulerCandidates = null,
+  schedulerCandidatesError = null
+}: {
+  tasks: Task[];
+  schedulerCandidates?: SchedulerCandidateDiscovery | null;
+  schedulerCandidatesError?: string | null;
+}) {
   const [activeCategory, setActiveCategory] = useState<FilterCategory>("all");
   const [search, setSearch] = useState("");
 
@@ -302,6 +314,26 @@ export function TaskBoard({ tasks }: { tasks: Task[] }) {
           activeCategory={activeCategory}
           onSelectCategory={setActiveCategory}
         />
+
+        <section
+          className="section panel"
+          id="scheduler-candidates"
+          aria-label="Scheduler Candidates"
+        >
+          <h2>Scheduler Candidates</h2>
+          {schedulerCandidatesError ? (
+            <div className="empty">
+              Scheduler candidate readback unavailable: {schedulerCandidatesError}.
+              NOT execution permission. Read-only discovery.
+              Human/operator confirmation required.
+            </div>
+          ) : (
+            <>
+              <SchedulerCandidateSummary bundle={schedulerCandidates} />
+              <SchedulerCandidateList bundle={schedulerCandidates} />
+            </>
+          )}
+        </section>
 
         {/* Search */}
         <TaskBoardFilters search={search} onSearchChange={setSearch} />

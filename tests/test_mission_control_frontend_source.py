@@ -118,6 +118,165 @@ class TestRuntimeAuditFrontendSource(unittest.TestCase):
         self.assertNotIn("mark as approved", lowered)
 
 
+class TestSchedulerCandidateVisibilityFrontendSource(unittest.TestCase):
+    """Phase I: Mission Control scheduler candidate visibility frontend source tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(
+            "mission-control/components/SchedulerCandidatePanel.tsx", "r"
+        ) as f:
+            cls.panel_src = f.read()
+        with open(
+            "mission-control/app/tasks/[taskKey]/page.tsx", "r"
+        ) as f:
+            cls.page_src = f.read()
+        with open("mission-control/components/TaskBoard.tsx", "r") as f:
+            cls.board_src = f.read()
+        with open("mission-control/app/page.tsx", "r") as f:
+            cls.dashboard_src = f.read()
+        with open("mission-control/lib/api.ts", "r") as f:
+            cls.api_src = f.read()
+        with open("mission-control/lib/types.ts", "r") as f:
+            cls.types_src = f.read()
+
+    def test_types_define_scheduler_candidate(self):
+        """Phase H types are reflected in the Mission Control type layer."""
+        self.assertIn("SchedulerCandidate", self.types_src)
+        self.assertIn("SchedulerCandidateDiscovery", self.types_src)
+        self.assertIn("candidate_ready", self.types_src)
+        self.assertIn("recommended_command_kind", self.types_src)
+        self.assertIn("required_next_gate", self.types_src)
+        self.assertIn("required_operator_action", self.types_src)
+        self.assertIn("missing_evidence", self.types_src)
+        self.assertIn("consistency_warnings", self.types_src)
+        self.assertIn("discovery_note", self.types_src)
+
+    def test_api_calls_scheduler_candidates_endpoint(self):
+        """API client GETs the scheduler candidates listing endpoint."""
+        self.assertIn("/api/scheduler/candidates", self.api_src)
+        self.assertIn("getSchedulerCandidates", self.api_src)
+
+    def test_api_calls_task_scheduler_candidate_endpoint(self):
+        """API client GETs the per-task scheduler candidate endpoint with encoded key."""
+        self.assertIn("getTaskSchedulerCandidate", self.api_src)
+        self.assertIn(
+            "/api/tasks/${encodeURIComponent(taskKey)}/scheduler-candidate",
+            self.api_src,
+        )
+
+    def test_task_detail_bundle_includes_scheduler_candidate_best_effort(self):
+        """schedulerCandidate is best-effort: failure does not break task bundle."""
+        self.assertIn("schedulerCandidate", self.api_src)
+        self.assertIn(
+            "schedulerCandidate.ok\n      ? schedulerCandidate.data\n      : null",
+            self.api_src,
+        )
+
+    def test_task_detail_page_renders_scheduler_candidate_section(self):
+        """Task detail page surfaces a read-only Scheduler Candidate section."""
+        self.assertIn("Scheduler Candidate", self.page_src)
+        self.assertIn("TaskSchedulerCandidatePanel", self.page_src)
+
+    def test_dashboard_renders_scheduler_candidate_overview(self):
+        """Dashboard board renders a Scheduler Candidates overview."""
+        self.assertIn("Scheduler Candidates", self.board_src)
+        self.assertIn("getSchedulerCandidates", self.dashboard_src)
+        self.assertIn("schedulerCandidates", self.dashboard_src)
+
+    def test_panel_advertises_read_only_safety_labels(self):
+        """Mandatory safety labels appear in the scheduler candidate panel."""
+        self.assertIn("NOT execution permission", self.panel_src)
+        self.assertIn("Read-only discovery", self.panel_src)
+        self.assertIn("Human/operator confirmation required", self.panel_src)
+        self.assertIn("Mission Control remains read-only", self.panel_src)
+
+    def test_panel_has_empty_state(self):
+        """Panel shows an empty state when no candidate is available."""
+        self.assertIn(
+            "No scheduler candidate available for this task.",
+            self.panel_src,
+        )
+
+    def test_panel_has_no_action_buttons(self):
+        """Scheduler candidate panel must not introduce any action surface."""
+        forbidden = (
+            "Create Proposal",
+            "Confirm",
+            "Approve",
+            "Merge",
+            "Cleanup",
+            "Retry",
+            "Rerun",
+            "Reject",
+            "execution_allowed",
+            "Execute",
+            "<button",
+            "<form",
+            "onSubmit",
+            "onClick",
+        )
+        for token in forbidden:
+            self.assertNotIn(
+                token,
+                self.panel_src,
+                f"SchedulerCandidatePanel must not introduce action surface: {token}",
+            )
+
+    def test_panel_uses_no_mutation_requests(self):
+        """Scheduler candidate UI uses no POST/PATCH/DELETE/PUT."""
+        for token in ("postJson", "POST", "PATCH", "DELETE", "PUT"):
+            self.assertNotIn(
+                token,
+                self.panel_src,
+                f"SchedulerCandidatePanel must not issue mutation requests: {token}",
+            )
+
+    def test_api_layer_uses_no_mutation_for_scheduler_candidates(self):
+        """API client has no scheduler candidate POST/PATCH/DELETE endpoints."""
+        for token in (
+            'postJson<.*>("/api/scheduler/candidates',
+            '"/api/scheduler/candidates", payload',
+            "/scheduler-candidate, payload",
+        ):
+            # Defensive lexical checks: no POST against scheduler candidate paths.
+            self.assertNotIn(
+                token,
+                self.api_src,
+                f"API client must not POST against scheduler candidate paths: {token}",
+            )
+        # Cross-check: postJson calls must not be combined with candidate paths.
+        post_lines = [
+            line
+            for line in self.api_src.splitlines()
+            if "postJson" in line
+        ]
+        for line in post_lines:
+            self.assertNotIn("scheduler", line.lower())
+            self.assertNotIn("candidate", line.lower())
+
+    def test_mission_control_remains_read_only_for_candidates(self):
+        """Dashboard/Task detail must not introduce candidate action wording."""
+        combined = self.page_src + self.board_src + self.dashboard_src
+        forbidden = (
+            "Create Proposal",
+            "Confirm Proposal",
+            "Confirm Candidate",
+            "Run Candidate",
+            "Retry Candidate",
+            "Approve Candidate",
+            "Merge Candidate",
+            "Cleanup Candidate",
+            "execution_allowed",
+        )
+        for token in forbidden:
+            self.assertNotIn(
+                token,
+                combined,
+                f"Mission Control must remain read-only for candidates: {token}",
+            )
+
+
 class TestResponsiveLayoutCSS(unittest.TestCase):
     """Phase 74 + Phase 76: Responsive layout CSS source tests."""
 

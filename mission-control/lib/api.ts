@@ -13,6 +13,7 @@ import type {
   Project,
   RejectRequest,
   RuntimeAuditEvent,
+  SchedulerCandidateDiscovery,
   StartTaskRequest,
   Task,
   TaskDetailBundle,
@@ -250,18 +251,61 @@ export async function getRuntimeAudits(
   return { ok: true, data: result.data.items };
 }
 
+export async function getSchedulerCandidates(params?: {
+  task_key?: string;
+  project?: string;
+  status?: string;
+  include_not_ready?: boolean;
+  include_no_action?: boolean;
+  limit?: number;
+  completed_limit?: number;
+}): Promise<ApiResult<SchedulerCandidateDiscovery>> {
+  const search = new URLSearchParams();
+  if (params?.task_key) search.set("task_key", params.task_key);
+  if (params?.project) search.set("project", params.project);
+  if (params?.status) search.set("status", params.status);
+  if (params?.include_not_ready) search.set("include_not_ready", "true");
+  if (params?.include_no_action) search.set("include_no_action", "true");
+  if (typeof params?.limit === "number") {
+    search.set("limit", String(params.limit));
+  }
+  if (typeof params?.completed_limit === "number") {
+    search.set("completed_limit", String(params.completed_limit));
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<SchedulerCandidateDiscovery>(
+    `/api/scheduler/candidates${suffix}`
+  );
+}
+
+export async function getTaskSchedulerCandidate(
+  taskKey: string
+): Promise<ApiResult<SchedulerCandidateDiscovery>> {
+  return requestJson<SchedulerCandidateDiscovery>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/scheduler-candidate`
+  );
+}
+
 export async function getTaskDetailBundle(
   taskKey: string
 ): Promise<ApiResult<TaskDetailBundle>> {
-  const [task, runs, artifacts, validations, approvals, runtimeAudits] =
-    await Promise.all([
-      getTask(taskKey),
-      getExecutorRuns(taskKey),
-      getArtifacts(taskKey),
-      getValidations(taskKey),
-      getApprovals(taskKey),
-      getRuntimeAudits(taskKey)
-    ]);
+  const [
+    task,
+    runs,
+    artifacts,
+    validations,
+    approvals,
+    runtimeAudits,
+    schedulerCandidate
+  ] = await Promise.all([
+    getTask(taskKey),
+    getExecutorRuns(taskKey),
+    getArtifacts(taskKey),
+    getValidations(taskKey),
+    getApprovals(taskKey),
+    getRuntimeAudits(taskKey),
+    getTaskSchedulerCandidate(taskKey)
+  ]);
 
   const failed = [task, runs, artifacts, validations, approvals].find(
     (result) => !result.ok
@@ -279,6 +323,9 @@ export async function getTaskDetailBundle(
     approvals.ok
   ) {
     const runtimeAuditEvents = runtimeAudits.ok ? runtimeAudits.data : [];
+    const candidateBundle = schedulerCandidate.ok
+      ? schedulerCandidate.data
+      : null;
 
     return {
       ok: true,
@@ -288,7 +335,8 @@ export async function getTaskDetailBundle(
         artifacts: artifacts.data,
         validations: validations.data,
         approvals: approvals.data,
-        runtimeAudits: runtimeAuditEvents
+        runtimeAudits: runtimeAuditEvents,
+        schedulerCandidate: candidateBundle
       }
     };
   }
