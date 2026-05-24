@@ -682,6 +682,98 @@ class ApiActionTests(unittest.TestCase):
         self.assertTrue(str(self.store.db_path).startswith(str(self.root)))
         self.assertNotIn(".agent-taskflow/state.db", str(self.store.db_path))
 
+    def test_scheduler_candidates_endpoint_rejects_action_methods(self) -> None:
+        """Phase H readback is GET-only and exposes no scheduler action route.
+
+        The scheduler candidate readback endpoints are read-only by design.
+        They MUST NOT accept POST / PATCH / PUT / DELETE because candidate
+        discovery is not execution permission: no proposal creation, no
+        confirmation, no handoff, no runtime execution, no approved task
+        runner invocation, and no GitHub mutation may be triggered from
+        the API in this phase.
+        """
+        for method in ("post", "patch", "put"):
+            response = getattr(self.client, method)(
+                "/api/scheduler/candidates", json={}
+            )
+            self.assertEqual(
+                response.status_code,
+                405,
+                f"/api/scheduler/candidates must not accept {method.upper()}",
+            )
+        delete_response = self.client.delete("/api/scheduler/candidates")
+        self.assertEqual(
+            delete_response.status_code,
+            405,
+            "/api/scheduler/candidates must not accept DELETE",
+        )
+
+    def test_scheduler_candidate_task_endpoint_rejects_action_methods(self) -> None:
+        """Per-task scheduler candidate readback is GET-only as well."""
+        self.add_task("AT-0009", status="queued")
+        for method in ("post", "patch", "put"):
+            response = getattr(self.client, method)(
+                "/api/tasks/AT-0009/scheduler-candidate", json={}
+            )
+            self.assertEqual(
+                response.status_code,
+                405,
+                (
+                    "/api/tasks/{task_key}/scheduler-candidate must not accept "
+                    f"{method.upper()}"
+                ),
+            )
+        delete_response = self.client.delete(
+            "/api/tasks/AT-0009/scheduler-candidate"
+        )
+        self.assertEqual(
+            delete_response.status_code,
+            405,
+            "/api/tasks/{task_key}/scheduler-candidate must not accept DELETE",
+        )
+
+    def test_no_scheduler_proposal_action_route_added(self) -> None:
+        """Phase H does not introduce a scheduler proposal action endpoint.
+
+        Any future scheduler proposal creation surface is intentionally
+        out of scope for this phase. The readback layer must remain
+        strictly Level 1 read-only discovery.
+        """
+        for path in (
+            "/api/scheduler/proposals",
+            "/api/scheduler/confirmations",
+            "/api/scheduler/handoffs",
+            "/api/scheduler/runtime",
+            "/api/scheduler/candidates/approve",
+            "/api/scheduler/candidates/dispatch",
+        ):
+            response = self.client.post(path, json={})
+            self.assertEqual(
+                response.status_code,
+                404,
+                f"Unexpected route exists: POST {path}",
+            )
+
+    def test_scheduler_candidates_get_does_not_mutate_mirror(self) -> None:
+        """GET readback must not call the dispatcher or write to the mirror."""
+        self.add_task("AT-0009", status="queued")
+        before = self.store.get_task("AT-0009")
+        assert before is not None
+
+        list_response = self.client.get("/api/scheduler/candidates")
+        task_response = self.client.get(
+            "/api/tasks/AT-0009/scheduler-candidate"
+        )
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(task_response.status_code, 200)
+        self.assertEqual(self.dispatcher_factory_calls, [])
+        self.assertEqual(self.dispatchers, [])
+
+        after = self.store.get_task("AT-0009")
+        assert after is not None
+        self.assertEqual(after.status, before.status)
+
 
 if __name__ == "__main__":
     unittest.main()

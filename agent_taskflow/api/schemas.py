@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
 from agent_taskflow.models import TaskArtifactRecord, TaskRecord
+from agent_taskflow.scheduler_candidate_discovery import (
+    CANDIDATE_SAFETY_FLAGS,
+    DISCOVERY_NOTE,
+    DISCOVERY_SAFETY_FLAGS,
+)
 
 OPERATOR_CLI_DECIDED_BY = "operator_cli"
 LEGACY_HUMAN_DECIDED_BY = "human"
@@ -301,6 +307,91 @@ def list_response(items: list[dict[str, Any]]) -> dict[str, Any]:
 def detail_response(item: dict[str, Any]) -> dict[str, Any]:
     return {"item": item}
 
+
+
+def scheduler_candidate_to_dict(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a scheduler candidate mapping for JSON-safe API responses.
+
+    The per-candidate ``safety`` block is forced to the locked-down values
+    advertised by ``CANDIDATE_SAFETY_FLAGS`` so the API response always shows
+    that candidate listing is read-only and is **not** execution permission.
+    The serializer also normalizes ``missing_evidence``, ``consistency_warnings``,
+    and ``related_artifacts`` into plain lists for stable response shapes.
+    """
+    payload = json_safe(dict(candidate))
+    if not isinstance(payload, dict):
+        return payload  # pragma: no cover - defensive
+
+    payload.setdefault("task_key", candidate.get("task_key"))
+    payload.setdefault("project", candidate.get("project"))
+    payload.setdefault("status", candidate.get("status"))
+    payload.setdefault("current_phase_label", candidate.get("current_phase_label"))
+    payload.setdefault(
+        "recommended_command_kind", candidate.get("recommended_command_kind")
+    )
+    payload.setdefault("candidate_ready", bool(candidate.get("candidate_ready")))
+    payload.setdefault("required_next_gate", candidate.get("required_next_gate"))
+    payload.setdefault(
+        "required_operator_action", candidate.get("required_operator_action")
+    )
+    payload.setdefault("missing_evidence", list(candidate.get("missing_evidence") or []))
+    payload.setdefault(
+        "consistency_warnings",
+        list(candidate.get("consistency_warnings") or []),
+    )
+    payload.setdefault(
+        "related_artifacts", list(candidate.get("related_artifacts") or [])
+    )
+    payload.setdefault("reason", candidate.get("reason"))
+    payload.setdefault("discovery_note", DISCOVERY_NOTE)
+    payload["safety"] = dict(CANDIDATE_SAFETY_FLAGS)
+    # Discovery layer never grants execution permission. Remove any leaked
+    # execution_allowed key that some adapter might have set so the API
+    # never advertises a forbidden flag.
+    payload.pop("execution_allowed", None)
+    return payload
+
+
+def scheduler_candidate_discovery_to_dict(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Normalize a discovery result mapping for JSON-safe API responses.
+
+    The top-level ``safety`` block is forced to ``DISCOVERY_SAFETY_FLAGS``
+    so every response advertises that the API call did not mutate the DB,
+    did not create proposal / confirmation / handoff / verifier report /
+    runtime evidence, and did not invoke ``approved_task_runner``.
+    """
+    payload = json_safe(dict(result))
+    if not isinstance(payload, dict):
+        return payload  # pragma: no cover - defensive
+
+    raw_candidates = result.get("candidates") or []
+    normalized_candidates = [
+        scheduler_candidate_to_dict(candidate)
+        for candidate in raw_candidates
+        if isinstance(candidate, Mapping)
+    ]
+    payload["candidates"] = normalized_candidates
+    payload["candidate_count"] = len(normalized_candidates)
+    payload.setdefault("ok", bool(result.get("ok", True)))
+    payload.setdefault("mode", result.get("mode"))
+    payload.setdefault("schema_version", result.get("schema_version"))
+    payload.setdefault("discovery_note", DISCOVERY_NOTE)
+    if "filters" in result:
+        payload["filters"] = json_safe(result["filters"])
+    if "summary" in result:
+        summary = json_safe(result["summary"])
+        if isinstance(summary, dict):
+            # Keep the read-only summary truthful even if a future code path
+            # forgets to set these explicitly.
+            summary["execution_allowed"] = False
+            summary["requires_human_review"] = True
+        payload["summary"] = summary
+    payload["safety"] = dict(DISCOVERY_SAFETY_FLAGS)
+    # Discovery is never execution permission, regardless of payload contents.
+    payload.pop("execution_allowed", None)
+    return payload
 
 
 class ArtifactPreviewResponse(BaseModel):
