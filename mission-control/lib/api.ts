@@ -263,7 +263,7 @@ export async function getTaskDetailBundle(
       getRuntimeAudits(taskKey)
     ]);
 
-  const failed = [task, runs, artifacts, validations, approvals, runtimeAudits].find(
+  const failed = [task, runs, artifacts, validations, approvals].find(
     (result) => !result.ok
   );
 
@@ -276,9 +276,10 @@ export async function getTaskDetailBundle(
     runs.ok &&
     artifacts.ok &&
     validations.ok &&
-    approvals.ok &&
-    runtimeAudits.ok
+    approvals.ok
   ) {
+    const runtimeAuditEvents = runtimeAudits.ok ? runtimeAudits.data : [];
+
     return {
       ok: true,
       data: {
@@ -287,7 +288,7 @@ export async function getTaskDetailBundle(
         artifacts: artifacts.data,
         validations: validations.data,
         approvals: approvals.data,
-        runtimeAudits: runtimeAudits.data
+        runtimeAudits: runtimeAuditEvents
       }
     };
   }

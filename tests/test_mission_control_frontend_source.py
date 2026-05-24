@@ -58,6 +58,13 @@ class TestRuntimeAuditFrontendSource(unittest.TestCase):
         self.assertIn("/runtime-audits", self.api_src)
         self.assertIn("getRuntimeAudits", self.api_src)
 
+    def test_runtime_audits_are_best_effort_in_task_detail_bundle(self):
+        self.assertIn("runtimeAudits.ok ? runtimeAudits.data : []", self.api_src)
+        self.assertIn(
+            "[task, runs, artifacts, validations, approvals].find",
+            self.api_src,
+        )
+
     def test_runtime_audit_type_is_defined(self):
         self.assertIn("RuntimeAuditEvent", self.types_src)
         self.assertIn("runtime_execution_id", self.types_src)

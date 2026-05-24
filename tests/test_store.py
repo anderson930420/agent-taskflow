@@ -606,7 +606,8 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(event["runtime_execution_id"])
         self.assertIsNone(event["preflight_passed"])
         self.assertIsNone(event["executor"])
-        self.assertFalse(event["not_action_evidence"])
+        self.assertTrue(event["not_action_evidence"])
+        self.assertTrue(event["not_validation_authority"])
 
     def test_list_runtime_execution_artifacts_filters_artifact_type(self) -> None:
         self.store.upsert_task(self.make_task())

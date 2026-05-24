@@ -621,12 +621,8 @@ class TaskMirrorStore:
                     "runtime_execution_artifact_path": _get(
                         "runtime_execution_artifact_path"
                     ),
-                    "not_action_evidence": bool(
-                        _get("not_action_evidence", False)
-                    ),
-                    "not_validation_authority": bool(
-                        _get("not_validation_authority", False)
-                    ),
+                    "not_action_evidence": True,
+                    "not_validation_authority": True,
                 }
             )
 
