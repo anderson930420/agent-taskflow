@@ -19,7 +19,8 @@ Renders on the main board (`mission-control/app/page.tsx` →
 `components/TaskBoard.tsx`) in a `Scheduler Candidates` section that shows:
 
 - total candidate count
-- ready candidate count
+- ready candidate count from the API summary when available, with a local
+  displayed-candidate count as fallback
 - discovery note from the API
 - a read-only candidate list table:
   - task key (navigation link to the task detail page only — no action)
@@ -27,11 +28,8 @@ Renders on the main board (`mission-control/app/page.tsx` →
   - recommended command kind
   - required next gate
   - candidate ready
-  - safety labels (`read_only`, `proposal_created=false`,
-    `confirmation_created=false`, `handoff_created=false`,
-    `runtime_started=false`, `approved_task_runner_called=false`,
-    `github_mutated=false`, `approved=false`, `merged=false`,
-    `cleanup_performed=false`, `background_worker_started=false`)
+  - summarized safety labels that show true flags such as `read_only`
+    without rendering false values such as `proposal_created=false`
 
 If the candidates endpoint fails, the dashboard renders an inline error state
 inside the same section. The dashboard never converts that failure into an
@@ -63,7 +61,7 @@ The per-task panel shows:
 - `severity`
 - `confidence`
 - `discovery_note`
-- `safety` flags
+- summarized `safety` labels
 
 If no candidate is associated with the task, the panel renders an empty
 state: `No scheduler candidate available for this task.`
@@ -102,8 +100,10 @@ emitted in the UI.
 - Mission Control remains read-only.
 - `validation_result` remains the authoritative validation record; the
   candidate panel does not imply that any task is approved or ready to merge.
-- All safety flags from the API (`CANDIDATE_SAFETY_FLAGS` and
-  `DISCOVERY_SAFETY_FLAGS`) are surfaced to the operator verbatim.
+- The API response still includes the full safety blocks
+  (`CANDIDATE_SAFETY_FLAGS` and `DISCOVERY_SAFETY_FLAGS`) with true and false
+  values. Mission Control summarizes those blocks for display and lists only
+  true labels, falling back to a read-only label when there are no true values.
 
 ## Relationship to future phases
 

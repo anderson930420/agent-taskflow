@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.scheduler_candidate_discovery import (
@@ -429,6 +430,43 @@ class SchedulerCandidateDiscoveryTests(_DiscoveryTestBase):
         self.assertEqual(no_action["required_next_gate"], "none")
         self.assertEqual(no_action["required_operator_action"], "none")
 
+    def test_include_not_ready_does_not_include_no_action(self) -> None:
+        task_key = "AT-DISC-DONE-NOT-READY"
+        artifact_dir = self.seed_task(task_key, status="completed")
+        self._record_cleanup(task_key, artifact_dir)
+
+        payload = self.discover(include_not_ready=True)
+
+        kinds = [
+            candidate["recommended_command_kind"]
+            for candidate in payload["candidates"]
+        ]
+        self.assertNotIn("no_action", kinds)
+        self.assertEqual(payload["candidate_count"], 0)
+
+    def test_include_not_ready_and_no_action_include_both_categories(self) -> None:
+        human_task_key = "AT-DISC-HUMAN-BOTH"
+        human_artifact_dir = self.seed_task(
+            human_task_key, status="waiting_approval"
+        )
+        self._record_executor_and_validators(human_task_key)
+        self._record_pr_handoff(human_task_key, human_artifact_dir)
+        self._record_branch_push(human_task_key, human_artifact_dir)
+        self._record_draft_pr(human_task_key, human_artifact_dir, merged=False)
+
+        done_task_key = "AT-DISC-DONE-BOTH"
+        done_artifact_dir = self.seed_task(done_task_key, status="completed")
+        self._record_cleanup(done_task_key, done_artifact_dir)
+
+        payload = self.discover(include_not_ready=True, include_no_action=True)
+
+        kinds_by_key = {
+            candidate["task_key"]: candidate["recommended_command_kind"]
+            for candidate in payload["candidates"]
+        }
+        self.assertEqual(kinds_by_key[human_task_key], "human_pr_review")
+        self.assertEqual(kinds_by_key[done_task_key], "no_action")
+
     def test_candidate_ready_false_for_not_ready_kinds(self) -> None:
         for kind in NOT_READY_KINDS | NO_ACTION_KINDS:
             self.assertNotIn(kind, ACTIONABLE_CANDIDATE_KINDS)
@@ -457,6 +495,24 @@ class SchedulerCandidateDiscoveryTests(_DiscoveryTestBase):
             discover_scheduler_candidates(
                 SchedulerCandidateDiscoveryRequest(db_path=missing)
             )
+
+    def test_request_normalizes_db_path_with_tilde(self) -> None:
+        with patch.dict("os.environ", {"HOME": str(self.root)}):
+            request = SchedulerCandidateDiscoveryRequest(db_path="~/state.db")
+
+        self.assertEqual(request.db_path, self.root / "state.db")
+
+    def test_discovery_uses_request_normalized_db_path(self) -> None:
+        self.seed_task("AT-DISC-TILDE", status="queued")
+
+        with patch.dict("os.environ", {"HOME": str(self.root)}):
+            request = SchedulerCandidateDiscoveryRequest(db_path="~/state.db")
+
+        payload = discover_scheduler_candidates(request)
+
+        self.assertEqual(payload["db_path"], str(self.db_path))
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertEqual(payload["candidates"][0]["task_key"], "AT-DISC-TILDE")
 
     def test_invalid_project_filter_raises(self) -> None:
         with self.assertRaises(ValueError):

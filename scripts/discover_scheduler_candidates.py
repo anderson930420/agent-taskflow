@@ -67,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Include candidates whose recommended kind is unknown or "
             "human_pr_review (these are not scheduler-actionable). "
+            "Does not include no_action. "
             "Excluded by default."
         ),
     )
@@ -103,11 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    db_path = Path(args.db_path).expanduser() if args.db_path else None
-
     try:
         request = SchedulerCandidateDiscoveryRequest(
-            db_path=db_path,
+            db_path=args.db_path,
             task_key=args.task_key,
             project=args.project,
             status=args.status,

@@ -142,9 +142,12 @@ By default, candidates whose kind is in `NOT_READY_KINDS` or
 `NO_ACTION_KINDS` are excluded from the listing. They are surfaced only
 when the operator explicitly opts in:
 
-- `--include-not-ready` re-includes `unknown` and `human_pr_review` (and,
-  as a superset, also `no_action`).
+- `--include-not-ready` re-includes `unknown`, `human_pr_review`, and
+  future unknown recommendation kinds that require manual triage. It does
+  not include `no_action`.
 - `--include-no-action` re-includes `no_action` only.
+- Operators may pass both flags when they need to inspect not-ready
+  candidates and `no_action` candidates in the same listing.
 
 When included, their `candidate_ready` remains `false` and their
 `required_next_gate` reflects that they are not scheduler-actionable.
@@ -169,10 +172,20 @@ PYTHONPATH=. .venv/bin/python3 scripts/discover_scheduler_candidates.py \
 # Include otherwise-excluded categories
 PYTHONPATH=. .venv/bin/python3 scripts/discover_scheduler_candidates.py \
   --pretty --include-not-ready
+
+PYTHONPATH=. .venv/bin/python3 scripts/discover_scheduler_candidates.py \
+  --pretty --include-no-action
 ```
 
 Default output is compact JSON. `--pretty` emits indented JSON for
 operators. Both forms include the `safety` block.
+
+The later Mission Control visibility layer uses the API
+`summary.candidate_ready_count` when it is available, falling back to a local
+count of displayed candidates only when the summary is absent. Mission Control
+safety labels are summarized for display and show only true flags such as
+`read_only`; the raw API response continues to include the complete `safety`
+block with both true and false values.
 
 ## 7. Example Output
 

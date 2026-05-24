@@ -142,7 +142,7 @@ class SchedulerCandidateDiscoveryError(RuntimeError):
 class SchedulerCandidateDiscoveryRequest:
     """Inputs for a read-only scheduler candidate listing."""
 
-    db_path: Path | None = None
+    db_path: str | Path | None = None
     task_key: str | None = None
     project: str | None = None
     status: str | None = None
@@ -187,7 +187,8 @@ def discover_scheduler_candidates(
     merge, or run cleanup. It is strictly Level 1 discovery.
     """
 
-    db_path = Path(request.db_path).expanduser()
+    db_path = request.db_path
+    assert db_path is not None
 
     try:
         rec_payload = list_task_recommendations(
@@ -260,7 +261,7 @@ def list_scheduler_candidates(
     """Convenience wrapper around :func:`discover_scheduler_candidates`."""
 
     request = SchedulerCandidateDiscoveryRequest(
-        db_path=Path(db_path).expanduser() if db_path is not None else None,
+        db_path=db_path,
         task_key=task_key,
         project=project,
         status=status,
@@ -326,7 +327,7 @@ def _should_include(
     if candidate["candidate_ready"]:
         return True
     if kind in NO_ACTION_KINDS:
-        return include_not_ready or include_no_action
+        return include_no_action
     if kind in NOT_READY_KINDS:
         return include_not_ready
     return include_not_ready
