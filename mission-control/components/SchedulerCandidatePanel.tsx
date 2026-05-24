@@ -38,8 +38,6 @@ function safetyLabels(
   for (const [key, value] of Object.entries(safety)) {
     if (value === true) {
       labels.push(key);
-    } else if (value === false) {
-      labels.push(`${key}=false`);
     }
   }
   return labels;
@@ -148,7 +146,7 @@ export function TaskSchedulerCandidatePanel({
             <tr>
               <th>Safety flags</th>
               <td className="muted">
-                {safety.length === 0 ? "—" : safety.join("; ")}
+                {safety.length === 0 ? "read-only" : safety.join("; ")}
               </td>
             </tr>
           </tbody>
@@ -171,9 +169,11 @@ export function SchedulerCandidateSummary({
     );
   }
   const total = bundle.candidate_count ?? bundle.candidates?.length ?? 0;
-  const readyCount = (bundle.candidates ?? []).filter(
+  const displayedReadyCount = (bundle.candidates ?? []).filter(
     (item) => item.candidate_ready === true
   ).length;
+  const readyCount =
+    bundle.summary?.candidate_ready_count ?? displayedReadyCount;
   return (
     <div>
       <SafetyBanner />

@@ -152,6 +152,12 @@ class TestSchedulerCandidateVisibilityFrontendSource(unittest.TestCase):
         self.assertIn("consistency_warnings", self.types_src)
         self.assertIn("discovery_note", self.types_src)
 
+    def test_types_define_scheduler_candidate_summary(self):
+        """Scheduler candidate summary is explicitly typed."""
+        self.assertIn("interface SchedulerCandidateSummary", self.types_src)
+        self.assertIn("candidate_ready_count", self.types_src)
+        self.assertIn("summary?: SchedulerCandidateSummary", self.types_src)
+
     def test_api_calls_scheduler_candidates_endpoint(self):
         """API client GETs the scheduler candidates listing endpoint."""
         self.assertIn("/api/scheduler/candidates", self.api_src)
@@ -257,6 +263,22 @@ class TestSchedulerCandidateVisibilityFrontendSource(unittest.TestCase):
             "No scheduler candidate available for this task.",
             self.panel_src,
         )
+
+    def test_summary_uses_api_candidate_ready_count_when_available(self):
+        """Summary prefers backend candidate_ready_count over UI recomputation."""
+        self.assertIn("displayedReadyCount", self.panel_src)
+        self.assertIn(
+            "bundle.summary?.candidate_ready_count ?? displayedReadyCount",
+            self.panel_src,
+        )
+
+    def test_safety_labels_do_not_render_false_flags(self):
+        """Safety labels summarize true flags and do not render key=false noise."""
+        self.assertIn("value === true", self.panel_src)
+        self.assertNotIn("value === false", self.panel_src)
+        self.assertNotIn("key}=false", self.panel_src)
+        self.assertNotIn("=false`", self.panel_src)
+        self.assertIn("read-only", self.panel_src)
 
     def test_panel_has_no_action_buttons(self):
         """Scheduler candidate panel must not introduce any action surface."""

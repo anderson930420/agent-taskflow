@@ -322,6 +322,16 @@ export interface SchedulerCandidate {
   [key: string]: unknown;
 }
 
+export interface SchedulerCandidateSummary {
+  candidate_count: number;
+  candidate_ready_count: number;
+  warning_count: number;
+  recommended_command_kind_counts: Record<string, number>;
+  execution_allowed: boolean;
+  requires_human_review: boolean;
+  [key: string]: unknown;
+}
+
 export interface SchedulerCandidateDiscovery {
   ok: boolean;
   mode: string;
@@ -331,7 +341,7 @@ export interface SchedulerCandidateDiscovery {
   filters?: Record<string, unknown>;
   candidate_count: number;
   candidates: SchedulerCandidate[];
-  summary?: Record<string, unknown>;
+  summary?: SchedulerCandidateSummary;
   safety?: Record<string, unknown>;
 }
 

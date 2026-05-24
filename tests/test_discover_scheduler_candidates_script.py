@@ -61,8 +61,11 @@ class DiscoverSchedulerCandidatesScriptTests(unittest.TestCase):
         self,
         *args: str,
         db_path: Path | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+        if env_overrides:
+            env.update(env_overrides)
         cli_args = [
             sys.executable,
             str(SCRIPT),
@@ -95,6 +98,129 @@ class DiscoverSchedulerCandidatesScriptTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM task_worktrees"
                 ).fetchone()[0],
             }
+
+    def record_artifact(
+        self,
+        task_key: str,
+        artifact_dir: Path,
+        artifact_type: str,
+        filename: str,
+        payload: dict[str, object],
+    ) -> Path:
+        path = artifact_dir / filename
+        path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        self.store.record_task_artifact(task_key, artifact_type, path)
+        return path
+
+    def record_executor_and_validators(self, task_key: str) -> None:
+        run_id = self.store.create_executor_run(task_key, "manual")
+        self.store.finish_executor_run(
+            task_key,
+            run_id,
+            executor="manual",
+            status="completed",
+            exit_code=0,
+            summary="done",
+        )
+        self.store.record_validation_result(
+            task_key,
+            "pytest",
+            status="passed",
+            exit_code=0,
+            summary="passed",
+        )
+
+    def record_human_pr_review_evidence(
+        self,
+        task_key: str,
+        artifact_dir: Path,
+    ) -> None:
+        self.record_executor_and_validators(task_key)
+        self.record_artifact(
+            task_key,
+            artifact_dir,
+            "pr_handoff_package",
+            "pr_handoff_package.json",
+            {"kind": "pr_handoff_package_created", "task_key": task_key},
+        )
+        self.store.record_task_event(
+            task_key,
+            "pr_handoff_package_created",
+            "pr_handoff_package",
+            payload={"kind": "pr_handoff_package_created", "task_key": task_key},
+        )
+        branch_payload = {
+            "kind": "branch_push_completed",
+            "artifact_type": "branch_push",
+            "task_key": task_key,
+            "branch": f"task/{task_key}",
+            "base_branch": "main",
+            "head_sha": "head-sha",
+            "push_ok": True,
+        }
+        self.record_artifact(
+            task_key,
+            artifact_dir,
+            "branch_push",
+            "branch_push.json",
+            branch_payload,
+        )
+        self.store.record_task_event(
+            task_key,
+            "branch_push_completed",
+            "branch_push_confirm",
+            payload=branch_payload,
+        )
+        draft_payload = {
+            "kind": "draft_pr_created",
+            "artifact_type": "draft_pr",
+            "task_key": task_key,
+            "verified": True,
+            "verification": {"verified": True, "passed": True},
+            "pr_number": 123,
+            "pr_url": "https://github.com/example/repo/pull/123",
+            "current_state": "OPEN",
+            "merged": False,
+            "recorded_post_merge": False,
+            "pr_created": True,
+            "draft_pr_created": True,
+        }
+        self.record_artifact(
+            task_key,
+            artifact_dir,
+            "draft_pr",
+            "draft_pr.json",
+            draft_payload,
+        )
+        self.store.record_task_event(
+            task_key,
+            "draft_pr_created",
+            "draft_pr_confirm",
+            payload=draft_payload,
+        )
+
+    def record_cleanup(self, task_key: str, artifact_dir: Path) -> None:
+        for artifact_type, filename, event_type in (
+            ("local_cleanup", "local_cleanup.json", "local_cleanup_completed"),
+            (
+                "remote_branch_cleanup",
+                "remote_branch_cleanup.json",
+                "remote_branch_cleanup_completed",
+            ),
+            ("task_closeout", "task_closeout.json", "task_closeout_completed"),
+        ):
+            payload = {
+                "kind": event_type,
+                "artifact_type": artifact_type,
+                "task_key": task_key,
+            }
+            self.record_artifact(task_key, artifact_dir, artifact_type, filename, payload)
+            self.store.record_task_event(
+                task_key,
+                event_type,
+                f"{artifact_type}_confirm",
+                payload=payload,
+            )
 
     def test_pretty_json_returns_ok_and_safety(self) -> None:
         self.seed_task("AT-CLI-G-001", status="queued")
@@ -225,6 +351,24 @@ class DiscoverSchedulerCandidatesScriptTests(unittest.TestCase):
         self.assertFalse(missing.exists())
         self.assertTrue(payload["safety"]["read_only"])
 
+    def test_db_path_with_tilde_is_normalized_by_request(self) -> None:
+        self.seed_task("AT-CLI-G-TILDE", status="queued")
+
+        result = self.run_script(
+            "--pretty",
+            "--db-path",
+            "~/state.db",
+            env_overrides={"HOME": str(self.root)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["db_path"], str(self.db_path))
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertEqual(
+            payload["candidates"][0]["task_key"], "AT-CLI-G-TILDE"
+        )
+
     def test_script_does_not_mutate_db(self) -> None:
         self.seed_task("AT-CLI-G-NOMUT", status="queued")
         before = self.db_counts()
@@ -267,31 +411,7 @@ class DiscoverSchedulerCandidatesScriptTests(unittest.TestCase):
 
     def test_include_no_action_flag(self) -> None:
         artifact_dir = self.seed_task("AT-CLI-G-DONE", status="completed")
-        for artifact_type, filename, event_type in (
-            ("local_cleanup", "local_cleanup.json", "local_cleanup_completed"),
-            (
-                "remote_branch_cleanup",
-                "remote_branch_cleanup.json",
-                "remote_branch_cleanup_completed",
-            ),
-            ("task_closeout", "task_closeout.json", "task_closeout_completed"),
-        ):
-            payload = {
-                "kind": event_type,
-                "artifact_type": artifact_type,
-                "task_key": "AT-CLI-G-DONE",
-            }
-            path = artifact_dir / filename
-            path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-            self.store.record_task_artifact(
-                "AT-CLI-G-DONE", artifact_type, path
-            )
-            self.store.record_task_event(
-                "AT-CLI-G-DONE",
-                event_type,
-                f"{artifact_type}_confirm",
-                payload=payload,
-            )
+        self.record_cleanup("AT-CLI-G-DONE", artifact_dir)
 
         default_result = self.run_script("--pretty")
         include_result = self.run_script("--pretty", "--include-no-action")
@@ -310,6 +430,48 @@ class DiscoverSchedulerCandidatesScriptTests(unittest.TestCase):
         ]
         self.assertNotIn("no_action", default_kinds)
         self.assertIn("no_action", include_kinds)
+
+    def test_include_not_ready_does_not_include_no_action_flag(self) -> None:
+        artifact_dir = self.seed_task("AT-CLI-G-DONE-NR", status="completed")
+        self.record_cleanup("AT-CLI-G-DONE-NR", artifact_dir)
+
+        result = self.run_script("--pretty", "--include-not-ready")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        kinds = [
+            candidate["recommended_command_kind"]
+            for candidate in payload["candidates"]
+        ]
+        self.assertNotIn("no_action", kinds)
+        self.assertEqual(payload["candidate_count"], 0)
+
+    def test_include_not_ready_and_no_action_flags_include_both(self) -> None:
+        human_artifact_dir = self.seed_task(
+            "AT-CLI-G-HUMAN-BOTH",
+            status="waiting_approval",
+        )
+        self.record_human_pr_review_evidence(
+            "AT-CLI-G-HUMAN-BOTH",
+            human_artifact_dir,
+        )
+        done_artifact_dir = self.seed_task("AT-CLI-G-DONE-BOTH", status="completed")
+        self.record_cleanup("AT-CLI-G-DONE-BOTH", done_artifact_dir)
+
+        result = self.run_script(
+            "--pretty",
+            "--include-not-ready",
+            "--include-no-action",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        kinds_by_key = {
+            candidate["task_key"]: candidate["recommended_command_kind"]
+            for candidate in payload["candidates"]
+        }
+        self.assertEqual(kinds_by_key["AT-CLI-G-HUMAN-BOTH"], "human_pr_review")
+        self.assertEqual(kinds_by_key["AT-CLI-G-DONE-BOTH"], "no_action")
 
 
 if __name__ == "__main__":
