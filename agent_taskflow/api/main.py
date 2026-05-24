@@ -34,9 +34,15 @@ from agent_taskflow.api.schemas import (
     list_response,
     project_to_dict,
     runtime_audit_event_to_dict,
+    scheduler_candidate_discovery_to_dict,
     task_to_dict,
     validation_result_to_dict,
     workspace_preparation_result_to_dict,
+)
+from agent_taskflow.scheduler_candidate_discovery import (
+    SchedulerCandidateDiscoveryError,
+    SchedulerCandidateDiscoveryRequest,
+    discover_scheduler_candidates,
 )
 from agent_taskflow.api.review import (
     build_artifact_file_summaries,
@@ -584,6 +590,79 @@ def create_app(
         )
         return detail_response(evidence)
 
+
+    @app.get("/api/scheduler/candidates")
+    def list_scheduler_candidates(
+        task_key: str | None = Query(default=None),
+        project: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        include_not_ready: bool = Query(default=False),
+        include_no_action: bool = Query(default=False),
+        limit: int | None = Query(default=None, ge=0),
+        completed_limit: int = Query(default=20, ge=0),
+        current_store: TaskMirrorStore = Depends(get_store),
+    ) -> dict[str, object]:
+        """Read-only Phase G scheduler candidate readback (Phase H).
+
+        Candidate listing is **not** execution permission. The API does not
+        create proposals, confirmations, handoffs, verifier reports, or
+        runtime evidence, does not invoke ``approved_task_runner``, and
+        does not mutate the local mirror DB. Mission Control remains
+        read-only.
+        """
+        try:
+            request = SchedulerCandidateDiscoveryRequest(
+                db_path=current_store.db_path,
+                task_key=task_key,
+                project=project,
+                status=status,
+                include_not_ready=include_not_ready,
+                include_no_action=include_no_action,
+                limit=limit,
+                completed_limit=completed_limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            result = discover_scheduler_candidates(request)
+        except SchedulerCandidateDiscoveryError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        return scheduler_candidate_discovery_to_dict(result)
+
+    @app.get("/api/tasks/{task_key}/scheduler-candidate")
+    def get_task_scheduler_candidate(
+        task_key: str,
+        current_store: TaskMirrorStore = Depends(get_store),
+    ) -> dict[str, object]:
+        """Read-only scheduler candidate readback for a single task (Phase H).
+
+        Follows ``/api/tasks/{task_key}/...`` style: returns 404 if the task
+        is unknown. With ``include_not_ready`` and ``include_no_action`` set
+        the response always reflects the current discovery classification for
+        the task — even when it is not a ready candidate — so the operator
+        sees why the task is or is not eligible. The response is read-only
+        and is **not** execution permission.
+        """
+        task = task_or_404(task_key, current_store)
+        try:
+            request = SchedulerCandidateDiscoveryRequest(
+                db_path=current_store.db_path,
+                task_key=task.task_key,
+                include_not_ready=True,
+                include_no_action=True,
+                limit=1,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            result = discover_scheduler_candidates(request)
+        except SchedulerCandidateDiscoveryError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        return scheduler_candidate_discovery_to_dict(result)
 
     @app.get("/api/tasks/{task_key}/artifacts/{artifact_name}")
     def get_artifact_preview(
