@@ -38,6 +38,86 @@ class TestMissionControlFrontendDefaultExecutor(unittest.TestCase):
         self.assertIn('"pi"', self.gov_src)
 
 
+class TestRuntimeAuditFrontendSource(unittest.TestCase):
+    """Phase D: Mission Control runtime audit readback frontend source tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open("mission-control/components/RuntimeAuditPanel.tsx", "r") as f:
+            cls.panel_src = f.read()
+        with open(
+            "mission-control/app/tasks/[taskKey]/page.tsx", "r"
+        ) as f:
+            cls.page_src = f.read()
+        with open("mission-control/lib/api.ts", "r") as f:
+            cls.api_src = f.read()
+        with open("mission-control/lib/types.ts", "r") as f:
+            cls.types_src = f.read()
+
+    def test_runtime_audits_endpoint_is_fetched(self):
+        self.assertIn("/runtime-audits", self.api_src)
+        self.assertIn("getRuntimeAudits", self.api_src)
+
+    def test_runtime_audits_are_best_effort_in_task_detail_bundle(self):
+        self.assertIn("runtimeAudits.ok ? runtimeAudits.data : []", self.api_src)
+        self.assertIn(
+            "[task, runs, artifacts, validations, approvals].find",
+            self.api_src,
+        )
+
+    def test_runtime_audit_type_is_defined(self):
+        self.assertIn("RuntimeAuditEvent", self.types_src)
+        self.assertIn("runtime_execution_id", self.types_src)
+
+    def test_task_detail_page_renders_runtime_audit_section(self):
+        self.assertIn("RuntimeAuditPanel", self.page_src)
+        self.assertIn("Runtime Audit", self.page_src)
+
+    def test_runtime_audit_panel_advertises_safety_labels(self):
+        self.assertIn("Not action evidence", self.panel_src)
+        self.assertIn("Not validation authority", self.panel_src)
+
+    def test_runtime_audit_panel_has_empty_state(self):
+        self.assertIn("No runtime audit events recorded", self.panel_src)
+
+    def test_runtime_audit_panel_has_no_action_buttons(self):
+        forbidden = (
+            "approveTask",
+            "rejectTask",
+            "startTask",
+            "blockTask",
+            "/approve",
+            "/reject",
+            "/start",
+            "/block",
+            "Approve",
+            "Reject",
+            "Retry",
+            "Rerun",
+            "Merge",
+            "Cleanup",
+        )
+        for token in forbidden:
+            self.assertNotIn(
+                token,
+                self.panel_src,
+                f"RuntimeAuditPanel must not introduce action surface: {token}",
+            )
+
+    def test_runtime_audit_panel_does_not_imply_validation_passed(self):
+        lowered = self.panel_src.lower()
+        self.assertNotIn("validation passed", lowered)
+        self.assertNotIn("validation pass", lowered)
+        self.assertNotIn("ready to merge", lowered)
+        self.assertNotIn("ready for review", lowered)
+        # `approved_task_runner_invoked` is allowed as a field reference;
+        # what must not appear is a label that calls the task itself
+        # "approved" or "accepted".
+        self.assertNotIn("task approved", lowered)
+        self.assertNotIn("task accepted", lowered)
+        self.assertNotIn("mark as approved", lowered)
+
+
 class TestResponsiveLayoutCSS(unittest.TestCase):
     """Phase 74 + Phase 76: Responsive layout CSS source tests."""
 

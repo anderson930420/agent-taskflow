@@ -528,6 +528,103 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(decisions[1]["decided_by"], "reviewer")
         self.assertEqual(decisions[1]["notes"], "needs changes")
 
+    def test_list_runtime_audit_events_empty_when_no_events(self) -> None:
+        self.store.upsert_task(self.make_task())
+        self.assertEqual(self.store.list_runtime_audit_events("AT-0003"), [])
+
+    def test_list_runtime_audit_events_returns_normalized_records(self) -> None:
+        self.store.upsert_task(self.make_task())
+        # Unrelated event must not appear.
+        self.store.record_task_event(
+            "AT-0003",
+            "note",
+            "dispatcher",
+            message="other event",
+            payload={"kind": "executor_run_started", "run_id": "x"},
+        )
+        self.store.record_task_event(
+            "AT-0003",
+            "runtime_preflight_finished",
+            "queued_task_handoff",
+            message="preflight",
+            payload={
+                "kind": "runtime_preflight_finished",
+                "runtime_execution_id": "rte-1",
+                "executor": "noop",
+                "preflight_passed": True,
+                "package_verified": True,
+                "intake_runner_handoff_verified": True,
+                "expiration_still_valid": True,
+                "verifier_run_id": "vr-1",
+                "verifier_report_path": "/tmp/v.json",
+                "intake_runner_handoff_artifact_path": "/tmp/h.json",
+                "approved_task_runner_invoked": False,
+                "not_action_evidence": True,
+            },
+        )
+        self.store.record_task_event(
+            "AT-0003",
+            "runtime_execution_finished",
+            "queued_task_handoff",
+            message="finished",
+            payload={
+                "kind": "runtime_execution_finished",
+                "runtime_execution_id": "rte-1",
+                "executor": "noop",
+                "runner_returned": True,
+                "runner_ok": True,
+                "runner_status": "completed",
+                "runner_phase": "validation",
+                "final_status": "completed",
+                "not_action_evidence": True,
+                "not_validation_authority": True,
+            },
+        )
+
+        events = self.store.list_runtime_audit_events("AT-0003")
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["kind"], "runtime_preflight_finished")
+        self.assertEqual(events[0]["runtime_execution_id"], "rte-1")
+        self.assertTrue(events[0]["preflight_passed"])
+        self.assertTrue(events[0]["not_action_evidence"])
+        self.assertEqual(events[1]["kind"], "runtime_execution_finished")
+        self.assertEqual(events[1]["runner_status"], "completed")
+        self.assertTrue(events[1]["not_validation_authority"])
+
+    def test_list_runtime_audit_events_handles_missing_fields(self) -> None:
+        self.store.upsert_task(self.make_task())
+        self.store.record_task_event(
+            "AT-0003",
+            "runtime_preflight_finished",
+            "queued_task_handoff",
+            message="minimal",
+            payload={"kind": "runtime_preflight_finished"},
+        )
+        events = self.store.list_runtime_audit_events("AT-0003")
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertIsNone(event["runtime_execution_id"])
+        self.assertIsNone(event["preflight_passed"])
+        self.assertIsNone(event["executor"])
+        self.assertTrue(event["not_action_evidence"])
+        self.assertTrue(event["not_validation_authority"])
+
+    def test_list_runtime_execution_artifacts_filters_artifact_type(self) -> None:
+        self.store.upsert_task(self.make_task())
+        self.store.record_task_artifact(
+            "AT-0003",
+            "spec",
+            "/tmp/AT-0003/spec.md",
+        )
+        self.store.record_task_artifact(
+            "AT-0003",
+            "runtime_handoff_execution",
+            "/tmp/AT-0003/runtime_handoff_executions/rte-1.json",
+        )
+        artifacts = self.store.list_runtime_execution_artifacts("AT-0003")
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0].artifact_type, "runtime_handoff_execution")
+
     def test_update_missing_task_status_raises_key_error(self) -> None:
         with self.assertRaisesRegex(KeyError, "Task not found"):
             self.store.update_task_status("AT-404", "blocked")

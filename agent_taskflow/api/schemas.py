@@ -235,6 +235,65 @@ def approval_decision_to_dict(record: dict[str, Any]) -> dict[str, Any]:
     return json_safe(record)
 
 
+class RuntimeAuditEventResponse(BaseModel):
+    """Read-only runtime audit event surfaced from queued_task_handoff.
+
+    Runtime audit events are observation only. They are not action evidence
+    and are not validation authority. ``validation_result`` events remain
+    the authoritative validator record.
+    """
+
+    id: int | None = None
+    task_key: str
+    created_at: str | None = None
+    source: str | None = None
+    message: str | None = None
+    kind: str
+    runtime_execution_id: str | None = None
+    executor: str | None = None
+    preflight_passed: bool | None = None
+    package_verified: bool | None = None
+    intake_runner_handoff_verified: bool | None = None
+    expiration_still_valid: bool | None = None
+    approved_task_runner_invoked: bool | None = None
+    runner_returned: bool | None = None
+    runner_ok: bool | None = None
+    runner_status: str | None = None
+    runner_phase: str | None = None
+    final_status: str | None = None
+    runner_error: str | None = None
+    verifier_run_id: str | None = None
+    verifier_report_path: str | None = None
+    intake_runner_handoff_artifact_path: str | None = None
+    proposal_hash: str | None = None
+    proposal_item_id: str | None = None
+    item_hash: str | None = None
+    confirmation_id: str | None = None
+    runtime_execution_artifact_path: str | None = None
+    not_action_evidence: bool = True
+    not_validation_authority: bool = True
+
+
+def runtime_audit_event_to_dict(record: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a runtime audit event dict for JSON-safe API responses.
+
+    Ensures the safety flags are present and true so the response always
+    advertises that runtime audit evidence is not action evidence and not
+    validation authority.
+    """
+    payload = json_safe(record)
+    if not isinstance(payload, dict):
+        return payload  # pragma: no cover - defensive
+    payload.setdefault("not_action_evidence", True)
+    payload.setdefault("not_validation_authority", True)
+    # Coerce in case stored payload had explicit false; runtime audit
+    # readback always presents the boundary truthfully regardless of
+    # historical payload contents.
+    payload["not_action_evidence"] = True
+    payload["not_validation_authority"] = True
+    return payload
+
+
 def list_response(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {"items": items, "count": len(items)}
 

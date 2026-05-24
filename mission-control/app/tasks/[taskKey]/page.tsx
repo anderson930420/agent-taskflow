@@ -4,6 +4,7 @@ import { ApprovalList } from "../../../components/ApprovalList";
 import { ArtifactList } from "../../../components/ArtifactList";
 import { DogfoodEvidencePanel } from "../../../components/DogfoodEvidencePanel";
 import { RunList } from "../../../components/RunList";
+import { RuntimeAuditPanel } from "../../../components/RuntimeAuditPanel";
 import { ReviewEvidenceSection } from "../../../components/ReviewEvidenceSection";
 import { StartDispatchPanel } from "../../../components/StartDispatchPanel";
 import { StatusBadge } from "../../../components/StatusBadge";
@@ -55,7 +56,8 @@ export default async function TaskDetailPage({
     );
   }
 
-  const { task, runs, artifacts, validations, approvals } = result.data;
+  const { task, runs, artifacts, validations, approvals, runtimeAudits } =
+    result.data;
 
   return (
     <main>
@@ -210,6 +212,11 @@ export default async function TaskDetailPage({
           <section className="section panel">
             <h2>Validation Results</h2>
             <ValidationList validations={validations} />
+          </section>
+
+          <section className="section panel">
+            <h2>Runtime Audit</h2>
+            <RuntimeAuditPanel events={runtimeAudits} />
           </section>
 
           <section className="section panel">

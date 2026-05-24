@@ -298,6 +298,192 @@ class ApiTests(unittest.TestCase):
         assert after is not None
         self.assertEqual(after.status, before.status)
 
+    def _seed_runtime_audit_events(self, task_key: str) -> None:
+        self.store.record_task_event(
+            task_key,
+            "runtime_preflight_finished",
+            "queued_task_handoff",
+            message="Runtime preflight passed",
+            payload={
+                "kind": "runtime_preflight_finished",
+                "runtime_execution_id": "rte-001",
+                "executor": "noop",
+                "preflight_passed": True,
+                "package_verified": True,
+                "intake_runner_handoff_verified": True,
+                "expiration_still_valid": True,
+                "verifier_run_id": "vr-1",
+                "verifier_report_path": "/tmp/verifier.json",
+                "intake_runner_handoff_artifact_path": "/tmp/handoff.json",
+                "proposal_hash": "phash",
+                "proposal_item_id": "pid",
+                "item_hash": "ihash",
+                "confirmation_id": "cid",
+                "approved_task_runner_invoked": False,
+                "not_action_evidence": True,
+            },
+        )
+        self.store.record_task_event(
+            task_key,
+            "runtime_execution_started",
+            "queued_task_handoff",
+            message="Invoking approved_task_runner",
+            payload={
+                "kind": "runtime_execution_started",
+                "runtime_execution_id": "rte-001",
+                "executor": "noop",
+                "approved_task_runner_invoked": True,
+                "verifier_run_id": "vr-1",
+                "verifier_report_path": "/tmp/verifier.json",
+                "intake_runner_handoff_artifact_path": "/tmp/handoff.json",
+                "not_action_evidence": True,
+            },
+        )
+        self.store.record_task_event(
+            task_key,
+            "runtime_execution_finished",
+            "queued_task_handoff",
+            message="Runner returned",
+            payload={
+                "kind": "runtime_execution_finished",
+                "runtime_execution_id": "rte-001",
+                "executor": "noop",
+                "runner_returned": True,
+                "runner_ok": True,
+                "runner_status": "completed",
+                "runner_phase": "validation",
+                "final_status": "completed",
+                "runner_error": None,
+                "verifier_run_id": "vr-1",
+                "verifier_report_path": "/tmp/verifier.json",
+                "intake_runner_handoff_artifact_path": "/tmp/handoff.json",
+                "not_action_evidence": True,
+                "not_validation_authority": True,
+            },
+        )
+        self.store.record_task_artifact(
+            task_key,
+            "runtime_handoff_execution",
+            self.artifact_root / task_key / "runtime_handoff_executions" / "rte-001.json",
+        )
+
+    def test_runtime_audits_empty_when_no_events(self) -> None:
+        response = self.client.get("/api/tasks/AT-0008/runtime-audits")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"items": [], "count": 0})
+
+    def test_runtime_audits_returns_recorded_events(self) -> None:
+        self._seed_runtime_audit_events("AT-0008")
+        response = self.client.get("/api/tasks/AT-0008/runtime-audits")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 3)
+        kinds = [item["kind"] for item in payload["items"]]
+        self.assertEqual(
+            kinds,
+            [
+                "runtime_preflight_finished",
+                "runtime_execution_started",
+                "runtime_execution_finished",
+            ],
+        )
+
+    def test_runtime_audits_preflight_event_fields(self) -> None:
+        self._seed_runtime_audit_events("AT-0008")
+        response = self.client.get("/api/tasks/AT-0008/runtime-audits")
+        preflight = response.json()["items"][0]
+        self.assertEqual(preflight["kind"], "runtime_preflight_finished")
+        self.assertEqual(preflight["runtime_execution_id"], "rte-001")
+        self.assertEqual(preflight["executor"], "noop")
+        self.assertTrue(preflight["preflight_passed"])
+        self.assertTrue(preflight["package_verified"])
+        self.assertTrue(preflight["intake_runner_handoff_verified"])
+        self.assertEqual(preflight["verifier_run_id"], "vr-1")
+        self.assertEqual(preflight["verifier_report_path"], "/tmp/verifier.json")
+        self.assertEqual(
+            preflight["intake_runner_handoff_artifact_path"], "/tmp/handoff.json"
+        )
+        self.assertFalse(preflight["approved_task_runner_invoked"])
+        self.assertTrue(preflight["not_action_evidence"])
+        self.assertTrue(preflight["not_validation_authority"])
+
+    def test_runtime_audits_execution_started_event_fields(self) -> None:
+        self._seed_runtime_audit_events("AT-0008")
+        started = self.client.get("/api/tasks/AT-0008/runtime-audits").json()["items"][1]
+        self.assertEqual(started["kind"], "runtime_execution_started")
+        self.assertTrue(started["approved_task_runner_invoked"])
+        self.assertTrue(started["not_action_evidence"])
+        self.assertTrue(started["not_validation_authority"])
+
+    def test_runtime_audits_execution_finished_event_fields(self) -> None:
+        self._seed_runtime_audit_events("AT-0008")
+        finished = self.client.get("/api/tasks/AT-0008/runtime-audits").json()["items"][2]
+        self.assertEqual(finished["kind"], "runtime_execution_finished")
+        self.assertTrue(finished["runner_returned"])
+        self.assertTrue(finished["runner_ok"])
+        self.assertEqual(finished["runner_status"], "completed")
+        self.assertEqual(finished["runner_phase"], "validation")
+        self.assertEqual(finished["final_status"], "completed")
+        self.assertIsNone(finished["runner_error"])
+        self.assertTrue(finished["not_action_evidence"])
+        self.assertTrue(finished["not_validation_authority"])
+
+    def test_runtime_audits_do_not_imply_validation_pass(self) -> None:
+        self._seed_runtime_audit_events("AT-0008")
+        runtime = self.client.get("/api/tasks/AT-0008/runtime-audits").json()
+        validations = self.client.get("/api/tasks/AT-0008/validations").json()
+        # /validations remains the sole validation authority surface.
+        self.assertEqual(validations["count"], 1)
+        for event in runtime["items"]:
+            self.assertNotIn("validation_passed", event)
+            self.assertTrue(event["not_validation_authority"])
+
+    def test_runtime_audits_missing_optional_fields_degrade(self) -> None:
+        self.store.record_task_event(
+            "AT-0008",
+            "runtime_preflight_finished",
+            "queued_task_handoff",
+            message="Minimal preflight",
+            payload={"kind": "runtime_preflight_finished"},
+        )
+        response = self.client.get("/api/tasks/AT-0008/runtime-audits")
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["items"][0]
+        self.assertEqual(item["kind"], "runtime_preflight_finished")
+        self.assertIsNone(item["runtime_execution_id"])
+        self.assertIsNone(item["executor"])
+        self.assertIsNone(item["preflight_passed"])
+        # Safety flags remain advertised even when payload omits them.
+        self.assertTrue(item["not_action_evidence"])
+        self.assertTrue(item["not_validation_authority"])
+
+    def test_runtime_audits_for_missing_task_returns_404(self) -> None:
+        response = self.client.get("/api/tasks/AT-9999/runtime-audits")
+        self.assertEqual(response.status_code, 404)
+
+    def test_runtime_audits_endpoint_is_read_only(self) -> None:
+        for method in ("post", "put", "patch", "delete"):
+            response = getattr(self.client, method)("/api/tasks/AT-0008/runtime-audits")
+            self.assertEqual(response.status_code, 405)
+
+    def test_runtime_audits_do_not_modify_task_status(self) -> None:
+        before = self.store.get_task("AT-0008")
+        assert before is not None
+        self._seed_runtime_audit_events("AT-0008")
+        for _ in range(3):
+            response = self.client.get("/api/tasks/AT-0008/runtime-audits")
+            self.assertEqual(response.status_code, 200)
+        after = self.store.get_task("AT-0008")
+        assert after is not None
+        self.assertEqual(after.status, before.status)
+
+    def test_runtime_handoff_execution_artifact_visible(self) -> None:
+        self._seed_runtime_audit_events("AT-0008")
+        response = self.client.get("/api/tasks/AT-0008/artifacts")
+        self.assertEqual(response.status_code, 200)
+        artifact_types = [item["artifact_type"] for item in response.json()["items"]]
+        self.assertIn("runtime_handoff_execution", artifact_types)
+
     def test_app_factory_uses_temp_db_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "custom-state.db"

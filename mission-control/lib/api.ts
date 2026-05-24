@@ -12,6 +12,7 @@ import type {
   ListResponse,
   Project,
   RejectRequest,
+  RuntimeAuditEvent,
   StartTaskRequest,
   Task,
   TaskDetailBundle,
@@ -238,16 +239,29 @@ export async function getApprovals(
   return { ok: true, data: result.data.items };
 }
 
+export async function getRuntimeAudits(
+  taskKey: string
+): Promise<ApiResult<RuntimeAuditEvent[]>> {
+  const result = await requestJson<ListResponse<RuntimeAuditEvent>>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/runtime-audits`
+  );
+
+  if (!result.ok) return result;
+  return { ok: true, data: result.data.items };
+}
+
 export async function getTaskDetailBundle(
   taskKey: string
 ): Promise<ApiResult<TaskDetailBundle>> {
-  const [task, runs, artifacts, validations, approvals] = await Promise.all([
-    getTask(taskKey),
-    getExecutorRuns(taskKey),
-    getArtifacts(taskKey),
-    getValidations(taskKey),
-    getApprovals(taskKey)
-  ]);
+  const [task, runs, artifacts, validations, approvals, runtimeAudits] =
+    await Promise.all([
+      getTask(taskKey),
+      getExecutorRuns(taskKey),
+      getArtifacts(taskKey),
+      getValidations(taskKey),
+      getApprovals(taskKey),
+      getRuntimeAudits(taskKey)
+    ]);
 
   const failed = [task, runs, artifacts, validations, approvals].find(
     (result) => !result.ok
@@ -264,6 +278,8 @@ export async function getTaskDetailBundle(
     validations.ok &&
     approvals.ok
   ) {
+    const runtimeAuditEvents = runtimeAudits.ok ? runtimeAudits.data : [];
+
     return {
       ok: true,
       data: {
@@ -271,7 +287,8 @@ export async function getTaskDetailBundle(
         runs: runs.data,
         artifacts: artifacts.data,
         validations: validations.data,
-        approvals: approvals.data
+        approvals: approvals.data,
+        runtimeAudits: runtimeAuditEvents
       }
     };
   }

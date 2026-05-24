@@ -266,12 +266,46 @@ export type ApiResult<T> =
       error: ApiFailure;
     };
 
+export interface RuntimeAuditEvent {
+  id?: number | string | null;
+  task_key: string;
+  created_at?: string | null;
+  source?: string | null;
+  message?: string | null;
+  kind: string;
+  runtime_execution_id?: string | null;
+  executor?: string | null;
+  preflight_passed?: boolean | null;
+  package_verified?: boolean | null;
+  intake_runner_handoff_verified?: boolean | null;
+  expiration_still_valid?: boolean | null;
+  approved_task_runner_invoked?: boolean | null;
+  runner_returned?: boolean | null;
+  runner_ok?: boolean | null;
+  runner_status?: string | null;
+  runner_phase?: string | null;
+  final_status?: string | null;
+  runner_error?: string | null;
+  verifier_run_id?: string | null;
+  verifier_report_path?: string | null;
+  intake_runner_handoff_artifact_path?: string | null;
+  proposal_hash?: string | null;
+  proposal_item_id?: string | null;
+  item_hash?: string | null;
+  confirmation_id?: string | null;
+  runtime_execution_artifact_path?: string | null;
+  not_action_evidence?: boolean;
+  not_validation_authority?: boolean;
+  [key: string]: unknown;
+}
+
 export interface TaskDetailBundle {
   task: Task;
   runs: ExecutorRun[];
   artifacts: Artifact[];
   validations: ValidationResult[];
   approvals: ApprovalDecision[];
+  runtimeAudits: RuntimeAuditEvent[];
 }
 
 export interface TaskReviewBundle {
