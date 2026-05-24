@@ -299,6 +299,42 @@ export interface RuntimeAuditEvent {
   [key: string]: unknown;
 }
 
+export interface SchedulerCandidate {
+  task_key: string;
+  project?: string | null;
+  title?: string | null;
+  status?: string | null;
+  current_phase_label?: string | null;
+  recommended_command_kind?: string | null;
+  recommended_next_action?: string | null;
+  candidate_ready?: boolean;
+  required_next_gate?: string | null;
+  required_operator_action?: string | null;
+  missing_evidence?: string[];
+  consistency_warnings?: string[];
+  related_artifacts?: unknown[];
+  reason?: string | null;
+  blocked_reason?: string | null;
+  severity?: string | null;
+  confidence?: number | null;
+  discovery_note?: string | null;
+  safety?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface SchedulerCandidateDiscovery {
+  ok: boolean;
+  mode: string;
+  schema_version?: string | null;
+  discovery_note?: string | null;
+  db_path?: string | null;
+  filters?: Record<string, unknown>;
+  candidate_count: number;
+  candidates: SchedulerCandidate[];
+  summary?: Record<string, unknown>;
+  safety?: Record<string, unknown>;
+}
+
 export interface TaskDetailBundle {
   task: Task;
   runs: ExecutorRun[];
@@ -306,6 +342,7 @@ export interface TaskDetailBundle {
   validations: ValidationResult[];
   approvals: ApprovalDecision[];
   runtimeAudits: RuntimeAuditEvent[];
+  schedulerCandidate: SchedulerCandidateDiscovery | null;
 }
 
 export interface TaskReviewBundle {

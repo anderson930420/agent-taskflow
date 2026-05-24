@@ -6,6 +6,7 @@ import { DogfoodEvidencePanel } from "../../../components/DogfoodEvidencePanel";
 import { RunList } from "../../../components/RunList";
 import { RuntimeAuditPanel } from "../../../components/RuntimeAuditPanel";
 import { ReviewEvidenceSection } from "../../../components/ReviewEvidenceSection";
+import { TaskSchedulerCandidatePanel } from "../../../components/SchedulerCandidatePanel";
 import { StartDispatchPanel } from "../../../components/StartDispatchPanel";
 import { StatusBadge } from "../../../components/StatusBadge";
 import { TaskEvidencePanel } from "../../../components/TaskEvidencePanel";
@@ -56,8 +57,15 @@ export default async function TaskDetailPage({
     );
   }
 
-  const { task, runs, artifacts, validations, approvals, runtimeAudits } =
-    result.data;
+  const {
+    task,
+    runs,
+    artifacts,
+    validations,
+    approvals,
+    runtimeAudits,
+    schedulerCandidate
+  } = result.data;
 
   return (
     <main>
@@ -217,6 +225,11 @@ export default async function TaskDetailPage({
           <section className="section panel">
             <h2>Runtime Audit</h2>
             <RuntimeAuditPanel events={runtimeAudits} />
+          </section>
+
+          <section className="section panel">
+            <h2>Scheduler Candidate</h2>
+            <TaskSchedulerCandidatePanel bundle={schedulerCandidate} />
           </section>
 
           <section className="section panel">
