@@ -7,6 +7,7 @@ import { RunList } from "../../../components/RunList";
 import { RuntimeAuditPanel } from "../../../components/RuntimeAuditPanel";
 import { ReviewEvidenceSection } from "../../../components/ReviewEvidenceSection";
 import { TaskSchedulerCandidatePanel } from "../../../components/SchedulerCandidatePanel";
+import { TaskSchedulerProposalPanel } from "../../../components/SchedulerProposalPanel";
 import { StartDispatchPanel } from "../../../components/StartDispatchPanel";
 import { StatusBadge } from "../../../components/StatusBadge";
 import { TaskEvidencePanel } from "../../../components/TaskEvidencePanel";
@@ -64,7 +65,8 @@ export default async function TaskDetailPage({
     validations,
     approvals,
     runtimeAudits,
-    schedulerCandidate
+    schedulerCandidate,
+    schedulerProposals
   } = result.data;
 
   return (
@@ -230,6 +232,11 @@ export default async function TaskDetailPage({
           <section className="section panel">
             <h2>Scheduler Candidate</h2>
             <TaskSchedulerCandidatePanel bundle={schedulerCandidate} />
+          </section>
+
+          <section className="section panel">
+            <h2>Scheduler Proposals</h2>
+            <TaskSchedulerProposalPanel bundle={schedulerProposals} />
           </section>
 
           <section className="section panel">

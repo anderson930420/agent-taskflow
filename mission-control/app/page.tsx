@@ -2,6 +2,7 @@ import { TaskBoard } from "../components/TaskBoard";
 import {
   API_BASE_URL,
   getSchedulerCandidates,
+  getSchedulerProposals,
   getTasks
 } from "../lib/api";
 import type { Task } from "../lib/types";
@@ -13,9 +14,10 @@ function byUpdatedDesc(a: Task, b: Task): number {
 }
 
 export default async function DashboardPage() {
-  const [tasksResult, candidatesResult] = await Promise.all([
+  const [tasksResult, candidatesResult, proposalsResult] = await Promise.all([
     getTasks(),
-    getSchedulerCandidates({ include_not_ready: true, include_no_action: true })
+    getSchedulerCandidates({ include_not_ready: true, include_no_action: true }),
+    getSchedulerProposals({ limit: 20 })
   ]);
 
   if (!tasksResult.ok) {
@@ -40,12 +42,20 @@ export default async function DashboardPage() {
   const schedulerCandidatesError = candidatesResult.ok
     ? null
     : candidatesResult.error.message;
+  const schedulerProposals = proposalsResult.ok
+    ? proposalsResult.data
+    : null;
+  const schedulerProposalsError = proposalsResult.ok
+    ? null
+    : proposalsResult.error.message;
 
   return (
     <TaskBoard
       tasks={tasks}
       schedulerCandidates={schedulerCandidates}
       schedulerCandidatesError={schedulerCandidatesError}
+      schedulerProposals={schedulerProposals}
+      schedulerProposalsError={schedulerProposalsError}
     />
   );
 }

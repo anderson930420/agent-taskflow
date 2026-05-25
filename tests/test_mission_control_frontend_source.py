@@ -359,6 +359,181 @@ class TestSchedulerCandidateVisibilityFrontendSource(unittest.TestCase):
             )
 
 
+class TestSchedulerProposalVisibilityFrontendSource(unittest.TestCase):
+    """Phase J3: Mission Control scheduler proposal read-only visibility tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(
+            "mission-control/components/SchedulerProposalPanel.tsx", "r"
+        ) as f:
+            cls.panel_src = f.read()
+        with open(
+            "mission-control/app/tasks/[taskKey]/page.tsx", "r"
+        ) as f:
+            cls.page_src = f.read()
+        with open("mission-control/components/TaskBoard.tsx", "r") as f:
+            cls.board_src = f.read()
+        with open("mission-control/app/page.tsx", "r") as f:
+            cls.dashboard_src = f.read()
+        with open("mission-control/lib/api.ts", "r") as f:
+            cls.api_src = f.read()
+        with open("mission-control/lib/types.ts", "r") as f:
+            cls.types_src = f.read()
+
+    def _api_function_source(self, name, next_name):
+        start = self.api_src.index(f"export async function {name}")
+        end = self.api_src.index(f"export async function {next_name}", start + 1)
+        return self.api_src[start:end]
+
+    def test_api_exports_scheduler_proposal_get_helpers(self):
+        self.assertIn("getSchedulerProposals", self.api_src)
+        self.assertIn("getTaskSchedulerProposals", self.api_src)
+        self.assertIn("/api/scheduler/proposals", self.api_src)
+        self.assertIn(
+            "/api/tasks/${encodeURIComponent(taskKey)}/scheduler-proposals",
+            self.api_src,
+        )
+
+    def test_scheduler_proposal_get_helpers_use_request_json_only(self):
+        list_fn = self._api_function_source(
+            "getSchedulerProposals",
+            "getTaskSchedulerProposals",
+        )
+        task_fn = self._api_function_source(
+            "getTaskSchedulerProposals",
+            "getTaskDetailBundle",
+        )
+        for fn_src in (list_fn, task_fn):
+            self.assertIn("requestJson<SchedulerProposalReadback>", fn_src)
+            self.assertNotIn("postJson", fn_src)
+            self.assertNotIn("POST", fn_src)
+            self.assertNotIn("PATCH", fn_src)
+            self.assertNotIn("DELETE", fn_src)
+
+    def test_no_scheduler_proposal_mutation_helpers_exist(self):
+        for token in (
+            "createSchedulerProposal",
+            "confirmSchedulerProposal",
+            "runSchedulerProposal",
+        ):
+            self.assertNotIn(token, self.api_src)
+
+    def test_no_mutation_calls_for_scheduler_proposal_routes(self):
+        for line in self.api_src.splitlines():
+            if "scheduler/proposals" in line or "scheduler-proposals" in line:
+                self.assertNotIn("postJson", line)
+                self.assertNotIn("POST", line)
+                self.assertNotIn("PATCH", line)
+                self.assertNotIn("DELETE", line)
+
+    def test_types_define_scheduler_proposal_readback(self):
+        self.assertIn("SchedulerProposalReadbackItem", self.types_src)
+        self.assertIn("SchedulerProposalReadback", self.types_src)
+        self.assertIn("proposal_id", self.types_src)
+        self.assertIn("proposal_hash", self.types_src)
+        self.assertIn("proposal_item_id", self.types_src)
+        self.assertIn("item_hash", self.types_src)
+        self.assertIn("recommended_command_kind", self.types_src)
+        self.assertIn("missing_evidence", self.types_src)
+        self.assertIn("readback_warnings", self.types_src)
+        self.assertIn("requires_human_confirmation", self.types_src)
+
+    def test_task_detail_bundle_includes_scheduler_proposals_best_effort(self):
+        self.assertIn("schedulerProposals", self.types_src)
+        self.assertIn("schedulerProposals", self.api_src)
+        self.assertIn("getTaskSchedulerProposals(taskKey)", self.api_src)
+        self.assertIn(
+            "schedulerProposals.ok\n      ? schedulerProposals.data\n      : null",
+            self.api_src,
+        )
+
+    def test_scheduler_proposal_panel_component_exists(self):
+        self.assertIn("SchedulerProposalSummary", self.panel_src)
+        self.assertIn("SchedulerProposalList", self.panel_src)
+        self.assertIn("TaskSchedulerProposalPanel", self.panel_src)
+        self.assertIn("SchedulerProposalPanel", self.panel_src)
+
+    def test_dashboard_fetches_and_passes_scheduler_proposals(self):
+        self.assertIn("getSchedulerProposals", self.dashboard_src)
+        self.assertIn("getSchedulerProposals({ limit: 20 })", self.dashboard_src)
+        self.assertIn("schedulerProposals", self.dashboard_src)
+        self.assertIn("schedulerProposalsError", self.dashboard_src)
+
+    def test_task_detail_page_renders_scheduler_proposals_section(self):
+        self.assertIn("Scheduler Proposals", self.page_src)
+        self.assertIn("TaskSchedulerProposalPanel", self.page_src)
+        self.assertIn("schedulerProposals", self.page_src)
+
+    def test_task_board_renders_scheduler_proposals_section(self):
+        self.assertIn('id="scheduler-proposals"', self.board_src)
+        self.assertIn("Scheduler Proposals", self.board_src)
+        self.assertIn("SchedulerProposalSummary", self.board_src)
+        self.assertIn("SchedulerProposalList", self.board_src)
+
+    def test_panel_displays_required_fields(self):
+        for token in (
+            "Proposal id",
+            "Proposal hash",
+            "Proposal item id",
+            "Item hash",
+            "Recommended command kind",
+            "Artifact path",
+            "Event created",
+            "Artifact created",
+            "Readback warnings",
+            "Missing evidence",
+            "Safety",
+        ):
+            self.assertIn(token, self.panel_src)
+
+    def test_panel_and_dashboard_include_required_safety_language(self):
+        combined = self.panel_src + self.board_src
+        for phrase in (
+            "NOT execution permission",
+            "Proposal is not confirmation",
+            "Human/operator confirmation required",
+            "Mission Control remains read-only",
+            "Read-only proposal readback",
+        ):
+            self.assertIn(phrase, combined)
+
+    def test_task_panel_has_empty_state(self):
+        self.assertIn(
+            "No scheduler proposals recorded for this task",
+            self.panel_src,
+        )
+
+    def test_proposal_ui_has_no_action_controls(self):
+        combined = self.panel_src + self.board_src
+        for token in (
+            "Confirm proposal",
+            "Run proposal",
+            "Execute proposal",
+            "Create handoff",
+            "Approve proposal",
+            "Merge proposal",
+            "Cleanup proposal",
+            "<button",
+            "<form",
+            "onSubmit",
+            "onClick",
+        ):
+            self.assertNotIn(
+                token,
+                combined,
+                f"Scheduler proposal visibility must not add action controls: {token}",
+            )
+
+    def test_panel_uses_no_mutation_requests(self):
+        for token in ("postJson", "POST", "PATCH", "DELETE", "PUT"):
+            self.assertNotIn(
+                token,
+                self.panel_src,
+                f"SchedulerProposalPanel must not issue mutation requests: {token}",
+            )
+
+
 class TestResponsiveLayoutCSS(unittest.TestCase):
     """Phase 74 + Phase 76: Responsive layout CSS source tests."""
 

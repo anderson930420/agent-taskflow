@@ -345,6 +345,40 @@ export interface SchedulerCandidateDiscovery {
   safety?: Record<string, unknown>;
 }
 
+export interface SchedulerProposalReadbackItem {
+  task_key: string;
+  proposal_id?: string | null;
+  proposal_hash?: string | null;
+  proposal_item_id?: string | null;
+  item_hash?: string | null;
+  recommended_command_kind?: string | null;
+  artifact_path?: string | null;
+  artifact_created_at?: string | null;
+  event_created_at?: string | null;
+  event_source?: string | null;
+  event_message?: string | null;
+  schema_version?: string | null;
+  proposal_status?: string | null;
+  missing_evidence?: string[];
+  readback_warnings?: string[];
+  not_execution_permission?: boolean;
+  not_confirmation?: boolean;
+  requires_human_confirmation?: boolean;
+  safety?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface SchedulerProposalReadback {
+  ok: boolean;
+  mode: string;
+  schema_version?: string | null;
+  readback_note?: string | null;
+  filters?: Record<string, unknown>;
+  items: SchedulerProposalReadbackItem[];
+  count: number;
+  safety?: Record<string, unknown>;
+}
+
 export interface TaskDetailBundle {
   task: Task;
   runs: ExecutorRun[];
@@ -353,6 +387,7 @@ export interface TaskDetailBundle {
   approvals: ApprovalDecision[];
   runtimeAudits: RuntimeAuditEvent[];
   schedulerCandidate: SchedulerCandidateDiscovery | null;
+  schedulerProposals: SchedulerProposalReadback | null;
 }
 
 export interface TaskReviewBundle {

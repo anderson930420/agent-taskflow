@@ -14,6 +14,7 @@ import type {
   RejectRequest,
   RuntimeAuditEvent,
   SchedulerCandidateDiscovery,
+  SchedulerProposalReadback,
   StartTaskRequest,
   Task,
   TaskDetailBundle,
@@ -286,6 +287,29 @@ export async function getTaskSchedulerCandidate(
   );
 }
 
+export async function getSchedulerProposals(params?: {
+  task_key?: string;
+  limit?: number;
+}): Promise<ApiResult<SchedulerProposalReadback>> {
+  const search = new URLSearchParams();
+  if (params?.task_key) search.set("task_key", params.task_key);
+  if (typeof params?.limit === "number") {
+    search.set("limit", String(params.limit));
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<SchedulerProposalReadback>(
+    `/api/scheduler/proposals${suffix}`
+  );
+}
+
+export async function getTaskSchedulerProposals(
+  taskKey: string
+): Promise<ApiResult<SchedulerProposalReadback>> {
+  return requestJson<SchedulerProposalReadback>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/scheduler-proposals`
+  );
+}
+
 export async function getTaskDetailBundle(
   taskKey: string
 ): Promise<ApiResult<TaskDetailBundle>> {
@@ -296,7 +320,8 @@ export async function getTaskDetailBundle(
     validations,
     approvals,
     runtimeAudits,
-    schedulerCandidate
+    schedulerCandidate,
+    schedulerProposals
   ] = await Promise.all([
     getTask(taskKey),
     getExecutorRuns(taskKey),
@@ -304,7 +329,8 @@ export async function getTaskDetailBundle(
     getValidations(taskKey),
     getApprovals(taskKey),
     getRuntimeAudits(taskKey),
-    getTaskSchedulerCandidate(taskKey)
+    getTaskSchedulerCandidate(taskKey),
+    getTaskSchedulerProposals(taskKey)
   ]);
 
   const failed = [task, runs, artifacts, validations, approvals].find(
@@ -326,6 +352,9 @@ export async function getTaskDetailBundle(
     const candidateBundle = schedulerCandidate.ok
       ? schedulerCandidate.data
       : null;
+    const proposalBundle = schedulerProposals.ok
+      ? schedulerProposals.data
+      : null;
 
     return {
       ok: true,
@@ -336,7 +365,8 @@ export async function getTaskDetailBundle(
         validations: validations.data,
         approvals: approvals.data,
         runtimeAudits: runtimeAuditEvents,
-        schedulerCandidate: candidateBundle
+        schedulerCandidate: candidateBundle,
+        schedulerProposals: proposalBundle
       }
     };
   }
