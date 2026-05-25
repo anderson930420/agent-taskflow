@@ -8,12 +8,20 @@ import {
   TASK_CATEGORIES,
   type TaskStateCategoryKey,
 } from "../lib/taskState";
-import type { SchedulerCandidateDiscovery, Task } from "../lib/types";
+import type {
+  SchedulerCandidateDiscovery,
+  SchedulerProposalReadback,
+  Task
+} from "../lib/types";
 import { ApiStatusIndicator } from "./ApiStatus";
 import {
   SchedulerCandidateList,
   SchedulerCandidateSummary
 } from "./SchedulerCandidatePanel";
+import {
+  SchedulerProposalList,
+  SchedulerProposalSummary
+} from "./SchedulerProposalPanel";
 import { TaskBoardFilters } from "./TaskBoardFilters";
 import { TaskCategorySummary } from "./TaskCategorySummary";
 
@@ -199,11 +207,15 @@ function EmptyState({ message }: { message: string }) {
 export function TaskBoard({
   tasks,
   schedulerCandidates = null,
-  schedulerCandidatesError = null
+  schedulerCandidatesError = null,
+  schedulerProposals = null,
+  schedulerProposalsError = null
 }: {
   tasks: Task[];
   schedulerCandidates?: SchedulerCandidateDiscovery | null;
   schedulerCandidatesError?: string | null;
+  schedulerProposals?: SchedulerProposalReadback | null;
+  schedulerProposalsError?: string | null;
 }) {
   const [activeCategory, setActiveCategory] = useState<FilterCategory>("all");
   const [search, setSearch] = useState("");
@@ -332,6 +344,28 @@ export function TaskBoard({
             <>
               <SchedulerCandidateSummary bundle={schedulerCandidates} />
               <SchedulerCandidateList bundle={schedulerCandidates} />
+            </>
+          )}
+        </section>
+
+        <section
+          className="section panel"
+          id="scheduler-proposals"
+          aria-label="Scheduler Proposals"
+        >
+          <h2>Scheduler Proposals</h2>
+          {schedulerProposalsError ? (
+            <div className="empty">
+              Scheduler proposal readback unavailable: {schedulerProposalsError}.
+              Read-only proposal readback. NOT execution permission.
+              Proposal is not confirmation.
+              Human/operator confirmation required.
+              Mission Control remains read-only.
+            </div>
+          ) : (
+            <>
+              <SchedulerProposalSummary bundle={schedulerProposals} />
+              <SchedulerProposalList bundle={schedulerProposals} />
             </>
           )}
         </section>
