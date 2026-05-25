@@ -732,15 +732,16 @@ class ApiActionTests(unittest.TestCase):
             "/api/tasks/{task_key}/scheduler-candidate must not accept DELETE",
         )
 
-    def test_no_scheduler_proposal_action_route_added(self) -> None:
-        """Phase H does not introduce a scheduler proposal action endpoint.
+    def test_no_scheduler_proposal_creation_route_added(self) -> None:
+        """Scheduler proposal readback does not introduce action endpoints."""
+        proposal_response = self.client.post("/api/scheduler/proposals", json={})
+        self.assertEqual(
+            proposal_response.status_code,
+            405,
+            "POST /api/scheduler/proposals must be rejected by the GET-only route",
+        )
 
-        Any future scheduler proposal creation surface is intentionally
-        out of scope for this phase. The readback layer must remain
-        strictly Level 1 read-only discovery.
-        """
         for path in (
-            "/api/scheduler/proposals",
             "/api/scheduler/confirmations",
             "/api/scheduler/handoffs",
             "/api/scheduler/runtime",
