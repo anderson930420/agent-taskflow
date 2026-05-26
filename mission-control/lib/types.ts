@@ -379,6 +379,44 @@ export interface SchedulerProposalReadback {
   safety?: Record<string, unknown>;
 }
 
+export interface SchedulerConfirmationReadbackItem {
+  task_key: string;
+  confirmation_id?: string | null;
+  proposal_id?: string | null;
+  proposal_hash?: string | null;
+  proposal_item_id?: string | null;
+  item_hash?: string | null;
+  recommended_command_kind?: string | null;
+  proposal_artifact_path?: string | null;
+  artifact_path?: string | null;
+  artifact_created_at?: string | null;
+  event_created_at?: string | null;
+  event_source?: string | null;
+  event_message?: string | null;
+  schema_version?: string | null;
+  confirmation_status?: string | null;
+  missing_evidence?: string[];
+  readback_warnings?: string[];
+  not_execution_permission?: boolean;
+  not_verifier_report?: boolean;
+  not_handoff?: boolean;
+  not_runtime?: boolean;
+  requires_next_gate?: boolean;
+  safety?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface SchedulerConfirmationReadback {
+  ok: boolean;
+  mode: string;
+  schema_version?: string | null;
+  readback_note?: string | null;
+  filters?: Record<string, unknown>;
+  items: SchedulerConfirmationReadbackItem[];
+  count: number;
+  safety?: Record<string, unknown>;
+}
+
 export interface TaskDetailBundle {
   task: Task;
   runs: ExecutorRun[];
@@ -388,6 +426,7 @@ export interface TaskDetailBundle {
   runtimeAudits: RuntimeAuditEvent[];
   schedulerCandidate: SchedulerCandidateDiscovery | null;
   schedulerProposals: SchedulerProposalReadback | null;
+  schedulerConfirmations: SchedulerConfirmationReadback | null;
 }
 
 export interface TaskReviewBundle {
