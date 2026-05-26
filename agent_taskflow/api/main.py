@@ -35,6 +35,7 @@ from agent_taskflow.api.schemas import (
     project_to_dict,
     runtime_audit_event_to_dict,
     scheduler_candidate_discovery_to_dict,
+    scheduler_confirmation_readback_to_dict,
     scheduler_proposal_readback_to_dict,
     task_to_dict,
     validation_result_to_dict,
@@ -44,6 +45,11 @@ from agent_taskflow.scheduler_candidate_discovery import (
     SchedulerCandidateDiscoveryError,
     SchedulerCandidateDiscoveryRequest,
     discover_scheduler_candidates,
+)
+from agent_taskflow.scheduler_confirmation_readback import (
+    SchedulerConfirmationReadbackError,
+    list_scheduler_confirmation_readbacks,
+    list_task_scheduler_confirmation_readbacks,
 )
 from agent_taskflow.scheduler_proposal_readback import (
     SchedulerProposalReadbackError,
@@ -717,6 +723,56 @@ def create_app(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         return scheduler_proposal_readback_to_dict(result)
+
+    @app.get("/api/scheduler/confirmations")
+    def list_scheduler_confirmations(
+        task_key: str | None = Query(default=None),
+        limit: int | None = Query(default=None, ge=0),
+        current_store: TaskMirrorStore = Depends(get_store),
+    ) -> dict[str, object]:
+        """Read-only scheduler confirmation evidence readback (Phase K3).
+
+        This endpoint only reads existing ``scheduler_confirmation`` artifacts
+        and ``scheduler_confirmation_created`` events from the local mirror.
+        It does not create confirmations, verifier reports, handoffs, runtime
+        evidence, executor/validator runs, approvals, merges, cleanup,
+        background workers, or GitHub mutations. A scheduler confirmation is
+        auditable evidence for the next gate only; it is not execution
+        permission.
+        """
+        try:
+            result = list_scheduler_confirmation_readbacks(
+                current_store,
+                task_key=task_key,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SchedulerConfirmationReadbackError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        return scheduler_confirmation_readback_to_dict(result)
+
+    @app.get("/api/tasks/{task_key}/scheduler-confirmations")
+    def list_task_scheduler_confirmations(
+        task_key: str,
+        limit: int | None = Query(default=None, ge=0),
+        current_store: TaskMirrorStore = Depends(get_store),
+    ) -> dict[str, object]:
+        """Read-only scheduler confirmation evidence readback for one task."""
+        task = task_or_404(task_key, current_store)
+        try:
+            result = list_task_scheduler_confirmation_readbacks(
+                current_store,
+                task.task_key,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SchedulerConfirmationReadbackError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        return scheduler_confirmation_readback_to_dict(result)
 
     @app.get("/api/tasks/{task_key}/artifacts/{artifact_name}")
     def get_artifact_preview(

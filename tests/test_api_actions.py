@@ -741,8 +741,22 @@ class ApiActionTests(unittest.TestCase):
             "POST /api/scheduler/proposals must be rejected by the GET-only route",
         )
 
+        # The Phase K3 scheduler confirmation readback is GET-only; POST must
+        # be rejected by the route guard rather than fall through to a
+        # nonexistent route.
+        confirmation_response = self.client.post(
+            "/api/scheduler/confirmations", json={}
+        )
+        self.assertEqual(
+            confirmation_response.status_code,
+            405,
+            (
+                "POST /api/scheduler/confirmations must be rejected by the "
+                "GET-only readback route"
+            ),
+        )
+
         for path in (
-            "/api/scheduler/confirmations",
             "/api/scheduler/handoffs",
             "/api/scheduler/runtime",
             "/api/scheduler/candidates/approve",
