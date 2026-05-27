@@ -359,9 +359,14 @@ export async function getTaskDetailBundle(
     getTaskSchedulerConfirmations(taskKey)
   ]);
 
-  const failed = [task, runs, artifacts, validations, approvals].find(
-    (result) => !result.ok
-  );
+  const failed = [
+    task,
+    runs,
+    artifacts,
+    validations,
+    approvals,
+    schedulerConfirmations
+  ].find((result) => !result.ok);
 
   if (failed && !failed.ok) {
     return failed;
@@ -372,7 +377,8 @@ export async function getTaskDetailBundle(
     runs.ok &&
     artifacts.ok &&
     validations.ok &&
-    approvals.ok
+    approvals.ok &&
+    schedulerConfirmations.ok
   ) {
     const runtimeAuditEvents = runtimeAudits.ok ? runtimeAudits.data : [];
     const candidateBundle = schedulerCandidate.ok
@@ -380,9 +386,6 @@ export async function getTaskDetailBundle(
       : null;
     const proposalBundle = schedulerProposals.ok
       ? schedulerProposals.data
-      : null;
-    const confirmationBundle = schedulerConfirmations.ok
-      ? schedulerConfirmations.data
       : null;
 
     return {
@@ -396,7 +399,7 @@ export async function getTaskDetailBundle(
         runtimeAudits: runtimeAuditEvents,
         schedulerCandidate: candidateBundle,
         schedulerProposals: proposalBundle,
-        schedulerConfirmations: confirmationBundle
+        schedulerConfirmations: schedulerConfirmations.data
       }
     };
   }

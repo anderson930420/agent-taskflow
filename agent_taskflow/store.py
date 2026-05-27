@@ -214,6 +214,25 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
     )
 
 
+def _escape_like_pattern(value: str) -> str:
+    """Escape SQLite LIKE wildcards so a marker matches literally.
+
+    SQLite LIKE treats ``%`` and ``_`` as wildcards. Markers used to filter
+    payload JSON (e.g. ``"executor_run_started"``) contain ``_`` and would
+    otherwise behave as a single-character wildcard, causing accidental
+    matches. Escaping with a ``\\`` prefix, paired with ``ESCAPE '\\'`` in
+    the LIKE clause, restores literal matching. The ``\\`` character itself
+    is escaped first so a marker containing a backslash does not produce a
+    dangling escape sequence.
+    """
+    return (
+        value
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
 def _row_to_event(row: sqlite3.Row) -> TaskEventRecord:
     return TaskEventRecord(
         task_key=row["task_key"],
@@ -428,9 +447,13 @@ class TaskMirrorStore:
         payload_clause = ""
 
         if payload_markers:
-            marker_clauses = " OR ".join("payload_json LIKE ?" for _ in payload_markers)
+            marker_clauses = " OR ".join(
+                "payload_json LIKE ? ESCAPE '\\'" for _ in payload_markers
+            )
             payload_clause = f"AND payload_json IS NOT NULL AND ({marker_clauses})"
-            params.extend(f"%{marker}%" for marker in payload_markers)
+            params.extend(
+                f"%{_escape_like_pattern(marker)}%" for marker in payload_markers
+            )
 
         with connect(self.db_path) as conn:
             rows = conn.execute(

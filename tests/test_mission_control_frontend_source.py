@@ -60,10 +60,33 @@ class TestRuntimeAuditFrontendSource(unittest.TestCase):
 
     def test_runtime_audits_are_best_effort_in_task_detail_bundle(self):
         self.assertIn("runtimeAudits.ok ? runtimeAudits.data : []", self.api_src)
-        self.assertIn(
-            "[task, runs, artifacts, validations, approvals].find",
+        # Bug-2 hardening: runtimeAudits must remain best-effort and therefore
+        # must NOT appear in getTaskDetailBundle's failed array. Verify the
+        # failed array contents directly rather than matching the exact
+        # source layout.
+        import re
+
+        match = re.search(
+            r"const failed = \[\s*([^\]]+?)\s*\]\.find",
             self.api_src,
         )
+        self.assertIsNotNone(
+            match,
+            "getTaskDetailBundle must declare a `failed` array of critical results",
+        )
+        failed_members = {
+            token.strip()
+            for token in match.group(1).split(",")
+            if token.strip()
+        }
+        self.assertIn("task", failed_members)
+        self.assertIn("runs", failed_members)
+        self.assertIn("artifacts", failed_members)
+        self.assertIn("validations", failed_members)
+        self.assertIn("approvals", failed_members)
+        self.assertNotIn("runtimeAudits", failed_members)
+        self.assertNotIn("schedulerCandidate", failed_members)
+        self.assertNotIn("schedulerProposals", failed_members)
 
     def test_runtime_audit_type_is_defined(self):
         self.assertIn("RuntimeAuditEvent", self.types_src)
@@ -593,10 +616,70 @@ class TestSchedulerConfirmationVisibilityFrontendSource(unittest.TestCase):
         )
         self.assertIn("schedulerConfirmations", self.api_src)
         self.assertIn("getTaskSchedulerConfirmations(taskKey)", self.api_src)
+        # Bug-2 hardening: schedulerConfirmations is treated as a critical
+        # fetch, so its data is assigned from `.data` directly after the
+        # failed-array gate, not via a silent best-effort ternary fallback
+        # to null.
         self.assertIn(
+            "schedulerConfirmations: schedulerConfirmations.data",
+            self.api_src,
+        )
+        self.assertNotIn(
             "schedulerConfirmations.ok\n      ? schedulerConfirmations.data\n      : null",
             self.api_src,
         )
+
+    def test_task_detail_bundle_failed_array_includes_scheduler_confirmations(self):
+        """Bug-2 hardening: schedulerConfirmations failures must surface as a
+        bundle-level failure, not be silently swallowed."""
+        import re
+
+        match = re.search(
+            r"const failed = \[\s*([^\]]+?)\s*\]\.find",
+            self.api_src,
+        )
+        self.assertIsNotNone(
+            match,
+            "getTaskDetailBundle must declare a `failed` array of critical results",
+        )
+        failed_members = {
+            token.strip()
+            for token in match.group(1).split(",")
+            if token.strip()
+        }
+        self.assertIn(
+            "schedulerConfirmations",
+            failed_members,
+            "schedulerConfirmations must be monitored by the failed array",
+        )
+
+    def test_scheduler_confirmations_remain_get_only_after_hardening(self):
+        """schedulerConfirmations helpers must remain GET-only after the
+        Bug-2 fix; no POST/PATCH/DELETE/PUT helpers may have been added."""
+        list_fn = self._api_function_source(
+            "getSchedulerConfirmations",
+            "getTaskSchedulerConfirmations",
+        )
+        task_fn = self._api_function_source(
+            "getTaskSchedulerConfirmations",
+            "getTaskDetailBundle",
+        )
+        for fn_src in (list_fn, task_fn):
+            self.assertIn("requestJson<SchedulerConfirmationReadback>", fn_src)
+            for token in ("postJson", "POST", "PATCH", "DELETE", "PUT"):
+                self.assertNotIn(token, fn_src)
+
+    def test_no_scheduler_confirmation_mutation_helpers_added(self):
+        """No mutation helpers may exist for scheduler confirmations."""
+        for token in (
+            "createSchedulerConfirmation",
+            "confirmSchedulerProposal",
+            "createSchedulerConfirmationFromProposal",
+            "recordSchedulerConfirmation",
+            "deleteSchedulerConfirmation",
+            "updateSchedulerConfirmation",
+        ):
+            self.assertNotIn(token, self.api_src)
 
     def test_api_exports_scheduler_confirmation_get_helpers(self):
         self.assertIn("getSchedulerConfirmations", self.api_src)
