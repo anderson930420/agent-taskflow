@@ -24,6 +24,9 @@ TASK_TO_DRAFT_PR_PIPELINE_SOURCE = "task_to_draft_pr_pipeline"
 TASK_TO_DRAFT_PR_PIPELINE_SAFETY_FLAGS: dict[str, bool] = {
     "one_task_only": True,
     "operator_triggered": True,
+    "single_use_enforced": True,
+    "resume_already_processed": False,
+    "duplicate_trigger_suppressed": False,
     "approved_task_runner_called": False,
     "github_mutated": False,
     "branch_pushed": False,
@@ -259,6 +262,16 @@ def run_task_to_draft_pr_pipeline(
 
     pr_safety = pr_preparation_result.get("safety") or {}
     status = str(pr_preparation_result.get("status") or "draft_pr_created")
+    one_shot_summary = _one_shot_summary(one_shot_result)
+    pr_preparation_summary = _pr_preparation_summary(pr_preparation_result)
+    resume_already_processed = bool(
+        one_shot_summary.get("already_executed")
+        and pr_preparation_summary.get("draft_pr_already_created")
+    )
+    duplicate_trigger_suppressed = bool(
+        resume_already_processed
+        or pr_safety.get("duplicate_trigger_suppressed")
+    )
     return {
         "ok": True,
         "schema_version": TASK_TO_DRAFT_PR_PIPELINE_SCHEMA_VERSION,
@@ -267,9 +280,12 @@ def run_task_to_draft_pr_pipeline(
         "mode": "confirmed",
         "task_key": request.task_key,
         "final_task_status": final_task_status,
+        "single_use_enforced": True,
+        "resume_already_processed": resume_already_processed,
+        "duplicate_trigger_suppressed": duplicate_trigger_suppressed,
         "stages": {
-            _STAGE_ONE_SHOT: _one_shot_summary(one_shot_result),
-            _STAGE_PR_PREPARATION: _pr_preparation_summary(pr_preparation_result),
+            _STAGE_ONE_SHOT: one_shot_summary,
+            _STAGE_PR_PREPARATION: pr_preparation_summary,
         },
         "safety": _safety(
             dry_run=False,
@@ -277,6 +293,8 @@ def run_task_to_draft_pr_pipeline(
             github_mutated=bool(pr_safety.get("github_mutated", True)),
             branch_pushed=bool(pr_safety.get("branch_pushed", True)),
             draft_pr_created=bool(pr_safety.get("draft_pr_created", True)),
+            resume_already_processed=resume_already_processed,
+            duplicate_trigger_suppressed=duplicate_trigger_suppressed,
         ),
     }
 
@@ -323,6 +341,9 @@ def _dry_run_response(
         "would_run_task_to_draft_pr": True,
         "resume_existing": request.resume_existing,
         "resume_pr_preparation": request.resume_pr_preparation,
+        "single_use_enforced": True,
+        "resume_already_processed": False,
+        "duplicate_trigger_suppressed": False,
         "stages": {
             _STAGE_ONE_SHOT: {
                 "would_run": True,
@@ -370,10 +391,26 @@ def _failure_response(
 
 
 def _one_shot_summary(result: dict[str, Any]) -> dict[str, Any]:
+    stages = result.get("stages") or {}
     runtime_stage = (result.get("stages") or {}).get("runtime_execution") or {}
+    already_executed = bool(
+        result.get("status") == "already_executed"
+        or runtime_stage.get("already_executed")
+    )
     return {
         "ok": bool(result.get("ok")),
         "status": result.get("status"),
+        "reused": already_executed,
+        "already_executed": already_executed,
+        "proposal_reused": bool((stages.get("proposal") or {}).get("reused")),
+        "confirmation_reused": bool(
+            (stages.get("confirmation") or {}).get("reused")
+        ),
+        "verifier_report_reused": bool(
+            (stages.get("verifier_report") or {}).get("reused")
+        ),
+        "handoff_reused": bool((stages.get("handoff") or {}).get("reused")),
+        "runtime_reused": bool(runtime_stage.get("reused")),
         "runtime_execution_id": runtime_stage.get("runtime_execution_id"),
         "runner_status": runtime_stage.get("runner_status"),
         "approved_task_runner_called": bool(
@@ -389,14 +426,23 @@ def _one_shot_runner_called(result: dict[str, Any]) -> bool:
 
 def _pr_preparation_summary(result: dict[str, Any]) -> dict[str, Any]:
     stages = result.get("stages") or {}
+    handoff_stage = stages.get("pr_handoff") or {}
     branch_stage = stages.get("branch_push") or {}
     draft_stage = stages.get("draft_pr") or {}
+    reused = bool(
+        handoff_stage.get("reused")
+        and branch_stage.get("reused")
+        and draft_stage.get("reused")
+    )
     return {
         "ok": bool(result.get("ok")),
         "status": result.get("status"),
+        "reused": reused,
+        "pr_handoff_reused": bool(handoff_stage.get("reused")),
         "branch_pushed": bool(branch_stage.get("pushed")),
         "draft_pr_created": bool(draft_stage.get("created")),
         "branch_push_reused": bool(branch_stage.get("reused")),
+        "branch_push_already_pushed": bool(branch_stage.get("already_pushed")),
         "draft_pr_reused": bool(draft_stage.get("reused")),
         "draft_pr_already_created": bool(draft_stage.get("already_created")),
         "pr_url": draft_stage.get("pr_url"),
@@ -411,9 +457,14 @@ def _safety(
     github_mutated: bool = False,
     branch_pushed: bool = False,
     draft_pr_created: bool = False,
+    resume_already_processed: bool = False,
+    duplicate_trigger_suppressed: bool = False,
 ) -> dict[str, bool]:
     safety = dict(TASK_TO_DRAFT_PR_PIPELINE_SAFETY_FLAGS)
     safety["dry_run"] = dry_run
+    safety["single_use_enforced"] = True
+    safety["resume_already_processed"] = resume_already_processed
+    safety["duplicate_trigger_suppressed"] = duplicate_trigger_suppressed
     safety["approved_task_runner_called"] = approved_task_runner_called
     safety["github_mutated"] = github_mutated
     safety["branch_pushed"] = branch_pushed

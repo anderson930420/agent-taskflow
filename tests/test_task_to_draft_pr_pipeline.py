@@ -369,17 +369,35 @@ class TaskToDraftPRPipelineTests(unittest.TestCase):
 
         self.assertTrue(second["ok"], msg=f"second: {second!r}")
         self.assertEqual(second["status"], "draft_pr_already_created")
+        self.assertTrue(second["single_use_enforced"])
+        self.assertTrue(second["resume_already_processed"])
+        self.assertTrue(second["duplicate_trigger_suppressed"])
         self.assertEqual(runner.call_count, 1)
         self.assertEqual(branch.call_count, 1)
         self.assertEqual(draft.call_count, 1)
         self.assertEqual(before, _counts(self.db_path))
         self.assertEqual(second["stages"]["one_shot"]["status"], "already_executed")
+        self.assertTrue(second["stages"]["one_shot"]["reused"])
+        self.assertTrue(second["stages"]["one_shot"]["already_executed"])
+        self.assertTrue(second["stages"]["one_shot"]["proposal_reused"])
+        self.assertTrue(second["stages"]["one_shot"]["confirmation_reused"])
+        self.assertTrue(second["stages"]["one_shot"]["verifier_report_reused"])
+        self.assertTrue(second["stages"]["one_shot"]["handoff_reused"])
+        self.assertTrue(second["stages"]["one_shot"]["runtime_reused"])
+        self.assertTrue(second["stages"]["pr_preparation"]["reused"])
+        self.assertTrue(second["stages"]["pr_preparation"]["pr_handoff_reused"])
         self.assertTrue(second["stages"]["pr_preparation"]["branch_push_reused"])
+        self.assertTrue(
+            second["stages"]["pr_preparation"]["branch_push_already_pushed"]
+        )
         self.assertTrue(second["stages"]["pr_preparation"]["draft_pr_reused"])
         self.assertTrue(second["stages"]["pr_preparation"]["draft_pr_already_created"])
         self.assertFalse(second["safety"]["approved_task_runner_called"])
         self.assertFalse(second["safety"]["branch_pushed"])
         self.assertFalse(second["safety"]["draft_pr_created"])
+        self.assertTrue(second["safety"]["single_use_enforced"])
+        self.assertTrue(second["safety"]["resume_already_processed"])
+        self.assertTrue(second["safety"]["duplicate_trigger_suppressed"])
 
     def test_resume_pr_preparation_flag_is_independent_from_one_shot_resume(self) -> None:
         request = self._request(
