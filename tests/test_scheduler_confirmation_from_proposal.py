@@ -360,7 +360,7 @@ class NotEligibleTests(_Base):
         task_key = "AT-K2-NEL-002"
         proposal = self._create_proposal(task_key)
         # Move the task out of queued after the proposal is recorded.
-        self._seed_task(task_key, status="in_progress")
+        self.store.update_task_status(task_key, "in_progress", source="test")
         before = self._db_counts()
 
         result = create_scheduler_confirmation_from_proposal(

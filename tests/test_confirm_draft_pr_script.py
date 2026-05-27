@@ -556,7 +556,7 @@ class ConfirmDraftPrScriptTests(unittest.TestCase):
         self.assertFalse(any(call["args"][:3] == ["gh", "pr", "create"] for call in runner.calls))
 
     def test_script_rejects_non_waiting_task_by_default(self) -> None:
-        self._seed_task(status="blocked")
+        self.store.update_task_status(self.task_key, "blocked", source="test")
         runner = FakeGhRunner()
         exit_code, stdout, _stderr = self._run_main(
             self._base_args() + ["--dry-run"],

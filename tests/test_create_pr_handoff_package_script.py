@@ -414,7 +414,11 @@ class CreatePrHandoffPackageScriptTests(unittest.TestCase):
         )
 
     def test_script_rejects_non_waiting_task_by_default(self) -> None:
-        self._seed_task(status="blocked")
+        self.store.update_task_status(
+            "AT-HANDOFF-PKG-CLI",
+            "blocked",
+            source="test",
+        )
         result = self._run(
             "--task-key",
             "AT-HANDOFF-PKG-CLI",

@@ -174,7 +174,7 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(task.blocked_reason)
         self.assertEqual(task.repo_path, Path("/home/ubuntu/agent-taskflow"))
 
-    def test_task_upsert_updates_existing_task(self) -> None:
+    def test_task_upsert_preserves_existing_status_by_default(self) -> None:
         self.store.upsert_task(self.make_task(status="blocked"))
         self.store.upsert_task(self.make_task(status="waiting_approval"))
 
@@ -182,7 +182,42 @@ class StoreTests(unittest.TestCase):
 
         self.assertIsNotNone(task)
         assert task is not None
+        self.assertEqual(task.status, "blocked")
+
+    def test_task_upsert_can_explicitly_override_existing_status(self) -> None:
+        self.store.upsert_task(self.make_task(status="blocked"))
+        self.store.upsert_task(
+            self.make_task(status="waiting_approval"),
+            preserve_existing_status=False,
+        )
+
+        task = self.store.get_task("AT-0003")
+
+        self.assertIsNotNone(task)
+        assert task is not None
         self.assertEqual(task.status, "waiting_approval")
+
+    def test_task_upsert_preserves_active_statuses_on_reingest(self) -> None:
+        for status in ("waiting_approval", "implementing"):
+            with self.subTest(status=status):
+                task_key = f"AT-{status.upper()}"
+                self.store.upsert_task(self.make_task(task_key, status=status))
+                self.store.upsert_task(self.make_task(task_key, status="queued"))
+
+                task = self.store.get_task(task_key)
+
+                self.assertIsNotNone(task)
+                assert task is not None
+                self.assertEqual(task.status, status)
+
+    def test_new_task_insert_keeps_requested_status(self) -> None:
+        self.store.upsert_task(self.make_task(status="queued"))
+
+        task = self.store.get_task("AT-0003")
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "queued")
 
     def test_invalid_task_status_is_rejected_before_write(self) -> None:
         with self.assertRaisesRegex(ValueError, "Invalid task status"):
@@ -268,6 +303,66 @@ class StoreTests(unittest.TestCase):
         assert task is not None
         self.assertEqual(task.status, "queued")
         self.assertIsNone(task.blocked_reason)
+
+    def test_connect_sets_busy_timeout(self) -> None:
+        with store_module.connect(self.db_path) as conn:
+            timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+
+        self.assertEqual(timeout, store_module.SQLITE_BUSY_TIMEOUT_MS)
+
+    def test_connect_enables_wal_for_file_backed_db(self) -> None:
+        with store_module.connect(self.db_path) as conn:
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+
+        self.assertEqual(journal_mode.lower(), "wal")
+
+    def test_lineage_consumption_events_are_filterable(self) -> None:
+        self.store.upsert_task(self.make_task(status="queued"))
+        consumed_path = Path("/tmp/AT-0003/scheduler_confirmation.json")
+        consumer_path = Path("/tmp/AT-0003/verifier_report.json")
+
+        self.store.record_lineage_consumed(
+            "AT-0003",
+            "scheduler_confirmation_consumed",
+            "unit-test",
+            consumed_artifact_type="scheduler_confirmation",
+            consumed_artifact_path=consumed_path,
+            consumer_artifact_type="scheduler_confirmation_verifier_report",
+            consumer_artifact_path=consumer_path,
+            confirmation_id="confirmation-1",
+            verifier_report_id="verifier-1",
+            proposal_hash="proposal-hash",
+            proposal_item_id="item-1",
+            item_hash="item-hash",
+        )
+
+        self.assertTrue(
+            self.store.lineage_consumed(
+                "AT-0003",
+                "scheduler_confirmation_consumed",
+                consumed_artifact_type="scheduler_confirmation",
+                consumed_artifact_path=consumed_path,
+                confirmation_id="confirmation-1",
+                proposal_hash="proposal-hash",
+                proposal_item_id="item-1",
+                item_hash="item-hash",
+            )
+        )
+        events = self.store.list_lineage_consumption_events(
+            "AT-0003",
+            "scheduler_confirmation_consumed",
+            consumed_artifact_type="scheduler_confirmation",
+            consumed_artifact_path=consumed_path,
+            confirmation_id="confirmation-1",
+        )
+
+        self.assertEqual(len(events), 1)
+        payload = events[0]["payload"]
+        self.assertEqual(payload["consumer_artifact_path"], str(consumer_path))
+        self.assertTrue(payload["single_use_enforced"])
+        self.assertTrue(payload["not_approval"])
+        self.assertTrue(payload["not_merge"])
+        self.assertTrue(payload["not_cleanup"])
 
     def test_dispatcher_store_events_can_record_executor_run(self) -> None:
         self.store.upsert_task(self.make_task())

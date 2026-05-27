@@ -22,6 +22,7 @@ from agent_taskflow.models import (
     validate_task_status,
     validate_task_worktree_status,
 )
+from agent_taskflow.tasks import normalize_task_key
 
 
 def default_db_path() -> Path:
@@ -35,12 +36,33 @@ def _db_path(path: str | Path | None) -> Path:
     return require_absolute_path(path, "db_path")
 
 
+SQLITE_BUSY_TIMEOUT_MS = 5000
+SQLITE_ENABLE_WAL = True
+
+LINEAGE_CONSUMPTION_SAFETY_FLAGS: dict[str, bool] = {
+    "single_use_enforced": True,
+    "not_approval": True,
+    "not_merge": True,
+    "not_cleanup": True,
+}
+
+
+def _should_attempt_wal(db_path: Path) -> bool:
+    return SQLITE_ENABLE_WAL and str(db_path) != ":memory:"
+
+
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
-    """Open a SQLite connection with foreign keys enabled."""
+    """Open a SQLite connection with concurrency and foreign-key pragmas."""
     db_path = _db_path(path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    if _should_attempt_wal(db_path):
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.DatabaseError:
+            pass
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
@@ -276,7 +298,12 @@ class TaskMirrorStore:
     def init_db(self) -> None:
         init_db(self.db_path)
 
-    def upsert_task(self, record: TaskRecord) -> None:
+    def upsert_task(
+        self,
+        record: TaskRecord,
+        *,
+        preserve_existing_status: bool = True,
+    ) -> None:
         now = utc_now_iso()
         created_at = record.created_at or now
         updated_at = record.updated_at or now
@@ -315,10 +342,16 @@ class TaskMirrorStore:
                     board = excluded.board,
                     hermes_task_id = excluded.hermes_task_id,
                     title = excluded.title,
-                    status = excluded.status,
+                    status = CASE
+                        WHEN ? THEN tasks.status
+                        ELSE excluded.status
+                    END,
                     repo_path = excluded.repo_path,
                     artifact_dir = excluded.artifact_dir,
-                    blocked_reason = excluded.blocked_reason,
+                    blocked_reason = CASE
+                        WHEN ? THEN tasks.blocked_reason
+                        ELSE excluded.blocked_reason
+                    END,
                     updated_at = excluded.updated_at,
                     last_synced_at = excluded.last_synced_at,
                     executor = excluded.executor,
@@ -345,6 +378,8 @@ class TaskMirrorStore:
                     record.provider,
                     tools_json,
                     record.pi_bin,
+                    preserve_existing_status,
+                    preserve_existing_status,
                 ),
             )
 
@@ -834,6 +869,134 @@ class TaskMirrorStore:
                 ),
             )
 
+    def record_lineage_consumed(
+        self,
+        task_key: str,
+        event_type: str,
+        source: str,
+        *,
+        consumed_artifact_type: str,
+        consumed_artifact_path: str | Path,
+        consumer_artifact_type: str,
+        consumer_artifact_path: str | Path,
+        confirmation_id: str | None = None,
+        verifier_report_id: str | None = None,
+        handoff_id: str | None = None,
+        proposal_hash: str | None = None,
+        proposal_item_id: str | None = None,
+        item_hash: str | None = None,
+    ) -> None:
+        consumed_at = utc_now_iso()
+        payload = {
+            "kind": event_type,
+            "task_key": normalize_task_key(task_key),
+            "consumed_artifact_type": consumed_artifact_type,
+            "consumed_artifact_path": str(consumed_artifact_path),
+            "consumer_artifact_type": consumer_artifact_type,
+            "consumer_artifact_path": str(consumer_artifact_path),
+            "confirmation_id": confirmation_id,
+            "verifier_report_id": verifier_report_id,
+            "handoff_id": handoff_id,
+            "proposal_hash": proposal_hash,
+            "proposal_item_id": proposal_item_id,
+            "item_hash": item_hash,
+            "consumed_at": consumed_at,
+            "source": source,
+            **LINEAGE_CONSUMPTION_SAFETY_FLAGS,
+        }
+        self.record_task_event(
+            task_key,
+            event_type,
+            source,
+            message=(
+                f"{consumed_artifact_type} consumed by "
+                f"{consumer_artifact_type} (single-use enforced)"
+            ),
+            payload=payload,
+        )
+
+    def list_lineage_consumption_events(
+        self,
+        task_key: str,
+        event_type: str,
+        *,
+        consumed_artifact_type: str,
+        consumed_artifact_path: str | Path | None = None,
+        confirmation_id: str | None = None,
+        verifier_report_id: str | None = None,
+        handoff_id: str | None = None,
+        proposal_hash: str | None = None,
+        proposal_item_id: str | None = None,
+        item_hash: str | None = None,
+    ) -> list[dict[str, Any]]:
+        expected: dict[str, str | None] = {
+            "consumed_artifact_path": (
+                str(consumed_artifact_path)
+                if consumed_artifact_path is not None
+                else None
+            ),
+            "confirmation_id": confirmation_id,
+            "verifier_report_id": verifier_report_id,
+            "handoff_id": handoff_id,
+            "proposal_hash": proposal_hash,
+            "proposal_item_id": proposal_item_id,
+            "item_hash": item_hash,
+        }
+        matches: list[dict[str, Any]] = []
+        for event in self.list_task_events(task_key):
+            if event.event_type != event_type:
+                continue
+            payload = self._event_payload(event)
+            if payload.get("single_use_enforced") is not True:
+                continue
+            if payload.get("consumed_artifact_type") != consumed_artifact_type:
+                continue
+            if any(
+                value is not None and payload.get(key) != value
+                for key, value in expected.items()
+            ):
+                continue
+            matches.append(
+                {
+                    "task_key": event.task_key,
+                    "event_type": event.event_type,
+                    "event_source": event.source,
+                    "event_message": event.message,
+                    "event_created_at": event.created_at,
+                    "payload": payload,
+                }
+            )
+        return matches
+
+    def lineage_consumed(
+        self,
+        task_key: str,
+        event_type: str,
+        *,
+        consumed_artifact_type: str,
+        consumed_artifact_path: str | Path | None = None,
+        confirmation_id: str | None = None,
+        verifier_report_id: str | None = None,
+        handoff_id: str | None = None,
+        proposal_hash: str | None = None,
+        proposal_item_id: str | None = None,
+        item_hash: str | None = None,
+    ) -> bool:
+        return bool(
+            self.list_lineage_consumption_events(
+                task_key,
+                event_type,
+                consumed_artifact_type=consumed_artifact_type,
+                consumed_artifact_path=consumed_artifact_path,
+                confirmation_id=confirmation_id,
+                verifier_report_id=verifier_report_id,
+                handoff_id=handoff_id,
+                proposal_hash=proposal_hash,
+                proposal_item_id=proposal_item_id,
+                item_hash=item_hash,
+            )
+        )
+
     def create_executor_run(
         self,
         task_key: str,
@@ -1070,8 +1233,16 @@ class TaskMirrorStore:
         return [_row_to_worktree(row) for row in rows]
 
 
-def upsert_task(db_path: str | Path | None, record: TaskRecord) -> None:
-    TaskMirrorStore(db_path).upsert_task(record)
+def upsert_task(
+    db_path: str | Path | None,
+    record: TaskRecord,
+    *,
+    preserve_existing_status: bool = True,
+) -> None:
+    TaskMirrorStore(db_path).upsert_task(
+        record,
+        preserve_existing_status=preserve_existing_status,
+    )
 
 
 def get_task(db_path: str | Path | None, task_key: str) -> TaskRecord | None:

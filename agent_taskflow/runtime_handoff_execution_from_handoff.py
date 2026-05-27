@@ -36,6 +36,7 @@ RUNTIME_EXECUTION_ARTIFACT_TYPE = "runtime_handoff_execution"
 RUNTIME_PREFLIGHT_EVENT_TYPE = "runtime_preflight_finished"
 RUNTIME_STARTED_EVENT_TYPE = "runtime_execution_started"
 RUNTIME_FINISHED_EVENT_TYPE = "runtime_execution_finished"
+HANDOFF_CONSUMED_EVENT_TYPE = "intake_runner_handoff_consumed"
 
 RUNTIME_EXECUTION_SAFETY_FLAGS: dict[str, bool] = {
     "runtime_started": False,
@@ -89,6 +90,7 @@ REASON_ITEM_HASH_MISMATCH = "item_hash_mismatch"
 REASON_TASK_STATUS_MISMATCH = "task_status_mismatch"
 REASON_RECOMMENDED_COMMAND_KIND_MISMATCH = "recommended_command_kind_mismatch"
 REASON_DUPLICATE_RUNTIME_EXECUTION = "duplicate_runtime_execution"
+REASON_HANDOFF_ALREADY_CONSUMED = "intake_runner_handoff_already_consumed"
 
 
 _REQUIRED_CHECKS: tuple[str, ...] = (
@@ -107,6 +109,7 @@ _REQUIRED_CHECKS: tuple[str, ...] = (
     "task_status_matches_expected",
     "recommended_command_kind_matches",
     "duplicate_runtime_execution_absent",
+    "intake_runner_handoff_not_consumed",
 )
 
 
@@ -221,6 +224,7 @@ def check_runtime_handoff_preflight(
         "task_status": None,
         "expected_status": None,
         "duplicate_runtime_execution_count": 0,
+        "intake_runner_handoff_consumed_count": 0,
     }
 
     task_record = None
@@ -368,6 +372,28 @@ def check_runtime_handoff_preflight(
         checks["duplicate_runtime_execution_absent"] = True
     else:
         reasons.append(REASON_DUPLICATE_RUNTIME_EXECUTION)
+
+    consumed_events: list[dict[str, Any]] = []
+    if store is not None and handoff_view.get("handoff_id"):
+        consumed_events = store.list_lineage_consumption_events(
+            request.task_key,
+            HANDOFF_CONSUMED_EVENT_TYPE,
+            consumed_artifact_type=HANDOFF_ARTIFACT_TYPE,
+            consumed_artifact_path=_string_value(
+                handoff_view.get("handoff_artifact_path")
+            ),
+            confirmation_id=_string_value(handoff_view.get("confirmation_id")),
+            verifier_report_id=_string_value(handoff_view.get("verifier_report_id")),
+            handoff_id=_string_value(handoff_view.get("handoff_id")),
+            proposal_hash=_string_value(handoff_view.get("proposal_hash")),
+            proposal_item_id=_string_value(handoff_view.get("proposal_item_id")),
+            item_hash=_string_value(handoff_view.get("item_hash")),
+        )
+    current_view["intake_runner_handoff_consumed_count"] = len(consumed_events)
+    if not consumed_events:
+        checks["intake_runner_handoff_not_consumed"] = True
+    else:
+        reasons.append(REASON_HANDOFF_ALREADY_CONSUMED)
 
     unique_reasons = list(dict.fromkeys(reasons))
     unique_warnings = list(dict.fromkeys(warnings))
@@ -555,6 +581,21 @@ def run_runtime_handoff_execution_from_handoff(
             "(runtime audit evidence only; not approval)"
         ),
         payload=finished_event,
+    )
+    store.record_lineage_consumed(
+        request.task_key,
+        HANDOFF_CONSUMED_EVENT_TYPE,
+        RUNTIME_EXECUTION_SOURCE,
+        consumed_artifact_type=HANDOFF_ARTIFACT_TYPE,
+        consumed_artifact_path=str(handoff_view["handoff_artifact_path"]),
+        consumer_artifact_type=RUNTIME_EXECUTION_ARTIFACT_TYPE,
+        consumer_artifact_path=artifact_path,
+        confirmation_id=str(handoff_view["confirmation_id"]),
+        verifier_report_id=str(handoff_view["verifier_report_id"]),
+        handoff_id=str(handoff_view["handoff_id"]),
+        proposal_hash=str(handoff_view["proposal_hash"]),
+        proposal_item_id=str(handoff_view["proposal_item_id"]),
+        item_hash=str(handoff_view["item_hash"]),
     )
 
     status = "executed" if runner_returned and runner_ok else "executed_with_failure"
@@ -1445,6 +1486,7 @@ __all__ = [
     "RUNTIME_EXECUTION_SAFETY_FLAGS",
     "RUNTIME_EXECUTION_SCHEMA_VERSION",
     "RUNTIME_EXECUTION_SOURCE",
+    "HANDOFF_CONSUMED_EVENT_TYPE",
     "RUNTIME_FINISHED_EVENT_TYPE",
     "RUNTIME_PREFLIGHT_EVENT_TYPE",
     "RUNTIME_STARTED_EVENT_TYPE",

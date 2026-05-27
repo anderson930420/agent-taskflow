@@ -215,19 +215,18 @@ def ingest_github_issue(
     would_write_task = existing is None
     summary_status = "ingested" if existing is None else "reused"
 
-    if existing is None:
-        store.upsert_task(
-            TaskRecord(
-                task_key=task_key,
-                project=project,
-                board=project,
-                title=issue.title,
-                status=task_status,
-                repo_path=request.local_repo_path,
-                artifact_dir=artifact_dir,
-                blocked_reason=blocked_reason,
-            )
+    store.upsert_task(
+        TaskRecord(
+            task_key=task_key,
+            project=project,
+            board=project,
+            title=issue.title,
+            status=task_status,
+            repo_path=request.local_repo_path,
+            artifact_dir=artifact_dir,
+            blocked_reason=blocked_reason,
         )
+    )
 
     artifact_dir.mkdir(parents=True, exist_ok=True)
     issue_spec_path.write_text(

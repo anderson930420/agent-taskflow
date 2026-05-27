@@ -38,6 +38,7 @@ VERIFIER_REPORT_SCHEMA_VERSION = "scheduler_confirmation_verifier_report.v1"
 VERIFIER_REPORT_SOURCE = "scheduler_confirmation_verifier_report"
 VERIFIER_REPORT_ARTIFACT_TYPE = "scheduler_confirmation_verifier_report"
 VERIFIER_REPORT_EVENT_TYPE = "scheduler_confirmation_verifier_report_created"
+CONFIRMATION_CONSUMED_EVENT_TYPE = "scheduler_confirmation_consumed"
 
 VERIFIER_REPORT_SAFETY_FLAGS: dict[str, bool] = {
     "verifier_report_created": False,
@@ -83,6 +84,7 @@ REASON_ITEM_HASH_MISMATCH = "item_hash_mismatch"
 REASON_TASK_STATUS_MISMATCH = "task_status_mismatch"
 REASON_RECOMMENDED_COMMAND_KIND_MISMATCH = "recommended_command_kind_mismatch"
 REASON_DUPLICATE_ACTIVE_VERIFIER_REPORT = "duplicate_active_verifier_report"
+REASON_CONFIRMATION_ALREADY_CONSUMED = "scheduler_confirmation_already_consumed"
 
 _REQUIRED_CHECKS: tuple[str, ...] = (
     "confirmation_exists",
@@ -98,6 +100,7 @@ _REQUIRED_CHECKS: tuple[str, ...] = (
     "task_status_matches_expected",
     "recommended_command_kind_matches",
     "duplicate_verifier_report_absent",
+    "scheduler_confirmation_not_consumed",
 )
 
 _CONFIRMATION_REQUIRED_FLAGS: tuple[str, ...] = (
@@ -194,6 +197,7 @@ def check_scheduler_confirmation_verifier_binding(
         "task_status": None,
         "expected_status": None,
         "duplicate_verifier_report_count": 0,
+        "scheduler_confirmation_consumed_count": 0,
     }
 
     store = TaskMirrorStore(request.db_path)
@@ -288,6 +292,26 @@ def check_scheduler_confirmation_verifier_binding(
     else:
         reasons.append(REASON_DUPLICATE_ACTIVE_VERIFIER_REPORT)
 
+    consumed_events = store.list_lineage_consumption_events(
+        request.task_key,
+        CONFIRMATION_CONSUMED_EVENT_TYPE,
+        consumed_artifact_type="scheduler_confirmation",
+        consumed_artifact_path=_string_value(
+            confirmation_view.get("confirmation_artifact_path")
+        ),
+        confirmation_id=request.confirmation_id,
+        proposal_hash=_string_value(confirmation_view.get("proposal_hash"))
+        or request.proposal_hash,
+        proposal_item_id=_string_value(confirmation_view.get("proposal_item_id"))
+        or request.proposal_item_id,
+        item_hash=_string_value(confirmation_view.get("item_hash")) or request.item_hash,
+    )
+    current_view["scheduler_confirmation_consumed_count"] = len(consumed_events)
+    if not consumed_events:
+        checks["scheduler_confirmation_not_consumed"] = True
+    else:
+        reasons.append(REASON_CONFIRMATION_ALREADY_CONSUMED)
+
     unique_reasons = list(dict.fromkeys(reasons))
     unique_warnings = list(dict.fromkeys(warnings))
     verification_passed = not unique_reasons and all(
@@ -379,6 +403,20 @@ def create_scheduler_confirmation_verifier_report(
             "(audit only; not execution permission)"
         ),
         payload=event_payload,
+    )
+    store.record_lineage_consumed(
+        request.task_key,
+        CONFIRMATION_CONSUMED_EVENT_TYPE,
+        VERIFIER_REPORT_SOURCE,
+        consumed_artifact_type="scheduler_confirmation",
+        consumed_artifact_path=str(verifier_report["confirmation_artifact_path"]),
+        consumer_artifact_type=VERIFIER_REPORT_ARTIFACT_TYPE,
+        consumer_artifact_path=artifact_path,
+        confirmation_id=str(verifier_report["confirmation_id"]),
+        verifier_report_id=str(verifier_report["verifier_report_id"]),
+        proposal_hash=str(verifier_report["proposal_hash"]),
+        proposal_item_id=str(verifier_report["proposal_item_id"]),
+        item_hash=str(verifier_report["item_hash"]),
     )
 
     return {
@@ -852,6 +890,7 @@ def _string_value(value: Any) -> str | None:
 
 __all__ = [
     "VERIFIER_REPORT_ARTIFACT_TYPE",
+    "CONFIRMATION_CONSUMED_EVENT_TYPE",
     "VERIFIER_REPORT_EVENT_TYPE",
     "VERIFIER_REPORT_SAFETY_FLAGS",
     "VERIFIER_REPORT_SCHEMA_VERSION",

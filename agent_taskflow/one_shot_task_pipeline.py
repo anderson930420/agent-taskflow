@@ -1451,8 +1451,14 @@ def _verifier_report_reuse_reasons(
             binding,
             duplicate_check_name="duplicate_verifier_report_absent",
             duplicate_reason="duplicate_active_verifier_report",
-            ignored_reasons={"task_status_mismatch"},
-            ignored_checks={"task_status_matches_expected"},
+            ignored_reasons={
+                "task_status_mismatch",
+                "scheduler_confirmation_already_consumed",
+            },
+            ignored_checks={
+                "task_status_matches_expected",
+                "scheduler_confirmation_not_consumed",
+            },
         )
     )
     return _unique_strings(reasons)
@@ -1485,8 +1491,14 @@ def _handoff_reuse_reasons(
             binding,
             duplicate_check_name="duplicate_handoff_absent",
             duplicate_reason="duplicate_active_handoff",
-            ignored_reasons={"task_status_mismatch"},
-            ignored_checks={"task_status_matches_expected"},
+            ignored_reasons={
+                "task_status_mismatch",
+                "scheduler_confirmation_verifier_report_already_consumed",
+            },
+            ignored_checks={
+                "task_status_matches_expected",
+                "scheduler_confirmation_verifier_report_not_consumed",
+            },
         )
     )
     return _unique_strings(reasons)
@@ -1519,8 +1531,14 @@ def _runtime_reuse_reasons(
             preflight,
             duplicate_check_name="duplicate_runtime_execution_absent",
             duplicate_reason="duplicate_runtime_execution",
-            ignored_reasons={"task_status_mismatch"},
-            ignored_checks={"task_status_matches_expected"},
+            ignored_reasons={
+                "task_status_mismatch",
+                "intake_runner_handoff_already_consumed",
+            },
+            ignored_checks={
+                "task_status_matches_expected",
+                "intake_runner_handoff_not_consumed",
+            },
         )
     )
     reasons.extend(_runtime_audit_event_reasons(store, task_key, runtime_execution))

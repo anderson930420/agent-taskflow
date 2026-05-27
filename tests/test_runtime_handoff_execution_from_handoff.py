@@ -8,11 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SMOKE_SCRIPT = REPO_ROOT / "scripts" / "run_minimal_runtime_handoff_execution_smoke.py"
 
 from agent_taskflow.runtime_handoff_execution_from_handoff import (
+    HANDOFF_CONSUMED_EVENT_TYPE,
     RUNTIME_EXECUTION_ARTIFACT_TYPE,
     RUNTIME_FINISHED_EVENT_TYPE,
     RUNTIME_PREFLIGHT_EVENT_TYPE,
@@ -177,6 +179,15 @@ def _make_request(seeded: dict[str, Any], **overrides: Any) -> RuntimeHandoffExe
     return RuntimeHandoffExecutionRequest(**fields)
 
 
+def _consumption_events(store: TaskMirrorStore, task_key: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for event in store.list_task_events(task_key):
+        if event.event_type != HANDOFF_CONSUMED_EVENT_TYPE:
+            continue
+        events.append(json.loads(event.payload_json or "{}"))
+    return events
+
+
 class _FakeRunner:
     def __init__(self) -> None:
         self.calls = 0
@@ -230,6 +241,10 @@ class RuntimeHandoffExecutionTests(unittest.TestCase):
         self.assertEqual(result["status"], "dry_run")
         self.assertTrue(result["ok"])
         self.assertEqual(fake.calls, 0)
+        self.assertEqual(
+            _consumption_events(self.seeded["store"], self.seeded["task_key"]),
+            [],
+        )
         self.assertEqual(
             events_before,
             len(self.seeded["store"].list_task_events(self.seeded["task_key"])),
@@ -295,6 +310,29 @@ class RuntimeHandoffExecutionTests(unittest.TestCase):
         self.assertFalse(payload["safety"]["approved"])
         self.assertFalse(payload["safety"]["merged"])
 
+        consumption_events = _consumption_events(
+            store,
+            self.seeded["task_key"],
+        )
+        self.assertEqual(len(consumption_events), 1)
+        consumed = consumption_events[0]
+        self.assertEqual(consumed["kind"], HANDOFF_CONSUMED_EVENT_TYPE)
+        self.assertEqual(consumed["consumed_artifact_type"], "intake_runner_handoff")
+        self.assertEqual(consumed["consumer_artifact_type"], RUNTIME_EXECUTION_ARTIFACT_TYPE)
+        self.assertEqual(consumed["handoff_id"], self.seeded["handoff"]["handoff_id"])
+        self.assertEqual(
+            consumed["verifier_report_id"],
+            self.seeded["handoff"]["verifier_report_id"],
+        )
+        self.assertEqual(consumed["confirmation_id"], self.seeded["handoff"]["confirmation_id"])
+        self.assertEqual(consumed["proposal_hash"], self.seeded["handoff"]["proposal_hash"])
+        self.assertEqual(consumed["proposal_item_id"], self.seeded["handoff"]["proposal_item_id"])
+        self.assertEqual(consumed["item_hash"], self.seeded["handoff"]["item_hash"])
+        self.assertTrue(consumed["single_use_enforced"])
+        self.assertTrue(consumed["not_approval"])
+        self.assertTrue(consumed["not_merge"])
+        self.assertTrue(consumed["not_cleanup"])
+
     def test_preflight_failure_does_not_call_runner(self) -> None:
         fake = _FakeRunner()
         result = run_runtime_handoff_execution_from_handoff(
@@ -309,6 +347,10 @@ class RuntimeHandoffExecutionTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "preflight_failed")
         self.assertEqual(fake.calls, 0)
+        self.assertEqual(
+            _consumption_events(self.seeded["store"], self.seeded["task_key"]),
+            [],
+        )
 
     def test_duplicate_runtime_execution_blocks_second_run(self) -> None:
         fake = _FakeRunner()
@@ -331,7 +373,35 @@ class RuntimeHandoffExecutionTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "preflight_failed")
         self.assertIn("duplicate_runtime_execution", result["reasons"])
+        self.assertIn("intake_runner_handoff_already_consumed", result["reasons"])
+        self.assertEqual(
+            result["preflight"]["current"]["intake_runner_handoff_consumed_count"],
+            1,
+        )
         self.assertEqual(fake.calls, 1)
+
+    def test_failed_runtime_artifact_recording_does_not_consume_handoff(self) -> None:
+        fake = _FakeRunner()
+        with mock.patch.object(
+            TaskMirrorStore,
+            "record_task_artifact",
+            side_effect=RuntimeError("artifact write failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "artifact write failed"):
+                run_runtime_handoff_execution_from_handoff(
+                    _make_request(
+                        self.seeded,
+                        dry_run=False,
+                        confirm_run_approved_task_runner=True,
+                    ),
+                    approved_task_runner_fn=fake,
+                )
+
+        self.assertEqual(fake.calls, 1)
+        self.assertEqual(
+            _consumption_events(self.seeded["store"], self.seeded["task_key"]),
+            [],
+        )
 
     def test_runner_non_ok_still_records_finished_event(self) -> None:
         def runner(**kwargs: Any) -> dict[str, Any]:

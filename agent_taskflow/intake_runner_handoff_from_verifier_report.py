@@ -34,6 +34,9 @@ HANDOFF_SCHEMA_VERSION = "intake_runner_handoff_from_verifier_report.v1"
 HANDOFF_SOURCE = "intake_runner_handoff_from_verifier_report"
 HANDOFF_ARTIFACT_TYPE = "intake_runner_handoff"
 HANDOFF_EVENT_TYPE = "intake_runner_handoff_created"
+VERIFIER_REPORT_CONSUMED_EVENT_TYPE = (
+    "scheduler_confirmation_verifier_report_consumed"
+)
 
 HANDOFF_SAFETY_FLAGS: dict[str, bool] = {
     "handoff_created": False,
@@ -90,6 +93,9 @@ REASON_ITEM_HASH_MISMATCH = "item_hash_mismatch"
 REASON_TASK_STATUS_MISMATCH = "task_status_mismatch"
 REASON_RECOMMENDED_COMMAND_KIND_MISMATCH = "recommended_command_kind_mismatch"
 REASON_DUPLICATE_ACTIVE_HANDOFF = "duplicate_active_handoff"
+REASON_VERIFIER_REPORT_ALREADY_CONSUMED = (
+    "scheduler_confirmation_verifier_report_already_consumed"
+)
 
 _REQUIRED_CHECKS: tuple[str, ...] = (
     "verifier_report_exists",
@@ -106,6 +112,7 @@ _REQUIRED_CHECKS: tuple[str, ...] = (
     "task_status_matches_expected",
     "recommended_command_kind_matches",
     "duplicate_handoff_absent",
+    "scheduler_confirmation_verifier_report_not_consumed",
 )
 
 _VERIFIER_REQUIRED_BINDING_KEYS: tuple[str, ...] = (
@@ -209,6 +216,7 @@ def check_intake_runner_handoff_binding(
         "task_status": None,
         "expected_status": None,
         "duplicate_handoff_count": 0,
+        "scheduler_confirmation_verifier_report_consumed_count": 0,
     }
 
     task_record = None
@@ -324,6 +332,32 @@ def check_intake_runner_handoff_binding(
     else:
         reasons.append(REASON_DUPLICATE_ACTIVE_HANDOFF)
 
+    consumed_events: list[dict[str, Any]] = []
+    if store is not None:
+        consumed_events = store.list_lineage_consumption_events(
+            request.task_key,
+            VERIFIER_REPORT_CONSUMED_EVENT_TYPE,
+            consumed_artifact_type=VERIFIER_REPORT_ARTIFACT_TYPE,
+            consumed_artifact_path=_string_value(
+                verifier_view.get("verifier_report_artifact_path")
+            ),
+            confirmation_id=_string_value(verifier_view.get("confirmation_id"))
+            or request.confirmation_id,
+            verifier_report_id=request.verifier_report_id,
+            proposal_hash=_string_value(verifier_view.get("proposal_hash"))
+            or request.proposal_hash,
+            proposal_item_id=_string_value(verifier_view.get("proposal_item_id"))
+            or request.proposal_item_id,
+            item_hash=_string_value(verifier_view.get("item_hash")) or request.item_hash,
+        )
+    current_view["scheduler_confirmation_verifier_report_consumed_count"] = len(
+        consumed_events
+    )
+    if not consumed_events:
+        checks["scheduler_confirmation_verifier_report_not_consumed"] = True
+    else:
+        reasons.append(REASON_VERIFIER_REPORT_ALREADY_CONSUMED)
+
     unique_reasons = list(dict.fromkeys(reasons))
     unique_warnings = list(dict.fromkeys(warnings))
     allowed = not unique_reasons and all(checks[name] for name in _REQUIRED_CHECKS)
@@ -412,6 +446,21 @@ def create_intake_runner_handoff_from_verifier_report(
             "(prepared evidence only; not runtime execution)"
         ),
         payload=event_payload,
+    )
+    store.record_lineage_consumed(
+        request.task_key,
+        VERIFIER_REPORT_CONSUMED_EVENT_TYPE,
+        HANDOFF_SOURCE,
+        consumed_artifact_type=VERIFIER_REPORT_ARTIFACT_TYPE,
+        consumed_artifact_path=str(handoff["verifier_report_artifact_path"]),
+        consumer_artifact_type=HANDOFF_ARTIFACT_TYPE,
+        consumer_artifact_path=artifact_path,
+        confirmation_id=str(handoff["confirmation_id"]),
+        verifier_report_id=str(handoff["verifier_report_id"]),
+        handoff_id=str(handoff["handoff_id"]),
+        proposal_hash=str(handoff["proposal_hash"]),
+        proposal_item_id=str(handoff["proposal_item_id"]),
+        item_hash=str(handoff["item_hash"]),
     )
 
     return {
@@ -1184,6 +1233,7 @@ __all__ = [
     "HANDOFF_SAFETY_FLAGS",
     "HANDOFF_SCHEMA_VERSION",
     "HANDOFF_SOURCE",
+    "VERIFIER_REPORT_CONSUMED_EVENT_TYPE",
     "IntakeRunnerHandoffFromVerifierReportError",
     "IntakeRunnerHandoffFromVerifierReportRequest",
     "check_intake_runner_handoff_binding",

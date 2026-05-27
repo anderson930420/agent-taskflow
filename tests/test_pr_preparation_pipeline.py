@@ -668,7 +668,7 @@ class PRPreparationPipelineTests(unittest.TestCase):
         self.assertEqual(draft.call_count, 1)
 
     def test_preflight_requires_waiting_approval(self) -> None:
-        self._seed_ready_task(status="queued")
+        self.store.update_task_status(self.task_key, "queued", source="test")
         branch = _FakeBranchPush()
         draft = _FakeDraftPR()
 

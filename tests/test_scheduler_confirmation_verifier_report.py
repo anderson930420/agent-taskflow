@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.scheduler_candidate_proposals import (
@@ -19,6 +20,7 @@ from agent_taskflow.scheduler_confirmation_from_proposal import (
     create_scheduler_confirmation_from_proposal,
 )
 from agent_taskflow.scheduler_confirmation_verifier_report import (
+    CONFIRMATION_CONSUMED_EVENT_TYPE,
     VERIFIER_REPORT_ARTIFACT_TYPE,
     VERIFIER_REPORT_EVENT_TYPE,
     VERIFIER_REPORT_SAFETY_FLAGS,
@@ -158,6 +160,14 @@ class _Base(unittest.TestCase):
         ]
         return {"artifacts": len(artifacts), "events": len(events)}
 
+    def _consumption_events(self, task_key: str) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for event in self.store.list_task_events(task_key):
+            if event.event_type != CONFIRMATION_CONSUMED_EVENT_TYPE:
+                continue
+            events.append(json.loads(event.payload_json or "{}"))
+        return events
+
 
 class DryRunTests(_Base):
     def test_dry_run_valid_confirmation_writes_nothing(self) -> None:
@@ -191,6 +201,7 @@ class DryRunTests(_Base):
 
         self.assertEqual(self._db_counts(), before)
         self.assertEqual(self._report_counts(task_key), {"artifacts": 0, "events": 0})
+        self.assertEqual(self._consumption_events(task_key), [])
         self.assertFalse(
             (self.artifact_root / "scheduler_confirmation_verifier_reports").exists()
         )
@@ -299,6 +310,23 @@ class ConfirmedCreationTests(_Base):
         self.assertTrue(event_payload["not_runtime"])
         self.assertTrue(event_payload["requires_next_gate"])
 
+        consumption_events = self._consumption_events(task_key)
+        self.assertEqual(len(consumption_events), 1)
+        consumed = consumption_events[0]
+        self.assertEqual(consumed["kind"], CONFIRMATION_CONSUMED_EVENT_TYPE)
+        self.assertEqual(consumed["task_key"], task_key)
+        self.assertEqual(consumed["consumed_artifact_type"], "scheduler_confirmation")
+        self.assertEqual(consumed["consumer_artifact_type"], VERIFIER_REPORT_ARTIFACT_TYPE)
+        self.assertEqual(consumed["confirmation_id"], confirmation["confirmation_id"])
+        self.assertEqual(consumed["verifier_report_id"], report_id)
+        self.assertEqual(consumed["proposal_hash"], confirmation["proposal_hash"])
+        self.assertEqual(consumed["proposal_item_id"], confirmation["proposal_item_id"])
+        self.assertEqual(consumed["item_hash"], confirmation["item_hash"])
+        self.assertTrue(consumed["single_use_enforced"])
+        self.assertTrue(consumed["not_approval"])
+        self.assertTrue(consumed["not_merge"])
+        self.assertTrue(consumed["not_cleanup"])
+
         task = self.store.get_task(task_key)
         assert task is not None
         self.assertEqual(task.status, "queued")
@@ -326,6 +354,28 @@ class NotVerifiedTests(_Base):
         self.assertTrue(result["reasons"])
         self.assertEqual(self._db_counts(), before)
         self.assertEqual(self._report_counts(task_key), {"artifacts": 0, "events": 0})
+        self.assertEqual(self._consumption_events(task_key), [])
+
+    def test_failed_downstream_creation_does_not_consume_confirmation(self) -> None:
+        task_key = "AT-L4A-NV-002"
+        confirmation = self._create_confirmation(task_key)
+
+        with mock.patch.object(
+            TaskMirrorStore,
+            "record_task_artifact",
+            side_effect=RuntimeError("artifact write failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "artifact write failed"):
+                create_scheduler_confirmation_verifier_report(
+                    self._build_request(
+                        task_key,
+                        confirmation,
+                        dry_run=False,
+                        confirm_create_verifier_report=True,
+                    )
+                )
+
+        self.assertEqual(self._consumption_events(task_key), [])
 
 
 class DuplicateTests(_Base):
@@ -355,7 +405,13 @@ class DuplicateTests(_Base):
         self.assertFalse(second["ok"])
         self.assertEqual(second["status"], "not_verified")
         self.assertIn("duplicate_active_verifier_report", second["reasons"])
+        self.assertIn("scheduler_confirmation_already_consumed", second["reasons"])
+        self.assertEqual(
+            second["binding"]["current"]["scheduler_confirmation_consumed_count"],
+            1,
+        )
         self.assertEqual(self._report_counts(task_key), {"artifacts": 1, "events": 1})
+        self.assertEqual(len(self._consumption_events(task_key)), 1)
 
 
 class ArtifactSafetyTests(_Base):

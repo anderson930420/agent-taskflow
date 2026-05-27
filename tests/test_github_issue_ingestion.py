@@ -11,6 +11,7 @@ from agent_taskflow.github_issue_ingestion import (
     GitHubIssueSnapshot,
     ingest_github_issue,
 )
+from agent_taskflow.models import TaskRecord
 from agent_taskflow.store import TaskMirrorStore
 
 
@@ -152,6 +153,35 @@ class GitHubIssueIngestionTests(unittest.TestCase):
         self.assertEqual([task.task_key for task in tasks], ["AT-GH-42"])
         self.assertEqual(len(self.store.list_task_artifacts("AT-GH-42")), 1)
         self.assertEqual(len(self.store.list_task_events("AT-GH-42")), 2)
+
+    def test_reingest_preserves_existing_active_status(self) -> None:
+        self.store.init_db()
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-GH-42",
+                project="agent-taskflow",
+                board="agent-taskflow",
+                title="Old title",
+                status="waiting_approval",
+                repo_path=self.local_repo,
+                artifact_dir=self.root / "old-artifacts" / "AT-GH-42",
+            )
+        )
+
+        result = ingest_github_issue(
+            self.request(),
+            store=self.store,
+            fetcher=lambda repo, issue_number: open_issue(),
+        )
+
+        self.assertEqual(result.status, "reused")
+        self.assertFalse(result.wrote_task)
+        task = self.store.get_task("AT-GH-42")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "waiting_approval")
+        self.assertEqual(task.title, "Implement prepared workspace follow-up")
+        self.assertEqual(task.artifact_dir, self.root / "artifacts" / "AT-GH-42")
 
     def test_dry_run_writes_nothing(self) -> None:
         result = ingest_github_issue(

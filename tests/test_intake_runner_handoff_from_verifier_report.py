@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from agent_taskflow.intake_runner_handoff_from_verifier_report import (
     HANDOFF_ARTIFACT_TYPE,
@@ -15,6 +16,7 @@ from agent_taskflow.intake_runner_handoff_from_verifier_report import (
     HANDOFF_SAFETY_FLAGS,
     HANDOFF_SCHEMA_VERSION,
     HANDOFF_SOURCE,
+    VERIFIER_REPORT_CONSUMED_EVENT_TYPE,
     IntakeRunnerHandoffFromVerifierReportError,
     IntakeRunnerHandoffFromVerifierReportRequest,
     check_intake_runner_handoff_binding,
@@ -188,6 +190,14 @@ class _Base(unittest.TestCase):
         ]
         return {"artifacts": len(artifacts), "events": len(events)}
 
+    def _consumption_events(self, task_key: str) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for event in self.store.list_task_events(task_key):
+            if event.event_type != VERIFIER_REPORT_CONSUMED_EVENT_TYPE:
+                continue
+            events.append(json.loads(event.payload_json or "{}"))
+        return events
+
 
 class DryRunTests(_Base):
     def test_dry_run_valid_verifier_report_writes_nothing(self) -> None:
@@ -222,6 +232,7 @@ class DryRunTests(_Base):
 
         self.assertEqual(self._db_counts(), before)
         self.assertEqual(self._handoff_counts(task_key), {"artifacts": 0, "events": 0})
+        self.assertEqual(self._consumption_events(task_key), [])
         self.assertFalse((self.artifact_root / "intake_runner_handoffs").exists())
 
         for key, expected in HANDOFF_SAFETY_FLAGS.items():
@@ -320,7 +331,7 @@ class ConfirmedCreationTests(_Base):
         self.assertEqual(self._handoff_counts(task_key), {"artifacts": 1, "events": 1})
         after = self._db_counts()
         self.assertEqual(after["artifacts"], before["artifacts"] + 1)
-        self.assertEqual(after["events"], before["events"] + 1)
+        self.assertEqual(after["events"], before["events"] + 2)
         self.assertEqual(after["tasks"], before["tasks"])
         self.assertEqual(after["worktrees"], before["worktrees"])
 
@@ -339,6 +350,29 @@ class ConfirmedCreationTests(_Base):
         self.assertFalse(event_payload["approved_task_runner_called"])
         self.assertTrue(event_payload["requires_runtime_preflight"])
         self.assertTrue(event_payload["requires_next_gate"])
+
+        consumption_events = self._consumption_events(task_key)
+        self.assertEqual(len(consumption_events), 1)
+        consumed = consumption_events[0]
+        self.assertEqual(consumed["kind"], VERIFIER_REPORT_CONSUMED_EVENT_TYPE)
+        self.assertEqual(
+            consumed["consumed_artifact_type"],
+            "scheduler_confirmation_verifier_report",
+        )
+        self.assertEqual(consumed["consumer_artifact_type"], HANDOFF_ARTIFACT_TYPE)
+        self.assertEqual(
+            consumed["verifier_report_id"],
+            verifier_report["verifier_report_id"],
+        )
+        self.assertEqual(consumed["handoff_id"], handoff_id)
+        self.assertEqual(consumed["confirmation_id"], verifier_report["confirmation_id"])
+        self.assertEqual(consumed["proposal_hash"], verifier_report["proposal_hash"])
+        self.assertEqual(consumed["proposal_item_id"], verifier_report["proposal_item_id"])
+        self.assertEqual(consumed["item_hash"], verifier_report["item_hash"])
+        self.assertTrue(consumed["single_use_enforced"])
+        self.assertTrue(consumed["not_approval"])
+        self.assertTrue(consumed["not_merge"])
+        self.assertTrue(consumed["not_cleanup"])
 
         task = self.store.get_task(task_key)
         assert task is not None
@@ -367,6 +401,28 @@ class NotAllowedTests(_Base):
         self.assertTrue(result["reasons"])
         self.assertEqual(self._db_counts(), before)
         self.assertEqual(self._handoff_counts(task_key), {"artifacts": 0, "events": 0})
+        self.assertEqual(self._consumption_events(task_key), [])
+
+    def test_failed_downstream_creation_does_not_consume_verifier_report(self) -> None:
+        task_key = "AT-L5A-NA-002"
+        verifier_report = self._create_verifier_report(task_key)
+
+        with mock.patch.object(
+            TaskMirrorStore,
+            "record_task_artifact",
+            side_effect=RuntimeError("artifact write failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "artifact write failed"):
+                create_intake_runner_handoff_from_verifier_report(
+                    self._build_request(
+                        task_key,
+                        verifier_report,
+                        dry_run=False,
+                        confirm_create_handoff=True,
+                    )
+                )
+
+        self.assertEqual(self._consumption_events(task_key), [])
 
 
 class DuplicateTests(_Base):
@@ -396,11 +452,22 @@ class DuplicateTests(_Base):
         self.assertFalse(second["ok"])
         self.assertEqual(second["status"], "not_allowed")
         self.assertIn("duplicate_active_handoff", second["reasons"])
+        self.assertIn(
+            "scheduler_confirmation_verifier_report_already_consumed",
+            second["reasons"],
+        )
         self.assertEqual(
             second["binding"]["current"]["duplicate_handoff_count"],
             2,
         )
+        self.assertEqual(
+            second["binding"]["current"][
+                "scheduler_confirmation_verifier_report_consumed_count"
+            ],
+            1,
+        )
         self.assertEqual(self._handoff_counts(task_key), {"artifacts": 1, "events": 1})
+        self.assertEqual(len(self._consumption_events(task_key)), 1)
 
 
 class ArtifactSafetyTests(_Base):
