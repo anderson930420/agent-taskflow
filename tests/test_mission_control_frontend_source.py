@@ -741,6 +741,153 @@ class TestSchedulerConfirmationVisibilityFrontendSource(unittest.TestCase):
             )
 
 
+class TestRuntimeExecutionVisibilityFrontendSource(unittest.TestCase):
+    """Level 6B: Mission Control runtime execution result read-only visibility tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(
+            "mission-control/components/RuntimeExecutionPanel.tsx", "r"
+        ) as f:
+            cls.panel_src = f.read()
+        with open(
+            "mission-control/app/tasks/[taskKey]/page.tsx", "r"
+        ) as f:
+            cls.page_src = f.read()
+        with open("mission-control/lib/api.ts", "r") as f:
+            cls.api_src = f.read()
+        with open("mission-control/lib/types.ts", "r") as f:
+            cls.types_src = f.read()
+
+    def test_runtime_execution_panel_exists(self):
+        self.assertIn("RuntimeExecutionPanel", self.panel_src)
+        self.assertIn("export function RuntimeExecutionPanel", self.panel_src)
+
+    def test_runtime_execution_panel_includes_required_safety_language(self):
+        for phrase in (
+            "Runtime audit evidence is not approval.",
+            "Runtime audit evidence is not merge.",
+            "Runtime audit evidence is not cleanup.",
+            "Human review remains required after runtime.",
+            "Mission Control remains read-only.",
+        ):
+            self.assertIn(
+                phrase,
+                self.panel_src,
+                f"RuntimeExecutionPanel must include safety phrase: {phrase}",
+            )
+
+    def test_runtime_execution_panel_displays_required_fields(self):
+        for token in (
+            "runtime_execution_id",
+            "runtime_preflight_finished",
+            "runtime_execution_started",
+            "runtime_execution_finished",
+            "approved_task_runner_invoked",
+            "runner_ok",
+            "runner_status",
+            "runner_phase",
+            "runtime_execution_artifact_path",
+        ):
+            self.assertIn(
+                token,
+                self.panel_src,
+                f"RuntimeExecutionPanel must display field: {token}",
+            )
+
+    def test_runtime_execution_panel_has_no_action_surface(self):
+        for token in (
+            "<button",
+            "<form",
+            "onClick",
+            "onSubmit",
+            "postJson",
+            "fetch(",
+            "POST",
+            "PATCH",
+            "DELETE",
+            "runRuntime",
+            "executeRuntime",
+            "callApprovedTaskRunner",
+            "createRuntimeExecution",
+            "startRuntimeExecution",
+            "rerunRuntime",
+            "Approve",
+            "Merge",
+            "Cleanup",
+            "Run Now",
+            "Rerun",
+            "Execute",
+        ):
+            self.assertNotIn(
+                token,
+                self.panel_src,
+                f"RuntimeExecutionPanel must not introduce action surface: {token}",
+            )
+
+    def test_runtime_execution_panel_uses_no_approved_task_runner_invocation(self):
+        """approved_task_runner may appear only as a displayed field name, not
+        as a function call or import."""
+        self.assertNotIn("approved_task_runner(", self.panel_src)
+        self.assertNotIn("approvedTaskRunner(", self.panel_src)
+        self.assertNotIn("import approved_task_runner", self.panel_src)
+        self.assertNotIn("from \"approved_task_runner\"", self.panel_src)
+
+    def test_task_detail_page_imports_and_renders_runtime_execution_panel(self):
+        self.assertIn("RuntimeExecutionPanel", self.page_src)
+        self.assertIn(
+            "from \"../../../components/RuntimeExecutionPanel\"",
+            self.page_src,
+        )
+        self.assertIn("<RuntimeExecutionPanel", self.page_src)
+        self.assertIn("Runtime Execution", self.page_src)
+
+    def test_api_runtime_audits_helper_is_get_only(self):
+        """Existing getRuntimeAudits helper must remain GET-only via requestJson."""
+        start = self.api_src.index("export async function getRuntimeAudits")
+        # End at next exported function
+        end = self.api_src.index("export async function ", start + 1)
+        fn_src = self.api_src[start:end]
+        self.assertIn("requestJson<", fn_src)
+        for token in ("postJson", "POST", "PATCH", "DELETE"):
+            self.assertNotIn(
+                token,
+                fn_src,
+                f"getRuntimeAudits must not issue mutation: {token}",
+            )
+
+    def test_no_runtime_mutation_helpers_exist_in_api(self):
+        for token in (
+            "runRuntime",
+            "executeRuntime",
+            "callApprovedTaskRunner",
+            "createRuntimeExecution",
+            "startRuntimeExecution",
+            "rerunRuntime",
+            "approveRuntime",
+            "mergeRuntime",
+            "cleanupRuntime",
+        ):
+            self.assertNotIn(
+                token,
+                self.api_src,
+                f"API client must not expose runtime mutation helper: {token}",
+            )
+
+    def test_no_approved_task_runner_invocation_in_frontend_sources(self):
+        combined = self.panel_src + self.page_src + self.api_src
+        # The literal field name is allowed; an actual call/import is not.
+        self.assertNotIn("approved_task_runner(", combined)
+        self.assertNotIn("import approved_task_runner", combined)
+        self.assertNotIn("from \"approved_task_runner\"", combined)
+
+    def test_runtime_execution_panel_has_empty_state(self):
+        self.assertIn(
+            "No runtime execution evidence recorded",
+            self.panel_src,
+        )
+
+
 class TestResponsiveLayoutCSS(unittest.TestCase):
     """Phase 74 + Phase 76: Responsive layout CSS source tests."""
 

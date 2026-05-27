@@ -5,6 +5,7 @@ import { ArtifactList } from "../../../components/ArtifactList";
 import { DogfoodEvidencePanel } from "../../../components/DogfoodEvidencePanel";
 import { RunList } from "../../../components/RunList";
 import { RuntimeAuditPanel } from "../../../components/RuntimeAuditPanel";
+import { RuntimeExecutionPanel } from "../../../components/RuntimeExecutionPanel";
 import { ReviewEvidenceSection } from "../../../components/ReviewEvidenceSection";
 import { TaskSchedulerCandidatePanel } from "../../../components/SchedulerCandidatePanel";
 import { TaskSchedulerConfirmationPanel } from "../../../components/SchedulerConfirmationPanel";
@@ -229,6 +230,11 @@ export default async function TaskDetailPage({
           <section className="section panel">
             <h2>Runtime Audit</h2>
             <RuntimeAuditPanel events={runtimeAudits} />
+          </section>
+
+          <section className="section panel">
+            <h2>Runtime Execution</h2>
+            <RuntimeExecutionPanel events={runtimeAudits} />
           </section>
 
           <section className="section panel">
