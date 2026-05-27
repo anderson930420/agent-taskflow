@@ -62,8 +62,10 @@ class RunOneShotTaskPipelineScriptTests(unittest.TestCase):
         self.assertIn("--db-path", result.stdout)
         self.assertIn("--artifact-root", result.stdout)
         self.assertIn("--confirm-run-one-shot-pipeline", result.stdout)
+        self.assertIn("--resume-existing", result.stdout)
         self.assertIn("--recommended-command-kind", result.stdout)
         self.assertIn("--proposal-max-items", result.stdout)
+        self.assertNotIn("--allow-runtime-rerun", result.stdout)
 
     def test_script_dry_run_writes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

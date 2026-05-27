@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Run the Level 7A task_key based one-shot pipeline.
+"""Run the Level 7B task_key based one-shot pipeline.
 
 Dry-run by default. With --confirm-run-one-shot-pipeline the command
 walks the existing operator-gated chain (scheduler_proposal ->
 scheduler_confirmation -> scheduler_confirmation_verifier_report ->
 intake_runner_handoff -> runtime preflight -> approved_task_runner ->
-runtime_handoff_execution) for exactly one task_key. It does not start
-a scheduler loop, a background worker, or automatic task picking, and
-does not approve, merge, clean up, push, or create PRs.
+runtime_handoff_execution) for exactly one task_key. With
+--resume-existing it reuses valid matching stage evidence and returns
+already_executed when runtime evidence already exists. It does not
+start a scheduler loop, a worker process, or automatic task selection,
+and does not approve, merge, clean up, push, or create PRs.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from agent_taskflow.one_shot_task_pipeline import (  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the Level 7A task_key based one-shot pipeline. "
+            "Run the Level 7B task_key based one-shot pipeline. "
             "Dry-run by default. With --confirm-run-one-shot-pipeline "
             "the chain runs end-to-end for exactly one task_key."
         ),
@@ -45,6 +47,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--proposal-max-items", type=int, default=1)
     parser.add_argument("--operator", default=None)
     parser.add_argument("--operator-note", default=None)
+    parser.add_argument(
+        "--resume-existing",
+        action="store_true",
+        help=(
+            "Reuse valid matching proposal, confirmation, verifier report, "
+            "handoff, and runtime evidence where present. Existing runtime "
+            "evidence returns already_executed and is not rerun."
+        ),
+    )
     parser.add_argument(
         "--confirm-run-one-shot-pipeline",
         action="store_true",
@@ -79,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
             operator_note=args.operator_note,
             proposal_max_items=int(args.proposal_max_items),
             recommended_command_kind=args.recommended_command_kind,
+            resume_existing=bool(args.resume_existing),
         )
         payload = run_one_shot_task_pipeline(request)
     except (ValueError, OneShotTaskPipelineError) as exc:
@@ -112,6 +124,7 @@ def _format_pretty(payload: dict[str, Any]) -> str:
         f"  status:           {payload.get('status')}",
         f"  mode:             {payload.get('mode')}",
         f"  task_key:         {payload.get('task_key')}",
+        f"  resume_existing:  {payload.get('resume_existing')}",
         f"  final_task_status:{payload.get('final_task_status')}",
         f"  failed_stage:     {payload.get('failed_stage')}",
     ]

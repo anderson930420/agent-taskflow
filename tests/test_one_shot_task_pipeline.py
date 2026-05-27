@@ -40,6 +40,42 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "agent_taskflow" / "one_shot_task_pipeline.py"
 
 
+def _evidence_counts(store: TaskMirrorStore, task_key: str) -> dict[str, int]:
+    artifacts = store.list_task_artifacts(task_key)
+    events = store.list_task_events(task_key)
+    return {
+        "scheduler_proposal": sum(
+            1 for item in artifacts if item.artifact_type == PROPOSAL_ARTIFACT_TYPE
+        ),
+        "scheduler_confirmation": sum(
+            1 for item in artifacts if item.artifact_type == CONFIRMATION_ARTIFACT_TYPE
+        ),
+        "scheduler_confirmation_verifier_report": sum(
+            1
+            for item in artifacts
+            if item.artifact_type == VERIFIER_REPORT_ARTIFACT_TYPE
+        ),
+        "intake_runner_handoff": sum(
+            1 for item in artifacts if item.artifact_type == HANDOFF_ARTIFACT_TYPE
+        ),
+        "runtime_handoff_execution": sum(
+            1
+            for item in artifacts
+            if item.artifact_type == RUNTIME_EXECUTION_ARTIFACT_TYPE
+        ),
+        "runtime_audit_events": sum(
+            1
+            for event in events
+            if event.event_type
+            in (
+                RUNTIME_PREFLIGHT_EVENT_TYPE,
+                RUNTIME_STARTED_EVENT_TYPE,
+                RUNTIME_FINISHED_EVENT_TYPE,
+            )
+        ),
+    }
+
+
 def _seed_queued_task(
     *,
     workspace_root: Path,
@@ -149,6 +185,41 @@ class OneShotTaskPipelineCoreTests(unittest.TestCase):
             self.assertEqual(artifact_count, 0)
             self.assertEqual(event_count, 0)
 
+    def test_dry_run_resume_writes_nothing_and_does_not_call_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            db_path, artifact_root, store = _seed_queued_task(workspace_root=workspace)
+
+            fake_runner = _FakeWaitingApprovalRunner()
+            request = OneShotTaskPipelineRequest(
+                db_path=db_path,
+                artifact_root=artifact_root,
+                task_key="AT-L7A-CORE-TEST",
+                dry_run=True,
+                confirm_run_one_shot_pipeline=False,
+                resume_existing=True,
+            )
+            result = run_one_shot_task_pipeline(
+                request, approved_task_runner_fn=fake_runner
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "dry_run")
+            self.assertTrue(result["resume_existing"])
+            self.assertFalse(result["safety"]["approved_task_runner_called"])
+            self.assertEqual(fake_runner.call_count, 0)
+            self.assertEqual(
+                _evidence_counts(store, "AT-L7A-CORE-TEST"),
+                {
+                    "scheduler_proposal": 0,
+                    "scheduler_confirmation": 0,
+                    "scheduler_confirmation_verifier_report": 0,
+                    "intake_runner_handoff": 0,
+                    "runtime_handoff_execution": 0,
+                    "runtime_audit_events": 0,
+                },
+            )
+
     def test_confirmed_pipeline_runs_all_stages_with_fake_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -214,6 +285,243 @@ class OneShotTaskPipelineCoreTests(unittest.TestCase):
                     RUNTIME_FINISHED_EVENT_TYPE,
                 ],
             )
+
+    def test_resume_existing_reuses_proposal_confirmation_verifier_handoff(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            db_path, artifact_root, store = _seed_queued_task(workspace_root=workspace)
+
+            fake_runner = _FakeWaitingApprovalRunner()
+            first = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                ),
+                approved_task_runner_fn=fake_runner,
+            )
+            self.assertTrue(first["ok"], msg=f"first: {first!r}")
+            counts_after_first = _evidence_counts(store, "AT-L7A-CORE-TEST")
+
+            second = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                    resume_existing=True,
+                ),
+                approved_task_runner_fn=fake_runner,
+            )
+
+            self.assertTrue(second["ok"], msg=f"second: {second!r}")
+            self.assertEqual(second["status"], "already_executed")
+            self.assertEqual(fake_runner.call_count, 1)
+            for stage_name in (
+                "proposal",
+                "confirmation",
+                "verifier_report",
+                "handoff",
+            ):
+                self.assertFalse(second["stages"][stage_name]["created"])
+                self.assertTrue(second["stages"][stage_name]["reused"])
+            self.assertTrue(
+                second["stages"]["runtime_execution"]["already_executed"]
+            )
+            self.assertEqual(
+                _evidence_counts(store, "AT-L7A-CORE-TEST"),
+                counts_after_first,
+            )
+
+    def test_resume_existing_does_not_rerun_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            db_path, artifact_root, store = _seed_queued_task(workspace_root=workspace)
+
+            first_runner = _FakeWaitingApprovalRunner()
+            first = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                ),
+                approved_task_runner_fn=first_runner,
+            )
+            self.assertTrue(first["ok"], msg=f"first: {first!r}")
+
+            second_runner = _FakeWaitingApprovalRunner()
+            second = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                    resume_existing=True,
+                ),
+                approved_task_runner_fn=second_runner,
+            )
+
+            self.assertTrue(second["ok"], msg=f"second: {second!r}")
+            self.assertEqual(second["status"], "already_executed")
+            self.assertEqual(second_runner.call_count, 0)
+            self.assertFalse(second["safety"]["approved_task_runner_called"])
+            self.assertTrue(second["safety"]["human_review_required"])
+            counts = _evidence_counts(store, "AT-L7A-CORE-TEST")
+            self.assertEqual(counts["runtime_handoff_execution"], 1)
+            self.assertEqual(counts["runtime_audit_events"], 3)
+
+    def test_without_resume_duplicate_evidence_still_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            db_path, artifact_root, store = _seed_queued_task(workspace_root=workspace)
+
+            first_runner = _FakeWaitingApprovalRunner()
+            first = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                ),
+                approved_task_runner_fn=first_runner,
+            )
+            self.assertTrue(first["ok"], msg=f"first: {first!r}")
+            second_runner = _FakeWaitingApprovalRunner()
+            second = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                    recommended_command_kind=first["stages"]["proposal"][
+                        "recommended_command_kind"
+                    ],
+                    resume_existing=False,
+                ),
+                approved_task_runner_fn=second_runner,
+            )
+
+            self.assertFalse(second["ok"], msg=f"second: {second!r}")
+            self.assertEqual(second["status"], "failed")
+            self.assertIn(second["failed_stage"], ("proposal", "confirmation"))
+            self.assertEqual(second_runner.call_count, 0)
+
+    def test_resume_existing_invalid_confirmation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            db_path, artifact_root, store = _seed_queued_task(workspace_root=workspace)
+
+            first = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                ),
+                approved_task_runner_fn=_FakeWaitingApprovalRunner(),
+            )
+            self.assertTrue(first["ok"], msg=f"first: {first!r}")
+            confirmation_path = Path(first["stages"]["confirmation"]["artifact_path"])
+            confirmation_path.unlink()
+
+            second_runner = _FakeWaitingApprovalRunner()
+            second = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                    resume_existing=True,
+                ),
+                approved_task_runner_fn=second_runner,
+            )
+
+            self.assertFalse(second["ok"], msg=f"second: {second!r}")
+            self.assertIn(second["failed_stage"], ("confirmation", "verifier_report"))
+            self.assertEqual(second_runner.call_count, 0)
+            self.assertIn("confirmation_artifact_file_missing", second["reasons"])
+
+    def test_resume_existing_invalid_handoff_fails_before_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            db_path, artifact_root, _ = _seed_queued_task(workspace_root=workspace)
+
+            first = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                ),
+                approved_task_runner_fn=_FakeWaitingApprovalRunner(),
+            )
+            self.assertTrue(first["ok"], msg=f"first: {first!r}")
+            handoff_path = Path(first["stages"]["handoff"]["artifact_path"])
+            handoff_path.unlink()
+
+            second_runner = _FakeWaitingApprovalRunner()
+            second = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                    resume_existing=True,
+                ),
+                approved_task_runner_fn=second_runner,
+            )
+
+            self.assertFalse(second["ok"], msg=f"second: {second!r}")
+            self.assertEqual(second["failed_stage"], "handoff")
+            self.assertIn("intake_runner_handoff_artifact_file_missing", second["reasons"])
+            self.assertEqual(second_runner.call_count, 0)
+
+    def test_resume_existing_runtime_already_executed_returns_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            db_path, artifact_root, _ = _seed_queued_task(workspace_root=workspace)
+
+            first = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                ),
+                approved_task_runner_fn=_FakeWaitingApprovalRunner(),
+            )
+            self.assertTrue(first["ok"], msg=f"first: {first!r}")
+
+            second = run_one_shot_task_pipeline(
+                OneShotTaskPipelineRequest(
+                    db_path=db_path,
+                    artifact_root=artifact_root,
+                    task_key="AT-L7A-CORE-TEST",
+                    dry_run=False,
+                    confirm_run_one_shot_pipeline=True,
+                    resume_existing=True,
+                ),
+                approved_task_runner_fn=_FakeWaitingApprovalRunner(),
+            )
+
+            self.assertTrue(second["ok"], msg=f"second: {second!r}")
+            self.assertEqual(second["status"], "already_executed")
+            self.assertTrue(second["safety"]["human_review_required"])
 
     def test_confirmed_mode_requires_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -343,6 +651,8 @@ class OneShotTaskPipelineCoreTests(unittest.TestCase):
         self.assertEqual(ONE_SHOT_PIPELINE_SOURCE, "one_shot_task_pipeline")
         self.assertTrue(ONE_SHOT_PIPELINE_SAFETY_FLAGS["one_task_only"])
         self.assertTrue(ONE_SHOT_PIPELINE_SAFETY_FLAGS["operator_triggered"])
+        self.assertFalse(ONE_SHOT_PIPELINE_SAFETY_FLAGS["runtime_rerun_allowed"])
+        self.assertFalse(ONE_SHOT_PIPELINE_SAFETY_FLAGS["runtime_rerun_performed"])
         self.assertFalse(ONE_SHOT_PIPELINE_SAFETY_FLAGS["scheduler_loop_started"])
         self.assertFalse(
             ONE_SHOT_PIPELINE_SAFETY_FLAGS["background_worker_started"]
@@ -375,6 +685,14 @@ class OneShotTaskPipelineCoreTests(unittest.TestCase):
                 task_key="AT-X",
                 proposal_max_items=0,
             )
+        request = OneShotTaskPipelineRequest(
+            db_path=Path("/tmp/x.db"),
+            artifact_root=Path("/tmp"),
+            task_key=" at-x ",
+        )
+        self.assertFalse(request.resume_existing)
+        self.assertFalse(request.allow_runtime_rerun)
+        self.assertEqual(request.task_key, "at-x")
 
     def test_source_has_no_loop_or_auto_pick_or_pr_merge_cleanup(self) -> None:
         source_text = MODULE_PATH.read_text(encoding="utf-8")

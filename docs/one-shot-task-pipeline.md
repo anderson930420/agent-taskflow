@@ -1,4 +1,4 @@
-# Level 7A: One-Shot Task Pipeline
+# Level 7A / 7B: One-Shot Task Pipeline
 
 ## Purpose
 
@@ -20,6 +20,10 @@ task_key
 It is operator-triggered. It is not a background scheduler, not a
 worker loop, and not automatic task picking. It processes exactly one
 `task_key` per invocation.
+
+Level 7B adds idempotent resume for that same one-shot command. Resume
+is still per `task_key`, still operator-triggered, and still one task
+per invocation.
 
 ## What it exercises
 
@@ -91,6 +95,34 @@ proposal, confirmation, verifier report, handoff, and runtime
 preflight stages all pass and no duplicate runtime evidence is
 detected.
 
+### Confirmed resume
+
+```
+PYTHONPATH=. .venv/bin/python3 scripts/run_one_shot_task_pipeline.py \
+  --task-key AT-EXAMPLE \
+  --db-path /absolute/path/to/state.db \
+  --artifact-root /absolute/path/to/artifacts \
+  --confirm-run-one-shot-pipeline \
+  --resume-existing
+```
+
+With `--resume-existing`, Level 7B reuses only valid matching evidence
+for the same `task_key`:
+
+- `scheduler_proposal`
+- `scheduler_confirmation`
+- `scheduler_confirmation_verifier_report`
+- `intake_runner_handoff`
+
+If `runtime_handoff_execution` already exists for the matching handoff,
+the pipeline returns `already_executed`. It does not call
+`approved_task_runner` again, does not create new runtime audit
+evidence, and still requires human review.
+
+Invalid, stale, mismatched, ambiguous, or missing evidence fails
+clearly at the affected stage. Resume is not task discovery, not
+automatic task selection, and not multi-task automation.
+
 ### Smoke
 
 ```
@@ -99,7 +131,9 @@ PYTHONPATH=. .venv/bin/python3 scripts/run_one_shot_task_pipeline_smoke.py
 
 The smoke runs the full chain against an isolated temp workspace with a
 fake `approved_task_runner` injection, asserts evidence and safety
-markers, and prints a summary JSON.
+markers, then runs a second `--resume-existing` scenario and verifies
+that the second status is `already_executed`, the runner call count
+does not increase, and evidence counts remain unchanged.
 
 ## Safety boundary
 
@@ -111,6 +145,11 @@ markers, and prints a summary JSON.
 - Confirmed mode may call `approved_task_runner` only after every
   prior gate (proposal, confirmation, verifier report, handoff,
   runtime preflight) passes.
+- `--resume-existing` reuses only valid matching evidence for the same
+  `task_key`.
+- Existing `runtime_handoff_execution` is not rerun.
+- `approved_task_runner` is not called again for an `already_executed`
+  runtime.
 - Runtime audit evidence is not approval.
 - Runtime audit evidence is not merge.
 - Runtime audit evidence is not cleanup.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the Level 7A one-shot task pipeline hardening smoke.
+"""Run the Level 7B one-shot task pipeline hardening smoke.
 
 This smoke seeds one queued task into an isolated workspace and then runs
 the explicit operator-gated one-shot pipeline end-to-end with a fake
@@ -7,7 +7,9 @@ approved_task_runner injection. It asserts that every expected piece of
 audit evidence is produced, that the fake runner is invoked exactly once,
 that the final task status is ``waiting_approval``, and that no
 forbidden side effect (approval, merge, cleanup, GitHub mutation,
-scheduler loop, background worker, automatic task picking) occurred.
+scheduler loop, background worker, automatic task picking) occurred. It
+then runs the same task with resume enabled and verifies that runtime is
+not rerun and evidence counts do not change.
 """
 
 from __future__ import annotations
@@ -50,10 +52,10 @@ from agent_taskflow.store import TaskMirrorStore  # noqa: E402
 from agent_taskflow.tasks import normalize_task_key  # noqa: E402
 
 
-DEFAULT_TASK_KEY = "AT-L7A-ONE-SHOT-SMOKE"
+DEFAULT_TASK_KEY = "AT-L7B-ONE-SHOT-SMOKE"
 DEFAULT_PROJECT = "agent-taskflow"
-SMOKE_OPERATOR = "level-7a-smoke"
-SMOKE_OPERATOR_NOTE = "Level 7A one-shot task pipeline smoke"
+SMOKE_OPERATOR = "level-7b-smoke"
+SMOKE_OPERATOR_NOTE = "Level 7B one-shot task pipeline smoke"
 
 FORBIDDEN_ARTIFACT_TYPES = (
     "approval_decision",
@@ -316,6 +318,77 @@ def run_smoke(
         f"evidence_counts mismatch: {evidence_counts}",
     )
 
+    runner_call_count_after_first = fake_runner.call_count
+    resume_request = OneShotTaskPipelineRequest(
+        db_path=db_path,
+        artifact_root=artifact_root,
+        task_key=normalized_task_key,
+        dry_run=False,
+        confirm_run_one_shot_pipeline=True,
+        operator=SMOKE_OPERATOR,
+        operator_note=SMOKE_OPERATOR_NOTE,
+        proposal_max_items=1,
+        resume_existing=True,
+    )
+    resume_result = run_one_shot_task_pipeline(
+        resume_request,
+        approved_task_runner_fn=fake_runner,
+    )
+    _require(
+        resume_result.get("ok") is True,
+        f"resume one-shot pipeline not ok: {resume_result!r}",
+    )
+    _require(
+        resume_result.get("status") == "already_executed",
+        f"resume status mismatch: {resume_result.get('status')!r}",
+    )
+    _require(
+        fake_runner.call_count == runner_call_count_after_first,
+        "resume unexpectedly called fake runner",
+    )
+    resume_stages = resume_result.get("stages") or {}
+    for stage_name in (
+        "proposal",
+        "confirmation",
+        "verifier_report",
+        "handoff",
+    ):
+        stage = resume_stages.get(stage_name) or {}
+        _require(stage.get("reused") is True, f"{stage_name} not reused")
+        _require(stage.get("created") is False, f"{stage_name} recreated")
+    runtime_resume_stage = resume_stages.get("runtime_execution") or {}
+    _require(
+        runtime_resume_stage.get("already_executed") is True,
+        "runtime resume did not report already_executed",
+    )
+
+    evidence_counts_after_resume = {
+        "scheduler_proposal": _count_artifacts(
+            store, normalized_task_key, PROPOSAL_ARTIFACT_TYPE
+        ),
+        "scheduler_confirmation": _count_artifacts(
+            store, normalized_task_key, CONFIRMATION_ARTIFACT_TYPE
+        ),
+        "scheduler_confirmation_verifier_report": _count_artifacts(
+            store, normalized_task_key, VERIFIER_REPORT_ARTIFACT_TYPE
+        ),
+        "intake_runner_handoff": _count_artifacts(
+            store, normalized_task_key, HANDOFF_ARTIFACT_TYPE
+        ),
+        "runtime_handoff_execution": _count_artifacts(
+            store, normalized_task_key, RUNTIME_EXECUTION_ARTIFACT_TYPE
+        ),
+        "runtime_audit_events": (
+            _count_events(store, normalized_task_key, RUNTIME_PREFLIGHT_EVENT_TYPE)
+            + _count_events(store, normalized_task_key, RUNTIME_STARTED_EVENT_TYPE)
+            + _count_events(store, normalized_task_key, RUNTIME_FINISHED_EVENT_TYPE)
+        ),
+    }
+    _require(
+        evidence_counts_after_resume == evidence_counts,
+        f"resume changed evidence counts: {evidence_counts_after_resume}",
+    )
+
     runtime_audit_events = store.list_runtime_audit_events(normalized_task_key)
     _require(
         len(runtime_audit_events) == 3,
@@ -358,6 +431,15 @@ def run_smoke(
             "call_count": fake_runner.call_count,
             "runner_status": runtime_stage.get("runner_status"),
         },
+        "resume": {
+            "first_status": result.get("status"),
+            "second_status": resume_result.get("status"),
+            "runner_call_count_after_first": runner_call_count_after_first,
+            "runner_call_count_after_second": fake_runner.call_count,
+            "evidence_counts_unchanged_after_resume": (
+                evidence_counts_after_resume == evidence_counts
+            ),
+        },
         "evidence_counts": evidence_counts,
         "safety": {
             "one_task_only": safety.get("one_task_only"),
@@ -379,7 +461,7 @@ def run_smoke(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the Level 7A one-shot task pipeline hardening smoke."
+            "Run the Level 7B one-shot task pipeline hardening smoke."
         )
     )
     parser.add_argument("--task-key", default=DEFAULT_TASK_KEY)
@@ -411,7 +493,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             workspace_root = Path(
-                tempfile.mkdtemp(prefix="agent-taskflow-l7a-one-shot-", dir="/tmp")
+                tempfile.mkdtemp(prefix="agent-taskflow-l7b-one-shot-", dir="/tmp")
             )
             cleanup_workspace = not args.keep_workspace
 

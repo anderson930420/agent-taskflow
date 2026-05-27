@@ -1,4 +1,4 @@
-"""Tests for the Level 7A one-shot task pipeline smoke."""
+"""Tests for the Level 7B one-shot task pipeline smoke."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class RunOneShotTaskPipelineSmokeTests(unittest.TestCase):
         cls.smoke = _load_smoke_module()
         cls.summary = cls.smoke.run_smoke(
             workspace_root=cls.workspace_root,
-            task_key="AT-L7A-ONE-SHOT-SMOKE-TEST",
+            task_key="AT-L7B-ONE-SHOT-SMOKE-TEST",
         )
         cls.db_path = Path(cls.summary["db_path"])
         cls.store = TaskMirrorStore(cls.db_path)
@@ -54,7 +54,7 @@ class RunOneShotTaskPipelineSmokeTests(unittest.TestCase):
 
     def test_smoke_returns_ok(self) -> None:
         self.assertTrue(self.summary["ok"])
-        self.assertEqual(self.summary["task_key"], "AT-L7A-ONE-SHOT-SMOKE-TEST")
+        self.assertEqual(self.summary["task_key"], "AT-L7B-ONE-SHOT-SMOKE-TEST")
         self.assertEqual(self.summary["final_task_status"], "waiting_approval")
 
     def test_smoke_fake_runner_called_once(self) -> None:
@@ -76,6 +76,14 @@ class RunOneShotTaskPipelineSmokeTests(unittest.TestCase):
                 "runtime_audit_events": 3,
             },
         )
+
+    def test_smoke_resume_summary(self) -> None:
+        resume = self.summary["resume"]
+        self.assertEqual(resume["first_status"], "completed")
+        self.assertEqual(resume["second_status"], "already_executed")
+        self.assertEqual(resume["runner_call_count_after_first"], 1)
+        self.assertEqual(resume["runner_call_count_after_second"], 1)
+        self.assertTrue(resume["evidence_counts_unchanged_after_resume"])
 
     def test_smoke_runtime_audit_event_order(self) -> None:
         events = self.store.list_runtime_audit_events(self.summary["task_key"])
@@ -131,6 +139,10 @@ class RunOneShotTaskPipelineSmokeCliTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["final_task_status"], "waiting_approval")
             self.assertEqual(payload["runner"]["call_count"], 1)
+            self.assertEqual(payload["resume"]["second_status"], "already_executed")
+            self.assertTrue(
+                payload["resume"]["evidence_counts_unchanged_after_resume"]
+            )
             self.assertEqual(
                 payload["evidence_counts"]["scheduler_proposal"], 1
             )
@@ -152,6 +164,8 @@ class DocSafetyLanguageTests(unittest.TestCase):
             "approved_task_runner",
             "No GitHub Issue ingest",
             "Human review remains required",
+            "--resume-existing",
+            "already_executed",
             "No branch push",
             "No draft PR creation",
             "No approval, merge, or cleanup",
