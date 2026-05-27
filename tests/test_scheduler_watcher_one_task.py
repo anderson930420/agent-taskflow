@@ -279,6 +279,64 @@ class SchedulerWatcherOneTaskTests(unittest.TestCase):
         self.assertEqual(draft.call_count, 1)
         self.assertEqual(result["safety"]["processed_task_count"], 1)
 
+    def test_confirmed_first_candidate_rerun_does_not_reselect_completed_task(self) -> None:
+        runner = self.smoke._FakeApprovedTaskRunner()
+        branch = self.smoke._FakeBranchPush()
+        draft = self.smoke._FakeDraftPR()
+
+        first = run_scheduler_watcher_one_task(
+            self._request(
+                dry_run=False,
+                confirm_run_watcher_one_task=True,
+                select_first_candidate=True,
+                confirm_select_first_candidate=True,
+                confirm_run_one_shot_pipeline=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            approved_task_runner_fn=runner,
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+        self.assertTrue(first["ok"], msg=f"first: {first!r}")
+        before = _counts(self.db_path)
+
+        second = run_scheduler_watcher_one_task(
+            self._request(
+                dry_run=False,
+                confirm_run_watcher_one_task=True,
+                select_first_candidate=True,
+                confirm_select_first_candidate=True,
+                confirm_run_one_shot_pipeline=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            approved_task_runner_fn=runner,
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+
+        self.assertFalse(second["ok"], msg=f"second: {second!r}")
+        self.assertEqual(second["failed_stage"], "selection")
+        self.assertIn("no_eligible_candidates", second["reasons"])
+        self.assertIsNone(second["selected_candidate"])
+        self.assertNotIn("selected_task_key", second)
+        self.assertEqual(runner.call_count, 1)
+        self.assertEqual(branch.call_count, 1)
+        self.assertEqual(draft.call_count, 1)
+        self.assertEqual(before, _counts(self.db_path))
+        self.assertFalse(second["safety"]["task_to_draft_pr_pipeline_called"])
+        self.assertFalse(second["safety"]["approved_task_runner_called"])
+        self.assertFalse(second["safety"]["github_mutated"])
+        self.assertFalse(second["safety"]["branch_pushed"])
+        self.assertFalse(second["safety"]["draft_pr_created"])
+        self.assertFalse(second["safety"]["automatic_task_picking_started"])
+        self.assertFalse(second["safety"]["multi_task_batch_started"])
+
     def test_missing_downstream_confirm_flags_fail_before_execution(self) -> None:
         flag_sets = (
             {"confirm_run_one_shot_pipeline": False},
@@ -390,13 +448,30 @@ class SchedulerWatcherOneTaskTests(unittest.TestCase):
 
         self.assertTrue(second["ok"], msg=f"second: {second!r}")
         self.assertEqual(second["status"], "completed_one_task")
+        self.assertTrue(second["single_use_enforced"])
+        self.assertTrue(second["resume_already_processed"])
+        self.assertTrue(second["duplicate_trigger_suppressed"])
+        self.assertEqual(
+            second["selected_candidate"]["reason"], "resume_already_processed"
+        )
+        self.assertTrue(second["selected_candidate"]["resume_via_skipped_preview"])
         self.assertEqual(
             second["task_to_draft_pr"]["status"], "draft_pr_already_created"
         )
+        self.assertTrue(second["task_to_draft_pr"]["single_use_enforced"])
+        self.assertTrue(second["task_to_draft_pr"]["resume_already_processed"])
+        self.assertTrue(second["task_to_draft_pr"]["duplicate_trigger_suppressed"])
         self.assertEqual(runner.call_count, 1)
         self.assertEqual(branch.call_count, 1)
         self.assertEqual(draft.call_count, 1)
         self.assertEqual(before, _counts(self.db_path))
+        self.assertFalse(second["safety"]["approved_task_runner_called"])
+        self.assertFalse(second["safety"]["github_mutated"])
+        self.assertFalse(second["safety"]["branch_pushed"])
+        self.assertFalse(second["safety"]["draft_pr_created"])
+        self.assertTrue(second["safety"]["single_use_enforced"])
+        self.assertTrue(second["safety"]["resume_already_processed"])
+        self.assertTrue(second["safety"]["duplicate_trigger_suppressed"])
 
     def test_request_validates_and_normalizes(self) -> None:
         with self.assertRaises(ValueError):

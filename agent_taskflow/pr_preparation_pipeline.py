@@ -54,6 +54,8 @@ PR_PREPARATION_PIPELINE_SAFETY_FLAGS: dict[str, bool] = {
     "one_task_only": True,
     "operator_triggered": True,
     "resume_existing": False,
+    "single_use_enforced": True,
+    "duplicate_trigger_suppressed": False,
     "github_mutated": False,
     "branch_pushed": False,
     "draft_pr_created": False,
@@ -229,6 +231,12 @@ def run_pr_preparation_pipeline(
     branch_pushed = branch_stage["summary"].get("pushed") is True
     draft_pr_created = draft_stage["summary"].get("created") is True
     draft_pr_already_created = draft_stage["summary"].get("already_created") is True
+    duplicate_trigger_suppressed = bool(
+        request.resume_existing
+        and not branch_pushed
+        and not draft_pr_created
+        and draft_pr_already_created
+    )
     return {
         "ok": True,
         "schema_version": PR_PREPARATION_PIPELINE_SCHEMA_VERSION,
@@ -240,6 +248,8 @@ def run_pr_preparation_pipeline(
         ),
         "mode": "confirmed",
         "task_key": request.task_key,
+        "single_use_enforced": True,
+        "duplicate_trigger_suppressed": duplicate_trigger_suppressed,
         "stages": stages,
         "safety": _safety(
             dry_run=False,
@@ -247,6 +257,7 @@ def run_pr_preparation_pipeline(
             github_mutated=branch_pushed or draft_pr_created,
             branch_pushed=branch_pushed,
             draft_pr_created=draft_pr_created,
+            duplicate_trigger_suppressed=duplicate_trigger_suppressed,
         ),
     }
 
@@ -1313,6 +1324,7 @@ def _dry_run_response(
             github_mutated=False,
             branch_pushed=False,
             draft_pr_created=False,
+            duplicate_trigger_suppressed=False,
         ),
     }
 
@@ -1344,6 +1356,7 @@ def _failure_response(
             github_mutated=branch_pushed or draft_pr_created,
             branch_pushed=branch_pushed,
             draft_pr_created=draft_pr_created,
+            duplicate_trigger_suppressed=False,
         ),
     }
 
@@ -1373,10 +1386,13 @@ def _safety(
     github_mutated: bool,
     branch_pushed: bool,
     draft_pr_created: bool,
+    duplicate_trigger_suppressed: bool = False,
 ) -> dict[str, bool]:
     safety = dict(PR_PREPARATION_PIPELINE_SAFETY_FLAGS)
     safety["dry_run"] = dry_run
     safety["resume_existing"] = resume_existing
+    safety["single_use_enforced"] = True
+    safety["duplicate_trigger_suppressed"] = duplicate_trigger_suppressed
     safety["github_mutated"] = github_mutated
     safety["branch_pushed"] = branch_pushed
     safety["draft_pr_created"] = draft_pr_created

@@ -42,6 +42,9 @@ WATCHER_ONE_TASK_SAFETY_FLAGS: dict[str, bool] = {
     "one_task_only": True,
     "operator_triggered": True,
     "confirmed_watcher": True,
+    "single_use_enforced": True,
+    "resume_already_processed": False,
+    "duplicate_trigger_suppressed": False,
     "preview_only": False,
     "task_to_draft_pr_pipeline_called": False,
     "approved_task_runner_called": False,
@@ -281,6 +284,12 @@ def run_scheduler_watcher_one_task(
         )
 
     pr_stage = (pipeline_result.get("stages") or {}).get("pr_preparation") or {}
+    resume_already_processed = bool(
+        pipeline_result.get("resume_already_processed")
+    )
+    duplicate_trigger_suppressed = bool(
+        pipeline_result.get("duplicate_trigger_suppressed")
+    )
     return {
         "ok": True,
         "schema_version": WATCHER_ONE_TASK_SCHEMA_VERSION,
@@ -289,6 +298,9 @@ def run_scheduler_watcher_one_task(
         "mode": "confirmed",
         "selected_task_key": selected_task_key,
         "selected_candidate": selected_candidate,
+        "single_use_enforced": True,
+        "resume_already_processed": resume_already_processed,
+        "duplicate_trigger_suppressed": duplicate_trigger_suppressed,
         "preview": {
             "candidate_count": candidate_count,
             "selected_index": selected_index,
@@ -299,6 +311,11 @@ def run_scheduler_watcher_one_task(
             "final_task_status": pipeline_result.get("final_task_status"),
             "pr_url": pr_stage.get("pr_url"),
             "pr_number": pr_stage.get("pr_number"),
+            "single_use_enforced": bool(
+                pipeline_result.get("single_use_enforced", True)
+            ),
+            "resume_already_processed": resume_already_processed,
+            "duplicate_trigger_suppressed": duplicate_trigger_suppressed,
         },
         "safety": _confirmed_safety(
             pipeline_called=True,
@@ -309,6 +326,8 @@ def run_scheduler_watcher_one_task(
             github_mutated=bool(pipeline_safety.get("github_mutated")),
             branch_pushed=bool(pipeline_safety.get("branch_pushed")),
             draft_pr_created=bool(pipeline_safety.get("draft_pr_created")),
+            resume_already_processed=resume_already_processed,
+            duplicate_trigger_suppressed=duplicate_trigger_suppressed,
         ),
     }
 
@@ -519,6 +538,9 @@ def _dry_run_safety() -> dict[str, bool]:
     safety = dict(WATCHER_ONE_TASK_SAFETY_FLAGS)
     safety["dry_run"] = True
     safety["preview_only"] = True
+    safety["single_use_enforced"] = True
+    safety["resume_already_processed"] = False
+    safety["duplicate_trigger_suppressed"] = False
     safety["task_to_draft_pr_pipeline_called"] = False
     safety["approved_task_runner_called"] = False
     safety["github_mutated"] = False
@@ -543,10 +565,15 @@ def _confirmed_safety(
     github_mutated: bool,
     branch_pushed: bool,
     draft_pr_created: bool,
+    resume_already_processed: bool = False,
+    duplicate_trigger_suppressed: bool = False,
 ) -> dict[str, Any]:
     safety: dict[str, Any] = dict(WATCHER_ONE_TASK_SAFETY_FLAGS)
     safety["dry_run"] = False
     safety["preview_only"] = False
+    safety["single_use_enforced"] = True
+    safety["resume_already_processed"] = resume_already_processed
+    safety["duplicate_trigger_suppressed"] = duplicate_trigger_suppressed
     safety["task_to_draft_pr_pipeline_called"] = pipeline_called
     safety["processed_task_count"] = processed_task_count
     safety["approved_task_runner_called"] = approved_task_runner_called

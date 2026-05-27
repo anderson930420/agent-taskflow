@@ -477,9 +477,13 @@ class PRPreparationPipelineTests(unittest.TestCase):
         self.assertTrue(second["stages"]["draft_pr"]["already_created"])
         self.assertFalse(second["stages"]["branch_push"]["pushed"])
         self.assertFalse(second["stages"]["draft_pr"]["created"])
+        self.assertTrue(second["single_use_enforced"])
+        self.assertTrue(second["duplicate_trigger_suppressed"])
         self.assertFalse(second["safety"]["github_mutated"])
         self.assertFalse(second["safety"]["branch_pushed"])
         self.assertFalse(second["safety"]["draft_pr_created"])
+        self.assertTrue(second["safety"]["single_use_enforced"])
+        self.assertTrue(second["safety"]["duplicate_trigger_suppressed"])
         self.assertFalse(second["safety"]["duplicate_draft_pr_created"])
 
     def test_resume_existing_draft_pr_already_created_is_ok(self) -> None:
