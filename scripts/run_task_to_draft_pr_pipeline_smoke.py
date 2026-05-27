@@ -308,6 +308,13 @@ def _forbidden_side_effect_counts(db_path: Path) -> dict[str, int]:
     return {"artifacts": artifacts, "events": events, "payload_markers": markers}
 
 
+def _evidence_counts(db_path: Path) -> dict[str, int]:
+    with sqlite3.connect(db_path) as conn:
+        artifacts = conn.execute("SELECT COUNT(*) FROM task_artifacts").fetchone()[0]
+        events = conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
+    return {"artifacts": artifacts, "events": events}
+
+
 def _init_repo(repo_path: Path, task_key: str) -> tuple[str, str]:
     repo_path.mkdir(parents=True)
     _git(repo_path, "init", "-b", "main")
@@ -496,6 +503,7 @@ def run_smoke(
     _require(fake_runner.call_count == 1, "fake runner not called once")
     _require(fake_branch_push.call_count == 1, "fake branch push not called once")
     _require(fake_draft_pr.call_count == 1, "fake draft PR not called once")
+    evidence_counts_after_confirmed = _evidence_counts(db_path)
     final_task = TaskMirrorStore(db_path).get_task(normalized_task_key)
     final_task_status = final_task.status if final_task is not None else None
     _require(
@@ -525,7 +533,67 @@ def run_smoke(
         f"forbidden side effects found: {forbidden_counts}",
     )
 
+    resume_confirmed = run_task_to_draft_pr_pipeline(
+        TaskToDraftPRPipelineRequest(
+            db_path=db_path,
+            artifact_root=artifact_root,
+            task_key=normalized_task_key,
+            dry_run=False,
+            resume_existing=True,
+            resume_pr_preparation=True,
+            confirm_run_one_shot_pipeline=True,
+            confirm_prepare_pr=True,
+            confirm_github_mutations=True,
+            confirm_branch_push=True,
+            confirm_draft_pr=True,
+            operator="level-7e-smoke",
+            operator_note="Level 7E task to draft PR resume smoke",
+        ),
+        approved_task_runner_fn=fake_runner,
+        branch_push_fn=fake_branch_push,
+        draft_pr_fn=fake_draft_pr,
+    )
+    _require(
+        resume_confirmed.get("ok") is True,
+        f"resume confirmed not ok: {resume_confirmed!r}",
+    )
+    _require(
+        resume_confirmed.get("status") == "draft_pr_already_created",
+        "resume did not report existing draft PR",
+    )
+    _require(fake_runner.call_count == 1, "resume called fake runner again")
+    _require(
+        fake_branch_push.call_count == 1,
+        "resume called fake branch push again",
+    )
+    _require(fake_draft_pr.call_count == 1, "resume called fake draft PR again")
+    _require(
+        evidence_counts_after_confirmed == _evidence_counts(db_path),
+        "resume changed evidence counts",
+    )
+    resume_safety = resume_confirmed.get("safety") or {}
+    _require(
+        resume_safety.get("approved_task_runner_called") is False,
+        "resume reported runner call",
+    )
+    _require(
+        resume_safety.get("branch_pushed") is False,
+        "resume pushed branch",
+    )
+    _require(
+        resume_safety.get("draft_pr_created") is False,
+        "resume created draft PR",
+    )
+    forbidden_counts_after_resume = _forbidden_side_effect_counts(db_path)
+    _require(
+        forbidden_counts_after_resume == {"artifacts": 0, "events": 0, "payload_markers": 0},
+        f"forbidden side effects after resume: {forbidden_counts_after_resume}",
+    )
+
     pr_stage = (confirmed.get("stages") or {}).get("pr_preparation") or {}
+    resume_pr_stage = (
+        (resume_confirmed.get("stages") or {}).get("pr_preparation") or {}
+    )
     return {
         "ok": True,
         "task_key": normalized_task_key,
@@ -548,6 +616,22 @@ def run_smoke(
             "pr_url": pr_stage.get("pr_url"),
             "pr_number": pr_stage.get("pr_number"),
         },
+        "resume_confirmed": {
+            "ok": resume_confirmed.get("ok") is True,
+            "status": resume_confirmed.get("status"),
+            "runner_call_count": fake_runner.call_count,
+            "branch_push_call_count": fake_branch_push.call_count,
+            "draft_pr_call_count": fake_draft_pr.call_count,
+            "branch_pushed": resume_safety.get("branch_pushed"),
+            "draft_pr_created": resume_safety.get("draft_pr_created"),
+            "branch_push_reused": resume_pr_stage.get("branch_push_reused"),
+            "draft_pr_reused": resume_pr_stage.get("draft_pr_reused"),
+            "draft_pr_already_created": resume_pr_stage.get(
+                "draft_pr_already_created"
+            ),
+            "evidence_counts_unchanged": evidence_counts_after_confirmed
+            == _evidence_counts(db_path),
+        },
         "safety": {
             "approved": safety.get("approved"),
             "merged": safety.get("merged"),
@@ -559,7 +643,7 @@ def run_smoke(
             ),
             "human_review_required": safety.get("human_review_required"),
         },
-        "forbidden_side_effect_counts": forbidden_counts,
+        "forbidden_side_effect_counts": forbidden_counts_after_resume,
     }
 
 

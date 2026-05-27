@@ -331,6 +331,104 @@ class TaskToDraftPRPipelineTests(unittest.TestCase):
         ]
         self.assertEqual(len(runtime_artifacts), 1)
 
+    def test_resume_pr_preparation_after_full_success_does_not_rerun_runner_push_or_draft(self) -> None:
+        runner = self.smoke._FakeApprovedTaskRunner()
+        branch = self.smoke._FakeBranchPush()
+        draft = self.smoke._FakeDraftPR()
+        first = run_task_to_draft_pr_pipeline(
+            self._request(
+                dry_run=False,
+                confirm_run_one_shot_pipeline=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            approved_task_runner_fn=runner,
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+        self.assertTrue(first["ok"], msg=f"first: {first!r}")
+        before = _counts(self.db_path)
+
+        second = run_task_to_draft_pr_pipeline(
+            self._request(
+                dry_run=False,
+                resume_existing=True,
+                resume_pr_preparation=True,
+                confirm_run_one_shot_pipeline=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            approved_task_runner_fn=runner,
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+
+        self.assertTrue(second["ok"], msg=f"second: {second!r}")
+        self.assertEqual(second["status"], "draft_pr_already_created")
+        self.assertEqual(runner.call_count, 1)
+        self.assertEqual(branch.call_count, 1)
+        self.assertEqual(draft.call_count, 1)
+        self.assertEqual(before, _counts(self.db_path))
+        self.assertEqual(second["stages"]["one_shot"]["status"], "already_executed")
+        self.assertTrue(second["stages"]["pr_preparation"]["branch_push_reused"])
+        self.assertTrue(second["stages"]["pr_preparation"]["draft_pr_reused"])
+        self.assertTrue(second["stages"]["pr_preparation"]["draft_pr_already_created"])
+        self.assertFalse(second["safety"]["approved_task_runner_called"])
+        self.assertFalse(second["safety"]["branch_pushed"])
+        self.assertFalse(second["safety"]["draft_pr_created"])
+
+    def test_resume_pr_preparation_flag_is_independent_from_one_shot_resume(self) -> None:
+        request = self._request(
+            resume_existing=True,
+            resume_pr_preparation=False,
+        )
+        self.assertTrue(request.resume_existing)
+        self.assertFalse(request.resume_pr_preparation)
+
+        first = run_task_to_draft_pr_pipeline(
+            self._request(
+                dry_run=False,
+                confirm_run_one_shot_pipeline=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            approved_task_runner_fn=self.smoke._FakeApprovedTaskRunner(),
+            branch_push_fn=self.smoke._FakeBranchPush(),
+            draft_pr_fn=self.smoke._FakeDraftPR(),
+        )
+        self.assertTrue(first["ok"], msg=f"first: {first!r}")
+
+        runner = self.smoke._FakeApprovedTaskRunner()
+        branch = _FailingBranchPush()
+        draft = _FailingDraftPR()
+        second = run_task_to_draft_pr_pipeline(
+            self._request(
+                dry_run=False,
+                resume_existing=True,
+                resume_pr_preparation=False,
+                confirm_run_one_shot_pipeline=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            approved_task_runner_fn=runner,
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["failed_stage"], "pr_preparation")
+        self.assertEqual(runner.call_count, 0)
+        self.assertEqual(branch.call_count, 1)
+        self.assertEqual(draft.call_count, 0)
+
     def test_constants_and_safety_defaults(self) -> None:
         self.assertEqual(
             TASK_TO_DRAFT_PR_PIPELINE_SCHEMA_VERSION,

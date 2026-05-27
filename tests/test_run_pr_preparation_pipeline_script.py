@@ -71,6 +71,7 @@ class RunPRPreparationPipelineScriptTests(unittest.TestCase):
         self.assertIn("--confirm-github-mutations", result.stdout)
         self.assertIn("--confirm-branch-push", result.stdout)
         self.assertIn("--confirm-draft-pr", result.stdout)
+        self.assertIn("--resume-existing", result.stdout)
 
     def test_script_dry_run_no_mutation_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

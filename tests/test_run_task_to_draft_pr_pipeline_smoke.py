@@ -68,6 +68,20 @@ class RunTaskToDraftPRPipelineSmokeTests(unittest.TestCase):
         self.assertEqual(confirmed["pr_number"], 1)
         self.assertTrue(confirmed["pr_url"].endswith("/pull/1"))
 
+    def test_smoke_resume_reuses_one_shot_and_pr_preparation(self) -> None:
+        resumed = self.summary["resume_confirmed"]
+        self.assertTrue(resumed["ok"])
+        self.assertEqual(resumed["status"], "draft_pr_already_created")
+        self.assertEqual(resumed["runner_call_count"], 1)
+        self.assertEqual(resumed["branch_push_call_count"], 1)
+        self.assertEqual(resumed["draft_pr_call_count"], 1)
+        self.assertFalse(resumed["branch_pushed"])
+        self.assertFalse(resumed["draft_pr_created"])
+        self.assertTrue(resumed["branch_push_reused"])
+        self.assertTrue(resumed["draft_pr_reused"])
+        self.assertTrue(resumed["draft_pr_already_created"])
+        self.assertTrue(resumed["evidence_counts_unchanged"])
+
     def test_smoke_forbidden_side_effect_counts_zero(self) -> None:
         self.assertEqual(
             self.summary["forbidden_side_effect_counts"],
@@ -112,6 +126,15 @@ class RunTaskToDraftPRPipelineSmokeCliTests(unittest.TestCase):
             self.assertEqual(payload["confirmed"]["draft_pr_call_count"], 1)
             self.assertEqual(payload["confirmed"]["final_task_status"], "waiting_approval")
             self.assertEqual(
+                payload["resume_confirmed"]["status"], "draft_pr_already_created"
+            )
+            self.assertEqual(payload["resume_confirmed"]["runner_call_count"], 1)
+            self.assertEqual(
+                payload["resume_confirmed"]["branch_push_call_count"], 1
+            )
+            self.assertEqual(payload["resume_confirmed"]["draft_pr_call_count"], 1)
+            self.assertTrue(payload["resume_confirmed"]["evidence_counts_unchanged"])
+            self.assertEqual(
                 payload["forbidden_side_effect_counts"],
                 {"artifacts": 0, "events": 0, "payload_markers": 0},
             )
@@ -128,6 +151,9 @@ class DocSafetyLanguageTests(unittest.TestCase):
             "one task per",
             "waiting_approval",
             "--confirm-run-one-shot-pipeline",
+            "--resume-existing",
+            "--resume-pr-preparation",
+            "rerun after successful draft PR",
             "--confirm-prepare-pr",
             "--confirm-github-mutations",
             "--confirm-branch-push",

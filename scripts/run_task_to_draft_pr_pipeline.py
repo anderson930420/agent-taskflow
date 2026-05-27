@@ -39,6 +39,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remote", default="origin")
     parser.add_argument("--base-branch", default=None)
     parser.add_argument("--resume-existing", action="store_true")
+    parser.add_argument(
+        "--resume-pr-preparation",
+        action="store_true",
+        help=(
+            "Pass resume_existing=True to PR preparation while keeping "
+            "--resume-existing scoped to one-shot runtime evidence."
+        ),
+    )
     parser.add_argument("--confirm-run-one-shot-pipeline", action="store_true")
     parser.add_argument("--confirm-prepare-pr", action="store_true")
     parser.add_argument("--confirm-github-mutations", action="store_true")
@@ -72,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=dry_run,
             confirm_run_one_shot_pipeline=bool(args.confirm_run_one_shot_pipeline),
             resume_existing=bool(args.resume_existing),
+            resume_pr_preparation=bool(args.resume_pr_preparation),
             confirm_prepare_pr=bool(args.confirm_prepare_pr),
             confirm_github_mutations=bool(args.confirm_github_mutations),
             confirm_branch_push=bool(args.confirm_branch_push),

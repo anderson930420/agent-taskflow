@@ -18,14 +18,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agent_taskflow.branch_push_confirm import (
+    ARTIFACT_TYPE as BRANCH_PUSH_ARTIFACT_TYPE,
     BranchPushConfirmRequest,
+    EVENT_TYPE as BRANCH_PUSH_EVENT_TYPE,
     confirm_branch_push,
 )
 from agent_taskflow.draft_pr_confirm import (
+    ARTIFACT_TYPE as DRAFT_PR_ARTIFACT_TYPE,
     DraftPrConfirmRequest,
+    EVENT_TYPE as DRAFT_PR_EVENT_TYPE,
     confirm_draft_pr,
 )
 from agent_taskflow.pr_handoff import (
+    ARTIFACT_TYPE as PR_HANDOFF_ARTIFACT_TYPE,
+    EVENT_TYPE as PR_HANDOFF_EVENT_TYPE,
     PrHandoffRequest,
     create_pr_handoff,
 )
@@ -47,9 +53,11 @@ PR_PREPARATION_PIPELINE_SOURCE = "pr_preparation_pipeline"
 PR_PREPARATION_PIPELINE_SAFETY_FLAGS: dict[str, bool] = {
     "one_task_only": True,
     "operator_triggered": True,
+    "resume_existing": False,
     "github_mutated": False,
     "branch_pushed": False,
     "draft_pr_created": False,
+    "duplicate_draft_pr_created": False,
     "approved": False,
     "merged": False,
     "cleanup_performed": False,
@@ -85,6 +93,8 @@ class PRPreparationPipelineRequest:
     confirm_github_mutations: bool = False
     confirm_branch_push: bool = False
     confirm_draft_pr: bool = False
+    resume_existing: bool = False
+    allow_repush: bool = False
     operator: str | None = None
     operator_note: str | None = None
     remote: str = "origin"
@@ -150,7 +160,11 @@ def run_pr_preparation_pipeline(
         )
 
     if request.dry_run:
-        handoff_preview = _run_pr_handoff_stage(request, dry_run=True)
+        handoff_preview = _run_pr_handoff_stage(
+            request,
+            preflight=preflight,
+            dry_run=True,
+        )
         stages[_STAGE_PR_HANDOFF] = handoff_preview["summary"]
         if not handoff_preview["ok"]:
             return _failure_response(
@@ -162,7 +176,11 @@ def run_pr_preparation_pipeline(
             )
         return _dry_run_response(request, preflight=preflight, handoff=handoff_preview)
 
-    handoff_stage = _run_pr_handoff_stage(request, dry_run=False)
+    handoff_stage = _run_pr_handoff_stage(
+        request,
+        preflight=preflight,
+        dry_run=False,
+    )
     stages[_STAGE_PR_HANDOFF] = handoff_stage["summary"]
     if not handoff_stage["ok"]:
         return _failure_response(
@@ -176,6 +194,7 @@ def run_pr_preparation_pipeline(
     branch_stage = _run_branch_push_stage(
         request,
         preflight=preflight,
+        handoff=handoff_stage,
         branch_push_fn=branch_push_fn or _default_branch_push_fn,
     )
     stages[_STAGE_BRANCH_PUSH] = branch_stage["summary"]
@@ -192,6 +211,7 @@ def run_pr_preparation_pipeline(
     draft_stage = _run_draft_pr_stage(
         request,
         preflight=preflight,
+        branch_push=branch_stage,
         draft_pr_fn=draft_pr_fn or _default_draft_pr_fn,
     )
     stages[_STAGE_DRAFT_PR] = draft_stage["summary"]
@@ -202,23 +222,31 @@ def run_pr_preparation_pipeline(
             reasons=draft_stage["reasons"],
             stage_result=draft_stage,
             stages=stages,
-            branch_pushed=True,
+            branch_pushed=branch_stage["summary"].get("pushed") is True,
             draft_pr_created=draft_stage["summary"].get("created") is True,
         )
 
+    branch_pushed = branch_stage["summary"].get("pushed") is True
+    draft_pr_created = draft_stage["summary"].get("created") is True
+    draft_pr_already_created = draft_stage["summary"].get("already_created") is True
     return {
         "ok": True,
         "schema_version": PR_PREPARATION_PIPELINE_SCHEMA_VERSION,
         "source": PR_PREPARATION_PIPELINE_SOURCE,
-        "status": "draft_pr_created",
+        "status": (
+            "draft_pr_already_created"
+            if draft_pr_already_created
+            else "draft_pr_created"
+        ),
         "mode": "confirmed",
         "task_key": request.task_key,
         "stages": stages,
         "safety": _safety(
             dry_run=False,
-            github_mutated=True,
-            branch_pushed=True,
-            draft_pr_created=True,
+            resume_existing=request.resume_existing,
+            github_mutated=branch_pushed or draft_pr_created,
+            branch_pushed=branch_pushed,
+            draft_pr_created=draft_pr_created,
         ),
     }
 
@@ -405,19 +433,23 @@ def _runtime_evidence(store: TaskMirrorStore, task_key: str) -> dict[str, Any]:
     }
 
 
-def _read_json_artifact(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
+def _read_json_artifact(
+    path: Path,
+    *,
+    context: str = "runtime_handoff_execution_artifact",
+) -> tuple[dict[str, Any] | None, list[str]]:
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return None, [f"runtime_handoff_execution_artifact_file_missing: {path}"]
+        return None, [f"{context}_file_missing: {path}"]
     except OSError as exc:
-        return None, [f"runtime_handoff_execution_artifact_read_error: {exc}"]
+        return None, [f"{context}_read_error: {exc}"]
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return None, [f"runtime_handoff_execution_artifact_json_malformed: {path}"]
+        return None, [f"{context}_json_malformed: {path}"]
     if not isinstance(payload, dict):
-        return None, [f"runtime_handoff_execution_artifact_json_not_object: {path}"]
+        return None, [f"{context}_json_not_object: {path}"]
     return payload, []
 
 
@@ -451,8 +483,16 @@ def _source_repo(request: PRPreparationPipelineRequest) -> str | None:
 def _run_pr_handoff_stage(
     request: PRPreparationPipelineRequest,
     *,
+    preflight: dict[str, Any],
     dry_run: bool,
 ) -> dict[str, Any]:
+    if request.resume_existing and not dry_run:
+        reusable = _find_reusable_pr_handoff(request, preflight=preflight)
+        if reusable["state"] == "usable":
+            return reusable["stage"]
+        if reusable["state"] != "none":
+            return _stage_failure(_STAGE_PR_HANDOFF, reusable["reasons"], reusable)
+
     handoff_request = PrHandoffRequest(
         task_key=request.task_key,
         db_path=request.db_path,
@@ -473,11 +513,15 @@ def _run_pr_handoff_stage(
     payload = result.to_summary_dict()
     summary = {
         "created": bool(result.ok and not dry_run),
+        "reused": False,
         "would_create": bool(result.ok and dry_run),
         "artifact_path": str(result.json_path),
         "markdown_path": str(result.markdown_path),
         "artifact_recorded": result.artifact_recorded,
         "event_recorded": result.event_recorded,
+        "branch": (payload.get("package") or {}).get("branch"),
+        "base_branch": (payload.get("package") or {}).get("base_branch"),
+        "head_sha": (payload.get("package") or {}).get("head_sha"),
     }
     return {
         "ok": bool(result.ok),
@@ -492,9 +536,21 @@ def _run_branch_push_stage(
     request: PRPreparationPipelineRequest,
     *,
     preflight: dict[str, Any],
+    handoff: dict[str, Any],
     branch_push_fn: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     worktree = preflight["worktree"]
+    if request.resume_existing:
+        reusable = _find_reusable_branch_push(
+            request,
+            preflight=preflight,
+            handoff=handoff,
+        )
+        if reusable["state"] == "usable":
+            return reusable["stage"]
+        if reusable["state"] != "none":
+            return _stage_failure(_STAGE_BRANCH_PUSH, reusable["reasons"], reusable)
+
     try:
         result = _as_dict(
             branch_push_fn(
@@ -534,6 +590,8 @@ def _run_branch_push_stage(
         "stage": _STAGE_BRANCH_PUSH,
         "summary": {
             "pushed": True,
+            "reused": False,
+            "already_pushed": False,
             "remote": result.get("remote") or request.remote,
             "branch": result.get("branch") or worktree["branch"],
             "artifact_path": result.get("branch_push_json_path")
@@ -549,10 +607,22 @@ def _run_draft_pr_stage(
     request: PRPreparationPipelineRequest,
     *,
     preflight: dict[str, Any],
+    branch_push: dict[str, Any],
     draft_pr_fn: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     worktree = preflight["worktree"]
     repo = preflight["repo"]
+    if request.resume_existing:
+        reusable = _find_reusable_draft_pr(
+            request,
+            preflight=preflight,
+            branch_push=branch_push,
+        )
+        if reusable["state"] == "usable":
+            return reusable["stage"]
+        if reusable["state"] != "none":
+            return _stage_failure(_STAGE_DRAFT_PR, reusable["reasons"], reusable)
+
     try:
         result = _as_dict(
             draft_pr_fn(
@@ -583,8 +653,9 @@ def _run_draft_pr_stage(
         or result.get("draft_pr_created")
         or (result.get("summary") or {}).get("draft_pr_created")
     )
+    already_created = bool(result.get("status") == "already_exists_verified")
     draft_flag = bool(draft.get("draft", result.get("draft", True)))
-    if not result.get("ok") or not created or not draft_flag:
+    if not result.get("ok") or not (created or already_created) or not draft_flag:
         return _stage_failure(
             _STAGE_DRAFT_PR,
             list(result.get("reasons") or result.get("warnings") or [result.get("error") or "draft_pr_not_created"]),
@@ -595,7 +666,9 @@ def _run_draft_pr_stage(
         "ok": True,
         "stage": _STAGE_DRAFT_PR,
         "summary": {
-            "created": True,
+            "created": created,
+            "reused": already_created,
+            "already_created": already_created,
             "draft": True,
             "pr_url": draft.get("url") or result.get("pr_url"),
             "pr_number": draft.get("number") or result.get("pr_number"),
@@ -606,6 +679,565 @@ def _run_draft_pr_stage(
         "payload": result,
         "reasons": [],
     }
+
+
+def _find_reusable_pr_handoff(
+    request: PRPreparationPipelineRequest,
+    *,
+    preflight: dict[str, Any],
+) -> dict[str, Any]:
+    store = TaskMirrorStore(request.db_path)
+    artifacts = [
+        artifact
+        for artifact in store.list_task_artifacts(request.task_key)
+        if artifact.artifact_type == PR_HANDOFF_ARTIFACT_TYPE
+    ]
+    events = [
+        event
+        for event in store.list_task_events(request.task_key)
+        if event.event_type == PR_HANDOFF_EVENT_TYPE
+    ]
+    if not artifacts and not events:
+        return _reuse_scan("none", _STAGE_PR_HANDOFF)
+
+    reasons: list[str] = []
+    if not artifacts:
+        reasons.append("pr_handoff_artifact_missing")
+    if not events:
+        reasons.append("pr_handoff_event_missing")
+
+    event_paths: set[str] = set()
+    event_markdown_paths: dict[str, str] = {}
+    for event in events:
+        payload, payload_reasons = _read_event_payload(
+            event.payload_json,
+            context="pr_handoff_event",
+        )
+        reasons.extend(payload_reasons)
+        if payload is None:
+            continue
+        json_path = str(payload.get("json_path") or "").strip()
+        markdown_path = str(payload.get("markdown_path") or "").strip()
+        if json_path:
+            event_paths.add(json_path)
+            if markdown_path:
+                event_markdown_paths[json_path] = markdown_path
+
+    valid_candidates: list[dict[str, Any]] = []
+    artifact_paths = {str(artifact.path) for artifact in artifacts}
+    for artifact in artifacts:
+        payload, artifact_reasons = _read_json_artifact(
+            artifact.path,
+            context="pr_handoff_artifact",
+        )
+        reasons.extend(artifact_reasons)
+        if payload is None:
+            continue
+        candidate_reasons = _validate_pr_handoff_payload(
+            payload,
+            request=request,
+            preflight=preflight,
+        )
+        if candidate_reasons:
+            reasons.extend(
+                f"pr_handoff_invalid:{artifact.path}: {reason}"
+                for reason in candidate_reasons
+            )
+            continue
+        valid_candidates.append(
+            {
+                "artifact_path": str(artifact.path),
+                "markdown_path": event_markdown_paths.get(str(artifact.path)),
+                "payload": payload,
+            }
+        )
+
+    for event_path in sorted(event_paths):
+        if event_path not in artifact_paths:
+            reasons.append(f"pr_handoff_event_artifact_path_unmatched: {event_path}")
+
+    if reasons:
+        return _reuse_scan("invalid", _STAGE_PR_HANDOFF, reasons=reasons)
+
+    unique_paths = {candidate["artifact_path"] for candidate in valid_candidates}
+    if len(unique_paths) != 1:
+        return _reuse_scan(
+            "ambiguous",
+            _STAGE_PR_HANDOFF,
+            reasons=["pr_handoff_evidence_ambiguous"],
+        )
+
+    candidate = valid_candidates[0]
+    payload = candidate["payload"]
+    return _reuse_scan(
+        "usable",
+        _STAGE_PR_HANDOFF,
+        stage_result={
+            "ok": True,
+            "stage": _STAGE_PR_HANDOFF,
+            "summary": {
+                "created": False,
+                "reused": True,
+                "would_create": False,
+                "artifact_path": candidate["artifact_path"],
+                "markdown_path": candidate["markdown_path"],
+                "artifact_recorded": True,
+                "event_recorded": True,
+                "branch": payload.get("branch"),
+                "base_branch": payload.get("base_branch"),
+                "head_sha": payload.get("head_sha"),
+            },
+            "payload": payload,
+            "reasons": [],
+        },
+    )
+
+
+def _find_reusable_branch_push(
+    request: PRPreparationPipelineRequest,
+    *,
+    preflight: dict[str, Any],
+    handoff: dict[str, Any],
+) -> dict[str, Any]:
+    store = TaskMirrorStore(request.db_path)
+    artifacts = [
+        artifact
+        for artifact in store.list_task_artifacts(request.task_key)
+        if artifact.artifact_type == BRANCH_PUSH_ARTIFACT_TYPE
+    ]
+    events = [
+        event
+        for event in store.list_task_events(request.task_key)
+        if event.event_type == BRANCH_PUSH_EVENT_TYPE
+    ]
+    if not artifacts and not events:
+        return _reuse_scan("none", _STAGE_BRANCH_PUSH)
+
+    reasons: list[str] = []
+    if not artifacts:
+        reasons.append("branch_push_artifact_missing")
+    if not events:
+        reasons.append("branch_push_event_missing")
+
+    candidates: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        payload, artifact_reasons = _read_json_artifact(
+            artifact.path,
+            context="branch_push_artifact",
+        )
+        reasons.extend(artifact_reasons)
+        if payload is None:
+            continue
+        candidate_reasons = _validate_branch_push_payload(
+            payload,
+            request=request,
+            preflight=preflight,
+            handoff=handoff,
+        )
+        if candidate_reasons:
+            reasons.extend(
+                f"branch_push_invalid:{artifact.path}: {reason}"
+                for reason in candidate_reasons
+            )
+            continue
+        candidates.append(
+            {
+                "artifact_path": str(artifact.path),
+                "payload": payload,
+            }
+        )
+
+    for event in events:
+        payload, payload_reasons = _read_event_payload(
+            event.payload_json,
+            context="branch_push_event",
+        )
+        reasons.extend(payload_reasons)
+        if payload is None:
+            continue
+        candidate_reasons = _validate_branch_push_payload(
+            payload,
+            request=request,
+            preflight=preflight,
+            handoff=handoff,
+        )
+        if candidate_reasons:
+            reasons.extend(
+                f"branch_push_event_invalid: {reason}"
+                for reason in candidate_reasons
+            )
+            continue
+        candidates.append(
+            {
+                "artifact_path": str(payload.get("artifact_path") or ""),
+                "payload": payload,
+            }
+        )
+
+    if reasons:
+        return _reuse_scan("invalid", _STAGE_BRANCH_PUSH, reasons=reasons)
+
+    unique_keys = {
+        (
+            candidate["payload"].get("remote"),
+            candidate["payload"].get("branch"),
+            candidate["payload"].get("base_branch"),
+            candidate["payload"].get("head_sha")
+            or candidate["payload"].get("pushed_commit_sha"),
+        )
+        for candidate in candidates
+    }
+    if len(unique_keys) != 1:
+        return _reuse_scan(
+            "ambiguous",
+            _STAGE_BRANCH_PUSH,
+            reasons=["branch_push_evidence_ambiguous"],
+        )
+
+    artifact_candidates = [
+        candidate for candidate in candidates if candidate["artifact_path"]
+    ]
+    candidate = artifact_candidates[-1] if artifact_candidates else candidates[-1]
+    payload = candidate["payload"]
+    return _reuse_scan(
+        "usable",
+        _STAGE_BRANCH_PUSH,
+        stage_result={
+            "ok": True,
+            "stage": _STAGE_BRANCH_PUSH,
+            "summary": {
+                "pushed": False,
+                "reused": True,
+                "already_pushed": True,
+                "remote": payload.get("remote") or request.remote,
+                "branch": payload.get("branch") or preflight["worktree"]["branch"],
+                "artifact_path": candidate["artifact_path"] or None,
+            },
+            "payload": payload,
+            "reasons": [],
+        },
+    )
+
+
+def _find_reusable_draft_pr(
+    request: PRPreparationPipelineRequest,
+    *,
+    preflight: dict[str, Any],
+    branch_push: dict[str, Any],
+) -> dict[str, Any]:
+    existing = _find_existing_draft_pr_evidence(
+        request,
+        preflight=preflight,
+        branch_push=branch_push,
+    )
+    if existing["state"] != "usable":
+        return existing
+
+    payload = existing["payload"]
+    return _reuse_scan(
+        "usable",
+        _STAGE_DRAFT_PR,
+        stage_result={
+            "ok": True,
+            "stage": _STAGE_DRAFT_PR,
+            "summary": {
+                "created": False,
+                "reused": True,
+                "already_created": True,
+                "draft": True,
+                "pr_url": payload.get("pr_url"),
+                "pr_number": payload.get("pr_number"),
+                "artifact_path": existing.get("artifact_path"),
+            },
+            "payload": payload,
+            "reasons": [],
+        },
+    )
+
+
+def _find_existing_draft_pr_evidence(
+    request: PRPreparationPipelineRequest,
+    *,
+    preflight: dict[str, Any],
+    branch_push: dict[str, Any],
+) -> dict[str, Any]:
+    store = TaskMirrorStore(request.db_path)
+    artifacts = [
+        artifact
+        for artifact in store.list_task_artifacts(request.task_key)
+        if artifact.artifact_type == DRAFT_PR_ARTIFACT_TYPE
+    ]
+    events = [
+        event
+        for event in store.list_task_events(request.task_key)
+        if event.event_type == DRAFT_PR_EVENT_TYPE
+    ]
+    if not artifacts and not events:
+        return _reuse_scan("none", _STAGE_DRAFT_PR)
+
+    reasons: list[str] = []
+    if not artifacts:
+        reasons.append("draft_pr_artifact_missing")
+    if not events:
+        reasons.append("draft_pr_event_missing")
+
+    candidates: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        payload, artifact_reasons = _read_json_artifact(
+            artifact.path,
+            context="draft_pr_artifact",
+        )
+        reasons.extend(artifact_reasons)
+        if payload is None:
+            continue
+        candidate_reasons = _validate_draft_pr_payload(
+            payload,
+            request=request,
+            preflight=preflight,
+            branch_push=branch_push,
+        )
+        if candidate_reasons:
+            reasons.extend(
+                f"draft_pr_invalid:{artifact.path}: {reason}"
+                for reason in candidate_reasons
+            )
+            continue
+        candidates.append({"artifact_path": str(artifact.path), "payload": payload})
+
+    for event in events:
+        payload, payload_reasons = _read_event_payload(
+            event.payload_json,
+            context="draft_pr_event",
+        )
+        reasons.extend(payload_reasons)
+        if payload is None:
+            continue
+        candidate_reasons = _validate_draft_pr_payload(
+            payload,
+            request=request,
+            preflight=preflight,
+            branch_push=branch_push,
+        )
+        if candidate_reasons:
+            reasons.extend(
+                f"draft_pr_event_invalid: {reason}" for reason in candidate_reasons
+            )
+            continue
+        candidates.append(
+            {
+                "artifact_path": str(payload.get("artifact_path") or ""),
+                "payload": payload,
+            }
+        )
+
+    if reasons:
+        return _reuse_scan("invalid", _STAGE_DRAFT_PR, reasons=reasons)
+
+    unique_keys = {
+        (
+            candidate["payload"].get("repo"),
+            candidate["payload"].get("base_branch"),
+            candidate["payload"].get("head_branch"),
+            candidate["payload"].get("pr_number"),
+            candidate["payload"].get("pr_url"),
+        )
+        for candidate in candidates
+    }
+    if len(unique_keys) != 1:
+        return _reuse_scan(
+            "ambiguous",
+            _STAGE_DRAFT_PR,
+            reasons=["draft_pr_evidence_ambiguous"],
+        )
+
+    artifact_candidates = [
+        candidate for candidate in candidates if candidate["artifact_path"]
+    ]
+    candidate = artifact_candidates[-1] if artifact_candidates else candidates[-1]
+    return _reuse_scan(
+        "usable",
+        _STAGE_DRAFT_PR,
+        artifact_path=candidate["artifact_path"] or None,
+        payload=candidate["payload"],
+    )
+
+
+def _validate_pr_handoff_payload(
+    payload: dict[str, Any],
+    *,
+    request: PRPreparationPipelineRequest,
+    preflight: dict[str, Any],
+) -> list[str]:
+    worktree = preflight["worktree"]
+    expected_base = request.base_branch or worktree["base_branch"]
+    expected_repo = preflight["repo"]
+    reasons: list[str] = []
+    if payload.get("artifact_type") != PR_HANDOFF_ARTIFACT_TYPE:
+        reasons.append("artifact_type_mismatch")
+    if payload.get("task_key") != request.task_key:
+        reasons.append("task_key_mismatch")
+    if payload.get("task_status") != "waiting_approval":
+        reasons.append("task_status_not_waiting_approval")
+    if payload.get("branch") != worktree["branch"]:
+        reasons.append("branch_mismatch")
+    if payload.get("base_branch") != expected_base:
+        reasons.append("base_branch_mismatch")
+    if expected_repo and payload.get("repo") != expected_repo:
+        reasons.append("repo_mismatch")
+    safety = payload.get("safety") if isinstance(payload.get("safety"), dict) else {}
+    for key in ("pr_created", "pushed", "merged", "cleanup_performed", "github_mutated"):
+        if safety.get(key) is not False:
+            reasons.append(f"safety.{key}_not_false")
+    if safety.get("human_review_required") is not True:
+        reasons.append("safety.human_review_required_not_true")
+    return reasons
+
+
+def _validate_branch_push_payload(
+    payload: dict[str, Any],
+    *,
+    request: PRPreparationPipelineRequest,
+    preflight: dict[str, Any],
+    handoff: dict[str, Any],
+) -> list[str]:
+    worktree = preflight["worktree"]
+    expected_base = request.base_branch or worktree["base_branch"]
+    expected_head_sha = str(
+        ((handoff.get("summary") or {}).get("head_sha") or "")
+    ).strip()
+    pushed_head_sha = str(
+        payload.get("head_sha") or payload.get("pushed_commit_sha") or ""
+    ).strip()
+    reasons: list[str] = []
+    if payload.get("artifact_type") != BRANCH_PUSH_ARTIFACT_TYPE:
+        reasons.append("artifact_type_mismatch")
+    if payload.get("task_key") != request.task_key:
+        reasons.append("task_key_mismatch")
+    if payload.get("remote") != request.remote:
+        reasons.append("remote_mismatch")
+    if payload.get("branch") != worktree["branch"]:
+        reasons.append("branch_mismatch")
+    if payload.get("base_branch") != expected_base:
+        reasons.append("base_branch_mismatch")
+    if expected_head_sha and pushed_head_sha != expected_head_sha:
+        reasons.append("head_sha_mismatch")
+    if payload.get("branch_pushed") is not True:
+        reasons.append("branch_pushed_not_true")
+    if payload.get("push_ok") is not True:
+        reasons.append("push_ok_not_true")
+    for key in ("pr_created", "merged", "approved", "cleanup_performed"):
+        if payload.get(key) is not False:
+            reasons.append(f"{key}_not_false")
+    safety = payload.get("safety") if isinstance(payload.get("safety"), dict) else {}
+    if safety.get("branch_pushed") is not True:
+        reasons.append("safety.branch_pushed_not_true")
+    for key in ("pr_created", "merged", "approved", "cleanup_performed"):
+        if safety.get(key) is not False:
+            reasons.append(f"safety.{key}_not_false")
+    for key in ("branch_deleted", "worktree_deleted", "force_push"):
+        if key in safety and safety.get(key) is not False:
+            reasons.append(f"safety.{key}_not_false")
+    return reasons
+
+
+def _validate_draft_pr_payload(
+    payload: dict[str, Any],
+    *,
+    request: PRPreparationPipelineRequest,
+    preflight: dict[str, Any],
+    branch_push: dict[str, Any],
+) -> list[str]:
+    worktree = preflight["worktree"]
+    expected_base = request.base_branch or worktree["base_branch"]
+    expected_repo = preflight["repo"]
+    reasons: list[str] = []
+    if payload.get("artifact_type") != DRAFT_PR_ARTIFACT_TYPE:
+        reasons.append("artifact_type_mismatch")
+    if payload.get("task_key") != request.task_key:
+        reasons.append("task_key_mismatch")
+    if expected_repo and payload.get("repo") != expected_repo:
+        reasons.append("repo_mismatch")
+    if payload.get("base_branch") != expected_base:
+        reasons.append("base_branch_mismatch")
+    if payload.get("head_branch") != worktree["branch"]:
+        reasons.append("head_branch_mismatch")
+    if payload.get("draft") is not True:
+        reasons.append("draft_not_true")
+    if not payload.get("pr_url"):
+        reasons.append("pr_url_missing")
+    if not isinstance(payload.get("pr_number"), int):
+        reasons.append("pr_number_missing")
+    if payload.get("pr_created") is not True:
+        reasons.append("pr_created_not_true")
+    if payload.get("draft_pr_created") is not True:
+        reasons.append("draft_pr_created_not_true")
+    if payload.get("branch_push_verified") is not True:
+        reasons.append("branch_push_verified_not_true")
+    branch_push_artifact = (branch_push.get("summary") or {}).get("artifact_path")
+    payload_branch_push_artifact = payload.get("branch_push_artifact_path")
+    if (
+        branch_push_artifact
+        and payload_branch_push_artifact
+        and payload_branch_push_artifact != branch_push_artifact
+    ):
+        reasons.append("branch_push_artifact_path_mismatch")
+    for key in ("merged", "approved", "cleanup_performed"):
+        if payload.get(key) is not False:
+            reasons.append(f"{key}_not_false")
+    safety = payload.get("safety") if isinstance(payload.get("safety"), dict) else {}
+    if safety.get("pr_created") is not True:
+        reasons.append("safety.pr_created_not_true")
+    if safety.get("draft_pr") is not True:
+        reasons.append("safety.draft_pr_not_true")
+    for key in ("merged", "approved", "cleanup_performed"):
+        if safety.get(key) is not False:
+            reasons.append(f"safety.{key}_not_false")
+    for key in ("issue_closed", "branch_deleted", "worktree_deleted"):
+        if key in safety and safety.get(key) is not False:
+            reasons.append(f"safety.{key}_not_false")
+    return reasons
+
+
+def _read_event_payload(
+    payload_json: str | None,
+    *,
+    context: str,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    if not payload_json:
+        return None, [f"{context}_payload_missing"]
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None, [f"{context}_payload_json_malformed"]
+    if not isinstance(payload, dict):
+        return None, [f"{context}_payload_json_not_object"]
+    return payload, []
+
+
+def _reuse_scan(
+    state: str,
+    stage_name: str,
+    *,
+    reasons: list[str] | None = None,
+    stage_result: dict[str, Any] | None = None,
+    stage_payload: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+    artifact_path: str | None = None,
+) -> dict[str, Any]:
+    result = {
+        "state": state,
+        "stage_name": stage_name,
+        "reasons": _unique_strings(reasons or []),
+    }
+    if stage_result is not None:
+        result["stage"] = stage_result
+    if stage_payload is not None:
+        result["payload"] = stage_payload
+    if payload is not None:
+        result["payload"] = payload
+    if artifact_path is not None:
+        result["artifact_path"] = artifact_path
+    return result
 
 
 def _default_branch_push_fn(**kwargs: Any) -> dict[str, Any]:
@@ -677,6 +1309,7 @@ def _dry_run_response(
         },
         "safety": _safety(
             dry_run=True,
+            resume_existing=request.resume_existing,
             github_mutated=False,
             branch_pushed=False,
             draft_pr_created=False,
@@ -707,6 +1340,7 @@ def _failure_response(
         "stages": stages or {},
         "safety": _safety(
             dry_run=request.dry_run,
+            resume_existing=request.resume_existing,
             github_mutated=branch_pushed or draft_pr_created,
             branch_pushed=branch_pushed,
             draft_pr_created=draft_pr_created,
@@ -735,15 +1369,18 @@ def _stage_failure(
 def _safety(
     *,
     dry_run: bool,
+    resume_existing: bool = False,
     github_mutated: bool,
     branch_pushed: bool,
     draft_pr_created: bool,
 ) -> dict[str, bool]:
     safety = dict(PR_PREPARATION_PIPELINE_SAFETY_FLAGS)
     safety["dry_run"] = dry_run
+    safety["resume_existing"] = resume_existing
     safety["github_mutated"] = github_mutated
     safety["branch_pushed"] = branch_pushed
     safety["draft_pr_created"] = draft_pr_created
+    safety["duplicate_draft_pr_created"] = False
     safety["approved"] = False
     safety["merged"] = False
     safety["cleanup_performed"] = False

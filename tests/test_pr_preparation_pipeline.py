@@ -28,6 +28,21 @@ from agent_taskflow.runtime_handoff_execution_from_handoff import (
 from agent_taskflow.store import TaskMirrorStore
 
 
+def _git(cwd: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        shell=False,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} failed: {completed.stderr}")
+    return completed.stdout.strip()
+
+
 class _FakeBranchPush:
     def __init__(self) -> None:
         self.call_count = 0
@@ -36,8 +51,11 @@ class _FakeBranchPush:
         self.call_count += 1
         task_key = str(kwargs["task_key"])
         artifact_root = Path(kwargs["artifact_root"])
+        repo_path = Path(kwargs["repo_path"])
         branch = str(kwargs["branch"])
         remote = str(kwargs.get("remote") or "origin")
+        head_sha = _git(repo_path, "rev-parse", "HEAD")
+        base_sha = _git(repo_path, "rev-parse", "main")
         artifact_path = artifact_root / "branch_push" / task_key / "branch_push.json"
         payload = {
             "kind": "branch_push_completed",
@@ -46,6 +64,8 @@ class _FakeBranchPush:
             "remote": remote,
             "branch": branch,
             "base_branch": "main",
+            "base_sha": base_sha,
+            "head_sha": head_sha,
             "branch_pushed": True,
             "push_ok": True,
             "pr_created": False,
@@ -58,6 +78,9 @@ class _FakeBranchPush:
                 "merged": False,
                 "approved": False,
                 "cleanup_performed": False,
+                "branch_deleted": False,
+                "worktree_deleted": False,
+                "force_push": False,
                 "background_worker_started": False,
             },
         }
@@ -100,9 +123,12 @@ class _FakeDraftPR:
             "artifact_type": "draft_pr",
             "task_key": task_key,
             "repo": repo,
+            "base_branch": str(kwargs["base"]),
+            "head_branch": str(kwargs["head"]),
             "draft": True,
             "pr_number": 123,
             "pr_url": pr_url,
+            "branch_push_verified": True,
             "pr_created": True,
             "draft_pr_created": True,
             "merged": False,
@@ -114,6 +140,8 @@ class _FakeDraftPR:
                 "merged": False,
                 "approved": False,
                 "cleanup_performed": False,
+                "branch_deleted": False,
+                "worktree_deleted": False,
                 "background_worker_started": False,
             },
         }
@@ -328,6 +356,12 @@ class PRPreparationPipelineTests(unittest.TestCase):
         values.update(overrides)
         return PRPreparationPipelineRequest(**values)
 
+    def _evidence_counts(self) -> dict[str, int]:
+        with sqlite3.connect(self.db_path) as conn:
+            artifacts = conn.execute("SELECT COUNT(*) FROM task_artifacts").fetchone()[0]
+            events = conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
+        return {"artifacts": artifacts, "events": events}
+
     def test_dry_run_writes_nothing_and_no_github_mutation(self) -> None:
         branch = _FakeBranchPush()
         draft = _FakeDraftPR()
@@ -400,6 +434,238 @@ class PRPreparationPipelineTests(unittest.TestCase):
         self.assertTrue(any(e.event_type == "pr_handoff_created" for e in events))
         self.assertTrue(any(e.event_type == "branch_push_completed" for e in events))
         self.assertTrue(any(e.event_type == "draft_pr_created" for e in events))
+
+    def test_resume_existing_reuses_pr_handoff_branch_push_and_draft_pr(self) -> None:
+        branch = _FakeBranchPush()
+        draft = _FakeDraftPR()
+        first = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+        self.assertTrue(first["ok"], msg=f"first: {first!r}")
+        before_counts = self._evidence_counts()
+
+        second = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                resume_existing=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+
+        self.assertTrue(second["ok"], msg=f"second: {second!r}")
+        self.assertEqual(second["status"], "draft_pr_already_created")
+        self.assertEqual(branch.call_count, 1)
+        self.assertEqual(draft.call_count, 1)
+        self.assertEqual(before_counts, self._evidence_counts())
+        self.assertTrue(second["stages"]["pr_handoff"]["reused"])
+        self.assertTrue(second["stages"]["branch_push"]["reused"])
+        self.assertTrue(second["stages"]["branch_push"]["already_pushed"])
+        self.assertTrue(second["stages"]["draft_pr"]["reused"])
+        self.assertTrue(second["stages"]["draft_pr"]["already_created"])
+        self.assertFalse(second["stages"]["branch_push"]["pushed"])
+        self.assertFalse(second["stages"]["draft_pr"]["created"])
+        self.assertFalse(second["safety"]["github_mutated"])
+        self.assertFalse(second["safety"]["branch_pushed"])
+        self.assertFalse(second["safety"]["draft_pr_created"])
+        self.assertFalse(second["safety"]["duplicate_draft_pr_created"])
+
+    def test_resume_existing_draft_pr_already_created_is_ok(self) -> None:
+        branch = _FakeBranchPush()
+        draft = _FakeDraftPR()
+        first = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+        self.assertTrue(first["ok"], msg=f"first: {first!r}")
+
+        second = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                resume_existing=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=_FakeBranchPush(),
+            draft_pr_fn=_FakeDraftPR(),
+        )
+
+        self.assertTrue(second["ok"], msg=f"second: {second!r}")
+        self.assertEqual(second["status"], "draft_pr_already_created")
+        self.assertTrue(second["stages"]["draft_pr"]["reused"])
+        self.assertFalse(second["safety"]["duplicate_draft_pr_created"])
+
+    def test_without_resume_second_run_does_not_silently_reuse(self) -> None:
+        branch = _FakeBranchPush()
+        draft = _FakeDraftPR()
+        first = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+        self.assertTrue(first["ok"], msg=f"first: {first!r}")
+
+        second = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+
+        self.assertTrue(second["ok"], msg=f"second: {second!r}")
+        self.assertEqual(second["status"], "draft_pr_created")
+        self.assertEqual(branch.call_count, 2)
+        self.assertEqual(draft.call_count, 2)
+        self.assertFalse(second["stages"]["branch_push"]["reused"])
+        self.assertFalse(second["stages"]["draft_pr"]["reused"])
+
+    def test_resume_existing_invalid_draft_pr_evidence_fails(self) -> None:
+        first = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=_FakeBranchPush(),
+            draft_pr_fn=_FakeDraftPR(),
+        )
+        self.assertTrue(first["ok"], msg=f"first: {first!r}")
+        draft_artifact = next(
+            artifact
+            for artifact in self.store.list_task_artifacts(self.task_key)
+            if artifact.artifact_type == "draft_pr"
+        )
+        draft_artifact.path.write_text("{not json", encoding="utf-8")
+        branch = _FakeBranchPush()
+        draft = _FakeDraftPR()
+
+        second = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                resume_existing=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["failed_stage"], "draft_pr")
+        self.assertIn("draft_pr_artifact_json_malformed", "\n".join(second["reasons"]))
+        self.assertEqual(branch.call_count, 0)
+        self.assertEqual(draft.call_count, 0)
+        self.assertFalse(second["safety"]["duplicate_draft_pr_created"])
+
+    def test_resume_existing_invalid_branch_push_evidence_fails(self) -> None:
+        first = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=_FakeBranchPush(),
+            draft_pr_fn=_FakeDraftPR(),
+        )
+        self.assertTrue(first["ok"], msg=f"first: {first!r}")
+        branch_artifact = next(
+            artifact
+            for artifact in self.store.list_task_artifacts(self.task_key)
+            if artifact.artifact_type == "branch_push"
+        )
+        branch_artifact.path.write_text("{not json", encoding="utf-8")
+        branch = _FakeBranchPush()
+        draft = _FakeDraftPR()
+
+        second = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                resume_existing=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["failed_stage"], "branch_push")
+        self.assertIn("branch_push_artifact_json_malformed", "\n".join(second["reasons"]))
+        self.assertEqual(branch.call_count, 0)
+        self.assertEqual(draft.call_count, 0)
+
+    def test_resume_existing_no_push_or_draft_call_on_already_created(self) -> None:
+        branch = _FakeBranchPush()
+        draft = _FakeDraftPR()
+        first = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+        self.assertTrue(first["ok"], msg=f"first: {first!r}")
+
+        second = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                resume_existing=True,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+            ),
+            branch_push_fn=branch,
+            draft_pr_fn=draft,
+        )
+
+        self.assertTrue(second["ok"], msg=f"second: {second!r}")
+        self.assertEqual(branch.call_count, 1)
+        self.assertEqual(draft.call_count, 1)
 
     def test_preflight_requires_waiting_approval(self) -> None:
         self._seed_ready_task(status="queued")

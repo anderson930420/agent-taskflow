@@ -64,6 +64,7 @@ class RunTaskToDraftPRPipelineScriptTests(unittest.TestCase):
         self.assertIn("--recommended-command-kind", result.stdout)
         self.assertIn("--proposal-max-items", result.stdout)
         self.assertIn("--resume-existing", result.stdout)
+        self.assertIn("--resume-pr-preparation", result.stdout)
         self.assertIn("--confirm-run-one-shot-pipeline", result.stdout)
         self.assertIn("--confirm-prepare-pr", result.stdout)
         self.assertIn("--confirm-github-mutations", result.stdout)

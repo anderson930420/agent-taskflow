@@ -40,6 +40,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confirm-github-mutations", action="store_true")
     parser.add_argument("--confirm-branch-push", action="store_true")
     parser.add_argument("--confirm-draft-pr", action="store_true")
+    parser.add_argument(
+        "--resume-existing",
+        action="store_true",
+        help=(
+            "Reuse valid matching PR handoff, branch push, and draft PR "
+            "evidence instead of duplicating PR preparation work."
+        ),
+    )
 
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true")
@@ -69,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             confirm_github_mutations=bool(args.confirm_github_mutations),
             confirm_branch_push=bool(args.confirm_branch_push),
             confirm_draft_pr=bool(args.confirm_draft_pr),
+            resume_existing=bool(args.resume_existing),
             operator=args.operator,
             operator_note=args.operator_note,
             remote=args.remote,

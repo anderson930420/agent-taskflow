@@ -57,6 +57,7 @@ class TaskToDraftPRPipelineRequest:
 
     confirm_run_one_shot_pipeline: bool = False
     resume_existing: bool = False
+    resume_pr_preparation: bool = False
 
     confirm_prepare_pr: bool = False
     confirm_github_mutations: bool = False
@@ -146,6 +147,7 @@ def run_task_to_draft_pr_pipeline(
                 remote=request.remote,
                 base_branch=request.base_branch,
                 draft=True,
+                resume_existing=request.resume_pr_preparation,
             ),
             branch_push_fn=branch_push_fn,
             draft_pr_fn=draft_pr_fn,
@@ -232,6 +234,7 @@ def run_task_to_draft_pr_pipeline(
             remote=request.remote,
             base_branch=request.base_branch,
             draft=True,
+            resume_existing=request.resume_pr_preparation,
         ),
         branch_push_fn=branch_push_fn,
         draft_pr_fn=draft_pr_fn,
@@ -255,11 +258,12 @@ def run_task_to_draft_pr_pipeline(
         )
 
     pr_safety = pr_preparation_result.get("safety") or {}
+    status = str(pr_preparation_result.get("status") or "draft_pr_created")
     return {
         "ok": True,
         "schema_version": TASK_TO_DRAFT_PR_PIPELINE_SCHEMA_VERSION,
         "source": TASK_TO_DRAFT_PR_PIPELINE_SOURCE,
-        "status": "draft_pr_created",
+        "status": status,
         "mode": "confirmed",
         "task_key": request.task_key,
         "final_task_status": final_task_status,
@@ -318,6 +322,7 @@ def _dry_run_response(
         "task_key": request.task_key,
         "would_run_task_to_draft_pr": True,
         "resume_existing": request.resume_existing,
+        "resume_pr_preparation": request.resume_pr_preparation,
         "stages": {
             _STAGE_ONE_SHOT: {
                 "would_run": True,
@@ -391,6 +396,9 @@ def _pr_preparation_summary(result: dict[str, Any]) -> dict[str, Any]:
         "status": result.get("status"),
         "branch_pushed": bool(branch_stage.get("pushed")),
         "draft_pr_created": bool(draft_stage.get("created")),
+        "branch_push_reused": bool(branch_stage.get("reused")),
+        "draft_pr_reused": bool(draft_stage.get("reused")),
+        "draft_pr_already_created": bool(draft_stage.get("already_created")),
         "pr_url": draft_stage.get("pr_url"),
         "pr_number": draft_stage.get("pr_number"),
     }
