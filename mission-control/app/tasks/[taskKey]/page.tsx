@@ -5,8 +5,10 @@ import { ArtifactList } from "../../../components/ArtifactList";
 import { DogfoodEvidencePanel } from "../../../components/DogfoodEvidencePanel";
 import { RunList } from "../../../components/RunList";
 import { RuntimeAuditPanel } from "../../../components/RuntimeAuditPanel";
+import { RuntimeExecutionPanel } from "../../../components/RuntimeExecutionPanel";
 import { ReviewEvidenceSection } from "../../../components/ReviewEvidenceSection";
 import { TaskSchedulerCandidatePanel } from "../../../components/SchedulerCandidatePanel";
+import { TaskSchedulerConfirmationPanel } from "../../../components/SchedulerConfirmationPanel";
 import { TaskSchedulerProposalPanel } from "../../../components/SchedulerProposalPanel";
 import { StartDispatchPanel } from "../../../components/StartDispatchPanel";
 import { StatusBadge } from "../../../components/StatusBadge";
@@ -66,7 +68,8 @@ export default async function TaskDetailPage({
     approvals,
     runtimeAudits,
     schedulerCandidate,
-    schedulerProposals
+    schedulerProposals,
+    schedulerConfirmations
   } = result.data;
 
   return (
@@ -230,6 +233,11 @@ export default async function TaskDetailPage({
           </section>
 
           <section className="section panel">
+            <h2>Runtime Execution</h2>
+            <RuntimeExecutionPanel events={runtimeAudits} />
+          </section>
+
+          <section className="section panel">
             <h2>Scheduler Candidate</h2>
             <TaskSchedulerCandidatePanel bundle={schedulerCandidate} />
           </section>
@@ -237,6 +245,11 @@ export default async function TaskDetailPage({
           <section className="section panel">
             <h2>Scheduler Proposals</h2>
             <TaskSchedulerProposalPanel bundle={schedulerProposals} />
+          </section>
+
+          <section className="section panel">
+            <h2>Scheduler Confirmations</h2>
+            <TaskSchedulerConfirmationPanel bundle={schedulerConfirmations} />
           </section>
 
           <section className="section panel">

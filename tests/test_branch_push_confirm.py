@@ -250,7 +250,11 @@ class BranchPushConfirmTests(unittest.TestCase):
         self.assertFalse(result.safety["branch_pushed"])
 
     def test_task_not_waiting_approval_is_rejected_by_default(self) -> None:
-        self._seed_ready_task(status="blocked")
+        self.store.update_task_status(
+            "AT-BP-CONFIRM-001",
+            "blocked",
+            source="test",
+        )
 
         result = confirm_branch_push(
             self._request(confirm=True),

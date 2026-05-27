@@ -2,6 +2,7 @@ import { TaskBoard } from "../components/TaskBoard";
 import {
   API_BASE_URL,
   getSchedulerCandidates,
+  getSchedulerConfirmations,
   getSchedulerProposals,
   getTasks
 } from "../lib/api";
@@ -14,10 +15,16 @@ function byUpdatedDesc(a: Task, b: Task): number {
 }
 
 export default async function DashboardPage() {
-  const [tasksResult, candidatesResult, proposalsResult] = await Promise.all([
+  const [
+    tasksResult,
+    candidatesResult,
+    proposalsResult,
+    confirmationsResult
+  ] = await Promise.all([
     getTasks(),
     getSchedulerCandidates({ include_not_ready: true, include_no_action: true }),
-    getSchedulerProposals({ limit: 20 })
+    getSchedulerProposals({ limit: 20 }),
+    getSchedulerConfirmations({ limit: 20 })
   ]);
 
   if (!tasksResult.ok) {
@@ -48,6 +55,12 @@ export default async function DashboardPage() {
   const schedulerProposalsError = proposalsResult.ok
     ? null
     : proposalsResult.error.message;
+  const schedulerConfirmations = confirmationsResult.ok
+    ? confirmationsResult.data
+    : null;
+  const schedulerConfirmationsError = confirmationsResult.ok
+    ? null
+    : confirmationsResult.error.message;
 
   return (
     <TaskBoard
@@ -56,6 +69,8 @@ export default async function DashboardPage() {
       schedulerCandidatesError={schedulerCandidatesError}
       schedulerProposals={schedulerProposals}
       schedulerProposalsError={schedulerProposalsError}
+      schedulerConfirmations={schedulerConfirmations}
+      schedulerConfirmationsError={schedulerConfirmationsError}
     />
   );
 }

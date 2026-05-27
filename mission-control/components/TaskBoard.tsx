@@ -10,6 +10,7 @@ import {
 } from "../lib/taskState";
 import type {
   SchedulerCandidateDiscovery,
+  SchedulerConfirmationReadback,
   SchedulerProposalReadback,
   Task
 } from "../lib/types";
@@ -18,6 +19,10 @@ import {
   SchedulerCandidateList,
   SchedulerCandidateSummary
 } from "./SchedulerCandidatePanel";
+import {
+  SchedulerConfirmationList,
+  SchedulerConfirmationSummary
+} from "./SchedulerConfirmationPanel";
 import {
   SchedulerProposalList,
   SchedulerProposalSummary
@@ -209,13 +214,17 @@ export function TaskBoard({
   schedulerCandidates = null,
   schedulerCandidatesError = null,
   schedulerProposals = null,
-  schedulerProposalsError = null
+  schedulerProposalsError = null,
+  schedulerConfirmations = null,
+  schedulerConfirmationsError = null
 }: {
   tasks: Task[];
   schedulerCandidates?: SchedulerCandidateDiscovery | null;
   schedulerCandidatesError?: string | null;
   schedulerProposals?: SchedulerProposalReadback | null;
   schedulerProposalsError?: string | null;
+  schedulerConfirmations?: SchedulerConfirmationReadback | null;
+  schedulerConfirmationsError?: string | null;
 }) {
   const [activeCategory, setActiveCategory] = useState<FilterCategory>("all");
   const [search, setSearch] = useState("");
@@ -366,6 +375,28 @@ export function TaskBoard({
             <>
               <SchedulerProposalSummary bundle={schedulerProposals} />
               <SchedulerProposalList bundle={schedulerProposals} />
+            </>
+          )}
+        </section>
+
+        <section
+          className="section panel"
+          id="scheduler-confirmations"
+          aria-label="Scheduler Confirmations"
+        >
+          <h2>Scheduler Confirmations</h2>
+          {schedulerConfirmationsError ? (
+            <div className="empty">
+              Scheduler confirmation readback unavailable: {schedulerConfirmationsError}.
+              Read-only confirmation evidence. NOT execution permission.
+              Confirmation is not verifier report. Confirmation is not handoff.
+              Confirmation is not runtime execution. Next gate still required.
+              Mission Control remains read-only.
+            </div>
+          ) : (
+            <>
+              <SchedulerConfirmationSummary bundle={schedulerConfirmations} />
+              <SchedulerConfirmationList bundle={schedulerConfirmations} />
             </>
           )}
         </section>

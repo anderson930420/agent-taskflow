@@ -14,6 +14,12 @@ from agent_taskflow.scheduler_candidate_discovery import (
     DISCOVERY_NOTE,
     DISCOVERY_SAFETY_FLAGS,
 )
+from agent_taskflow.scheduler_confirmation_readback import (
+    CONFIRMATION_READBACK_ITEM_SAFETY_FLAGS,
+    CONFIRMATION_READBACK_NOTE,
+    CONFIRMATION_READBACK_SAFETY_FLAGS,
+    CONFIRMATION_READBACK_SCHEMA_VERSION,
+)
 from agent_taskflow.scheduler_proposal_readback import (
     READBACK_ITEM_SAFETY_FLAGS,
     READBACK_NOTE,
@@ -471,6 +477,106 @@ def scheduler_proposal_readback_to_dict(
     if "filters" in result:
         payload["filters"] = json_safe(result["filters"])
     payload["safety"] = dict(READBACK_SAFETY_FLAGS)
+    for forbidden_key in (
+        "execution_allowed",
+        "action",
+        "actions",
+        "confirm",
+        "run",
+        "execute",
+        "create_handoff",
+        "approve",
+        "merge",
+        "cleanup",
+    ):
+        payload.pop(forbidden_key, None)
+    return payload
+
+
+def scheduler_confirmation_readback_item_to_dict(
+    item: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Normalize one scheduler confirmation readback item for API responses.
+
+    The item-level safety fields are forced so stored evidence can never be
+    serialized as execution permission, a verifier report, a handoff, or
+    runtime execution.
+    """
+    payload = json_safe(dict(item))
+    if not isinstance(payload, dict):
+        return payload  # pragma: no cover - defensive
+
+    payload.setdefault("task_key", item.get("task_key"))
+    payload.setdefault("confirmation_id", item.get("confirmation_id"))
+    payload.setdefault("proposal_id", item.get("proposal_id"))
+    payload.setdefault("proposal_hash", item.get("proposal_hash"))
+    payload.setdefault("proposal_item_id", item.get("proposal_item_id"))
+    payload.setdefault("item_hash", item.get("item_hash"))
+    payload.setdefault(
+        "recommended_command_kind",
+        item.get("recommended_command_kind"),
+    )
+    payload.setdefault(
+        "proposal_artifact_path", item.get("proposal_artifact_path")
+    )
+    payload.setdefault("artifact_path", item.get("artifact_path"))
+    payload.setdefault("artifact_created_at", item.get("artifact_created_at"))
+    payload.setdefault("event_created_at", item.get("event_created_at"))
+    payload.setdefault("event_source", item.get("event_source"))
+    payload.setdefault("event_message", item.get("event_message"))
+    payload.setdefault("schema_version", item.get("schema_version"))
+    payload.setdefault(
+        "confirmation_status", item.get("confirmation_status") or "recorded"
+    )
+    payload.setdefault("missing_evidence", list(item.get("missing_evidence") or []))
+    payload.setdefault(
+        "readback_warnings", list(item.get("readback_warnings") or [])
+    )
+    payload["not_execution_permission"] = True
+    payload["not_verifier_report"] = True
+    payload["not_handoff"] = True
+    payload["not_runtime"] = True
+    payload["requires_next_gate"] = True
+    payload["safety"] = dict(CONFIRMATION_READBACK_ITEM_SAFETY_FLAGS)
+    for forbidden_key in (
+        "execution_allowed",
+        "action",
+        "actions",
+        "confirm",
+        "run",
+        "execute",
+        "create_handoff",
+        "approve",
+        "merge",
+        "cleanup",
+    ):
+        payload.pop(forbidden_key, None)
+    return payload
+
+
+def scheduler_confirmation_readback_to_dict(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Normalize scheduler confirmation readback for JSON-safe API responses."""
+    payload = json_safe(dict(result))
+    if not isinstance(payload, dict):
+        return payload  # pragma: no cover - defensive
+
+    raw_items = result.get("items") or []
+    normalized_items = [
+        scheduler_confirmation_readback_item_to_dict(item)
+        for item in raw_items
+        if isinstance(item, Mapping)
+    ]
+    payload["items"] = normalized_items
+    payload["count"] = len(normalized_items)
+    payload.setdefault("ok", bool(result.get("ok", True)))
+    payload["mode"] = "read_only"
+    payload["schema_version"] = CONFIRMATION_READBACK_SCHEMA_VERSION
+    payload["readback_note"] = CONFIRMATION_READBACK_NOTE
+    if "filters" in result:
+        payload["filters"] = json_safe(result["filters"])
+    payload["safety"] = dict(CONFIRMATION_READBACK_SAFETY_FLAGS)
     for forbidden_key in (
         "execution_allowed",
         "action",

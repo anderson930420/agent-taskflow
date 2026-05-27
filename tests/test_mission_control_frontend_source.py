@@ -60,10 +60,33 @@ class TestRuntimeAuditFrontendSource(unittest.TestCase):
 
     def test_runtime_audits_are_best_effort_in_task_detail_bundle(self):
         self.assertIn("runtimeAudits.ok ? runtimeAudits.data : []", self.api_src)
-        self.assertIn(
-            "[task, runs, artifacts, validations, approvals].find",
+        # Bug-2 hardening: runtimeAudits must remain best-effort and therefore
+        # must NOT appear in getTaskDetailBundle's failed array. Verify the
+        # failed array contents directly rather than matching the exact
+        # source layout.
+        import re
+
+        match = re.search(
+            r"const failed = \[\s*([^\]]+?)\s*\]\.find",
             self.api_src,
         )
+        self.assertIsNotNone(
+            match,
+            "getTaskDetailBundle must declare a `failed` array of critical results",
+        )
+        failed_members = {
+            token.strip()
+            for token in match.group(1).split(",")
+            if token.strip()
+        }
+        self.assertIn("task", failed_members)
+        self.assertIn("runs", failed_members)
+        self.assertIn("artifacts", failed_members)
+        self.assertIn("validations", failed_members)
+        self.assertIn("approvals", failed_members)
+        self.assertNotIn("runtimeAudits", failed_members)
+        self.assertNotIn("schedulerCandidate", failed_members)
+        self.assertNotIn("schedulerProposals", failed_members)
 
     def test_runtime_audit_type_is_defined(self):
         self.assertIn("RuntimeAuditEvent", self.types_src)
@@ -532,6 +555,420 @@ class TestSchedulerProposalVisibilityFrontendSource(unittest.TestCase):
                 self.panel_src,
                 f"SchedulerProposalPanel must not issue mutation requests: {token}",
             )
+
+
+class TestSchedulerConfirmationVisibilityFrontendSource(unittest.TestCase):
+    """Phase K4: Mission Control scheduler confirmation read-only visibility tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(
+            "mission-control/components/SchedulerConfirmationPanel.tsx", "r"
+        ) as f:
+            cls.panel_src = f.read()
+        with open(
+            "mission-control/app/tasks/[taskKey]/page.tsx", "r"
+        ) as f:
+            cls.page_src = f.read()
+        with open("mission-control/components/TaskBoard.tsx", "r") as f:
+            cls.board_src = f.read()
+        with open("mission-control/app/page.tsx", "r") as f:
+            cls.dashboard_src = f.read()
+        with open("mission-control/lib/api.ts", "r") as f:
+            cls.api_src = f.read()
+        with open("mission-control/lib/types.ts", "r") as f:
+            cls.types_src = f.read()
+
+    def _api_function_source(self, name, next_name):
+        start = self.api_src.index(f"export async function {name}")
+        end = self.api_src.index(f"export async function {next_name}", start + 1)
+        return self.api_src[start:end]
+
+    def test_types_define_scheduler_confirmation_readback(self):
+        self.assertIn("SchedulerConfirmationReadbackItem", self.types_src)
+        self.assertIn("SchedulerConfirmationReadback", self.types_src)
+        for token in (
+            "confirmation_id",
+            "proposal_id",
+            "proposal_hash",
+            "proposal_item_id",
+            "item_hash",
+            "recommended_command_kind",
+            "proposal_artifact_path",
+            "artifact_path",
+            "event_created_at",
+            "artifact_created_at",
+            "missing_evidence",
+            "readback_warnings",
+            "not_execution_permission",
+            "not_verifier_report",
+            "not_handoff",
+            "not_runtime",
+            "requires_next_gate",
+        ):
+            self.assertIn(token, self.types_src)
+
+    def test_task_detail_bundle_includes_scheduler_confirmations(self):
+        self.assertIn("schedulerConfirmations", self.types_src)
+        self.assertIn(
+            "schedulerConfirmations: SchedulerConfirmationReadback | null",
+            self.types_src,
+        )
+        self.assertIn("schedulerConfirmations", self.api_src)
+        self.assertIn("getTaskSchedulerConfirmations(taskKey)", self.api_src)
+        # Bug-2 hardening: schedulerConfirmations is treated as a critical
+        # fetch, so its data is assigned from `.data` directly after the
+        # failed-array gate, not via a silent best-effort ternary fallback
+        # to null.
+        self.assertIn(
+            "schedulerConfirmations: schedulerConfirmations.data",
+            self.api_src,
+        )
+        self.assertNotIn(
+            "schedulerConfirmations.ok\n      ? schedulerConfirmations.data\n      : null",
+            self.api_src,
+        )
+
+    def test_task_detail_bundle_failed_array_includes_scheduler_confirmations(self):
+        """Bug-2 hardening: schedulerConfirmations failures must surface as a
+        bundle-level failure, not be silently swallowed."""
+        import re
+
+        match = re.search(
+            r"const failed = \[\s*([^\]]+?)\s*\]\.find",
+            self.api_src,
+        )
+        self.assertIsNotNone(
+            match,
+            "getTaskDetailBundle must declare a `failed` array of critical results",
+        )
+        failed_members = {
+            token.strip()
+            for token in match.group(1).split(",")
+            if token.strip()
+        }
+        self.assertIn(
+            "schedulerConfirmations",
+            failed_members,
+            "schedulerConfirmations must be monitored by the failed array",
+        )
+
+    def test_scheduler_confirmations_remain_get_only_after_hardening(self):
+        """schedulerConfirmations helpers must remain GET-only after the
+        Bug-2 fix; no POST/PATCH/DELETE/PUT helpers may have been added."""
+        list_fn = self._api_function_source(
+            "getSchedulerConfirmations",
+            "getTaskSchedulerConfirmations",
+        )
+        task_fn = self._api_function_source(
+            "getTaskSchedulerConfirmations",
+            "getTaskDetailBundle",
+        )
+        for fn_src in (list_fn, task_fn):
+            self.assertIn("requestJson<SchedulerConfirmationReadback>", fn_src)
+            for token in ("postJson", "POST", "PATCH", "DELETE", "PUT"):
+                self.assertNotIn(token, fn_src)
+
+    def test_no_scheduler_confirmation_mutation_helpers_added(self):
+        """No mutation helpers may exist for scheduler confirmations."""
+        for token in (
+            "createSchedulerConfirmation",
+            "confirmSchedulerProposal",
+            "createSchedulerConfirmationFromProposal",
+            "recordSchedulerConfirmation",
+            "deleteSchedulerConfirmation",
+            "updateSchedulerConfirmation",
+        ):
+            self.assertNotIn(token, self.api_src)
+
+    def test_api_exports_scheduler_confirmation_get_helpers(self):
+        self.assertIn("getSchedulerConfirmations", self.api_src)
+        self.assertIn("getTaskSchedulerConfirmations", self.api_src)
+
+    def test_scheduler_confirmation_get_helpers_use_request_json_only(self):
+        list_fn = self._api_function_source(
+            "getSchedulerConfirmations",
+            "getTaskSchedulerConfirmations",
+        )
+        task_fn = self._api_function_source(
+            "getTaskSchedulerConfirmations",
+            "getTaskDetailBundle",
+        )
+        for fn_src in (list_fn, task_fn):
+            self.assertIn("requestJson<SchedulerConfirmationReadback>", fn_src)
+            self.assertNotIn("postJson", fn_src)
+            self.assertNotIn("POST", fn_src)
+            self.assertNotIn("PATCH", fn_src)
+            self.assertNotIn("DELETE", fn_src)
+
+    def test_scheduler_confirmation_get_helpers_call_k3_routes(self):
+        self.assertIn("/api/scheduler/confirmations", self.api_src)
+        self.assertIn(
+            "/api/tasks/${encodeURIComponent(taskKey)}/scheduler-confirmations",
+            self.api_src,
+        )
+
+    def test_no_mutation_calls_for_scheduler_confirmation_routes(self):
+        for line in self.api_src.splitlines():
+            if "scheduler/confirmations" in line or "scheduler-confirmations" in line:
+                self.assertNotIn("postJson", line)
+                self.assertNotIn("POST", line)
+                self.assertNotIn("PATCH", line)
+                self.assertNotIn("DELETE", line)
+
+    def test_scheduler_confirmation_panel_component_exists(self):
+        self.assertIn("SchedulerConfirmationPanel", self.panel_src)
+        self.assertIn("SchedulerConfirmationSummary", self.panel_src)
+        self.assertIn("SchedulerConfirmationList", self.panel_src)
+        self.assertIn("TaskSchedulerConfirmationPanel", self.panel_src)
+
+    def test_panel_includes_required_read_only_safety_language(self):
+        for phrase in (
+            "NOT execution permission",
+            "Confirmation is not verifier report",
+            "Confirmation is not handoff",
+            "Confirmation is not runtime execution",
+            "Mission Control remains read-only",
+        ):
+            self.assertIn(phrase, self.panel_src)
+
+    def test_panel_displays_required_confirmation_fields(self):
+        for token in (
+            "confirmation_id",
+            "task_key",
+            "proposal_id",
+            "proposal_hash",
+            "proposal_item_id",
+            "item_hash",
+            "recommended_command_kind",
+            "proposal_artifact_path",
+            "artifact_path",
+            "event_created_at",
+            "artifact_created_at",
+            "readback_warnings",
+            "missing_evidence",
+        ):
+            self.assertIn(token, self.panel_src)
+
+    def test_panel_has_no_action_controls_or_mutation_terms(self):
+        for token in (
+            "<button",
+            "<form",
+            "onClick",
+            "onSubmit",
+            "fetch(",
+            "postJson",
+            "POST",
+            "PATCH",
+            "DELETE",
+            "approved_task_runner",
+            "executor",
+            "validators",
+            "GitHub mutation",
+            "approval",
+            "merge",
+            "cleanup",
+        ):
+            self.assertNotIn(
+                token,
+                self.panel_src,
+                f"SchedulerConfirmationPanel must stay read-only: {token}",
+            )
+
+    def test_dashboard_fetches_and_passes_scheduler_confirmations(self):
+        self.assertIn("getSchedulerConfirmations", self.dashboard_src)
+        self.assertIn(
+            "getSchedulerConfirmations({ limit: 20 })",
+            self.dashboard_src,
+        )
+        self.assertIn("schedulerConfirmations", self.dashboard_src)
+        self.assertIn("schedulerConfirmationsError", self.dashboard_src)
+
+    def test_dashboard_renders_scheduler_confirmations_section(self):
+        self.assertIn('id="scheduler-confirmations"', self.board_src)
+        self.assertIn("Scheduler Confirmations", self.board_src)
+        self.assertIn("SchedulerConfirmationSummary", self.board_src)
+        self.assertIn("SchedulerConfirmationList", self.board_src)
+        for phrase in (
+            "Read-only confirmation evidence",
+            "NOT execution permission",
+            "Mission Control remains read-only",
+        ):
+            self.assertIn(phrase, self.board_src)
+
+    def test_task_detail_page_uses_scheduler_confirmation_panel(self):
+        self.assertIn("Scheduler Confirmations", self.page_src)
+        self.assertIn("TaskSchedulerConfirmationPanel", self.page_src)
+        self.assertIn("schedulerConfirmations", self.page_src)
+
+    def test_no_confirmation_creation_helper_names_exist(self):
+        combined = (
+            self.api_src
+            + self.types_src
+            + self.dashboard_src
+            + self.board_src
+            + self.page_src
+            + self.panel_src
+        )
+        for token in (
+            "createSchedulerConfirmation",
+            "confirmSchedulerProposal",
+            "createSchedulerConfirmationFromProposal",
+            "confirm-create-confirmation",
+            "confirm_create_confirmation",
+        ):
+            self.assertNotIn(
+                token,
+                combined,
+                f"K4 frontend must not add creation helper name: {token}",
+            )
+
+
+class TestRuntimeExecutionVisibilityFrontendSource(unittest.TestCase):
+    """Level 6B: Mission Control runtime execution result read-only visibility tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(
+            "mission-control/components/RuntimeExecutionPanel.tsx", "r"
+        ) as f:
+            cls.panel_src = f.read()
+        with open(
+            "mission-control/app/tasks/[taskKey]/page.tsx", "r"
+        ) as f:
+            cls.page_src = f.read()
+        with open("mission-control/lib/api.ts", "r") as f:
+            cls.api_src = f.read()
+        with open("mission-control/lib/types.ts", "r") as f:
+            cls.types_src = f.read()
+
+    def test_runtime_execution_panel_exists(self):
+        self.assertIn("RuntimeExecutionPanel", self.panel_src)
+        self.assertIn("export function RuntimeExecutionPanel", self.panel_src)
+
+    def test_runtime_execution_panel_includes_required_safety_language(self):
+        for phrase in (
+            "Runtime audit evidence is not approval.",
+            "Runtime audit evidence is not merge.",
+            "Runtime audit evidence is not cleanup.",
+            "Human review remains required after runtime.",
+            "Mission Control remains read-only.",
+        ):
+            self.assertIn(
+                phrase,
+                self.panel_src,
+                f"RuntimeExecutionPanel must include safety phrase: {phrase}",
+            )
+
+    def test_runtime_execution_panel_displays_required_fields(self):
+        for token in (
+            "runtime_execution_id",
+            "runtime_preflight_finished",
+            "runtime_execution_started",
+            "runtime_execution_finished",
+            "approved_task_runner_invoked",
+            "runner_ok",
+            "runner_status",
+            "runner_phase",
+            "runtime_execution_artifact_path",
+        ):
+            self.assertIn(
+                token,
+                self.panel_src,
+                f"RuntimeExecutionPanel must display field: {token}",
+            )
+
+    def test_runtime_execution_panel_has_no_action_surface(self):
+        for token in (
+            "<button",
+            "<form",
+            "onClick",
+            "onSubmit",
+            "postJson",
+            "fetch(",
+            "POST",
+            "PATCH",
+            "DELETE",
+            "runRuntime",
+            "executeRuntime",
+            "callApprovedTaskRunner",
+            "createRuntimeExecution",
+            "startRuntimeExecution",
+            "rerunRuntime",
+            "Approve",
+            "Merge",
+            "Cleanup",
+            "Run Now",
+            "Rerun",
+            "Execute",
+        ):
+            self.assertNotIn(
+                token,
+                self.panel_src,
+                f"RuntimeExecutionPanel must not introduce action surface: {token}",
+            )
+
+    def test_runtime_execution_panel_uses_no_approved_task_runner_invocation(self):
+        """approved_task_runner may appear only as a displayed field name, not
+        as a function call or import."""
+        self.assertNotIn("approved_task_runner(", self.panel_src)
+        self.assertNotIn("approvedTaskRunner(", self.panel_src)
+        self.assertNotIn("import approved_task_runner", self.panel_src)
+        self.assertNotIn("from \"approved_task_runner\"", self.panel_src)
+
+    def test_task_detail_page_imports_and_renders_runtime_execution_panel(self):
+        self.assertIn("RuntimeExecutionPanel", self.page_src)
+        self.assertIn(
+            "from \"../../../components/RuntimeExecutionPanel\"",
+            self.page_src,
+        )
+        self.assertIn("<RuntimeExecutionPanel", self.page_src)
+        self.assertIn("Runtime Execution", self.page_src)
+
+    def test_api_runtime_audits_helper_is_get_only(self):
+        """Existing getRuntimeAudits helper must remain GET-only via requestJson."""
+        start = self.api_src.index("export async function getRuntimeAudits")
+        # End at next exported function
+        end = self.api_src.index("export async function ", start + 1)
+        fn_src = self.api_src[start:end]
+        self.assertIn("requestJson<", fn_src)
+        for token in ("postJson", "POST", "PATCH", "DELETE"):
+            self.assertNotIn(
+                token,
+                fn_src,
+                f"getRuntimeAudits must not issue mutation: {token}",
+            )
+
+    def test_no_runtime_mutation_helpers_exist_in_api(self):
+        for token in (
+            "runRuntime",
+            "executeRuntime",
+            "callApprovedTaskRunner",
+            "createRuntimeExecution",
+            "startRuntimeExecution",
+            "rerunRuntime",
+            "approveRuntime",
+            "mergeRuntime",
+            "cleanupRuntime",
+        ):
+            self.assertNotIn(
+                token,
+                self.api_src,
+                f"API client must not expose runtime mutation helper: {token}",
+            )
+
+    def test_no_approved_task_runner_invocation_in_frontend_sources(self):
+        combined = self.panel_src + self.page_src + self.api_src
+        # The literal field name is allowed; an actual call/import is not.
+        self.assertNotIn("approved_task_runner(", combined)
+        self.assertNotIn("import approved_task_runner", combined)
+        self.assertNotIn("from \"approved_task_runner\"", combined)
+
+    def test_runtime_execution_panel_has_empty_state(self):
+        self.assertIn(
+            "No runtime execution evidence recorded",
+            self.panel_src,
+        )
 
 
 class TestResponsiveLayoutCSS(unittest.TestCase):

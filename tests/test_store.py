@@ -174,7 +174,7 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(task.blocked_reason)
         self.assertEqual(task.repo_path, Path("/home/ubuntu/agent-taskflow"))
 
-    def test_task_upsert_updates_existing_task(self) -> None:
+    def test_task_upsert_preserves_existing_status_by_default(self) -> None:
         self.store.upsert_task(self.make_task(status="blocked"))
         self.store.upsert_task(self.make_task(status="waiting_approval"))
 
@@ -182,7 +182,42 @@ class StoreTests(unittest.TestCase):
 
         self.assertIsNotNone(task)
         assert task is not None
+        self.assertEqual(task.status, "blocked")
+
+    def test_task_upsert_can_explicitly_override_existing_status(self) -> None:
+        self.store.upsert_task(self.make_task(status="blocked"))
+        self.store.upsert_task(
+            self.make_task(status="waiting_approval"),
+            preserve_existing_status=False,
+        )
+
+        task = self.store.get_task("AT-0003")
+
+        self.assertIsNotNone(task)
+        assert task is not None
         self.assertEqual(task.status, "waiting_approval")
+
+    def test_task_upsert_preserves_active_statuses_on_reingest(self) -> None:
+        for status in ("waiting_approval", "implementing"):
+            with self.subTest(status=status):
+                task_key = f"AT-{status.upper()}"
+                self.store.upsert_task(self.make_task(task_key, status=status))
+                self.store.upsert_task(self.make_task(task_key, status="queued"))
+
+                task = self.store.get_task(task_key)
+
+                self.assertIsNotNone(task)
+                assert task is not None
+                self.assertEqual(task.status, status)
+
+    def test_new_task_insert_keeps_requested_status(self) -> None:
+        self.store.upsert_task(self.make_task(status="queued"))
+
+        task = self.store.get_task("AT-0003")
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "queued")
 
     def test_invalid_task_status_is_rejected_before_write(self) -> None:
         with self.assertRaisesRegex(ValueError, "Invalid task status"):
@@ -268,6 +303,66 @@ class StoreTests(unittest.TestCase):
         assert task is not None
         self.assertEqual(task.status, "queued")
         self.assertIsNone(task.blocked_reason)
+
+    def test_connect_sets_busy_timeout(self) -> None:
+        with store_module.connect(self.db_path) as conn:
+            timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+
+        self.assertEqual(timeout, store_module.SQLITE_BUSY_TIMEOUT_MS)
+
+    def test_connect_enables_wal_for_file_backed_db(self) -> None:
+        with store_module.connect(self.db_path) as conn:
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+
+        self.assertEqual(journal_mode.lower(), "wal")
+
+    def test_lineage_consumption_events_are_filterable(self) -> None:
+        self.store.upsert_task(self.make_task(status="queued"))
+        consumed_path = Path("/tmp/AT-0003/scheduler_confirmation.json")
+        consumer_path = Path("/tmp/AT-0003/verifier_report.json")
+
+        self.store.record_lineage_consumed(
+            "AT-0003",
+            "scheduler_confirmation_consumed",
+            "unit-test",
+            consumed_artifact_type="scheduler_confirmation",
+            consumed_artifact_path=consumed_path,
+            consumer_artifact_type="scheduler_confirmation_verifier_report",
+            consumer_artifact_path=consumer_path,
+            confirmation_id="confirmation-1",
+            verifier_report_id="verifier-1",
+            proposal_hash="proposal-hash",
+            proposal_item_id="item-1",
+            item_hash="item-hash",
+        )
+
+        self.assertTrue(
+            self.store.lineage_consumed(
+                "AT-0003",
+                "scheduler_confirmation_consumed",
+                consumed_artifact_type="scheduler_confirmation",
+                consumed_artifact_path=consumed_path,
+                confirmation_id="confirmation-1",
+                proposal_hash="proposal-hash",
+                proposal_item_id="item-1",
+                item_hash="item-hash",
+            )
+        )
+        events = self.store.list_lineage_consumption_events(
+            "AT-0003",
+            "scheduler_confirmation_consumed",
+            consumed_artifact_type="scheduler_confirmation",
+            consumed_artifact_path=consumed_path,
+            confirmation_id="confirmation-1",
+        )
+
+        self.assertEqual(len(events), 1)
+        payload = events[0]["payload"]
+        self.assertEqual(payload["consumer_artifact_path"], str(consumer_path))
+        self.assertTrue(payload["single_use_enforced"])
+        self.assertTrue(payload["not_approval"])
+        self.assertTrue(payload["not_merge"])
+        self.assertTrue(payload["not_cleanup"])
 
     def test_dispatcher_store_events_can_record_executor_run(self) -> None:
         self.store.upsert_task(self.make_task())
@@ -970,6 +1065,189 @@ class StoreExecutorFieldsTests(unittest.TestCase):
         self.assertIsNotNone(task)
         assert task is not None
         self.assertEqual(task.tools, [])
+
+
+class PayloadMarkerLikeEscapeTests(unittest.TestCase):
+    """Hardening regression tests for the SQLite LIKE payload marker filter.
+
+    Markers used throughout the store (e.g. ``executor_run_started``,
+    ``validation_result``, ``approval_decision``) contain ``_`` which is a
+    SQLite LIKE single-character wildcard. Without ``ESCAPE`` handling, a
+    marker would match payload text where ``_`` happens to fall in a
+    different position. These tests verify the helper escapes those
+    wildcards so SQL-side filtering matches literally.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp.name) / "state.db"
+        self.store = TaskMirrorStore(self.db_path)
+        self.store.init_db()
+        self.store.upsert_task(
+            TaskRecord(
+                task_key="AT-LIKE",
+                project="agent-taskflow",
+                status="queued",
+                repo_path="/home/ubuntu/agent-taskflow",
+            )
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_escape_helper_escapes_like_metacharacters(self) -> None:
+        """Underscore, percent, and backslash receive escape prefixes."""
+        self.assertEqual(
+            store_module._escape_like_pattern("runtime_execution_started"),
+            r"runtime\_execution\_started",
+        )
+        self.assertEqual(
+            store_module._escape_like_pattern("100%"),
+            r"100\%",
+        )
+        self.assertEqual(
+            store_module._escape_like_pattern("a\\b"),
+            r"a\\b",
+        )
+        self.assertEqual(
+            store_module._escape_like_pattern("ordinary-marker"),
+            "ordinary-marker",
+        )
+
+    def test_underscore_marker_does_not_match_arbitrary_char_payload(self) -> None:
+        """Marker ``executor_run_started`` must NOT match
+        ``executorXrunYstarted`` even though ``_`` would normally act as a
+        single-character LIKE wildcard."""
+        # Inject a fabricated payload whose literal string contains underscore
+        # wildcards. Use a non-overlapping event kind so kind-based
+        # post-filtering does not hide the SQL-side miss.
+        self.store.record_task_event(
+            "AT-LIKE",
+            "note",
+            "test",
+            message="fabricated decoy payload",
+            payload={"kind": "fabricated_wildcard_decoy_started"},
+        )
+        # Exact marker row.
+        self.store.record_task_event(
+            "AT-LIKE",
+            "note",
+            "dispatcher",
+            message="real start",
+            payload={
+                "kind": "executor_run_started",
+                "run_id": "run-real",
+                "executor": "noop",
+            },
+        )
+        self.store.finish_executor_run(
+            "AT-LIKE",
+            "run-real",
+            executor="noop",
+            status="completed",
+            exit_code=0,
+        )
+
+        events = self.store._list_task_events_filtered(
+            "AT-LIKE",
+            event_types=("note",),
+            payload_markers=("executor_run_started",),
+        )
+
+        # Without LIKE escaping, the decoy payload containing
+        # ``fabricated_wildcard_decoy_started`` is exposed to single-character
+        # underscore wildcards. With escaping, it cannot match the literal
+        # marker ``executor_run_started``.
+        payloads = [event.payload_json or "" for event in events]
+        for payload in payloads:
+            self.assertNotIn("fabricated_wildcard_decoy_started", payload)
+
+        # The legitimate marker row still surfaces.
+        self.assertTrue(
+            any("executor_run_started" in (payload or "") for payload in payloads),
+            "Exact underscore marker should still match",
+        )
+
+    def test_percent_in_marker_is_treated_literally(self) -> None:
+        """A marker containing ``%`` must not act as a multi-character
+        wildcard. With escaping, the marker matches only the literal
+        substring."""
+        self.store.record_task_event(
+            "AT-LIKE",
+            "note",
+            "test",
+            message="literal percent marker",
+            payload={"kind": "progress_100%_milestone"},
+        )
+        self.store.record_task_event(
+            "AT-LIKE",
+            "note",
+            "test",
+            message="distractor row",
+            payload={"kind": "progress_99_milestone"},
+        )
+
+        events = self.store._list_task_events_filtered(
+            "AT-LIKE",
+            event_types=("note",),
+            payload_markers=("100%",),
+        )
+
+        payloads = [event.payload_json or "" for event in events]
+        # Literal-percent marker matches only the row that contains the
+        # exact ``100%`` substring.
+        self.assertTrue(
+            any("progress_100%_milestone" in (payload or "") for payload in payloads),
+            "Marker with literal % should still match exact substring",
+        )
+        for payload in payloads:
+            self.assertNotIn("progress_99_milestone", payload)
+
+    def test_normal_markers_still_round_trip(self) -> None:
+        """Markers that contain neither ``%`` nor ``_`` are not affected by
+        escaping."""
+        self.store.record_task_event(
+            "AT-LIKE",
+            "note",
+            "dispatcher",
+            message="ordinary",
+            payload={"kind": "ordinary-marker"},
+        )
+        events = self.store._list_task_events_filtered(
+            "AT-LIKE",
+            event_types=("note",),
+            payload_markers=("ordinary-marker",),
+        )
+        self.assertEqual(len(events), 1)
+
+    def test_list_executor_runs_only_returns_exact_marker_rows(self) -> None:
+        """Integration through the public ``list_executor_runs`` method:
+        decoy payload events with wildcard-like marker variants must not
+        leak into the executor run reconstruction."""
+        # Decoy payload that would match the unescaped LIKE wildcard pattern
+        # ``%executor_run_started%`` (a single-char wildcard ``_`` is
+        # otherwise permissive).
+        self.store.record_task_event(
+            "AT-LIKE",
+            "note",
+            "test",
+            message="decoy",
+            payload={"kind": "executorXrunXstarted_decoy", "run_id": "decoy-1"},
+        )
+        # Legitimate executor run lifecycle.
+        run_id = self.store.create_executor_run("AT-LIKE", "noop")
+        self.store.finish_executor_run(
+            "AT-LIKE",
+            run_id,
+            executor="noop",
+            status="completed",
+            exit_code=0,
+        )
+
+        runs = self.store.list_executor_runs("AT-LIKE")
+        run_ids = {run["run_id"] for run in runs}
+        self.assertIn(run_id, run_ids)
+        self.assertNotIn("decoy-1", run_ids)
 
 
 if __name__ == "__main__":

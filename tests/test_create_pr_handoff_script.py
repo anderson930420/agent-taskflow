@@ -180,15 +180,10 @@ class CreatePrHandoffScriptTests(unittest.TestCase):
         self.assertTrue(Path(payload["markdown_path"]).is_file())
 
     def test_cli_failure_exits_nonzero_with_clear_json_message(self) -> None:
-        self.store.upsert_task(
-            TaskRecord(
-                task_key="AT-CLI-HANDOFF",
-                project="agent-taskflow",
-                status="queued",
-                repo_path=self.repo,
-                artifact_dir=self.artifact_dir,
-                title="CLI handoff task",
-            )
+        self.store.update_task_status(
+            "AT-CLI-HANDOFF",
+            "queued",
+            source="test",
         )
 
         completed = self._run_script()

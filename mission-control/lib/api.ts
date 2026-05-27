@@ -14,6 +14,7 @@ import type {
   RejectRequest,
   RuntimeAuditEvent,
   SchedulerCandidateDiscovery,
+  SchedulerConfirmationReadback,
   SchedulerProposalReadback,
   StartTaskRequest,
   Task,
@@ -310,6 +311,29 @@ export async function getTaskSchedulerProposals(
   );
 }
 
+export async function getSchedulerConfirmations(params?: {
+  task_key?: string;
+  limit?: number;
+}): Promise<ApiResult<SchedulerConfirmationReadback>> {
+  const search = new URLSearchParams();
+  if (params?.task_key) search.set("task_key", params.task_key);
+  if (typeof params?.limit === "number") {
+    search.set("limit", String(params.limit));
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<SchedulerConfirmationReadback>(
+    `/api/scheduler/confirmations${suffix}`
+  );
+}
+
+export async function getTaskSchedulerConfirmations(
+  taskKey: string
+): Promise<ApiResult<SchedulerConfirmationReadback>> {
+  return requestJson<SchedulerConfirmationReadback>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/scheduler-confirmations`
+  );
+}
+
 export async function getTaskDetailBundle(
   taskKey: string
 ): Promise<ApiResult<TaskDetailBundle>> {
@@ -321,7 +345,8 @@ export async function getTaskDetailBundle(
     approvals,
     runtimeAudits,
     schedulerCandidate,
-    schedulerProposals
+    schedulerProposals,
+    schedulerConfirmations
   ] = await Promise.all([
     getTask(taskKey),
     getExecutorRuns(taskKey),
@@ -330,12 +355,18 @@ export async function getTaskDetailBundle(
     getApprovals(taskKey),
     getRuntimeAudits(taskKey),
     getTaskSchedulerCandidate(taskKey),
-    getTaskSchedulerProposals(taskKey)
+    getTaskSchedulerProposals(taskKey),
+    getTaskSchedulerConfirmations(taskKey)
   ]);
 
-  const failed = [task, runs, artifacts, validations, approvals].find(
-    (result) => !result.ok
-  );
+  const failed = [
+    task,
+    runs,
+    artifacts,
+    validations,
+    approvals,
+    schedulerConfirmations
+  ].find((result) => !result.ok);
 
   if (failed && !failed.ok) {
     return failed;
@@ -346,7 +377,8 @@ export async function getTaskDetailBundle(
     runs.ok &&
     artifacts.ok &&
     validations.ok &&
-    approvals.ok
+    approvals.ok &&
+    schedulerConfirmations.ok
   ) {
     const runtimeAuditEvents = runtimeAudits.ok ? runtimeAudits.data : [];
     const candidateBundle = schedulerCandidate.ok
@@ -366,7 +398,8 @@ export async function getTaskDetailBundle(
         approvals: approvals.data,
         runtimeAudits: runtimeAuditEvents,
         schedulerCandidate: candidateBundle,
-        schedulerProposals: proposalBundle
+        schedulerProposals: proposalBundle,
+        schedulerConfirmations: schedulerConfirmations.data
       }
     };
   }
