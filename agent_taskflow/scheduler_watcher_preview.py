@@ -149,6 +149,7 @@ def build_scheduler_watcher_preview(
 
     candidates: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    blocked_backlog: list[dict[str, Any]] = []
     summary = _empty_summary()
 
     for item in discovery.get("candidates") or []:
@@ -175,9 +176,12 @@ def build_scheduler_watcher_preview(
                     warnings=decision["warnings"],
                 )
             )
+            if item.get("status") == BLOCKED_STATUS:
+                blocked_backlog.append(_blocked_backlog_item(item))
             _increment_skip_summary(summary, decision["reason"])
 
     summary["would_run_count"] = len(candidates)
+    summary["blocked_backlog_count"] = len(blocked_backlog)
 
     return {
         "ok": True,
@@ -188,8 +192,10 @@ def build_scheduler_watcher_preview(
         "filters": _filters(request),
         "candidate_count": len(candidates),
         "skipped_count": len(skipped),
+        "blocked_backlog_count": len(blocked_backlog),
         "candidates": candidates,
         "skipped": skipped,
+        "blocked_backlog": blocked_backlog,
         "summary": summary,
         "safety": dict(WATCHER_PREVIEW_SAFETY_FLAGS),
     }
@@ -313,12 +319,40 @@ def _skipped_item(
     reason: str,
     warnings: list[str],
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "task_key": item.get("task_key"),
         "status": item.get("status"),
         "would_run": False,
         "reason": reason,
         "warnings": warnings,
+    }
+    blocked_reason = item.get("blocked_reason")
+    if blocked_reason:
+        payload["blocked_reason"] = blocked_reason
+    return payload
+
+
+def _blocked_backlog_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_key": item.get("task_key"),
+        "project": item.get("project"),
+        "title": item.get("title"),
+        "status": item.get("status"),
+        "recommended_command_kind": item.get("recommended_command_kind"),
+        "blocked_reason": item.get("blocked_reason"),
+        "would_run": False,
+        "reason": "blocked",
+        "required_operator_action": "inspect_manually",
+        "recovery_hint": (
+            "Inspect the blocker, repair the underlying issue, then use an "
+            "explicit operator workflow to move the task out of blocked state."
+        ),
+        "safety": {
+            "preview_only": True,
+            "executed_now": False,
+            "status_changed_now": False,
+            "github_mutated_now": False,
+        },
     }
 
 
@@ -341,6 +375,7 @@ def _empty_summary() -> dict[str, Any]:
     return {
         "would_run_count": 0,
         "blocked_count": 0,
+        "blocked_backlog_count": 0,
         "waiting_approval_count": 0,
         "completed_count": 0,
         "not_ready_count": 0,
