@@ -40,6 +40,11 @@ from agent_taskflow.github_issue_one_task_lock import (
     default_github_issue_one_task_lock_path,
 )
 from agent_taskflow.models import require_absolute_path
+from agent_taskflow.one_shot_task_pipeline import (
+    OneShotTaskPipelineError,
+    OneShotTaskPipelineRequest,
+    run_one_shot_task_pipeline,
+)
 from agent_taskflow.scheduler_watcher_one_task import (
     SchedulerWatcherOneTaskError,
     SchedulerWatcherOneTaskRequest,
@@ -58,7 +63,17 @@ _FAILED_STAGE_CONFIRMATION_FLAGS = "confirmation_flags"
 _FAILED_STAGE_SELECTION = "selection"
 _FAILED_STAGE_INGESTION = "ingestion"
 _FAILED_STAGE_WATCHER = "watcher"
+_FAILED_STAGE_EXECUTION = "execution"
 _FAILED_STAGE_LOCK = "lock"
+
+_PUBLICATION_SKIPPED: dict[str, Any] = {
+    "skipped": True,
+    "reason": "publish_after_execution_false",
+    "next_operator_action": (
+        "run explicit task-to-draft-pr publication workflow if publication "
+        "is desired"
+    ),
+}
 
 _CONFIRMATION_FLAGS: tuple[tuple[str, str], ...] = (
     ("confirm_ingest_issue", "--confirm-ingest-issue"),
@@ -106,6 +121,7 @@ class GitHubIssueOneTaskAutomationRequest:
     remote: str = "origin"
     base_branch: str | None = None
     draft: bool = True
+    publish_after_execution: bool = True
 
     lock_path: Path | None = None
     fail_if_locked: bool = True
@@ -435,6 +451,18 @@ def run_github_issue_one_task_automation(
 
     failure_registry.clear_failure(repo=request.repo, issue_number=selected_issue_number)
 
+    if not request.publish_after_execution:
+        return _run_execution_only(
+            request,
+            discovery=discovery,
+            selected_issue=selected_issue,
+            ingestion=ingestion,
+            selected_task_key=selected_task_key,
+            selection=selection,
+            recommended_candidates=recommended_candidates,
+            approved_task_runner_fn=approved_task_runner_fn,
+        )
+
     try:
         watcher = run_scheduler_watcher_one_task(
             SchedulerWatcherOneTaskRequest(
@@ -523,6 +551,105 @@ def run_github_issue_one_task_automation(
             "reason": selection.get("reason"),
             "candidate_count": len(recommended_candidates),
         },
+    )
+
+
+def _run_execution_only(
+    request: GitHubIssueOneTaskAutomationRequest,
+    *,
+    discovery: dict[str, Any],
+    selected_issue: dict[str, Any],
+    ingestion: dict[str, Any],
+    selected_task_key: str | None,
+    selection: dict[str, Any],
+    recommended_candidates: list[dict[str, Any]],
+    approved_task_runner_fn: Callable[..., dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Run execution-only one-shot pipeline without PR publication.
+
+    This stops after the one-task pipeline reaches ``waiting_approval``. It
+    never calls the scheduler watcher, branch push, or draft PR helpers, so no
+    GitHub mutation, branch push, or draft PR can happen on this path. Explicit
+    publication remains the separate task-to-draft-PR workflow.
+    """
+
+    try:
+        execution = run_one_shot_task_pipeline(
+            OneShotTaskPipelineRequest(
+                db_path=request.db_path,
+                artifact_root=request.artifact_root,
+                task_key=selected_task_key,
+                dry_run=False,
+                confirm_run_one_shot_pipeline=True,
+                operator=request.operator,
+                operator_note=request.operator_note,
+                resume_existing=True,
+                recommended_command_kind=None,
+            ),
+            approved_task_runner_fn=approved_task_runner_fn,
+        )
+    except (OneShotTaskPipelineError, ValueError) as exc:
+        return _failure_response(
+            request,
+            status="execution_failed",
+            failed_stage=_FAILED_STAGE_EXECUTION,
+            reasons=[str(exc)],
+            discovery=discovery,
+            selected_issue=selected_issue,
+            ingestion=ingestion,
+            watcher=None,
+            issue_ingested=_ingestion_wrote(ingestion),
+            selected_task_key=selected_task_key,
+            publication=dict(_PUBLICATION_SKIPPED),
+        )
+
+    execution_safety = execution.get("safety") or {}
+    safety = _safety(
+        dry_run=False,
+        discovery_called=True,
+        issue_ingested=_ingestion_wrote(ingestion),
+        watcher_called=False,
+        approved_task_runner_called=bool(
+            execution_safety.get("approved_task_runner_called")
+        ),
+        github_mutated=False,
+        branch_pushed=False,
+        draft_pr_created=False,
+    )
+
+    if execution.get("ok") is not True:
+        return _failure_response(
+            request,
+            status="execution_failed",
+            failed_stage=_FAILED_STAGE_EXECUTION,
+            reasons=list(execution.get("reasons") or ["execution_not_ok"]),
+            discovery=discovery,
+            selected_issue=selected_issue,
+            ingestion=ingestion,
+            watcher=None,
+            issue_ingested=_ingestion_wrote(ingestion),
+            selected_task_key=selected_task_key,
+            safety=safety,
+            execution=execution,
+            publication=dict(_PUBLICATION_SKIPPED),
+        )
+
+    return _success_response(
+        request,
+        status="execution_completed",
+        discovery=discovery,
+        selected_issue=selected_issue,
+        ingestion=ingestion,
+        watcher=None,
+        selected_task_key=selected_task_key,
+        safety=safety,
+        selection={
+            "would_select_issue": True,
+            "reason": selection.get("reason"),
+            "candidate_count": len(recommended_candidates),
+        },
+        execution=execution,
+        publication=dict(_PUBLICATION_SKIPPED),
     )
 
 
@@ -627,6 +754,8 @@ def _success_response(
     selected_task_key: str | None,
     safety: dict[str, Any],
     selection: dict[str, Any] | None = None,
+    execution: dict[str, Any] | None = None,
+    publication: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = _base_response(
         request,
@@ -641,6 +770,10 @@ def _success_response(
     )
     if selection is not None:
         payload["selection"] = selection
+    if execution is not None:
+        payload["execution"] = execution
+    if publication is not None:
+        payload["publication"] = publication
     return payload
 
 
@@ -660,6 +793,8 @@ def _failure_response(
     safety: dict[str, Any] | None = None,
     ingestion_failure: dict[str, Any] | None = None,
     lock: dict[str, Any] | None = None,
+    execution: dict[str, Any] | None = None,
+    publication: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = _base_response(
         request,
@@ -684,6 +819,10 @@ def _failure_response(
         payload["ingestion_failure"] = ingestion_failure
     if lock is not None:
         payload["lock"] = lock
+    if execution is not None:
+        payload["execution"] = execution
+    if publication is not None:
+        payload["publication"] = publication
     return payload
 
 

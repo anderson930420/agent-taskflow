@@ -222,6 +222,100 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertTrue(safety["branch_pushed"])
         self.assertTrue(safety["draft_pr_created"])
 
+    def test_confirmed_tick_defaults_to_execution_only(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
+            seen["request"] = request
+            return {
+                "ok": True,
+                "status": "execution_completed",
+                "mode": "confirmed",
+                "repo": request.repo,
+                "selected_task_key": "AT-GH-704",
+                "safety": {
+                    "discovery_called": True,
+                    "issue_ingested": True,
+                    "watcher_called": False,
+                    "approved_task_runner_called": True,
+                    "github_mutated": False,
+                    "branch_pushed": False,
+                    "draft_pr_created": False,
+                },
+                "publication": {
+                    "skipped": True,
+                    "reason": "publish_after_execution_false",
+                },
+            }
+
+        with mock.patch(
+            "agent_taskflow.github_issue_one_task_scheduler_tick."
+            "run_github_issue_one_task_automation",
+            side_effect=fake_automation,
+        ):
+            result = run_github_issue_one_task_scheduler_tick(
+                self.request(confirmed=True)
+            )
+
+        # Scheduler confirmed tick is execution-only by default.
+        self.assertFalse(seen["request"].publish_after_execution)
+        self.assertEqual(result["status"], "execution_completed")
+        self.assertFalse(result["publication_config"]["publish_after_execution"])
+        self.assertEqual(result["publication_config"]["mode"], "execution_only")
+        self.assertIn(
+            "task-to-draft-pr",
+            result["publication_config"]["next_operator_action"],
+        )
+        safety = result["safety"]
+        self.assertFalse(safety["publish_after_execution"])
+        self.assertTrue(safety["approved_task_runner_called"])
+        self.assertFalse(safety["watcher_called"])
+        self.assertFalse(safety["github_mutated"])
+        self.assertFalse(safety["branch_pushed"])
+        self.assertFalse(safety["draft_pr_created"])
+
+    def test_confirmed_tick_publish_after_execution_opt_in_passthrough(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
+            seen["request"] = request
+            return {
+                "ok": True,
+                "status": "completed_one_task",
+                "mode": "confirmed",
+                "repo": request.repo,
+                "selected_task_key": "AT-GH-705",
+                "safety": {
+                    "discovery_called": True,
+                    "issue_ingested": True,
+                    "watcher_called": True,
+                    "approved_task_runner_called": True,
+                    "github_mutated": True,
+                    "branch_pushed": True,
+                    "draft_pr_created": True,
+                },
+            }
+
+        with mock.patch(
+            "agent_taskflow.github_issue_one_task_scheduler_tick."
+            "run_github_issue_one_task_automation",
+            side_effect=fake_automation,
+        ):
+            result = run_github_issue_one_task_scheduler_tick(
+                self.request(confirmed=True, publish_after_execution=True)
+            )
+
+        # Explicit opt-in forwards to the publication path.
+        self.assertTrue(seen["request"].publish_after_execution)
+        self.assertEqual(result["status"], "completed_one_task")
+        self.assertTrue(result["publication_config"]["publish_after_execution"])
+        self.assertEqual(result["publication_config"]["mode"], "publication")
+        self.assertIsNone(result["publication_config"]["next_operator_action"])
+        safety = result["safety"]
+        self.assertTrue(safety["publish_after_execution"])
+        self.assertTrue(safety["branch_pushed"])
+        self.assertTrue(safety["draft_pr_created"])
+
     def test_confirmed_tick_builds_configured_approved_runner(self) -> None:
         seen: dict[str, Any] = {}
 

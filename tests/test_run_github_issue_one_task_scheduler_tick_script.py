@@ -109,6 +109,7 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
             "--remote",
             "--base-branch",
             "--confirmed",
+            "--publish-after-execution",
             "--executor",
             "--validator",
             "--worktree-root",
@@ -240,6 +241,50 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
         self.assertEqual(request.worktree_root, self.worktree_root)
         self.assertEqual(request.command, ("python", "-m", "pytest"))
         self.assertFalse(request.approved_task_preflight)
+
+    def test_confirmed_defaults_to_execution_only(self) -> None:
+        payload = {
+            "ok": True,
+            "status": "execution_completed",
+            "mode": "confirmed",
+            "publication_config": {
+                "publish_after_execution": False,
+                "mode": "execution_only",
+            },
+            "safety": {"dry_run": False, "confirmed": True},
+        }
+
+        rc, emitted, request = self.invoke_with_fake_run(
+            ["--confirmed", "--json"],
+            payload,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(emitted["publication_config"]["mode"], "execution_only")
+        self.assertTrue(request.confirmed)
+        self.assertFalse(request.publish_after_execution)
+
+    def test_publish_after_execution_flag_is_passed_to_request(self) -> None:
+        payload = {
+            "ok": True,
+            "status": "completed_one_task",
+            "mode": "confirmed",
+            "publication_config": {
+                "publish_after_execution": True,
+                "mode": "publication",
+            },
+            "safety": {"dry_run": False, "confirmed": True},
+        }
+
+        rc, emitted, request = self.invoke_with_fake_run(
+            ["--confirmed", "--publish-after-execution", "--json"],
+            payload,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(emitted["publication_config"]["mode"], "publication")
+        self.assertTrue(request.confirmed)
+        self.assertTrue(request.publish_after_execution)
 
     def test_script_returns_nonzero_for_not_ok_payload(self) -> None:
         payload = {

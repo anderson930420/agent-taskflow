@@ -16,6 +16,7 @@ stops.
 acquire non-overlap lock
 -> run github_issue_one_task_automation once
 -> process at most one GitHub Issue / one task
+-> (confirmed default) execute one-shot pipeline to waiting_approval and stop
 -> release lock
 -> stop
 ```
@@ -81,9 +82,19 @@ to `run_github_issue_one_task_automation`:
 The service or cron entry does not need to list every lower-level confirmation
 flag. The scheduler-level `--confirmed` flag is the controlled preset.
 
-Confirmed mode processes at most one eligible GitHub Issue, runs at most one
-local task through the one-task watcher, creates at most one draft PR through
-the existing confirmed path, and stops.
+Confirmed mode is execution-only by default. It processes at most one eligible
+GitHub Issue, ingests it, and runs at most one local task through the one-shot
+task pipeline (proposal -> confirmation -> verifier report -> handoff ->
+approved runner -> validators) until the task reaches `waiting_approval`, then
+stops. By default it does not call the scheduler watcher, does not prepare a
+PR, does not push a branch, and does not create a draft PR. PR publication
+readiness is a separate concern, so a publication-gate failure can no longer
+turn a successful execution into an overall `ok=false` tick.
+
+A successful execution-only tick returns `status=execution_completed` with the
+one-shot execution evidence under `automation.execution` and a
+`publication.skipped=true` marker. Publication remains the explicit, separate
+`scripts/run_task_to_draft_pr_pipeline.py` workflow.
 
 Example:
 
@@ -98,6 +109,29 @@ PYTHONPATH=. .venv/bin/python3 scripts/run_github_issue_one_task_scheduler_tick.
   --json
 ```
 
+## Publication Opt-In
+
+Publication is opt-in and off by default for the scheduler confirmed tick:
+
+```text
+--publish-after-execution
+```
+
+When this flag is present, the confirmed tick forwards
+`publish_after_execution=True` to the automation, which restores the existing
+watcher + task-to-draft-PR publication path (prepare PR, push branch, create
+draft PR). When the flag is omitted, the tick stays execution-only.
+
+The result includes a `publication_config` block reporting:
+
+- `publish_after_execution` (the requested mode)
+- `mode` (`execution_only` or `publication`)
+- `next_operator_action` (publication guidance when execution-only)
+
+No merge, approval, or cleanup flag is exposed. Branch push and draft PR
+creation only happen through this explicit opt-in or through the separate
+`scripts/run_task_to_draft_pr_pipeline.py` workflow.
+
 ## Safety Boundary
 
 Human Review and Human Merge remain final gates. The scheduler tick does not
@@ -111,6 +145,7 @@ The result safety block reports:
 - `one_issue_only=True`
 - `one_task_only=True`
 - lock acquisition and contention state
+- `publish_after_execution` (execution-only when `False`)
 - nested automation safety flags for discovery, ingestion, watcher, runner,
   branch push, and draft PR creation
 - `approved=False`
