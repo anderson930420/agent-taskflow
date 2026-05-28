@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from agent_taskflow.dispatcher import DEFAULT_VALIDATORS  # noqa: E402
 from agent_taskflow.github_issue_one_task_scheduler_tick import (  # noqa: E402
     GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SCHEMA_VERSION,
     GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SOURCE,
@@ -23,13 +24,23 @@ from agent_taskflow.github_issue_one_task_scheduler_tick import (  # noqa: E402
 )
 
 
+def _parse_validators(values: list[str] | None) -> tuple[str, ...]:
+    if not values:
+        return DEFAULT_VALIDATORS
+    validators = tuple(value.strip() for value in values if value.strip())
+    if not validators:
+        raise argparse.ArgumentTypeError("validator must not be empty")
+    return validators
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run one scheduled GitHub Issue one-task tick under a non-overlap "
             "lock. Dry-run is the default. --confirmed applies the controlled "
             "lower-level confirmation preset, processes at most one issue/task, "
-            "and stops."
+            "and stops. In confirmed mode, --executor wires the approved task "
+            "runner configuration into runtime execution."
         )
     )
     parser.add_argument("--repo", required=True)
@@ -45,6 +56,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remote", default="origin")
     parser.add_argument("--base-branch", default=None)
     parser.add_argument("--confirmed", action="store_true")
+    parser.add_argument(
+        "--executor",
+        default=None,
+        help=(
+            "Approved-task executor to use in confirmed mode, for example "
+            "noop, shell, pi, or opencode. Omit for dry-run or for a safe "
+            "confirmed preflight that stops before approved_task_runner."
+        ),
+    )
+    parser.add_argument(
+        "--validator",
+        action="append",
+        dest="validators",
+        help="Validator name for approved task execution. May be repeated.",
+    )
+    parser.add_argument(
+        "--worktree-root",
+        default=None,
+        help="Root directory for isolated approved-task worktrees.",
+    )
+    parser.add_argument(
+        "--command",
+        nargs="+",
+        help="Shell command to run when --executor shell is selected.",
+    )
+    preflight_group = parser.add_mutually_exclusive_group()
+    preflight_group.add_argument(
+        "--approved-task-preflight",
+        dest="approved_task_preflight",
+        action="store_true",
+        help="Run approved-task preflight before executor dispatch. This is the default.",
+    )
+    preflight_group.add_argument(
+        "--skip-approved-task-preflight",
+        dest="approved_task_preflight",
+        action="store_false",
+        help="Skip approved-task preflight before executor dispatch.",
+    )
+    parser.set_defaults(approved_task_preflight=True)
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -77,9 +127,18 @@ def main(argv: list[str] | None = None) -> int:
             remote=args.remote,
             base_branch=args.base_branch,
             draft=True,
+            executor=args.executor,
+            validators=_parse_validators(args.validators),
+            worktree_root=(
+                Path(args.worktree_root).expanduser()
+                if args.worktree_root is not None
+                else None
+            ),
+            approved_task_preflight=bool(args.approved_task_preflight),
+            command=tuple(args.command) if args.command is not None else None,
         )
         payload = run_github_issue_one_task_scheduler_tick(request)
-    except (ValueError, GitHubIssueOneTaskSchedulerTickError) as exc:
+    except (ValueError, argparse.ArgumentTypeError, GitHubIssueOneTaskSchedulerTickError) as exc:
         payload = _error_payload(
             str(exc),
             dry_run=dry_run,
@@ -132,6 +191,7 @@ def _error_payload(
             "lock_contended": False,
             "dry_run": dry_run,
             "confirmed": confirmed,
+            "runner_configured": False,
             "automation_called": False,
             "discovery_called": False,
             "issue_ingested": False,
