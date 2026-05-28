@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -31,6 +32,15 @@ def _parse_validators(values: list[str] | None) -> tuple[str, ...]:
     if not validators:
         raise argparse.ArgumentTypeError("validator must not be empty")
     return validators
+
+
+def _parse_command(value: str | None) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    command = tuple(shlex.split(value))
+    if not command:
+        raise ValueError("command must not be empty when provided")
+    return command
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,8 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--command",
-        nargs="+",
-        help="Shell command to run when --executor shell is selected.",
+        default=None,
+        help=(
+            "Shell command string to run when --executor shell is selected, "
+            "for example: --command 'python -m pytest'."
+        ),
     )
     preflight_group = parser.add_mutually_exclusive_group()
     preflight_group.add_argument(
@@ -135,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
                 else None
             ),
             approved_task_preflight=bool(args.approved_task_preflight),
-            command=tuple(args.command) if args.command is not None else None,
+            command=_parse_command(args.command),
         )
         payload = run_github_issue_one_task_scheduler_tick(request)
     except (ValueError, argparse.ArgumentTypeError, GitHubIssueOneTaskSchedulerTickError) as exc:
