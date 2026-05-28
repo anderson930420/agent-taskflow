@@ -1,11 +1,10 @@
-"""Scheduled one-task tick for GitHub Issue automation.
+"""Scheduled, locked one-task tick for GitHub Issue automation.
 
-This module wraps the existing one-shot GitHub Issue automation for cron or a
-systemd timer. The non-overlap lock is intentionally shared with the manual
-one-task automation entrypoint so manual and scheduled invocations cannot
-concurrently mutate the same DB/worktree. It is one tick only: no daemon,
-scheduler loop, background worker, or multi-task batch is started here. Human
-review and human merge remain external final gates.
+This module wraps the existing one-shot GitHub Issue automation in a shared
+non-overlap lock so cron, systemd timers, and manual automation invocations use
+the same advisory lock path. It is one tick only: no daemon, scheduler loop,
+background worker, or multi-task batch is started here. Human review and human
+merge remain external final gates.
 """
 
 from __future__ import annotations
@@ -19,9 +18,10 @@ from agent_taskflow.github_issue_ingestion import IssueFetcher
 from agent_taskflow.github_issue_one_task_automation import (
     GitHubIssueOneTaskAutomationError,
     GitHubIssueOneTaskAutomationRequest,
-    run_locked_github_issue_one_task_automation,
+    run_github_issue_one_task_automation,
 )
 from agent_taskflow.github_issue_one_task_lock import (
+    NonOverlapLock,
     default_github_issue_one_task_lock_path,
 )
 from agent_taskflow.models import require_absolute_path
@@ -41,7 +41,7 @@ class GitHubIssueOneTaskSchedulerTickError(RuntimeError):
 
 @dataclass(frozen=True)
 class GitHubIssueOneTaskSchedulerTickRequest:
-    """Inputs for one scheduled GitHub Issue one-task tick."""
+    """Inputs for one scheduled, locked GitHub Issue one-task tick."""
 
     repo: str
     db_path: Path
@@ -142,27 +142,49 @@ def run_github_issue_one_task_scheduler_tick(
     branch_push_fn: Callable[..., dict[str, Any]] | None = None,
     draft_pr_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Run one scheduler tick and stop."""
+    """Run one locked scheduler tick and stop."""
+
+    lock = NonOverlapLock(request.lock_path)
+    try:
+        acquired = lock.acquire(blocking=not request.fail_if_locked)
+    except OSError as exc:
+        return _failure_response(
+            request,
+            status="lock_failed",
+            reasons=[str(exc)],
+            lock_acquired=False,
+            lock_contended=False,
+            automation=None,
+        )
+
+    if not acquired:
+        return _locked_response(request)
 
     automation: dict[str, Any] | None = None
     automation_error: str | None = None
     try:
-        automation = run_locked_github_issue_one_task_automation(
-            _automation_request(request),
-            discovery_fetcher=discovery_fetcher,
-            ingestion_fetcher=ingestion_fetcher,
-            approved_task_runner_fn=approved_task_runner_fn,
-            branch_push_fn=branch_push_fn,
-            draft_pr_fn=draft_pr_fn,
-        )
-    except (GitHubIssueOneTaskAutomationError, ValueError) as exc:
-        automation_error = str(exc)
+        try:
+            automation = run_github_issue_one_task_automation(
+                _automation_request(request),
+                discovery_fetcher=discovery_fetcher,
+                ingestion_fetcher=ingestion_fetcher,
+                approved_task_runner_fn=approved_task_runner_fn,
+                branch_push_fn=branch_push_fn,
+                draft_pr_fn=draft_pr_fn,
+            )
+        except (GitHubIssueOneTaskAutomationError, ValueError) as exc:
+            automation_error = str(exc)
+    finally:
+        lock.release()
 
     if automation_error is not None:
         return _failure_response(
             request,
             status="automation_error",
             reasons=[automation_error],
+            lock_acquired=True,
+            lock_contended=False,
+            lock_released=True,
             automation_called=True,
             automation=automation,
         )
@@ -172,11 +194,18 @@ def run_github_issue_one_task_scheduler_tick(
             request,
             status="automation_error",
             reasons=["automation returned no result"],
+            lock_acquired=True,
+            lock_contended=False,
+            lock_released=True,
             automation_called=True,
             automation=None,
         )
 
-    return _automation_response(request, automation=automation)
+    return _automation_response(
+        request,
+        automation=automation,
+        lock_released=True,
+    )
 
 
 def _automation_request(
@@ -235,6 +264,7 @@ def _automation_response(
     request: GitHubIssueOneTaskSchedulerTickRequest,
     *,
     automation: dict[str, Any],
+    lock_released: bool,
 ) -> dict[str, Any]:
     automation_ok = automation.get("ok") is True
     status = str(automation.get("status") or "automation_completed")
@@ -245,11 +275,48 @@ def _automation_response(
         "status": status,
         "mode": _mode(request),
         "repo": request.repo,
-        "lock": automation.get("lock") or _lock_payload(request, acquired=False),
+        "lock": _lock_payload(
+            request,
+            acquired=True,
+            contended=False,
+            released=lock_released,
+        ),
         "automation": automation,
         "selected_task_key": automation.get("selected_task_key"),
         "ingestion_failure_registry": automation.get("ingestion_failure_registry"),
-        "safety": _safety(request, automation=automation),
+        "safety": _safety(
+            request,
+            lock_acquired=True,
+            lock_contended=False,
+            automation=automation,
+        ),
+    }
+
+
+def _locked_response(
+    request: GitHubIssueOneTaskSchedulerTickRequest,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "schema_version": GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SCHEMA_VERSION,
+        "source": GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SOURCE,
+        "status": "locked",
+        "mode": _mode(request),
+        "repo": request.repo,
+        "lock": _lock_payload(
+            request,
+            acquired=False,
+            contended=True,
+            released=False,
+        ),
+        "automation": None,
+        "selected_task_key": None,
+        "safety": _safety(
+            request,
+            lock_acquired=False,
+            lock_contended=True,
+            automation=None,
+        ),
     }
 
 
@@ -258,6 +325,9 @@ def _failure_response(
     *,
     status: str,
     reasons: list[str],
+    lock_acquired: bool,
+    lock_contended: bool,
+    lock_released: bool = False,
     automation_called: bool | None = None,
     automation: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -268,14 +338,24 @@ def _failure_response(
         "status": status,
         "mode": _mode(request),
         "repo": request.repo,
-        "lock": automation.get("lock") if automation else _lock_payload(request, acquired=False),
+        "lock": _lock_payload(
+            request,
+            acquired=lock_acquired,
+            contended=lock_contended,
+            released=lock_released,
+        ),
         "automation": automation,
         "selected_task_key": (
             automation.get("selected_task_key") if automation else None
         ),
+        "ingestion_failure_registry": (
+            automation.get("ingestion_failure_registry") if automation else None
+        ),
         "reasons": _unique_strings([reason for reason in reasons if reason]),
         "safety": _safety(
             request,
+            lock_acquired=lock_acquired,
+            lock_contended=lock_contended,
             automation=automation,
             automation_called=automation_called,
         ),
@@ -286,12 +366,14 @@ def _lock_payload(
     request: GitHubIssueOneTaskSchedulerTickRequest,
     *,
     acquired: bool,
+    contended: bool,
+    released: bool,
 ) -> dict[str, Any]:
     return {
         "path": str(request.lock_path),
         "acquired": acquired,
-        "contended": False,
-        "released": False,
+        "contended": contended,
+        "released": released,
         "fail_if_locked": request.fail_if_locked,
     }
 
@@ -299,6 +381,8 @@ def _lock_payload(
 def _safety(
     request: GitHubIssueOneTaskSchedulerTickRequest,
     *,
+    lock_acquired: bool,
+    lock_contended: bool,
     automation: dict[str, Any] | None,
     automation_called: bool | None = None,
 ) -> dict[str, Any]:
@@ -312,8 +396,8 @@ def _safety(
         "one_tick_only": True,
         "one_issue_only": True,
         "one_task_only": True,
-        "lock_acquired": bool(automation_safety.get("lock_acquired")),
-        "lock_contended": bool(automation_safety.get("lock_contended")),
+        "lock_acquired": lock_acquired,
+        "lock_contended": lock_contended,
         "dry_run": request.dry_run,
         "confirmed": request.confirmed,
         "automation_called": called,
