@@ -1,0 +1,27 @@
+# Example only. Copy and adapt outside the repository before enabling.
+# Do not embed GitHub tokens, SSH keys, API keys, or other secrets here.
+# Provide authentication through operator-managed gh auth, SSH agent setup,
+# systemd credentials, or an external EnvironmentFile with appropriate ACLs.
+
+[Unit]
+Description=Agent Taskflow GitHub Issue one-task scheduled tick (example)
+Documentation=../docs/github-issue-one-task-scheduler-tick.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/agent-taskflow
+Environment=PYTHONPATH=/opt/agent-taskflow
+# EnvironmentFile=/etc/agent-taskflow/github-issue-one-task.env
+# User=agent-taskflow
+# Group=agent-taskflow
+
+ExecStart=/opt/agent-taskflow/.venv/bin/python3 /opt/agent-taskflow/scripts/run_github_issue_one_task_scheduler_tick.py \
+  --repo OWNER/REPO \
+  --db-path /var/lib/agent-taskflow/state.db \
+  --local-repo-path /opt/agent-taskflow \
+  --artifact-root /var/lib/agent-taskflow/artifacts \
+  --lock-path /var/lock/agent-taskflow/github-issue-one-task.lock \
+  --confirmed \
+  --json

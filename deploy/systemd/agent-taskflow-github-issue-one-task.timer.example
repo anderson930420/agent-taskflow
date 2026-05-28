@@ -1,0 +1,16 @@
+# Example only. Copy and adapt outside the repository before enabling.
+# This timer runs the one-task tick service periodically. The service itself
+# uses a non-overlap lock, processes at most one issue/task, and stops.
+
+[Unit]
+Description=Run Agent Taskflow GitHub Issue one-task tick every 15 minutes (example)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=60s
+Persistent=false
+Unit=agent-taskflow-github-issue-one-task.service
+
+[Install]
+WantedBy=timers.target
