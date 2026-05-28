@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from agent_taskflow.approved_task_runner import ApprovedTaskRunRequest, run_approved_task
+from agent_taskflow.dispatcher import DEFAULT_VALIDATORS
 from agent_taskflow.github_issue_discovery import IssueListFetcher
 from agent_taskflow.github_issue_ingestion import IssueFetcher
 from agent_taskflow.github_issue_one_task_automation import (
@@ -61,6 +63,12 @@ class GitHubIssueOneTaskSchedulerTickRequest:
     base_branch: str | None = None
     draft: bool = True
 
+    executor: str | None = None
+    validators: tuple[str, ...] = DEFAULT_VALIDATORS
+    worktree_root: Path | None = None
+    approved_task_preflight: bool = True
+    command: tuple[str, ...] | None = None
+
     def __post_init__(self) -> None:
         repo = str(self.repo or "").strip()
         if "/" not in repo or repo.startswith("/") or repo.endswith("/"):
@@ -89,6 +97,13 @@ class GitHubIssueOneTaskSchedulerTickRequest:
             require_absolute_path(self.artifact_root, "artifact_root"),
         )
 
+        if self.worktree_root is not None:
+            object.__setattr__(
+                self,
+                "worktree_root",
+                require_absolute_path(self.worktree_root, "worktree_root"),
+            )
+
         if self.confirmed:
             object.__setattr__(self, "dry_run", False)
         elif not self.dry_run:
@@ -107,6 +122,11 @@ class GitHubIssueOneTaskSchedulerTickRequest:
             "exclude_labels",
             _normalize_labels(self.exclude_labels),
         )
+        object.__setattr__(
+            self,
+            "validators",
+            _normalize_validators(self.validators),
+        )
 
         lock_path = self.lock_path or default_lock_path()
         lock_path = Path(lock_path).expanduser()
@@ -114,7 +134,12 @@ class GitHubIssueOneTaskSchedulerTickRequest:
             raise ValueError("lock_path must be an absolute path")
         object.__setattr__(self, "lock_path", lock_path)
 
-        for field_name in ("operator", "operator_note", "base_branch"):
+        for field_name in (
+            "operator",
+            "operator_note",
+            "base_branch",
+            "executor",
+        ):
             value = getattr(self, field_name)
             if value is None:
                 continue
@@ -125,6 +150,15 @@ class GitHubIssueOneTaskSchedulerTickRequest:
         if not remote:
             raise ValueError("remote must not be empty")
         object.__setattr__(self, "remote", remote)
+
+        command = self.command
+        if command is not None:
+            normalized_command = tuple(
+                str(part).strip() for part in command if str(part).strip()
+            )
+            if not normalized_command:
+                raise ValueError("command must not be empty when provided")
+            object.__setattr__(self, "command", normalized_command)
 
 
 def default_lock_path() -> Path:
@@ -143,6 +177,8 @@ def run_github_issue_one_task_scheduler_tick(
     draft_pr_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run one locked scheduler tick and stop."""
+
+    runner_fn = approved_task_runner_fn or _configured_approved_task_runner_fn(request)
 
     lock = NonOverlapLock(request.lock_path)
     try:
@@ -168,7 +204,7 @@ def run_github_issue_one_task_scheduler_tick(
                 _automation_request(request),
                 discovery_fetcher=discovery_fetcher,
                 ingestion_fetcher=ingestion_fetcher,
-                approved_task_runner_fn=approved_task_runner_fn,
+                approved_task_runner_fn=runner_fn,
                 branch_push_fn=branch_push_fn,
                 draft_pr_fn=draft_pr_fn,
             )
@@ -260,6 +296,49 @@ def _automation_request(
     )
 
 
+def _configured_approved_task_runner_fn(
+    request: GitHubIssueOneTaskSchedulerTickRequest,
+) -> Callable[..., dict[str, Any]] | None:
+    """Return an injected runner wrapper when scheduler runner config exists."""
+
+    if request.executor is None:
+        return None
+
+    def _runner(**kwargs: Any) -> dict[str, Any]:
+        task_key = str(kwargs.get("task_key") or "").strip()
+        if not task_key:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "phase": "scheduler_runner_config",
+                "error": "approved runner wrapper requires task_key",
+                "safety": {
+                    "executor_started": False,
+                    "validators_started": False,
+                    "github_mutated": False,
+                },
+            }
+        result = run_approved_task(
+            ApprovedTaskRunRequest(
+                task_key=task_key,
+                executor=request.executor or "",
+                repo_path=request.local_repo_path,
+                db_path=request.db_path,
+                artifact_root=request.artifact_root,
+                worktree_root=request.worktree_root,
+                base_branch=request.base_branch or "main",
+                validators=request.validators,
+                confirm_approved_task=True,
+                dry_run=False,
+                preflight=request.approved_task_preflight,
+                command=request.command,
+            )
+        )
+        return result.to_dict()
+
+    return _runner
+
+
 def _automation_response(
     request: GitHubIssueOneTaskSchedulerTickRequest,
     *,
@@ -281,6 +360,7 @@ def _automation_response(
             contended=False,
             released=lock_released,
         ),
+        "runner_config": _runner_config_payload(request),
         "automation": automation,
         "selected_task_key": automation.get("selected_task_key"),
         "ingestion_failure_registry": automation.get("ingestion_failure_registry"),
@@ -309,6 +389,7 @@ def _locked_response(
             contended=True,
             released=False,
         ),
+        "runner_config": _runner_config_payload(request),
         "automation": None,
         "selected_task_key": None,
         "safety": _safety(
@@ -344,6 +425,7 @@ def _failure_response(
             contended=lock_contended,
             released=lock_released,
         ),
+        "runner_config": _runner_config_payload(request),
         "automation": automation,
         "selected_task_key": (
             automation.get("selected_task_key") if automation else None
@@ -378,6 +460,18 @@ def _lock_payload(
     }
 
 
+def _runner_config_payload(request: GitHubIssueOneTaskSchedulerTickRequest) -> dict[str, Any]:
+    return {
+        "configured": request.executor is not None,
+        "executor": request.executor,
+        "validators": list(request.validators),
+        "worktree_root": str(request.worktree_root) if request.worktree_root else None,
+        "base_branch": request.base_branch or "main",
+        "preflight": request.approved_task_preflight,
+        "command": list(request.command) if request.command else None,
+    }
+
+
 def _safety(
     request: GitHubIssueOneTaskSchedulerTickRequest,
     *,
@@ -400,6 +494,7 @@ def _safety(
         "lock_contended": lock_contended,
         "dry_run": request.dry_run,
         "confirmed": request.confirmed,
+        "runner_configured": request.executor is not None,
         "automation_called": called,
         "discovery_called": bool(automation_safety.get("discovery_called")),
         "issue_ingested": bool(automation_safety.get("issue_ingested")),
@@ -440,6 +535,13 @@ def _normalize_labels(labels: tuple[str, ...]) -> tuple[str, ...]:
 
 def _normalize_label(label: str) -> str:
     return str(label or "").strip().lower()
+
+
+def _normalize_validators(validators: tuple[str, ...]) -> tuple[str, ...]:
+    normalized = tuple(
+        str(value).strip().lower() for value in validators if str(value).strip()
+    )
+    return normalized or DEFAULT_VALIDATORS
 
 
 def _unique_strings(values: list[str]) -> list[str]:
