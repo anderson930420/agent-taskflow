@@ -140,6 +140,61 @@ class SchedulerWatcherPreviewTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["waiting_approval_count"], 1)
         self.assertEqual(payload["summary"]["completed_count"], 1)
 
+    def test_preview_exposes_blocked_backlog_without_execution(self) -> None:
+        self.seed_task(
+            "AT-L8A-BLOCKED-BACKLOG",
+            status="blocked",
+            title="Blocked backlog task",
+            blocked_reason="validator failed",
+        )
+
+        payload = self.preview()
+
+        self.assertEqual(payload["candidate_count"], 0)
+        self.assertEqual(payload["blocked_backlog_count"], 1)
+        self.assertEqual(payload["summary"]["blocked_count"], 1)
+        self.assertEqual(payload["summary"]["blocked_backlog_count"], 1)
+        self.assertEqual(len(payload["blocked_backlog"]), 1)
+        blocked = payload["blocked_backlog"][0]
+        self.assertEqual(blocked["task_key"], "AT-L8A-BLOCKED-BACKLOG")
+        self.assertEqual(blocked["title"], "Blocked backlog task")
+        self.assertEqual(blocked["blocked_reason"], "validator failed")
+        self.assertEqual(blocked["required_operator_action"], "inspect_manually")
+        self.assertIn("repair the underlying issue", blocked["recovery_hint"])
+        self.assertFalse(blocked["would_run"])
+        self.assertFalse(blocked["safety"]["executed_now"])
+        self.assertFalse(blocked["safety"]["status_changed_now"])
+        self.assertFalse(blocked["safety"]["github_mutated_now"])
+
+        skipped_by_key = {item["task_key"]: item for item in payload["skipped"]}
+        skipped = skipped_by_key["AT-L8A-BLOCKED-BACKLOG"]
+        self.assertEqual(skipped["reason"], "blocked")
+        self.assertEqual(skipped["blocked_reason"], "validator failed")
+
+    def test_blocked_tasks_are_never_candidates_even_when_included(self) -> None:
+        self.seed_task(
+            "AT-L8A-BLOCKED-INCLUDED",
+            status="blocked",
+            blocked_reason="manual review required",
+        )
+
+        payload = self.preview(include_blocked=True)
+
+        self.assertEqual(payload["candidate_count"], 0)
+        self.assertEqual(payload["blocked_backlog_count"], 1)
+        blocked = payload["blocked_backlog"][0]
+        self.assertEqual(blocked["task_key"], "AT-L8A-BLOCKED-INCLUDED")
+        self.assertFalse(blocked["would_run"])
+        skipped_by_key = {item["task_key"]: item for item in payload["skipped"]}
+        self.assertEqual(
+            skipped_by_key["AT-L8A-BLOCKED-INCLUDED"]["reason"],
+            "unsupported_command_kind",
+        )
+        self.assertIn(
+            "blocked tasks are never executable preview items",
+            skipped_by_key["AT-L8A-BLOCKED-INCLUDED"]["warnings"],
+        )
+
     def test_preview_include_flags(self) -> None:
         self.seed_task("AT-L8A-WAITING-FLAG", status="waiting_approval")
         self.record_executor_and_validators("AT-L8A-WAITING-FLAG")
