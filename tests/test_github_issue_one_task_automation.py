@@ -504,6 +504,130 @@ class GitHubIssueOneTaskAutomationTests(unittest.TestCase):
         self.assertIn("next_retry_after", columns)
         self.assertIn("quarantined", columns)
 
+    def test_execution_only_runs_one_shot_without_publication(self) -> None:
+        task_key = "AT-GH-505"
+        base_sha, branch_name = self.init_repo_for_task(task_key)
+        runner = _FakeApprovedTaskRunnerWithWorktree(
+            repo_path=self.local_repo,
+            branch=branch_name,
+            base_sha=base_sha,
+        )
+        branch_push = self.smoke._FakeBranchPush()
+        draft_pr = self.smoke._FakeDraftPR()
+
+        result = run_github_issue_one_task_automation(
+            self.confirmed_request(publish_after_execution=False),
+            discovery_fetcher=lambda request: [
+                discovery_issue(505, title="Execution only issue", labels=("ready",))
+            ],
+            ingestion_fetcher=lambda repo, issue_number: issue_snapshot(
+                505, title="Execution only issue", labels=("ready",)
+            ),
+            approved_task_runner_fn=runner,
+            branch_push_fn=branch_push,
+            draft_pr_fn=draft_pr,
+        )
+
+        self.assertTrue(result["ok"], msg=f"result: {result!r}")
+        self.assertEqual(result["status"], "execution_completed")
+        self.assertEqual(result["mode"], "confirmed")
+        self.assertEqual(result["selected_task_key"], task_key)
+        # Execution-only path never invokes the scheduler watcher or the
+        # publication helpers.
+        self.assertIsNone(result["watcher"])
+        self.assertEqual(runner.call_count, 1)
+        self.assertEqual(branch_push.call_count, 0)
+        self.assertEqual(draft_pr.call_count, 0)
+
+        # One-shot execution evidence is included and reached waiting_approval.
+        self.assertTrue(result["execution"]["ok"])
+        self.assertEqual(result["execution"]["final_task_status"], "waiting_approval")
+        self.assertTrue(
+            result["execution"]["safety"]["approved_task_runner_called"]
+        )
+
+        # Publication is explicitly skipped with operator guidance.
+        publication = result["publication"]
+        self.assertTrue(publication["skipped"])
+        self.assertEqual(publication["reason"], "publish_after_execution_false")
+        self.assertIn("task-to-draft-pr", publication["next_operator_action"])
+
+        safety = result["safety"]
+        self.assertTrue(safety["discovery_called"])
+        self.assertTrue(safety["issue_ingested"])
+        self.assertFalse(safety["watcher_called"])
+        self.assertTrue(safety["approved_task_runner_called"])
+        self.assertFalse(safety["github_mutated"])
+        self.assertFalse(safety["branch_pushed"])
+        self.assertFalse(safety["draft_pr_created"])
+        self.assertFalse(safety["approved"])
+        self.assertFalse(safety["merged"])
+        self.assertFalse(safety["cleanup_performed"])
+        self.assertTrue(safety["human_review_required"])
+
+        final = TaskMirrorStore(self.db_path).get_task(task_key)
+        self.assertEqual(final.status, "waiting_approval")
+
+    def test_default_publishes_after_execution_through_watcher_path(self) -> None:
+        # Default keeps existing manual task-to-draft-PR publication behavior.
+        self.assertTrue(self.confirmed_request().publish_after_execution)
+
+        task_key = "AT-GH-506"
+        base_sha, branch_name = self.init_repo_for_task(task_key)
+        runner = _FakeApprovedTaskRunnerWithWorktree(
+            repo_path=self.local_repo,
+            branch=branch_name,
+            base_sha=base_sha,
+        )
+        branch_push = self.smoke._FakeBranchPush()
+        draft_pr = self.smoke._FakeDraftPR()
+
+        result = run_github_issue_one_task_automation(
+            self.confirmed_request(),
+            discovery_fetcher=lambda request: [
+                discovery_issue(506, title="Publish issue", labels=("ready",))
+            ],
+            ingestion_fetcher=lambda repo, issue_number: issue_snapshot(
+                506, title="Publish issue", labels=("ready",)
+            ),
+            approved_task_runner_fn=runner,
+            branch_push_fn=branch_push,
+            draft_pr_fn=draft_pr,
+        )
+
+        self.assertTrue(result["ok"], msg=f"result: {result!r}")
+        self.assertEqual(result["status"], "completed_one_task")
+        # The publication path is unchanged: watcher ran and helpers were called.
+        self.assertIsNotNone(result["watcher"])
+        self.assertNotIn("execution", result)
+        self.assertNotIn("publication", result)
+        self.assertEqual(branch_push.call_count, 1)
+        self.assertEqual(draft_pr.call_count, 1)
+        self.assertTrue(result["safety"]["watcher_called"])
+        self.assertTrue(result["safety"]["branch_pushed"])
+        self.assertTrue(result["safety"]["draft_pr_created"])
+
+    def test_automation_source_has_no_loop_approval_or_cleanup_strings(self) -> None:
+        source = Path(
+            "agent_taskflow/github_issue_one_task_automation.py"
+        ).read_text(encoding="utf-8")
+        forbidden = (
+            "while True",
+            "schedule.every",
+            "asyncio.sleep",
+            "threading.Thread",
+            "Thread(",
+            "auto_approve",
+            "auto_merge",
+            "merge_pull_request",
+            "record_approval_decision(",
+            "git push --delete",
+            "git worktree remove",
+            "git branch -d",
+        )
+        for needle in forbidden:
+            self.assertNotIn(needle, source, needle)
+
     def test_blocked_closed_and_excluded_issues_are_not_selected(self) -> None:
         result = run_github_issue_one_task_automation(
             self.confirmed_request(exclude_labels=("skip",)),

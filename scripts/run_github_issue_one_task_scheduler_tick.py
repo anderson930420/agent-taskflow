@@ -67,6 +67,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-branch", default=None)
     parser.add_argument("--confirmed", action="store_true")
     parser.add_argument(
+        "--publish-after-execution",
+        dest="publish_after_execution",
+        action="store_true",
+        help=(
+            "Opt in to running the explicit task-to-draft-PR publication path "
+            "after execution. Omit to keep the scheduler confirmed tick "
+            "execution-only, stopping at waiting_approval for human review."
+        ),
+    )
+    parser.add_argument(
         "--executor",
         default=None,
         help=(
@@ -140,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
             remote=args.remote,
             base_branch=args.base_branch,
             draft=True,
+            publish_after_execution=bool(args.publish_after_execution),
             executor=args.executor,
             validators=_parse_validators(args.validators),
             worktree_root=(
@@ -156,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             str(exc),
             dry_run=dry_run,
             confirmed=confirmed,
+            publish_after_execution=bool(args.publish_after_execution),
             repo=str(args.repo),
             lock_path=(
                 Path(args.lock_path).expanduser()
@@ -175,6 +187,7 @@ def _error_payload(
     *,
     dry_run: bool,
     confirmed: bool,
+    publish_after_execution: bool,
     repo: str,
     lock_path: Path,
 ) -> dict[str, object]:
@@ -192,6 +205,18 @@ def _error_payload(
             "released": False,
             "fail_if_locked": True,
         },
+        "publication_config": {
+            "publish_after_execution": publish_after_execution,
+            "mode": "publication" if publish_after_execution else "execution_only",
+            "next_operator_action": (
+                None
+                if publish_after_execution
+                else (
+                    "run explicit task-to-draft-pr publication workflow if "
+                    "publication is desired"
+                )
+            ),
+        },
         "automation": None,
         "selected_task_key": None,
         "reasons": [message],
@@ -205,6 +230,7 @@ def _error_payload(
             "dry_run": dry_run,
             "confirmed": confirmed,
             "runner_configured": False,
+            "publish_after_execution": publish_after_execution,
             "automation_called": False,
             "discovery_called": False,
             "issue_ingested": False,

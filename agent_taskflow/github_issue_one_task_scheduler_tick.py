@@ -62,6 +62,7 @@ class GitHubIssueOneTaskSchedulerTickRequest:
     remote: str = "origin"
     base_branch: str | None = None
     draft: bool = True
+    publish_after_execution: bool = False
 
     executor: str | None = None
     validators: tuple[str, ...] = DEFAULT_VALIDATORS
@@ -271,6 +272,7 @@ def _automation_request(
             remote=request.remote,
             base_branch=request.base_branch,
             draft=request.draft,
+            publish_after_execution=request.publish_after_execution,
             lock_path=request.lock_path,
             fail_if_locked=request.fail_if_locked,
         )
@@ -291,6 +293,7 @@ def _automation_request(
         remote=request.remote,
         base_branch=request.base_branch,
         draft=request.draft,
+        publish_after_execution=request.publish_after_execution,
         lock_path=request.lock_path,
         fail_if_locked=request.fail_if_locked,
     )
@@ -361,6 +364,7 @@ def _automation_response(
             released=lock_released,
         ),
         "runner_config": _runner_config_payload(request),
+        "publication_config": _publication_config_payload(request),
         "automation": automation,
         "selected_task_key": automation.get("selected_task_key"),
         "ingestion_failure_registry": automation.get("ingestion_failure_registry"),
@@ -390,6 +394,7 @@ def _locked_response(
             released=False,
         ),
         "runner_config": _runner_config_payload(request),
+        "publication_config": _publication_config_payload(request),
         "automation": None,
         "selected_task_key": None,
         "safety": _safety(
@@ -426,6 +431,7 @@ def _failure_response(
             released=lock_released,
         ),
         "runner_config": _runner_config_payload(request),
+        "publication_config": _publication_config_payload(request),
         "automation": automation,
         "selected_task_key": (
             automation.get("selected_task_key") if automation else None
@@ -472,6 +478,33 @@ def _runner_config_payload(request: GitHubIssueOneTaskSchedulerTickRequest) -> d
     }
 
 
+def _publication_config_payload(
+    request: GitHubIssueOneTaskSchedulerTickRequest,
+) -> dict[str, Any]:
+    """Describe whether this tick is execution-only or publication-enabled.
+
+    The scheduler confirmed tick defaults to execution-only: it stops after the
+    one-task pipeline reaches ``waiting_approval`` and never publishes. Branch
+    push and draft PR creation remain the separate explicit task-to-draft-PR
+    workflow unless ``publish_after_execution`` is opted in.
+    """
+
+    return {
+        "publish_after_execution": request.publish_after_execution,
+        "mode": (
+            "publication" if request.publish_after_execution else "execution_only"
+        ),
+        "next_operator_action": (
+            None
+            if request.publish_after_execution
+            else (
+                "run explicit task-to-draft-pr publication workflow if "
+                "publication is desired"
+            )
+        ),
+    }
+
+
 def _safety(
     request: GitHubIssueOneTaskSchedulerTickRequest,
     *,
@@ -495,6 +528,7 @@ def _safety(
         "dry_run": request.dry_run,
         "confirmed": request.confirmed,
         "runner_configured": request.executor is not None,
+        "publish_after_execution": request.publish_after_execution,
         "automation_called": called,
         "discovery_called": bool(automation_safety.get("discovery_called")),
         "issue_ingested": bool(automation_safety.get("issue_ingested")),
