@@ -34,6 +34,8 @@ RUN_STATUS_BLOCKED = "blocked"
 DEFAULT_BASE_BRANCH = "main"
 SUPPORTED_EXECUTORS = tuple(list_executor_names())
 BUILTIN_VALIDATORS = {"pytest", "openspec", "policy", "changed-files", "typecheck", "lint"}
+# Executors that cannot run without an explicit model in their profile.
+EXECUTORS_REQUIRING_MODEL = frozenset({"opencode"})
 
 
 class ApprovedTaskRunnerError(RuntimeError):
@@ -63,6 +65,13 @@ class ApprovedTaskRunRequest:
     dry_run: bool = False
     preflight: bool = True
     command: tuple[str, ...] | None = None
+    # Executor profile overrides. When provided these take precedence over the
+    # TaskRecord profile fields; otherwise the recorded TaskRecord profile is
+    # used. Real executors such as opencode/pi may require this configuration.
+    model: str | None = None
+    provider: str | None = None
+    tools: tuple[str, ...] | None = None
+    pi_bin: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
@@ -87,6 +96,15 @@ class ApprovedTaskRunRequest:
             if not command:
                 raise ValueError("command must not be empty when provided")
             object.__setattr__(self, "command", command)
+        for field_name in ("model", "provider", "pi_bin"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            stripped = str(value).strip()
+            object.__setattr__(self, field_name, stripped or None)
+        if self.tools is not None:
+            tools = tuple(part.strip() for part in self.tools if str(part).strip())
+            object.__setattr__(self, "tools", tools or None)
 
 
 @dataclass(frozen=True)
@@ -164,7 +182,15 @@ def run_approved_task(
         )
 
     effective_artifact_dir = _effective_artifact_dir(task, request)
-    effective_task = replace(task, artifact_dir=effective_artifact_dir, executor=request.executor)
+    effective_task = replace(
+        task,
+        artifact_dir=effective_artifact_dir,
+        executor=request.executor,
+        model=request.model if request.model is not None else task.model,
+        provider=request.provider if request.provider is not None else task.provider,
+        tools=list(request.tools) if request.tools is not None else task.tools,
+        pi_bin=request.pi_bin if request.pi_bin is not None else task.pi_bin,
+    )
     preflight_result = _run_preflight(request, preflight_runner=preflight_runner)
     preflight_payload = _preflight_payload(preflight_result, ran=preflight_result is not None)
 
@@ -193,7 +219,7 @@ def run_approved_task(
             preflight=preflight_payload,
         )
 
-    if effective_task.artifact_dir != task.artifact_dir or effective_task.executor != task.executor:
+    if effective_task != task:
         current_store.upsert_task(effective_task)
 
     if preflight_result is not None and not preflight_result.ok:
@@ -239,6 +265,18 @@ def run_approved_task(
 
     executor = _resolve_executor(request, effective_task, executor_registry=executor_registry)
     executor_context = _build_executor_context(effective_task, workspace_result)
+    model_requirement_error = _model_requirement_error(request, effective_task)
+    if model_requirement_error is not None:
+        _block_task(current_store, effective_task.task_key, model_requirement_error)
+        return _blocked_failure(
+            request,
+            task=effective_task,
+            phase="executor",
+            error=model_requirement_error,
+            task_status_changed=True,
+            preflight=preflight_payload,
+            workspace=_workspace_payload(workspace_result),
+        )
     if request.executor == "opencode" and executor_context.prompt_path is None:
         reason = f"implementation_prompt.md is required for opencode executor: {effective_task.artifact_dir / 'implementation_prompt.md'}"
         _block_task(current_store, effective_task.task_key, reason)
@@ -582,6 +620,17 @@ def _resolve_executor(
         provider=task.provider,
         tools=task.tools if task.tools else None,
         pi_bin=task.pi_bin if task.pi_bin else "pi",
+    )
+
+
+def _model_requirement_error(request: ApprovedTaskRunRequest, task: TaskRecord) -> str | None:
+    if request.executor not in EXECUTORS_REQUIRING_MODEL:
+        return None
+    if request.model or task.model:
+        return None
+    return (
+        f"{request.executor} executor requires a model; provide --model or "
+        "record a model in the task executor profile"
     )
 
 

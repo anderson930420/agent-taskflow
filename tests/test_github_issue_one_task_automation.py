@@ -78,6 +78,10 @@ def issue_snapshot(
     )
 
 
+def _raise_ingestion_error() -> GitHubIssueSnapshot:
+    raise RuntimeError("poison issue cannot be ingested")
+
+
 class _FakeApprovedTaskRunnerWithWorktree:
     def __init__(
         self,
@@ -306,6 +310,45 @@ class GitHubIssueOneTaskAutomationTests(unittest.TestCase):
         self.assertFalse(safety["multi_task_batch_started"])
         self.assertTrue(safety["human_review_required"])
 
+    def test_confirmed_run_threads_executor_profile_into_task_record(self) -> None:
+        task_key = "AT-GH-510"
+        base_sha, branch_name = self.init_repo_for_task(task_key)
+        runner = _FakeApprovedTaskRunnerWithWorktree(
+            repo_path=self.local_repo,
+            branch=branch_name,
+            base_sha=base_sha,
+        )
+        branch_push = self.smoke._FakeBranchPush()
+        draft_pr = self.smoke._FakeDraftPR()
+
+        result = run_github_issue_one_task_automation(
+            self.confirmed_request(
+                model="claude-sonnet-4-6",
+                provider="anthropic",
+                tools=("read", "write"),
+                pi_bin="pi",
+            ),
+            discovery_fetcher=lambda request: [
+                discovery_issue(510, title="Profile issue", labels=("ready",))
+            ],
+            ingestion_fetcher=lambda repo, issue_number: issue_snapshot(
+                510, title="Profile issue", labels=("ready",)
+            ),
+            approved_task_runner_fn=runner,
+            branch_push_fn=branch_push,
+            draft_pr_fn=draft_pr,
+        )
+
+        self.assertTrue(result["ok"], msg=f"result: {result!r}")
+        self.assertEqual(result["selected_task_key"], task_key)
+        task = TaskMirrorStore(self.db_path).get_task(task_key)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.model, "claude-sonnet-4-6")
+        self.assertEqual(task.provider, "anthropic")
+        self.assertEqual(task.tools, ["read", "write"])
+        self.assertEqual(task.pi_bin, "pi")
+
     def test_second_confirmed_run_same_issue_is_noop_from_select_first_mode(self) -> None:
         task_key = "AT-GH-502"
         base_sha, branch_name = self.init_repo_for_task(task_key)
@@ -390,6 +433,72 @@ class GitHubIssueOneTaskAutomationTests(unittest.TestCase):
         self.assertEqual(draft_pr.call_count, 0)
         self.assertFalse(result["safety"]["issue_ingested"])
         self.assertFalse(result["safety"]["watcher_called"])
+
+    def test_poison_issue_ingestion_failure_does_not_block_later_issue(self) -> None:
+        first = run_github_issue_one_task_automation(
+            self.confirmed_request(),
+            discovery_fetcher=lambda request: [
+                discovery_issue(605, title="Poison issue", labels=("ready",)),
+                discovery_issue(606, title="Later issue", labels=("ready",)),
+            ],
+            ingestion_fetcher=lambda repo, issue_number: (_raise_ingestion_error()),
+            approved_task_runner_fn=lambda **kwargs: {"ok": False},
+            branch_push_fn=lambda **kwargs: {"ok": False},
+            draft_pr_fn=lambda **kwargs: {"ok": False},
+        )
+
+        self.assertFalse(first["ok"])
+        self.assertEqual(first["status"], "ingestion_failed")
+        self.assertEqual(first["selected_issue"]["number"], 605)
+        self.assertEqual(first["ingestion_failure"]["issue_number"], 605)
+        self.assertEqual(first["ingestion_failure"]["failure_count"], 1)
+        # PR #65 records the failure in the quarantine registry; a single
+        # failure quarantines the issue (quarantine_after_failures default 1).
+        self.assertTrue(first["ingestion_failure"]["quarantined"])
+
+        task_key = "AT-GH-606"
+        base_sha, branch_name = self.init_repo_for_task(task_key)
+        runner = _FakeApprovedTaskRunnerWithWorktree(
+            repo_path=self.local_repo,
+            branch=branch_name,
+            base_sha=base_sha,
+        )
+        branch_push = self.smoke._FakeBranchPush()
+        draft_pr = self.smoke._FakeDraftPR()
+        ingestion_calls: list[int] = []
+
+        second = run_github_issue_one_task_automation(
+            self.confirmed_request(),
+            discovery_fetcher=lambda request: [
+                discovery_issue(605, title="Poison issue", labels=("ready",)),
+                discovery_issue(606, title="Later issue", labels=("ready",)),
+            ],
+            ingestion_fetcher=lambda repo, issue_number: (
+                ingestion_calls.append(issue_number)
+                or issue_snapshot(issue_number, labels=("ready",))
+            ),
+            approved_task_runner_fn=runner,
+            branch_push_fn=branch_push,
+            draft_pr_fn=draft_pr,
+        )
+
+        self.assertTrue(second["ok"], msg=f"second: {second!r}")
+        self.assertEqual(second["selected_issue"]["number"], 606)
+        self.assertEqual(ingestion_calls, [606])
+        # The quarantined poison issue is filtered out of recommendation; the
+        # later issue is selected and the registry still tracks the failure.
+        self.assertEqual(
+            [item["number"] for item in second["discovery"]["quarantined_ingestion"]],
+            [605],
+        )
+        self.assertEqual(
+            second["ingestion_failure_registry"]["summary"]["ingestion_failure_count"],
+            1,
+        )
+        self.assertEqual(second["selected_task_key"], task_key)
+        self.assertEqual(runner.call_count, 1)
+        self.assertEqual(branch_push.call_count, 1)
+        self.assertEqual(draft_pr.call_count, 1)
 
     def test_dry_run_discovers_and_selects_without_writes_or_watcher(self) -> None:
         def forbidden_ingestion(repo: str, issue_number: int) -> GitHubIssueSnapshot:

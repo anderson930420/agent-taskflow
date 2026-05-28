@@ -401,6 +401,159 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertFalse(runner_request.preflight)
         self.assertEqual(runner_request.command, ("python", "-m", "pytest"))
 
+    def test_confirmed_tick_threads_executor_profile_to_automation(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
+            seen["request"] = request
+            return {
+                "ok": True,
+                "status": "completed_one_task",
+                "mode": "confirmed",
+                "repo": request.repo,
+                "selected_task_key": "AT-GH-720",
+                "safety": {},
+            }
+
+        with mock.patch(
+            "agent_taskflow.github_issue_one_task_scheduler_tick."
+            "run_github_issue_one_task_automation",
+            side_effect=fake_automation,
+        ):
+            run_github_issue_one_task_scheduler_tick(
+                self.request(
+                    confirmed=True,
+                    model="claude-sonnet-4-6",
+                    provider="anthropic",
+                    tools=("read", "write", "read"),
+                    pi_bin="pi",
+                ),
+                discovery_fetcher=lambda request: [],
+                ingestion_fetcher=lambda repo, issue_number: issue_snapshot(
+                    issue_number
+                ),
+                approved_task_runner_fn=lambda **kwargs: {"ok": True},
+                branch_push_fn=lambda **kwargs: {"ok": True},
+                draft_pr_fn=lambda **kwargs: {"ok": True},
+            )
+
+        automation_request = seen["request"]
+        self.assertEqual(automation_request.model, "claude-sonnet-4-6")
+        self.assertEqual(automation_request.provider, "anthropic")
+        # Tools are normalized: stripped, de-duplicated, order preserved.
+        self.assertEqual(automation_request.tools, ("read", "write"))
+        self.assertEqual(automation_request.pi_bin, "pi")
+
+    def test_dry_run_tick_threads_executor_profile_to_automation(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
+            seen["request"] = request
+            return {
+                "ok": True,
+                "status": "dry_run",
+                "mode": "dry_run",
+                "repo": request.repo,
+                "selected_task_key": None,
+                "safety": {"discovery_called": True},
+            }
+
+        with mock.patch(
+            "agent_taskflow.github_issue_one_task_scheduler_tick."
+            "run_github_issue_one_task_automation",
+            side_effect=fake_automation,
+        ):
+            run_github_issue_one_task_scheduler_tick(
+                self.request(model="claude-sonnet-4-6", provider="anthropic"),
+                discovery_fetcher=lambda request: [],
+            )
+
+        automation_request = seen["request"]
+        self.assertTrue(automation_request.dry_run)
+        self.assertEqual(automation_request.model, "claude-sonnet-4-6")
+        self.assertEqual(automation_request.provider, "anthropic")
+
+    def test_tick_without_profile_leaves_automation_profile_unset(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
+            seen["request"] = request
+            return {
+                "ok": True,
+                "status": "dry_run",
+                "mode": "dry_run",
+                "repo": request.repo,
+                "selected_task_key": None,
+                "safety": {"discovery_called": True},
+            }
+
+        with mock.patch(
+            "agent_taskflow.github_issue_one_task_scheduler_tick."
+            "run_github_issue_one_task_automation",
+            side_effect=fake_automation,
+        ):
+            run_github_issue_one_task_scheduler_tick(
+                self.request(),
+                discovery_fetcher=lambda request: [],
+            )
+
+        automation_request = seen["request"]
+        self.assertIsNone(automation_request.model)
+        self.assertIsNone(automation_request.provider)
+        self.assertIsNone(automation_request.tools)
+        self.assertIsNone(automation_request.pi_bin)
+
+    def test_confirmed_tick_threads_executor_profile_into_approved_runner(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
+            runner = kwargs["approved_task_runner_fn"]
+            runner(
+                task_key="AT-GH-730",
+                db_path=request.db_path,
+                artifact_root=request.artifact_root,
+            )
+            return {
+                "ok": True,
+                "status": "execution_completed",
+                "mode": "confirmed",
+                "repo": request.repo,
+                "selected_task_key": "AT-GH-730",
+                "safety": {"approved_task_runner_called": True},
+            }
+
+        with mock.patch(
+            "agent_taskflow.github_issue_one_task_scheduler_tick."
+            "run_github_issue_one_task_automation",
+            side_effect=fake_automation,
+        ):
+            with mock.patch(
+                "agent_taskflow.github_issue_one_task_scheduler_tick.run_approved_task"
+            ) as fake_runner:
+                fake_runner.return_value.to_dict.return_value = {
+                    "ok": True,
+                    "status": "waiting_approval",
+                    "safety": {},
+                }
+                run_github_issue_one_task_scheduler_tick(
+                    self.request(
+                        confirmed=True,
+                        executor="pi",
+                        model="claude-sonnet-4-6",
+                        provider="anthropic",
+                        tools=("read", "write"),
+                        pi_bin="/custom/pi",
+                    )
+                )
+
+        runner_request = fake_runner.call_args.args[0]
+        captured["runner_request"] = runner_request
+        self.assertEqual(runner_request.executor, "pi")
+        self.assertEqual(runner_request.model, "claude-sonnet-4-6")
+        self.assertEqual(runner_request.provider, "anthropic")
+        self.assertEqual(runner_request.tools, ("read", "write"))
+        self.assertEqual(runner_request.pi_bin, "/custom/pi")
+
     def test_lock_contention_returns_locked_without_calling_automation(self) -> None:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+", encoding="utf-8") as handle:

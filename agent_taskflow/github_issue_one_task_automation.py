@@ -127,6 +127,13 @@ class GitHubIssueOneTaskAutomationRequest:
     fail_if_locked: bool = True
     quarantine_after_ingestion_failures: int = DEFAULT_QUARANTINE_AFTER_FAILURES
 
+    # Executor profile metadata threaded into ingestion so the mirrored
+    # TaskRecord can later drive a real executor profile, not only noop.
+    model: str | None = None
+    provider: str | None = None
+    tools: tuple[str, ...] | None = None
+    pi_bin: str | None = None
+
     def __post_init__(self) -> None:
         repo = str(self.repo or "").strip()
         if "/" not in repo or repo.startswith("/") or repo.endswith("/"):
@@ -183,12 +190,18 @@ class GitHubIssueOneTaskAutomationRequest:
             "operator_note",
             "recommended_command_kind",
             "base_branch",
+            "model",
+            "provider",
+            "pi_bin",
         ):
             value = getattr(self, field_name)
             if value is None:
                 continue
             stripped = str(value).strip()
             object.__setattr__(self, field_name, stripped or None)
+
+        if self.tools is not None:
+            object.__setattr__(self, "tools", _normalize_executor_tools(self.tools))
 
         remote = str(self.remote or "").strip()
         if not remote:
@@ -391,6 +404,10 @@ def run_github_issue_one_task_automation(
         local_repo_path=request.local_repo_path,
         artifact_root=request.artifact_root,
         dry_run=False,
+        model=request.model,
+        provider=request.provider,
+        tools=request.tools,
+        pi_bin=request.pi_bin,
     )
     try:
         if ingestion_fetcher is None:
@@ -928,6 +945,18 @@ def _normalize_labels(labels: tuple[str, ...]) -> tuple[str, ...]:
         seen.add(value)
         normalized.append(value)
     return tuple(normalized)
+
+
+def _normalize_executor_tools(tools: tuple[str, ...]) -> tuple[str, ...] | None:
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for tool in tools:
+        value = str(tool or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return tuple(normalized) or None
 
 
 def _normalize_label(label: str) -> str:

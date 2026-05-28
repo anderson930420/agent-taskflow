@@ -73,6 +73,13 @@ class GitHubIssueIngestionRequest:
     task_key: str | None = None
     project: str | None = None
     dry_run: bool = False
+    # Executor profile metadata recorded onto the mirrored TaskRecord so that a
+    # later confirmed executor run can use a real executor profile, not only
+    # noop. Ingestion itself never runs an executor.
+    model: str | None = None
+    provider: str | None = None
+    tools: tuple[str, ...] | None = None
+    pi_bin: str | None = None
 
     def __post_init__(self) -> None:
         repo = self.repo.strip()
@@ -97,6 +104,16 @@ class GitHubIssueIngestionRequest:
 
         if self.task_key is not None:
             object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
+
+        for field_name in ("model", "provider", "pi_bin"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            stripped = str(value).strip()
+            object.__setattr__(self, field_name, stripped or None)
+
+        if self.tools is not None:
+            object.__setattr__(self, "tools", _normalize_executor_tools(self.tools))
 
 
 @dataclass(frozen=True)
@@ -225,6 +242,10 @@ def ingest_github_issue(
             repo_path=request.local_repo_path,
             artifact_dir=artifact_dir,
             blocked_reason=blocked_reason,
+            model=request.model,
+            provider=request.provider,
+            tools=list(request.tools) if request.tools else None,
+            pi_bin=request.pi_bin,
         )
     )
 
@@ -338,6 +359,18 @@ def ingestion_result_to_dict(result: GitHubIssueIngestionResult) -> dict[str, An
         "recorded_event": result.recorded_event,
         "summary": result.summary,
     }
+
+
+def _normalize_executor_tools(tools: tuple[str, ...]) -> tuple[str, ...] | None:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tool in tools:
+        value = str(tool or "").strip()
+        if not value or value in seen:
+            continue
+        normalized.append(value)
+        seen.add(value)
+    return tuple(normalized) or None
 
 
 def _project_from_repo(repo: str) -> str:

@@ -90,6 +90,53 @@ class GitHubIssueIngestionTests(unittest.TestCase):
         self.assertEqual(task.project, "agent-taskflow")
         self.assertEqual(task.artifact_dir, self.root / "artifacts" / "AT-GH-42")
 
+    def test_ingest_writes_executor_profile_into_task_record(self) -> None:
+        request = GitHubIssueIngestionRequest(
+            repo="anderson930420/agent-taskflow",
+            issue_number=42,
+            local_repo_path=self.local_repo,
+            artifact_root=self.root / "artifacts",
+            model="claude-sonnet-4-6",
+            provider="anthropic",
+            tools=("read", "write", "read"),
+            pi_bin="/usr/local/bin/pi",
+        )
+
+        result = ingest_github_issue(
+            request,
+            store=self.store,
+            fetcher=lambda repo, issue_number: open_issue(),
+        )
+
+        self.assertTrue(result.ok)
+        task = self.store.get_task("AT-GH-42")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.model, "claude-sonnet-4-6")
+        self.assertEqual(task.provider, "anthropic")
+        # Tools are normalized: stripped, de-duplicated, order preserved.
+        self.assertEqual(task.tools, ["read", "write"])
+        self.assertEqual(task.pi_bin, "/usr/local/bin/pi")
+        # Ingestion records the profile but does not select an executor; the
+        # default (noop) behavior is preserved.
+        self.assertIsNone(task.executor)
+
+    def test_ingest_without_profile_leaves_executor_fields_unset(self) -> None:
+        ingest_github_issue(
+            self.request(),
+            store=self.store,
+            fetcher=lambda repo, issue_number: open_issue(),
+        )
+
+        task = self.store.get_task("AT-GH-42")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertIsNone(task.executor)
+        self.assertIsNone(task.model)
+        self.assertIsNone(task.provider)
+        self.assertIsNone(task.tools)
+        self.assertIsNone(task.pi_bin)
+
     def test_ingest_writes_issue_spec_artifact(self) -> None:
         result = ingest_github_issue(
             self.request(),
