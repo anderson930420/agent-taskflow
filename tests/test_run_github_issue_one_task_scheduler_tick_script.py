@@ -41,6 +41,7 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
         self.db_path = self.root / "state.db"
         self.artifact_root = self.root / "artifacts"
         self.artifact_root.mkdir()
+        self.worktree_root = self.root / "worktrees"
         self.lock_path = self.root / "scheduler.lock"
         self.script = _load_script_module()
 
@@ -108,6 +109,12 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
             "--remote",
             "--base-branch",
             "--confirmed",
+            "--executor",
+            "--validator",
+            "--worktree-root",
+            "--command",
+            "--approved-task-preflight",
+            "--skip-approved-task-preflight",
             "--json",
         ):
             self.assertIn(flag, result.stdout, flag)
@@ -123,7 +130,6 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
             "--cron",
             "--webhook",
             "--batch-size",
-            "--approve",
             "--merge",
             "--cleanup",
             "--delete-branch",
@@ -167,6 +173,7 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
         self.assertTrue(request.fail_if_locked)
         self.assertEqual(request.operator, "codex")
         self.assertEqual(request.operator_note, "dry run check")
+        self.assertIsNone(request.executor)
 
     def test_confirmed_flag_constructs_confirmed_scheduler_request(self) -> None:
         payload = {
@@ -194,6 +201,45 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
         self.assertTrue(request.confirmed)
         self.assertEqual(request.remote, "upstream")
         self.assertEqual(request.base_branch, "main")
+        self.assertIsNone(request.executor)
+
+    def test_confirmed_runner_config_flags_are_passed_to_request(self) -> None:
+        payload = {
+            "ok": True,
+            "status": "completed_one_task",
+            "mode": "confirmed",
+            "runner_config": {"configured": True, "executor": "shell"},
+            "safety": {"dry_run": False, "confirmed": True},
+        }
+
+        rc, emitted, request = self.invoke_with_fake_run(
+            [
+                "--confirmed",
+                "--executor",
+                "shell",
+                "--validator",
+                "pytest",
+                "--validator",
+                "policy",
+                "--worktree-root",
+                str(self.worktree_root),
+                "--command",
+                "python -m pytest",
+                "--skip-approved-task-preflight",
+                "--json",
+            ],
+            payload,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(emitted["runner_config"]["executor"], "shell")
+        self.assertFalse(request.dry_run)
+        self.assertTrue(request.confirmed)
+        self.assertEqual(request.executor, "shell")
+        self.assertEqual(request.validators, ("pytest", "policy"))
+        self.assertEqual(request.worktree_root, self.worktree_root)
+        self.assertEqual(request.command, ("python", "-m", "pytest"))
+        self.assertFalse(request.approved_task_preflight)
 
     def test_script_returns_nonzero_for_not_ok_payload(self) -> None:
         payload = {
@@ -240,7 +286,6 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
             "--cron",
             "--webhook",
             "--batch-size",
-            "--approve",
             "--merge",
             "--cleanup",
             "--delete-branch",
