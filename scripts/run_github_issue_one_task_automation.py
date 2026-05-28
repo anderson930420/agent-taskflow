@@ -18,15 +18,18 @@ from agent_taskflow.github_issue_one_task_automation import (  # noqa: E402
     GITHUB_ISSUE_ONE_TASK_AUTOMATION_SOURCE,
     GitHubIssueOneTaskAutomationError,
     GitHubIssueOneTaskAutomationRequest,
-    run_github_issue_one_task_automation,
+    run_locked_github_issue_one_task_automation,
+)
+from agent_taskflow.github_issue_one_task_lock import (  # noqa: E402
+    default_github_issue_one_task_lock_path,
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a one-shot GitHub Issue discovery, ingest one selected issue, "
-            "then invoke the confirmed one-task watcher and stop."
+            "Run a locked one-shot GitHub Issue discovery, ingest one selected "
+            "issue, then invoke the confirmed one-task watcher and stop."
         )
     )
     parser.add_argument("--repo", required=True)
@@ -45,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confirm-github-mutations", action="store_true")
     parser.add_argument("--confirm-branch-push", action="store_true")
     parser.add_argument("--confirm-draft-pr", action="store_true")
+    parser.add_argument("--lock-path", default=None)
+    parser.add_argument("--quarantine-after-ingestion-failures", type=int, default=1)
     parser.add_argument("--operator", default=None)
     parser.add_argument("--operator-note", default=None)
     parser.add_argument("--remote", default="origin")
@@ -57,6 +62,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     dry_run = not _confirmed_mode_requested(args)
+    lock_path = (
+        Path(args.lock_path).expanduser()
+        if args.lock_path is not None
+        else default_github_issue_one_task_lock_path()
+    )
 
     try:
         request = GitHubIssueOneTaskAutomationRequest(
@@ -82,10 +92,20 @@ def main(argv: list[str] | None = None) -> int:
             remote=args.remote,
             base_branch=args.base_branch,
             draft=True,
+            lock_path=lock_path,
+            fail_if_locked=True,
+            quarantine_after_ingestion_failures=int(
+                args.quarantine_after_ingestion_failures
+            ),
         )
-        payload = run_github_issue_one_task_automation(request)
+        payload = run_locked_github_issue_one_task_automation(request)
     except (ValueError, GitHubIssueOneTaskAutomationError) as exc:
-        payload = _error_payload(str(exc), dry_run=dry_run, repo=str(args.repo))
+        payload = _error_payload(
+            str(exc),
+            dry_run=dry_run,
+            repo=str(args.repo),
+            lock_path=lock_path,
+        )
         _emit(payload, compact=bool(args.json))
         return 1
 
@@ -108,7 +128,13 @@ def _confirmed_mode_requested(args: argparse.Namespace) -> bool:
     )
 
 
-def _error_payload(message: str, *, dry_run: bool, repo: str) -> dict[str, object]:
+def _error_payload(
+    message: str,
+    *,
+    dry_run: bool,
+    repo: str,
+    lock_path: Path,
+) -> dict[str, object]:
     return {
         "ok": False,
         "schema_version": GITHUB_ISSUE_ONE_TASK_AUTOMATION_SCHEMA_VERSION,
@@ -116,6 +142,13 @@ def _error_payload(message: str, *, dry_run: bool, repo: str) -> dict[str, objec
         "status": "error",
         "mode": "dry_run" if dry_run else "confirmed",
         "repo": repo,
+        "lock": {
+            "path": str(lock_path),
+            "acquired": False,
+            "contended": False,
+            "released": False,
+            "fail_if_locked": True,
+        },
         "selected_issue": None,
         "ingestion": None,
         "watcher": None,
@@ -125,6 +158,8 @@ def _error_payload(message: str, *, dry_run: bool, repo: str) -> dict[str, objec
             "dry_run": dry_run,
             "one_issue_only": True,
             "one_task_only": True,
+            "lock_acquired": False,
+            "lock_contended": False,
             "discovery_called": False,
             "issue_ingested": False,
             "watcher_called": False,

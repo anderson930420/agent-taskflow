@@ -70,7 +70,9 @@ class RunGitHubIssueOneTaskAutomationScriptTests(unittest.TestCase):
 
         stdout = io.StringIO()
         with mock.patch.object(
-            self.script, "run_github_issue_one_task_automation", side_effect=fake_run
+            self.script,
+            "run_locked_github_issue_one_task_automation",
+            side_effect=fake_run,
         ):
             with contextlib.redirect_stdout(stdout):
                 rc = self.script.main([*self.base_args(), *extra_args])
@@ -105,6 +107,8 @@ class RunGitHubIssueOneTaskAutomationScriptTests(unittest.TestCase):
             "--confirm-github-mutations",
             "--confirm-branch-push",
             "--confirm-draft-pr",
+            "--lock-path",
+            "--quarantine-after-ingestion-failures",
             "--operator",
             "--operator-note",
             "--remote",

@@ -1,20 +1,17 @@
 """Scheduled, locked one-task tick for GitHub Issue automation.
 
-This module wraps the existing one-shot GitHub Issue automation in a
-non-overlap lock so cron or a systemd timer can call it safely. It is one
-tick only: no daemon, scheduler loop, background worker, or multi-task batch
-is started here. Human review and human merge remain external final gates.
+This module wraps the existing one-shot GitHub Issue automation in a shared
+non-overlap lock so cron, systemd timers, and manual automation invocations use
+the same advisory lock path. It is one tick only: no daemon, scheduler loop,
+background worker, or multi-task batch is started here. Human review and human
+merge remain external final gates.
 """
 
 from __future__ import annotations
 
-import errno
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-
-import fcntl
 
 from agent_taskflow.github_issue_discovery import IssueListFetcher
 from agent_taskflow.github_issue_ingestion import IssueFetcher
@@ -22,6 +19,10 @@ from agent_taskflow.github_issue_one_task_automation import (
     GitHubIssueOneTaskAutomationError,
     GitHubIssueOneTaskAutomationRequest,
     run_github_issue_one_task_automation,
+)
+from agent_taskflow.github_issue_one_task_lock import (
+    NonOverlapLock,
+    default_github_issue_one_task_lock_path,
 )
 from agent_taskflow.models import require_absolute_path
 
@@ -127,13 +128,9 @@ class GitHubIssueOneTaskSchedulerTickRequest:
 
 
 def default_lock_path() -> Path:
-    """Return the default non-overlap lock path for scheduled ticks."""
+    """Return the shared non-overlap lock path for GitHub Issue automation."""
 
-    return (
-        Path.home()
-        / ".agent-taskflow"
-        / "github_issue_one_task_scheduler_tick.lock"
-    )
+    return default_github_issue_one_task_lock_path()
 
 
 def run_github_issue_one_task_scheduler_tick(
@@ -147,7 +144,7 @@ def run_github_issue_one_task_scheduler_tick(
 ) -> dict[str, Any]:
     """Run one locked scheduler tick and stop."""
 
-    lock = _NonOverlapLock(request.lock_path)
+    lock = NonOverlapLock(request.lock_path)
     try:
         acquired = lock.acquire(blocking=not request.fail_if_locked)
     except OSError as exc:
@@ -238,6 +235,8 @@ def _automation_request(
             remote=request.remote,
             base_branch=request.base_branch,
             draft=request.draft,
+            lock_path=request.lock_path,
+            fail_if_locked=request.fail_if_locked,
         )
 
     return GitHubIssueOneTaskAutomationRequest(
@@ -256,6 +255,8 @@ def _automation_request(
         remote=request.remote,
         base_branch=request.base_branch,
         draft=request.draft,
+        lock_path=request.lock_path,
+        fail_if_locked=request.fail_if_locked,
     )
 
 
@@ -282,6 +283,7 @@ def _automation_response(
         ),
         "automation": automation,
         "selected_task_key": automation.get("selected_task_key"),
+        "ingestion_failure_registry": automation.get("ingestion_failure_registry"),
         "safety": _safety(
             request,
             lock_acquired=True,
@@ -345,6 +347,9 @@ def _failure_response(
         "automation": automation,
         "selected_task_key": (
             automation.get("selected_task_key") if automation else None
+        ),
+        "ingestion_failure_registry": (
+            automation.get("ingestion_failure_registry") if automation else None
         ),
         "reasons": _unique_strings([reason for reason in reasons if reason]),
         "safety": _safety(
@@ -419,43 +424,6 @@ def _safety(
 
 def _mode(request: GitHubIssueOneTaskSchedulerTickRequest) -> str:
     return "confirmed" if request.confirmed else "dry_run"
-
-
-class _NonOverlapLock:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._handle: Any | None = None
-
-    def acquire(self, *, blocking: bool) -> bool:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+", encoding="utf-8")
-        flags = fcntl.LOCK_EX
-        if not blocking:
-            flags |= fcntl.LOCK_NB
-
-        try:
-            fcntl.flock(handle.fileno(), flags)
-        except OSError as exc:
-            handle.close()
-            if exc.errno in {errno.EACCES, errno.EAGAIN}:
-                return False
-            raise
-
-        handle.seek(0)
-        handle.truncate()
-        handle.write(f"pid={os.getpid()}\n")
-        handle.flush()
-        self._handle = handle
-        return True
-
-    def release(self) -> None:
-        if self._handle is None:
-            return
-        try:
-            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._handle.close()
-            self._handle = None
 
 
 def _normalize_labels(labels: tuple[str, ...]) -> tuple[str, ...]:

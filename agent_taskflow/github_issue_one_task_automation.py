@@ -29,6 +29,16 @@ from agent_taskflow.github_issue_ingestion import (
     ingest_github_issue,
     ingestion_result_to_dict,
 )
+from agent_taskflow.github_issue_ingestion_failures import (
+    DEFAULT_QUARANTINE_AFTER_FAILURES,
+    GitHubIssueIngestionFailureRegistry,
+    apply_ingestion_failure_filter,
+    failure_registry_payload,
+)
+from agent_taskflow.github_issue_one_task_lock import (
+    NonOverlapLock,
+    default_github_issue_one_task_lock_path,
+)
 from agent_taskflow.models import require_absolute_path
 from agent_taskflow.scheduler_watcher_one_task import (
     SchedulerWatcherOneTaskError,
@@ -48,6 +58,7 @@ _FAILED_STAGE_CONFIRMATION_FLAGS = "confirmation_flags"
 _FAILED_STAGE_SELECTION = "selection"
 _FAILED_STAGE_INGESTION = "ingestion"
 _FAILED_STAGE_WATCHER = "watcher"
+_FAILED_STAGE_LOCK = "lock"
 
 _CONFIRMATION_FLAGS: tuple[tuple[str, str], ...] = (
     ("confirm_ingest_issue", "--confirm-ingest-issue"),
@@ -96,6 +107,10 @@ class GitHubIssueOneTaskAutomationRequest:
     base_branch: str | None = None
     draft: bool = True
 
+    lock_path: Path | None = None
+    fail_if_locked: bool = True
+    quarantine_after_ingestion_failures: int = DEFAULT_QUARANTINE_AFTER_FAILURES
+
     def __post_init__(self) -> None:
         repo = str(self.repo or "").strip()
         if "/" not in repo or repo.startswith("/") or repo.endswith("/"):
@@ -126,6 +141,9 @@ class GitHubIssueOneTaskAutomationRequest:
         if self.issue_limit <= 0:
             raise ValueError("issue_limit must be positive")
 
+        if self.quarantine_after_ingestion_failures <= 0:
+            raise ValueError("quarantine_after_ingestion_failures must be positive")
+
         object.__setattr__(
             self,
             "include_labels",
@@ -136,6 +154,13 @@ class GitHubIssueOneTaskAutomationRequest:
             "exclude_labels",
             _normalize_labels(self.exclude_labels),
         )
+
+        lock_path = self.lock_path
+        if lock_path is not None:
+            lock_path = Path(lock_path).expanduser()
+            if not lock_path.is_absolute():
+                raise ValueError("lock_path must be an absolute path")
+            object.__setattr__(self, "lock_path", lock_path)
 
         for field_name in (
             "operator",
@@ -155,6 +180,91 @@ class GitHubIssueOneTaskAutomationRequest:
         object.__setattr__(self, "remote", remote)
 
 
+def run_locked_github_issue_one_task_automation(
+    request: GitHubIssueOneTaskAutomationRequest,
+    *,
+    discovery_fetcher: IssueListFetcher | None = None,
+    ingestion_fetcher: IssueFetcher | None = None,
+    approved_task_runner_fn: Callable[..., dict[str, Any]] | None = None,
+    branch_push_fn: Callable[..., dict[str, Any]] | None = None,
+    draft_pr_fn: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Run the one-shot automation under the shared non-overlap lock."""
+
+    lock_path = request.lock_path or default_github_issue_one_task_lock_path()
+    lock = NonOverlapLock(lock_path)
+    try:
+        acquired = lock.acquire(blocking=not request.fail_if_locked)
+    except OSError as exc:
+        return _failure_response(
+            request,
+            status="lock_failed",
+            failed_stage=_FAILED_STAGE_LOCK,
+            reasons=[str(exc)],
+            discovery=None,
+            selected_issue=None,
+            ingestion=None,
+            watcher=None,
+            lock={
+                "path": str(lock_path),
+                "acquired": False,
+                "contended": False,
+                "released": False,
+                "fail_if_locked": request.fail_if_locked,
+            },
+        )
+
+    if not acquired:
+        return _failure_response(
+            request,
+            status="locked",
+            failed_stage=_FAILED_STAGE_LOCK,
+            reasons=["another GitHub Issue one-task automation run holds the lock"],
+            discovery=None,
+            selected_issue=None,
+            ingestion=None,
+            watcher=None,
+            safety=_safety(
+                dry_run=request.dry_run,
+                discovery_called=False,
+                lock_acquired=False,
+                lock_contended=True,
+            ),
+            lock={
+                "path": str(lock_path),
+                "acquired": False,
+                "contended": True,
+                "released": False,
+                "fail_if_locked": request.fail_if_locked,
+            },
+        )
+
+    try:
+        payload = run_github_issue_one_task_automation(
+            request,
+            discovery_fetcher=discovery_fetcher,
+            ingestion_fetcher=ingestion_fetcher,
+            approved_task_runner_fn=approved_task_runner_fn,
+            branch_push_fn=branch_push_fn,
+            draft_pr_fn=draft_pr_fn,
+        )
+    finally:
+        lock.release()
+
+    payload["lock"] = {
+        "path": str(lock_path),
+        "acquired": True,
+        "contended": False,
+        "released": True,
+        "fail_if_locked": request.fail_if_locked,
+    }
+    safety = dict(payload.get("safety") or {})
+    safety["lock_acquired"] = True
+    safety["lock_contended"] = False
+    payload["safety"] = safety
+    return payload
+
+
 def run_github_issue_one_task_automation(
     request: GitHubIssueOneTaskAutomationRequest,
     *,
@@ -171,6 +281,8 @@ def run_github_issue_one_task_automation(
             "GitHub Issue one-task automation supports draft PR creation only"
         )
 
+    failure_registry = GitHubIssueIngestionFailureRegistry(request.db_path)
+
     try:
         discovery = _run_discovery(request, discovery_fetcher=discovery_fetcher)
     except (GitHubIssueDiscoveryError, ValueError) as exc:
@@ -185,6 +297,11 @@ def run_github_issue_one_task_automation(
             watcher=None,
         )
 
+    discovery = apply_ingestion_failure_filter(
+        discovery,
+        registry=failure_registry,
+        repo=request.repo,
+    )
     recommended_candidates = list(discovery.get("recommended_candidates") or [])
 
     if request.dry_run:
@@ -251,9 +368,10 @@ def run_github_issue_one_task_automation(
         )
 
     selected_issue = selection["issue"]
+    selected_issue_number = int(selected_issue["number"])
     ingestion_request = GitHubIssueIngestionRequest(
         repo=request.repo,
-        issue_number=int(selected_issue["number"]),
+        issue_number=selected_issue_number,
         local_repo_path=request.local_repo_path,
         artifact_root=request.artifact_root,
         dry_run=False,
@@ -271,6 +389,12 @@ def run_github_issue_one_task_automation(
                 fetcher=ingestion_fetcher,
             )
     except (GitHubIssueIngestionError, ValueError) as exc:
+        failure_record = failure_registry.record_failure(
+            repo=request.repo,
+            issue_number=selected_issue_number,
+            error_summary=str(exc),
+            quarantine_after_failures=request.quarantine_after_ingestion_failures,
+        )
         return _failure_response(
             request,
             status="ingestion_failed",
@@ -280,12 +404,21 @@ def run_github_issue_one_task_automation(
             selected_issue=selected_issue,
             ingestion=None,
             watcher=None,
+            ingestion_failure=failure_record.to_dict(),
         )
 
     ingestion = ingestion_result_to_dict(ingestion_result)
     selected_task_key = ingestion_result.task_key
 
     if ingestion_result.ok is not True:
+        failure_record = None
+        if not _ingestion_wrote(ingestion):
+            failure_record = failure_registry.record_failure(
+                repo=request.repo,
+                issue_number=selected_issue_number,
+                error_summary=ingestion_result.summary or "ingestion_not_ok",
+                quarantine_after_failures=request.quarantine_after_ingestion_failures,
+            )
         return _failure_response(
             request,
             status="ingestion_failed",
@@ -297,7 +430,10 @@ def run_github_issue_one_task_automation(
             watcher=None,
             issue_ingested=_ingestion_wrote(ingestion),
             selected_task_key=selected_task_key,
+            ingestion_failure=(failure_record.to_dict() if failure_record else None),
         )
+
+    failure_registry.clear_failure(repo=request.repo, issue_number=selected_issue_number)
 
     try:
         watcher = run_scheduler_watcher_one_task(
@@ -522,6 +658,8 @@ def _failure_response(
     watcher_called: bool = False,
     selected_task_key: str | None = None,
     safety: dict[str, Any] | None = None,
+    ingestion_failure: dict[str, Any] | None = None,
+    lock: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = _base_response(
         request,
@@ -542,6 +680,10 @@ def _failure_response(
     )
     payload["failed_stage"] = failed_stage
     payload["reasons"] = _unique_strings([reason for reason in reasons if reason])
+    if ingestion_failure is not None:
+        payload["ingestion_failure"] = ingestion_failure
+    if lock is not None:
+        payload["lock"] = lock
     return payload
 
 
@@ -557,7 +699,8 @@ def _base_response(
     selected_task_key: str | None,
     safety: dict[str, Any],
 ) -> dict[str, Any]:
-    return {
+    failure_registry = GitHubIssueIngestionFailureRegistry(request.db_path)
+    payload = {
         "ok": ok,
         "schema_version": GITHUB_ISSUE_ONE_TASK_AUTOMATION_SCHEMA_VERSION,
         "source": GITHUB_ISSUE_ONE_TASK_AUTOMATION_SOURCE,
@@ -569,8 +712,13 @@ def _base_response(
         "ingestion": ingestion,
         "watcher": watcher,
         "selected_task_key": selected_task_key,
+        "ingestion_failure_registry": failure_registry_payload(
+            failure_registry,
+            repo=request.repo,
+        ),
         "safety": safety,
     }
+    return payload
 
 
 def _safety(
@@ -583,8 +731,10 @@ def _safety(
     github_mutated: bool = False,
     branch_pushed: bool = False,
     draft_pr_created: bool = False,
+    lock_acquired: bool | None = None,
+    lock_contended: bool | None = None,
 ) -> dict[str, Any]:
-    return {
+    safety: dict[str, Any] = {
         "dry_run": dry_run,
         "one_issue_only": True,
         "one_task_only": True,
@@ -603,6 +753,11 @@ def _safety(
         "multi_task_batch_started": False,
         "human_review_required": True,
     }
+    if lock_acquired is not None:
+        safety["lock_acquired"] = lock_acquired
+    if lock_contended is not None:
+        safety["lock_contended"] = lock_contended
+    return safety
 
 
 def _ingestion_wrote(ingestion: dict[str, Any] | None) -> bool:
@@ -650,4 +805,5 @@ __all__ = [
     "GitHubIssueOneTaskAutomationError",
     "GitHubIssueOneTaskAutomationRequest",
     "run_github_issue_one_task_automation",
+    "run_locked_github_issue_one_task_automation",
 ]
