@@ -428,6 +428,82 @@ class GitHubIssueOneTaskAutomationTests(unittest.TestCase):
         self.assertFalse(safety["branch_pushed"])
         self.assertFalse(safety["draft_pr_created"])
 
+    def test_legacy_ingestion_failure_table_is_migrated(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE github_issue_ingestion_failures (
+                    repo TEXT NOT NULL,
+                    issue_number INTEGER NOT NULL,
+                    failure_count INTEGER NOT NULL,
+                    first_failed_at TEXT NOT NULL,
+                    last_failed_at TEXT NOT NULL,
+                    last_error_summary TEXT NOT NULL,
+                    PRIMARY KEY(repo, issue_number)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO github_issue_ingestion_failures (
+                    repo,
+                    issue_number,
+                    failure_count,
+                    first_failed_at,
+                    last_failed_at,
+                    last_error_summary
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.repo,
+                    504,
+                    1,
+                    "2026-05-01T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                    "legacy failure",
+                ),
+            )
+
+        result = run_github_issue_one_task_automation(
+            self.request(
+                dry_run=True,
+                select_first_issue=True,
+                confirm_select_first_issue=True,
+            ),
+            discovery_fetcher=lambda request: [
+                discovery_issue(504, title="Legacy failure issue", labels=("ready",))
+            ],
+            ingestion_fetcher=lambda repo, issue_number: issue_snapshot(issue_number),
+            approved_task_runner_fn=lambda **kwargs: {"ok": False},
+            branch_push_fn=lambda **kwargs: {"ok": False},
+            draft_pr_fn=lambda **kwargs: {"ok": False},
+        )
+
+        self.assertTrue(result["ok"], msg=f"result: {result!r}")
+        self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(result["selected_issue"]["number"], 504)
+        self.assertEqual(
+            result["ingestion_failure_registry"]["summary"]["ingestion_failure_count"],
+            1,
+        )
+        self.assertEqual(
+            result["ingestion_failure_registry"]["summary"][
+                "quarantined_ingestion_failure_count"
+            ],
+            0,
+        )
+
+        with sqlite3.connect(self.db_path) as conn:
+            columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(github_issue_ingestion_failures)"
+                ).fetchall()
+            }
+        self.assertIn("next_retry_after", columns)
+        self.assertIn("quarantined", columns)
+
     def test_blocked_closed_and_excluded_issues_are_not_selected(self) -> None:
         result = run_github_issue_one_task_automation(
             self.confirmed_request(exclude_labels=("skip",)),
