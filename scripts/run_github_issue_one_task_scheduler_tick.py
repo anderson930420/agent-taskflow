@@ -104,6 +104,33 @@ def build_parser() -> argparse.ArgumentParser:
             "for example: --command 'python -m pytest'."
         ),
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Executor profile model recorded on the ingested task and passed "
+            "to the approved task runner, for example claude-sonnet-4-6."
+        ),
+    )
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help="Executor profile provider recorded on the ingested task profile.",
+    )
+    parser.add_argument(
+        "--tools",
+        action="append",
+        default=[],
+        help=(
+            "Executor profile tool recorded on the ingested task profile. "
+            "Repeat to allow multiple tools."
+        ),
+    )
+    parser.add_argument(
+        "--pi-bin",
+        default=None,
+        help="Pi executor binary recorded on the ingested task profile.",
+    )
     preflight_group = parser.add_mutually_exclusive_group()
     preflight_group.add_argument(
         "--approved-task-preflight",
@@ -160,6 +187,10 @@ def main(argv: list[str] | None = None) -> int:
             ),
             approved_task_preflight=bool(args.approved_task_preflight),
             command=_parse_command(args.command),
+            model=args.model,
+            provider=args.provider,
+            tools=tuple(args.tools) if args.tools else None,
+            pi_bin=args.pi_bin,
         )
         payload = run_github_issue_one_task_scheduler_tick(request)
     except (ValueError, argparse.ArgumentTypeError, GitHubIssueOneTaskSchedulerTickError) as exc:

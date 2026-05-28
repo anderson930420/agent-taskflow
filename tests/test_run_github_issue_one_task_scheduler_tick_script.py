@@ -176,6 +176,68 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
         self.assertEqual(request.operator_note, "dry run check")
         self.assertIsNone(request.executor)
 
+    def test_help_lists_executor_profile_flags(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"],
+            cwd=REPO_ROOT,
+            shell=False,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for flag in ("--model", "--provider", "--tools", "--pi-bin"):
+            self.assertIn(flag, result.stdout, flag)
+
+    def test_executor_profile_flags_parse_into_request(self) -> None:
+        payload = {
+            "ok": True,
+            "status": "dry_run",
+            "mode": "dry_run",
+            "safety": {"dry_run": True, "confirmed": False},
+        }
+
+        rc, _emitted, request = self.invoke_with_fake_run(
+            [
+                "--model",
+                "claude-sonnet-4-6",
+                "--provider",
+                "anthropic",
+                "--tools",
+                "read",
+                "--tools",
+                "write",
+                "--pi-bin",
+                "pi",
+                "--json",
+            ],
+            payload,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(request.model, "claude-sonnet-4-6")
+        self.assertEqual(request.provider, "anthropic")
+        self.assertEqual(request.tools, ("read", "write"))
+        self.assertEqual(request.pi_bin, "pi")
+
+    def test_executor_profile_flags_default_to_none(self) -> None:
+        payload = {
+            "ok": True,
+            "status": "dry_run",
+            "mode": "dry_run",
+            "safety": {"dry_run": True, "confirmed": False},
+        }
+
+        rc, _emitted, request = self.invoke_with_fake_run(["--json"], payload)
+
+        self.assertEqual(rc, 0)
+        self.assertIsNone(request.model)
+        self.assertIsNone(request.provider)
+        self.assertIsNone(request.tools)
+        self.assertIsNone(request.pi_bin)
+
     def test_confirmed_flag_constructs_confirmed_scheduler_request(self) -> None:
         payload = {
             "ok": True,

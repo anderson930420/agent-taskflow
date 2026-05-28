@@ -172,6 +172,10 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         preflight: bool = True,
         command: tuple[str, ...] | None = None,
         base_branch: str = "main",
+        model: str | None = None,
+        provider: str | None = None,
+        tools: tuple[str, ...] | None = None,
+        pi_bin: str | None = None,
     ) -> ApprovedTaskRunRequest:
         return ApprovedTaskRunRequest(
             task_key=task_key,
@@ -186,6 +190,10 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             dry_run=dry_run,
             preflight=preflight,
             command=command,
+            model=model,
+            provider=provider,
+            tools=tools,
+            pi_bin=pi_bin,
         )
 
     def test_missing_confirmation_flag_refuses_to_run(self) -> None:
@@ -354,6 +362,90 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertTrue(result.safety["task_status_changed"])
         self.assertTrue(result.safety["workspace_prepared"])
         self.assertTrue(result.safety["validators_started"])
+        self.assertFalse(result.safety["branch_pushed"])
+        self.assertFalse(result.safety["pr_created"])
+        self.assertFalse(result.safety["merged"])
+        self.assertFalse(result.safety["approved"])
+        self.assertFalse(result.safety["cleanup_performed"])
+
+    def test_opencode_without_model_is_explicitly_blocked(self) -> None:
+        self._add_task("AT-GH-409")
+
+        result = run_approved_task(
+            self._request(task_key="AT-GH-409", executor="opencode"),
+            store=self.store,
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "executor")
+        self.assertEqual(result.status, RUN_STATUS_BLOCKED)
+        self.assertIn("requires a model", result.error or "")
+        self.assertEqual(self.store.get_task("AT-GH-409").status, RUN_STATUS_BLOCKED)
+        self.assertFalse(result.safety["executor_started"])
+
+    def test_request_executor_profile_flows_to_real_executor(self) -> None:
+        self._add_task("AT-GH-410")
+        captured: dict[str, object] = {}
+        fake_executor = FakeExecutor(name="pi", status="completed")
+
+        def fake_get_executor(name, **kwargs):
+            captured["name"] = name
+            captured["kwargs"] = kwargs
+            return fake_executor
+
+        with mock.patch(
+            "agent_taskflow.approved_task_runner.get_executor",
+            side_effect=fake_get_executor,
+        ):
+            result = run_approved_task(
+                self._request(
+                    task_key="AT-GH-410",
+                    executor="pi",
+                    validators=("policy",),
+                    model="claude-sonnet-4-6",
+                    provider="anthropic",
+                    tools=("read", "write"),
+                    pi_bin="/custom/pi",
+                ),
+                store=self.store,
+                validator_registry={"policy": PolicyCheckValidator()},
+                preflight_runner=lambda **kwargs: _preflight_result(),
+            )
+
+        self.assertTrue(result.ok, msg=result.error)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
+        self.assertEqual(captured["name"], "pi")
+        self.assertEqual(captured["kwargs"]["model"], "claude-sonnet-4-6")
+        self.assertEqual(captured["kwargs"]["provider"], "anthropic")
+        self.assertEqual(captured["kwargs"]["tools"], ["read", "write"])
+        self.assertEqual(captured["kwargs"]["pi_bin"], "/custom/pi")
+        task = self.store.get_task("AT-GH-410")
+        self.assertEqual(task.model, "claude-sonnet-4-6")
+        self.assertEqual(task.provider, "anthropic")
+        self.assertEqual(task.tools, ["read", "write"])
+        self.assertEqual(task.pi_bin, "/custom/pi")
+
+    def test_noop_execution_still_works_with_profile_metadata(self) -> None:
+        self._add_task("AT-GH-411")
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-411",
+                executor="noop",
+                validators=("policy",),
+                model="claude-sonnet-4-6",
+                provider="anthropic",
+            ),
+            store=self.store,
+            executor_registry={"noop": NoopExecutor()},
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertTrue(result.ok, msg=result.error)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
+        self.assertEqual(self.store.get_task("AT-GH-411").status, APPROVED_TASK_STATUS)
         self.assertFalse(result.safety["branch_pushed"])
         self.assertFalse(result.safety["pr_created"])
         self.assertFalse(result.safety["merged"])

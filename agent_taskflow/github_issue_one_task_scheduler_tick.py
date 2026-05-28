@@ -70,6 +70,14 @@ class GitHubIssueOneTaskSchedulerTickRequest:
     approved_task_preflight: bool = True
     command: tuple[str, ...] | None = None
 
+    # Executor profile metadata threaded down to ingestion and the approved
+    # task runner so a confirmed tick can drive a real executor profile, not
+    # only noop.
+    model: str | None = None
+    provider: str | None = None
+    tools: tuple[str, ...] | None = None
+    pi_bin: str | None = None
+
     def __post_init__(self) -> None:
         repo = str(self.repo or "").strip()
         if "/" not in repo or repo.startswith("/") or repo.endswith("/"):
@@ -140,12 +148,18 @@ class GitHubIssueOneTaskSchedulerTickRequest:
             "operator_note",
             "base_branch",
             "executor",
+            "model",
+            "provider",
+            "pi_bin",
         ):
             value = getattr(self, field_name)
             if value is None:
                 continue
             stripped = str(value).strip()
             object.__setattr__(self, field_name, stripped or None)
+
+        if self.tools is not None:
+            object.__setattr__(self, "tools", _normalize_executor_tools(self.tools))
 
         remote = str(self.remote or "").strip()
         if not remote:
@@ -275,6 +289,10 @@ def _automation_request(
             publish_after_execution=request.publish_after_execution,
             lock_path=request.lock_path,
             fail_if_locked=request.fail_if_locked,
+            model=request.model,
+            provider=request.provider,
+            tools=request.tools,
+            pi_bin=request.pi_bin,
         )
 
     return GitHubIssueOneTaskAutomationRequest(
@@ -296,6 +314,10 @@ def _automation_request(
         publish_after_execution=request.publish_after_execution,
         lock_path=request.lock_path,
         fail_if_locked=request.fail_if_locked,
+        model=request.model,
+        provider=request.provider,
+        tools=request.tools,
+        pi_bin=request.pi_bin,
     )
 
 
@@ -335,6 +357,10 @@ def _configured_approved_task_runner_fn(
                 dry_run=False,
                 preflight=request.approved_task_preflight,
                 command=request.command,
+                model=request.model,
+                provider=request.provider,
+                tools=request.tools,
+                pi_bin=request.pi_bin,
             )
         )
         return result.to_dict()
@@ -475,6 +501,10 @@ def _runner_config_payload(request: GitHubIssueOneTaskSchedulerTickRequest) -> d
         "base_branch": request.base_branch or "main",
         "preflight": request.approved_task_preflight,
         "command": list(request.command) if request.command else None,
+        "model": request.model,
+        "provider": request.provider,
+        "tools": list(request.tools) if request.tools else None,
+        "pi_bin": request.pi_bin,
     }
 
 
@@ -569,6 +599,18 @@ def _normalize_labels(labels: tuple[str, ...]) -> tuple[str, ...]:
 
 def _normalize_label(label: str) -> str:
     return str(label or "").strip().lower()
+
+
+def _normalize_executor_tools(tools: tuple[str, ...]) -> tuple[str, ...] | None:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tool in tools:
+        value = str(tool or "").strip()
+        if not value or value in seen:
+            continue
+        normalized.append(value)
+        seen.add(value)
+    return tuple(normalized) or None
 
 
 def _normalize_validators(validators: tuple[str, ...]) -> tuple[str, ...]:

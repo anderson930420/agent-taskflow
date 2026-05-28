@@ -21,16 +21,18 @@ acquire non-overlap lock
 -> stop
 ```
 
-If another tick already holds the lock, the wrapper returns a safe no-op
-payload with `status=locked` and `ok=true`. This avoids treating normal timer
-overlap as a failed service run. In that locked result it does not call
-discovery, does not ingest an issue, does not call the watcher, does not run a
-task, does not push a branch, and does not create a draft PR.
+The lock is shared with `scripts/run_github_issue_one_task_automation.py`, so
+manual and scheduled write-capable runs cannot overlap. If another run already
+holds the lock, the wrapper returns a safe no-op payload with `status=locked`
+and `ok=true`. This avoids treating normal timer overlap as a failed service
+run. In that locked result it does not call discovery, does not ingest an
+issue, does not call the watcher, does not run a task, does not push a branch,
+and does not create a draft PR.
 
 The default lock path is:
 
 ```text
-~/.agent-taskflow/github_issue_one_task_scheduler_tick.lock
+~/.agent-taskflow/github_issue_one_task.lock
 ```
 
 Use `--lock-path` to point systemd or cron at an operator-managed runtime
@@ -96,6 +98,14 @@ one-shot execution evidence under `automation.execution` and a
 `publication.skipped=true` marker. Publication remains the explicit, separate
 `scripts/run_task_to_draft_pr_pipeline.py` workflow.
 
+If the first GitHub Issue repeatedly fails ingestion before the local task
+mirror is written, the underlying automation records the failure in SQLite and
+discovery skips active backoff or quarantined records. A later eligible issue
+can still be selected on a later tick. The JSON output includes
+`failed_ingestions` in the nested discovery block and
+`summary.failed_ingestion_count` at the scheduler, nested automation, and
+discovery summary levels.
+
 Example:
 
 ```bash
@@ -105,6 +115,44 @@ PYTHONPATH=. .venv/bin/python3 scripts/run_github_issue_one_task_scheduler_tick.
   --local-repo-path /absolute/path/to/repo \
   --artifact-root /absolute/path/to/artifacts \
   --lock-path /absolute/path/to/github-issue-one-task.lock \
+  --confirmed \
+  --json
+```
+
+## Executor Profile
+
+By default the scheduled tick records no executor selection on the ingested
+task, which preserves the existing noop/default execution behavior. To make a
+confirmed tick capable of driving a real executor profile, optional executor
+profile metadata can be passed and is threaded down to the mirrored
+`TaskRecord` through ingestion:
+
+```text
+--model      executor model recorded on the ingested task
+--provider   executor provider recorded on the ingested task
+--tools      executor tool recorded on the ingested task (repeatable)
+--pi-bin     Pi executor binary recorded on the ingested task profile
+```
+
+These flags only record profile metadata. The scheduler tick does not add an
+executor selection flag, does not run a Claude Code executor, does not add an
+AI validator, and does not change any safety gate. The recorded profile is
+consumed later by the deterministic approved task runner when a real executor
+(such as `opencode` or `pi`) is invoked; `opencode` requires a model, so a
+missing model is reported explicitly at runtime.
+
+Example:
+
+```bash
+PYTHONPATH=. .venv/bin/python3 scripts/run_github_issue_one_task_scheduler_tick.py \
+  --repo OWNER/REPO \
+  --db-path /absolute/path/to/state.db \
+  --local-repo-path /absolute/path/to/repo \
+  --artifact-root /absolute/path/to/artifacts \
+  --lock-path /absolute/path/to/github-issue-one-task.lock \
+  --model claude-sonnet-4-6 \
+  --provider anthropic \
+  --tools read --tools write \
   --confirmed \
   --json
 ```
