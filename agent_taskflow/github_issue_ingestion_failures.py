@@ -62,12 +62,26 @@ class GitHubIssueIngestionFailureRegistry:
                     first_failed_at TEXT NOT NULL,
                     last_failed_at TEXT NOT NULL,
                     next_retry_after TEXT,
-                    quarantined INTEGER NOT NULL,
+                    quarantined INTEGER NOT NULL DEFAULT 0,
                     last_error_summary TEXT NOT NULL,
                     PRIMARY KEY(repo, issue_number)
                 )
                 """
             )
+            column_rows = conn.execute(
+                "PRAGMA table_info(github_issue_ingestion_failures)"
+            ).fetchall()
+            columns = {str(row["name"]) for row in column_rows}
+            if "next_retry_after" not in columns:
+                conn.execute(
+                    "ALTER TABLE github_issue_ingestion_failures "
+                    "ADD COLUMN next_retry_after TEXT"
+                )
+            if "quarantined" not in columns:
+                conn.execute(
+                    "ALTER TABLE github_issue_ingestion_failures "
+                    "ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0"
+                )
 
     def record_failure(
         self,
