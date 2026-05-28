@@ -58,6 +58,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.db_path = self.root / "state.db"
         self.artifact_root = self.root / "artifacts"
         self.artifact_root.mkdir()
+        self.worktree_root = self.root / "worktrees"
         self.lock_path = self.root / "scheduler.lock"
         self.repo = "anderson930420/agent-taskflow"
 
@@ -109,6 +110,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertTrue(result["lock"]["acquired"])
         self.assertFalse(result["lock"]["contended"])
         self.assertTrue(result["lock"]["released"])
+        self.assertFalse(result["runner_config"]["configured"])
         self.assertEqual(result["automation"]["status"], "dry_run")
         self.assertEqual(result["automation"]["selected_issue"]["number"], 701)
         self.assertIsNone(result["selected_task_key"])
@@ -123,6 +125,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertFalse(safety["lock_contended"])
         self.assertTrue(safety["dry_run"])
         self.assertFalse(safety["confirmed"])
+        self.assertFalse(safety["runner_configured"])
         self.assertTrue(safety["automation_called"])
         self.assertTrue(safety["discovery_called"])
         self.assertFalse(safety["issue_ingested"])
@@ -203,11 +206,13 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "completed_one_task")
         self.assertEqual(result["mode"], "confirmed")
+        self.assertFalse(result["runner_config"]["configured"])
         self.assertEqual(result["selected_task_key"], "AT-GH-702")
         self.assertEqual(result["automation"]["selected_task_key"], "AT-GH-702")
         safety = result["safety"]
         self.assertFalse(safety["dry_run"])
         self.assertTrue(safety["confirmed"])
+        self.assertFalse(safety["runner_configured"])
         self.assertTrue(safety["automation_called"])
         self.assertTrue(safety["discovery_called"])
         self.assertTrue(safety["issue_ingested"])
@@ -216,6 +221,91 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertTrue(safety["github_mutated"])
         self.assertTrue(safety["branch_pushed"])
         self.assertTrue(safety["draft_pr_created"])
+
+    def test_confirmed_tick_builds_configured_approved_runner(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
+            runner = kwargs["approved_task_runner_fn"]
+            seen["runner_payload"] = runner(
+                task_key="AT-GH-703",
+                handoff={},
+                handoff_id="handoff-test",
+                runtime_execution_id="runtime-test",
+                db_path=request.db_path,
+                artifact_root=request.artifact_root,
+            )
+            return {
+                "ok": True,
+                "status": "completed_one_task",
+                "mode": "confirmed",
+                "repo": request.repo,
+                "selected_task_key": "AT-GH-703",
+                "safety": {
+                    "discovery_called": True,
+                    "issue_ingested": True,
+                    "watcher_called": True,
+                    "approved_task_runner_called": True,
+                    "github_mutated": False,
+                    "branch_pushed": False,
+                    "draft_pr_created": False,
+                },
+            }
+
+        with mock.patch(
+            "agent_taskflow.github_issue_one_task_scheduler_tick."
+            "run_github_issue_one_task_automation",
+            side_effect=fake_automation,
+        ):
+            with mock.patch(
+                "agent_taskflow.github_issue_one_task_scheduler_tick.run_approved_task"
+            ) as fake_runner:
+                fake_runner.return_value.to_dict.return_value = {
+                    "ok": True,
+                    "status": "waiting_approval",
+                    "phase": "waiting_approval",
+                    "summary": {"final_task_status": "waiting_approval"},
+                    "safety": {
+                        "executor_started": True,
+                        "validators_started": True,
+                        "github_mutated": False,
+                    },
+                }
+                result = run_github_issue_one_task_scheduler_tick(
+                    self.request(
+                        confirmed=True,
+                        executor="shell",
+                        validators=("pytest", "policy"),
+                        worktree_root=self.worktree_root,
+                        base_branch="main",
+                        approved_task_preflight=False,
+                        command=("python", "-m", "pytest"),
+                    )
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["runner_config"]["configured"])
+        self.assertEqual(result["runner_config"]["executor"], "shell")
+        self.assertEqual(result["runner_config"]["validators"], ["pytest", "policy"])
+        self.assertEqual(result["runner_config"]["worktree_root"], str(self.worktree_root))
+        self.assertEqual(result["runner_config"]["command"], ["python", "-m", "pytest"])
+        self.assertFalse(result["runner_config"]["preflight"])
+        self.assertTrue(result["safety"]["runner_configured"])
+        self.assertEqual(seen["runner_payload"]["status"], "waiting_approval")
+
+        runner_request = fake_runner.call_args.args[0]
+        self.assertEqual(runner_request.task_key, "AT-GH-703")
+        self.assertEqual(runner_request.executor, "shell")
+        self.assertEqual(runner_request.repo_path, self.local_repo)
+        self.assertEqual(runner_request.db_path, self.db_path)
+        self.assertEqual(runner_request.artifact_root, self.artifact_root)
+        self.assertEqual(runner_request.worktree_root, self.worktree_root)
+        self.assertEqual(runner_request.base_branch, "main")
+        self.assertEqual(runner_request.validators, ("pytest", "policy"))
+        self.assertTrue(runner_request.confirm_approved_task)
+        self.assertFalse(runner_request.dry_run)
+        self.assertFalse(runner_request.preflight)
+        self.assertEqual(runner_request.command, ("python", "-m", "pytest"))
 
     def test_lock_contention_returns_locked_without_calling_automation(self) -> None:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
