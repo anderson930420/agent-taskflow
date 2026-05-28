@@ -1,0 +1,334 @@
+from __future__ import annotations
+
+import fcntl
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+from agent_taskflow.github_issue_discovery import GitHubIssueDiscoveryIssue
+from agent_taskflow.github_issue_ingestion import GitHubIssueSnapshot
+from agent_taskflow.github_issue_one_task_scheduler_tick import (
+    GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SCHEMA_VERSION,
+    GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SOURCE,
+    GitHubIssueOneTaskSchedulerTickRequest,
+    run_github_issue_one_task_scheduler_tick,
+)
+
+
+def discovery_issue(
+    number: int,
+    *,
+    title: str | None = None,
+    state: str = "open",
+    labels: tuple[str, ...] = (),
+) -> GitHubIssueDiscoveryIssue:
+    return GitHubIssueDiscoveryIssue(
+        number=number,
+        title=title or f"Issue {number}",
+        state=state,
+        labels=labels,
+        url=f"https://github.com/anderson930420/agent-taskflow/issues/{number}",
+        created_at="2026-05-01T00:00:00Z",
+        updated_at="2026-05-02T00:00:00Z",
+    )
+
+
+def issue_snapshot(number: int) -> GitHubIssueSnapshot:
+    return GitHubIssueSnapshot(
+        number=number,
+        title=f"Issue {number}",
+        body="Issue body for scheduler tick test.",
+        state="open",
+        labels=("ready",),
+        author="octocat",
+        url=f"https://github.com/anderson930420/agent-taskflow/issues/{number}",
+        created_at="2026-05-01T00:00:00Z",
+        updated_at="2026-05-02T00:00:00Z",
+    )
+
+
+class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.local_repo = self.root / "repo"
+        self.local_repo.mkdir()
+        self.db_path = self.root / "state.db"
+        self.artifact_root = self.root / "artifacts"
+        self.artifact_root.mkdir()
+        self.lock_path = self.root / "scheduler.lock"
+        self.repo = "anderson930420/agent-taskflow"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def request(self, **overrides: Any) -> GitHubIssueOneTaskSchedulerTickRequest:
+        values: dict[str, Any] = {
+            "repo": self.repo,
+            "db_path": self.db_path,
+            "local_repo_path": self.local_repo,
+            "artifact_root": self.artifact_root,
+            "lock_path": self.lock_path,
+        }
+        values.update(overrides)
+        return GitHubIssueOneTaskSchedulerTickRequest(**values)
+
+    def test_dry_run_acquires_lock_and_calls_automation_without_writes(self) -> None:
+        discovery_calls: list[int] = []
+
+        def forbidden_ingestion(repo: str, issue_number: int) -> GitHubIssueSnapshot:
+            raise AssertionError("dry-run scheduler tick must not ingest")
+
+        def forbidden_runner(**kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("dry-run scheduler tick must not call runner")
+
+        result = run_github_issue_one_task_scheduler_tick(
+            self.request(),
+            discovery_fetcher=lambda request: (
+                discovery_calls.append(request.limit)
+                or [discovery_issue(701, title="Dry run issue", labels=("ready",))]
+            ),
+            ingestion_fetcher=forbidden_ingestion,
+            approved_task_runner_fn=forbidden_runner,
+            branch_push_fn=forbidden_runner,
+            draft_pr_fn=forbidden_runner,
+        )
+
+        self.assertTrue(result["ok"], msg=f"result: {result!r}")
+        self.assertEqual(
+            result["schema_version"],
+            GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SCHEMA_VERSION,
+        )
+        self.assertEqual(result["source"], GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SOURCE)
+        self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(result["mode"], "dry_run")
+        self.assertEqual(discovery_calls, [100])
+        self.assertTrue(self.lock_path.exists())
+        self.assertTrue(result["lock"]["acquired"])
+        self.assertFalse(result["lock"]["contended"])
+        self.assertTrue(result["lock"]["released"])
+        self.assertEqual(result["automation"]["status"], "dry_run")
+        self.assertEqual(result["automation"]["selected_issue"]["number"], 701)
+        self.assertIsNone(result["selected_task_key"])
+        self.assertFalse(self.db_path.exists())
+
+        safety = result["safety"]
+        self.assertTrue(safety["scheduled_tick"])
+        self.assertTrue(safety["one_tick_only"])
+        self.assertTrue(safety["one_issue_only"])
+        self.assertTrue(safety["one_task_only"])
+        self.assertTrue(safety["lock_acquired"])
+        self.assertFalse(safety["lock_contended"])
+        self.assertTrue(safety["dry_run"])
+        self.assertFalse(safety["confirmed"])
+        self.assertTrue(safety["automation_called"])
+        self.assertTrue(safety["discovery_called"])
+        self.assertFalse(safety["issue_ingested"])
+        self.assertFalse(safety["watcher_called"])
+        self.assertFalse(safety["approved_task_runner_called"])
+        self.assertFalse(safety["github_mutated"])
+        self.assertFalse(safety["branch_pushed"])
+        self.assertFalse(safety["draft_pr_created"])
+
+    def test_confirmed_tick_passes_controlled_preset_and_propagates_result(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
+            seen["request"] = request
+            seen["kwargs"] = kwargs
+            return {
+                "ok": True,
+                "status": "completed_one_task",
+                "mode": "confirmed",
+                "repo": request.repo,
+                "selected_task_key": "AT-GH-702",
+                "safety": {
+                    "discovery_called": True,
+                    "issue_ingested": True,
+                    "watcher_called": True,
+                    "approved_task_runner_called": True,
+                    "github_mutated": True,
+                    "branch_pushed": True,
+                    "draft_pr_created": True,
+                },
+            }
+
+        with mock.patch(
+            "agent_taskflow.github_issue_one_task_scheduler_tick."
+            "run_github_issue_one_task_automation",
+            side_effect=fake_automation,
+        ):
+            result = run_github_issue_one_task_scheduler_tick(
+                self.request(
+                    confirmed=True,
+                    issue_limit=7,
+                    include_labels=("ready",),
+                    exclude_labels=("skip",),
+                    operator="codex",
+                    operator_note="scheduled tick test",
+                    remote="upstream",
+                    base_branch="main",
+                ),
+                discovery_fetcher=lambda request: [],
+                ingestion_fetcher=lambda repo, issue_number: issue_snapshot(
+                    issue_number
+                ),
+                approved_task_runner_fn=lambda **kwargs: {"ok": True},
+                branch_push_fn=lambda **kwargs: {"ok": True},
+                draft_pr_fn=lambda **kwargs: {"ok": True},
+            )
+
+        automation_request = seen["request"]
+        self.assertFalse(automation_request.dry_run)
+        self.assertTrue(automation_request.select_first_issue)
+        self.assertTrue(automation_request.confirm_select_first_issue)
+        self.assertTrue(automation_request.confirm_ingest_issue)
+        self.assertTrue(automation_request.confirm_run_watcher_one_task)
+        self.assertTrue(automation_request.confirm_run_one_shot_pipeline)
+        self.assertTrue(automation_request.confirm_prepare_pr)
+        self.assertTrue(automation_request.confirm_github_mutations)
+        self.assertTrue(automation_request.confirm_branch_push)
+        self.assertTrue(automation_request.confirm_draft_pr)
+        self.assertTrue(automation_request.draft)
+        self.assertEqual(automation_request.issue_limit, 7)
+        self.assertEqual(automation_request.include_labels, ("ready",))
+        self.assertEqual(automation_request.exclude_labels, ("skip",))
+        self.assertEqual(automation_request.operator, "codex")
+        self.assertEqual(automation_request.operator_note, "scheduled tick test")
+        self.assertEqual(automation_request.remote, "upstream")
+        self.assertEqual(automation_request.base_branch, "main")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "completed_one_task")
+        self.assertEqual(result["mode"], "confirmed")
+        self.assertEqual(result["selected_task_key"], "AT-GH-702")
+        self.assertEqual(result["automation"]["selected_task_key"], "AT-GH-702")
+        safety = result["safety"]
+        self.assertFalse(safety["dry_run"])
+        self.assertTrue(safety["confirmed"])
+        self.assertTrue(safety["automation_called"])
+        self.assertTrue(safety["discovery_called"])
+        self.assertTrue(safety["issue_ingested"])
+        self.assertTrue(safety["watcher_called"])
+        self.assertTrue(safety["approved_task_runner_called"])
+        self.assertTrue(safety["github_mutated"])
+        self.assertTrue(safety["branch_pushed"])
+        self.assertTrue(safety["draft_pr_created"])
+
+    def test_lock_contention_returns_locked_without_calling_automation(self) -> None:
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with mock.patch(
+                    "agent_taskflow.github_issue_one_task_scheduler_tick."
+                    "run_github_issue_one_task_automation",
+                    side_effect=AssertionError(
+                        "contended scheduler tick must not call automation"
+                    ),
+                ) as fake_automation:
+                    result = run_github_issue_one_task_scheduler_tick(
+                        self.request(confirmed=True)
+                    )
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+        self.assertFalse(fake_automation.called)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "locked")
+        self.assertIsNone(result["automation"])
+        self.assertIsNone(result["selected_task_key"])
+        self.assertFalse(result["lock"]["acquired"])
+        self.assertTrue(result["lock"]["contended"])
+        safety = result["safety"]
+        self.assertFalse(safety["lock_acquired"])
+        self.assertTrue(safety["lock_contended"])
+        self.assertFalse(safety["automation_called"])
+        self.assertFalse(safety["discovery_called"])
+        self.assertFalse(safety["issue_ingested"])
+        self.assertFalse(safety["watcher_called"])
+        self.assertFalse(safety["approved_task_runner_called"])
+        self.assertFalse(safety["branch_pushed"])
+        self.assertFalse(safety["draft_pr_created"])
+
+    def test_confirmed_no_eligible_issue_is_safe_noop(self) -> None:
+        def forbidden_ingestion(repo: str, issue_number: int) -> GitHubIssueSnapshot:
+            raise AssertionError("no-eligible scheduler tick must not ingest")
+
+        def forbidden_runner(**kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("no-eligible scheduler tick must not run work")
+
+        result = run_github_issue_one_task_scheduler_tick(
+            self.request(confirmed=True),
+            discovery_fetcher=lambda request: [],
+            ingestion_fetcher=forbidden_ingestion,
+            approved_task_runner_fn=forbidden_runner,
+            branch_push_fn=forbidden_runner,
+            draft_pr_fn=forbidden_runner,
+        )
+
+        self.assertTrue(result["ok"], msg=f"result: {result!r}")
+        self.assertEqual(result["status"], "no_eligible_issues")
+        self.assertEqual(result["mode"], "confirmed")
+        self.assertEqual(result["automation"]["status"], "no_eligible_issues")
+        self.assertIsNone(result["automation"]["selected_issue"])
+        self.assertIsNone(result["automation"]["ingestion"])
+        self.assertIsNone(result["automation"]["watcher"])
+        self.assertIsNone(result["selected_task_key"])
+        self.assertFalse(self.db_path.exists())
+        safety = result["safety"]
+        self.assertTrue(safety["automation_called"])
+        self.assertTrue(safety["discovery_called"])
+        self.assertFalse(safety["issue_ingested"])
+        self.assertFalse(safety["watcher_called"])
+        self.assertFalse(safety["approved_task_runner_called"])
+        self.assertFalse(safety["branch_pushed"])
+        self.assertFalse(safety["draft_pr_created"])
+
+    def test_safety_invariants_preserve_human_final_gates(self) -> None:
+        result = run_github_issue_one_task_scheduler_tick(
+            self.request(),
+            discovery_fetcher=lambda request: [],
+            ingestion_fetcher=lambda repo, issue_number: issue_snapshot(
+                issue_number
+            ),
+            approved_task_runner_fn=lambda **kwargs: {"ok": False},
+            branch_push_fn=lambda **kwargs: {"ok": False},
+            draft_pr_fn=lambda **kwargs: {"ok": False},
+        )
+
+        safety = result["safety"]
+        self.assertFalse(safety["approved"])
+        self.assertFalse(safety["merged"])
+        self.assertFalse(safety["cleanup_performed"])
+        self.assertFalse(safety["branch_deleted"])
+        self.assertFalse(safety["worktree_deleted"])
+        self.assertFalse(safety["scheduler_loop_started"])
+        self.assertFalse(safety["background_worker_started"])
+        self.assertFalse(safety["multi_task_batch_started"])
+        self.assertTrue(safety["human_review_required"])
+
+        source = Path(
+            "agent_taskflow/github_issue_one_task_scheduler_tick.py"
+        ).read_text(encoding="utf-8")
+        forbidden = (
+            "while True",
+            "schedule.every",
+            "asyncio.sleep",
+            "threading.Thread",
+            "Thread(",
+            "merge_pull_request",
+            "record_approval_decision(",
+            "delete_worktree",
+            "git worktree remove",
+            "git branch -d",
+            "git push --delete",
+        )
+        for needle in forbidden:
+            self.assertNotIn(needle, source, needle)
+
+
+if __name__ == "__main__":
+    unittest.main()

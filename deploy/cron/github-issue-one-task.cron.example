@@ -1,0 +1,8 @@
+# Example only. Copy and adapt outside the repository before installing.
+# Do not embed GitHub tokens, SSH keys, API keys, or other secrets here.
+# Assumes GitHub authentication and environment are provisioned externally.
+#
+# Runs one locked scheduled tick every 15 minutes. Each invocation processes
+# at most one eligible GitHub Issue / one task and then stops.
+
+*/15 * * * * cd /opt/agent-taskflow && PYTHONPATH=/opt/agent-taskflow /opt/agent-taskflow/.venv/bin/python3 /opt/agent-taskflow/scripts/run_github_issue_one_task_scheduler_tick.py --repo OWNER/REPO --db-path /var/lib/agent-taskflow/state.db --local-repo-path /opt/agent-taskflow --artifact-root /var/lib/agent-taskflow/artifacts --lock-path /var/lock/agent-taskflow/github-issue-one-task.lock --confirmed --json >> /var/log/agent-taskflow/github-issue-one-task.log 2>&1
