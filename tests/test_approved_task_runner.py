@@ -384,6 +384,161 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertEqual(self.store.get_task("AT-GH-409").status, RUN_STATUS_BLOCKED)
         self.assertFalse(result.safety["executor_started"])
 
+    def _write_issue_spec(self, artifact_dir: Path, *, title: str, body: str) -> Path:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        issue_spec_path = artifact_dir / "issue_spec.md"
+        issue_spec_path.write_text(
+            "\n".join(
+                [
+                    "# GitHub Issue Spec",
+                    "",
+                    f"- Title: {title}",
+                    "",
+                    "## Body",
+                    "",
+                    body,
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return issue_spec_path
+
+    def test_opencode_generates_implementation_prompt_from_issue_spec(self) -> None:
+        artifact_dir = self._add_task("AT-GH-67", title="Add the widget")
+        self._write_issue_spec(artifact_dir, title="Add the widget", body="Please add a widget.")
+        opencode = FakeExecutor(name="opencode", status="completed")
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-67",
+                executor="opencode",
+                validators=("policy",),
+                model="minimax-coding-plan/MiniMax-M2.7",
+            ),
+            store=self.store,
+            executor_registry={"opencode": opencode},
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertTrue(result.ok, msg=result.error)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
+
+        prompt_path = artifact_dir / "implementation_prompt.md"
+        self.assertTrue(prompt_path.exists())
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+        self.assertIn("AT-GH-67", prompt_text)
+        self.assertIn("Add the widget", prompt_text)
+        self.assertIn("Please add a widget.", prompt_text)
+
+        # The generated prompt is recorded as an implementation_prompt artifact.
+        artifact_types = {
+            record.artifact_type for record in self.store.list_task_artifacts("AT-GH-67")
+        }
+        self.assertIn("implementation_prompt", artifact_types)
+
+        # opencode no longer blocks before executor start; it ran with the prompt.
+        self.assertEqual(len(opencode.calls), 1)
+        self.assertEqual(opencode.calls[0].prompt_path, prompt_path)
+        self.assertTrue(result.executor_run["started"])
+        self.assertTrue(result.safety["executor_started"])
+
+    def test_opencode_blocks_when_issue_spec_missing(self) -> None:
+        artifact_dir = self._add_task("AT-GH-68", title="No spec task")
+        opencode = FakeExecutor(name="opencode", status="completed")
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-68",
+                executor="opencode",
+                validators=("policy",),
+                model="minimax-coding-plan/MiniMax-M2.7",
+            ),
+            store=self.store,
+            executor_registry={"opencode": opencode},
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "executor")
+        self.assertEqual(result.status, RUN_STATUS_BLOCKED)
+        self.assertIn("issue_spec.md", result.error or "")
+        self.assertEqual(len(opencode.calls), 0)
+        self.assertFalse(result.safety["executor_started"])
+        self.assertFalse((artifact_dir / "implementation_prompt.md").exists())
+        self.assertEqual(self.store.get_task("AT-GH-68").status, RUN_STATUS_BLOCKED)
+
+    def test_opencode_reuses_existing_implementation_prompt(self) -> None:
+        artifact_dir = self._add_task("AT-GH-69", title="Existing prompt task")
+        self._write_issue_spec(artifact_dir, title="ignored", body="ignored body")
+        prompt_path = artifact_dir / "implementation_prompt.md"
+        prompt_path.write_text("# Pre-supplied prompt\n", encoding="utf-8")
+        opencode = FakeExecutor(name="opencode", status="completed")
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-69",
+                executor="opencode",
+                validators=("policy",),
+                model="minimax-coding-plan/MiniMax-M2.7",
+            ),
+            store=self.store,
+            executor_registry={"opencode": opencode},
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertTrue(result.ok, msg=result.error)
+        # A pre-supplied prompt is left untouched (not regenerated from the spec).
+        self.assertEqual(prompt_path.read_text(encoding="utf-8"), "# Pre-supplied prompt\n")
+        self.assertEqual(opencode.calls[0].prompt_path, prompt_path)
+
+    def test_noop_does_not_generate_implementation_prompt(self) -> None:
+        artifact_dir = self._add_task("AT-GH-70", title="Noop task")
+        self._write_issue_spec(artifact_dir, title="Noop task", body="should be ignored by noop")
+
+        result = run_approved_task(
+            self._request(task_key="AT-GH-70", executor="noop", validators=("policy",)),
+            store=self.store,
+            executor_registry={"noop": NoopExecutor()},
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertTrue(result.ok, msg=result.error)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
+        self.assertFalse((artifact_dir / "implementation_prompt.md").exists())
+        artifact_types = {
+            record.artifact_type for record in self.store.list_task_artifacts("AT-GH-70")
+        }
+        self.assertNotIn("implementation_prompt", artifact_types)
+
+    def test_shell_does_not_generate_implementation_prompt(self) -> None:
+        artifact_dir = self._add_task("AT-GH-71", title="Shell task")
+        self._write_issue_spec(artifact_dir, title="Shell task", body="should be ignored by shell")
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-71",
+                executor="shell",
+                validators=("policy",),
+                command=("git", "status", "--short"),
+            ),
+            store=self.store,
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertTrue(result.ok, msg=result.error)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
+        self.assertFalse((artifact_dir / "implementation_prompt.md").exists())
+        artifact_types = {
+            record.artifact_type for record in self.store.list_task_artifacts("AT-GH-71")
+        }
+        self.assertNotIn("implementation_prompt", artifact_types)
+
     def test_request_executor_profile_flows_to_real_executor(self) -> None:
         self._add_task("AT-GH-410")
         captured: dict[str, object] = {}
