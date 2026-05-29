@@ -10,7 +10,13 @@ from typing import Any, Mapping, Sequence
 from agent_taskflow.api.schemas import json_safe
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
+from agent_taskflow.executors.implementation_prompt import (
+    EXECUTORS_REQUIRING_PROMPT,
+    IMPLEMENTATION_PROMPT_FILENAME,
+    render_implementation_prompt,
+)
 from agent_taskflow.executors.registry import build_shell_executor, get_executor, list_executor_names
+from agent_taskflow.github_issue_ingestion import ISSUE_SPEC_FILENAME
 from agent_taskflow.mission_contract import build_from_task_fields, write_mission_contract
 from agent_taskflow.models import TaskRecord, require_absolute_path
 from agent_taskflow.preflight import PreflightResult, run_preflight
@@ -277,18 +283,22 @@ def run_approved_task(
             preflight=preflight_payload,
             workspace=_workspace_payload(workspace_result),
         )
-    if request.executor == "opencode" and executor_context.prompt_path is None:
-        reason = f"implementation_prompt.md is required for opencode executor: {effective_task.artifact_dir / 'implementation_prompt.md'}"
-        _block_task(current_store, effective_task.task_key, reason)
-        return _blocked_failure(
-            request,
-            task=effective_task,
-            phase="executor",
-            error=reason,
-            task_status_changed=True,
-            preflight=preflight_payload,
-            workspace=_workspace_payload(workspace_result),
-        )
+    if request.executor in EXECUTORS_REQUIRING_PROMPT and executor_context.prompt_path is None:
+        prompt_path, prompt_error = _ensure_implementation_prompt(effective_task)
+        if prompt_error is not None:
+            _block_task(current_store, effective_task.task_key, prompt_error)
+            return _blocked_failure(
+                request,
+                task=effective_task,
+                phase="executor",
+                error=prompt_error,
+                task_status_changed=True,
+                preflight=preflight_payload,
+                workspace=_workspace_payload(workspace_result),
+            )
+        assert prompt_path is not None
+        _record_artifact(current_store, effective_task.task_key, "implementation_prompt", prompt_path)
+        executor_context = replace(executor_context, prompt_path=prompt_path)
 
     executor_run_id = current_store.create_executor_run(
         effective_task.task_key,
@@ -855,9 +865,44 @@ def _final_safety(
     }
 
 
+def _ensure_implementation_prompt(task: TaskRecord) -> tuple[Path | None, str | None]:
+    """Generate a deterministic implementation prompt from the issue spec.
+
+    Returns ``(prompt_path, None)`` when the prompt already exists or was
+    generated from ``issue_spec.md``, and ``(None, reason)`` when the issue spec
+    needed to generate it is missing so the caller can block the task. It writes
+    only the prompt file and records nothing about approval, merge, push, or
+    cleanup; the runner remains the artifact and review authority.
+    """
+
+    artifact_dir = task.artifact_dir
+    if artifact_dir is None:  # pragma: no cover - guarded before the executor phase.
+        return None, "Task artifact_dir is required to generate implementation_prompt.md"
+    prompt_path = artifact_dir / IMPLEMENTATION_PROMPT_FILENAME
+    if prompt_path.exists():
+        return prompt_path, None
+    issue_spec_path = artifact_dir / ISSUE_SPEC_FILENAME
+    if not issue_spec_path.exists():
+        return None, (
+            "issue_spec.md is required to generate implementation_prompt.md for "
+            f"{task.executor or 'opencode'} executor: {issue_spec_path}"
+        )
+    issue_spec_text = issue_spec_path.read_text(encoding="utf-8")
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text(
+        render_implementation_prompt(
+            task_key=task.task_key,
+            title=task.title,
+            issue_spec=issue_spec_text,
+        ),
+        encoding="utf-8",
+    )
+    return prompt_path, None
+
+
 def _build_executor_context(task: TaskRecord, workspace_result: WorkspacePreparationResult) -> ExecutorContext:
     artifact_dir = task.artifact_dir or workspace_result.worktree_path
-    prompt_path = artifact_dir / "implementation_prompt.md"
+    prompt_path = artifact_dir / IMPLEMENTATION_PROMPT_FILENAME
     if not prompt_path.exists():
         prompt_path = None
     return ExecutorContext(
@@ -890,7 +935,7 @@ def _write_mission_contract(
         model=task.model,
         provider=task.provider,
         required_validators=tuple(validators),
-        implementation_prompt_path=artifact_dir / "implementation_prompt.md",
+        implementation_prompt_path=artifact_dir / IMPLEMENTATION_PROMPT_FILENAME,
     )
     return write_mission_contract(contract, artifact_dir=artifact_dir)
 
