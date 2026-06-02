@@ -78,34 +78,26 @@ Mission Control is observability and review, not the execution core.
 ## Architecture Diagram
 
 ```mermaid
-flowchart TD
-    A[Human-authored GitHub Issue / Spec] --> B[Task Intake]
+flowchart LR
+    A[GitHub Issue / Spec] --> B[Task Intake]
     B --> C[SQLite Orchestrator State]
+    C --> D[Isolated Git Worktree]
+    D --> E[Executor Adapter]
+    E --> F[Implementation Worker]
+    F --> G[Deterministic Validators]
+    G --> H[Proof-of-Work Artifacts]
+    H --> I[Waiting Approval]
+    I --> J[Human Review]
+    J -->|approve| K[Optional Draft PR Handoff]
+    J -->|reject| N[Cleanup]
 
-    C --> D[Workspace Manager]
-    D --> E[Isolated Git Worktree]
+    C --> L[FastAPI Evidence API]
+    L --> M[Mission Control Dashboard]
 
-    E --> F[Executor Adapter]
-    F --> G[Implementation Worker<br/>Pi / OpenCode / Codex / Claude Code]
-
-    G --> H[Deterministic Validators]
-    H --> I[Proof-of-Work Artifacts]
-
-    I --> J[Waiting Approval]
-    J --> K[Human Review]
-
-    K --> L[Optional Branch Push]
-    K --> M[Optional Draft PR Handoff]
-    K --> N[Explicit Cleanup]
-
-    C --> O[FastAPI State / Evidence API]
-    O --> P[Mission Control Review Dashboard]
-
-    subgraph Safety_Boundaries
-        Q[No automatic merge]
-        R[No worker self-approval]
-        S[No automatic cleanup]
-        T[No hidden background daemon]
+    subgraph SB[Safety Boundaries enforced across all stages]
+        S1[No auto-merge]
+        S2[No self-approval]
+        S3[Explicit cleanup only]
     end
 ```
 
