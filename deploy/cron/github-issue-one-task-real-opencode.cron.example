@@ -1,0 +1,29 @@
+# Example only. Copy and adapt outside the repository before installing.
+# Do NOT embed GitHub tokens, SSH keys, opencode API keys, or other secrets
+# here. API credentials must be provided via the environment (gh auth and
+# opencode auth), not committed files.
+#
+# Cautious real opencode scheduled profile (Level 10H).
+#
+# What this profile does:
+# - Execution-only. Each tick runs at most one eligible GitHub Issue / one
+#   local task through the one-shot pipeline to waiting_approval, then stops.
+# - One issue / one task per tick. This is not a daemon, scheduler loop,
+#   webhook, background worker, or multi-task batch.
+# - Shared lock protection. The scheduler tick shares the non-overlap lock
+#   with manual write-capable runs, so concurrent ticks cannot overlap. A
+#   contended tick returns a safe no-op result and stops.
+#
+# What this profile does NOT do:
+# - No publish, no draft PR, no branch push, no PR merge, no approval, and no
+#   teardown of branches or worktrees. Human review remains the final gate.
+#
+# How to disable:
+# - Comment out (prefix with `#`) or remove the crontab line below using
+#   `crontab -e`.
+#
+# Schedule:
+# - Runs every 30 minutes by default. Adjust the schedule only after observing
+#   stable execution-only ticks for at least 24 hours.
+
+*/30 * * * * cd /home/ubuntu/agent-taskflow && { [ -f .venv/bin/activate ] && . .venv/bin/activate; }; python scripts/run_github_issue_one_task_scheduler_tick.py --repo anderson930420/agent-taskflow --db-path "$HOME/.agent-taskflow/state.db" --local-repo-path /home/ubuntu/agent-taskflow --artifact-root /home/ubuntu/agent-taskflow/artifacts/scheduler-tick --worktree-root /home/ubuntu/agent-taskflow/.worktrees --issue-limit 20 --operator cron-confirmed-real --operator-note "cron confirmed real opencode execution-only tick" --confirmed --executor opencode --model "minimax-coding-plan/MiniMax-M2.7" --validator policy --json >> /home/ubuntu/agent-taskflow/logs/github-issue-one-task-real-opencode.jsonl 2>&1
