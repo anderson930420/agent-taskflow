@@ -52,6 +52,8 @@ class OpenCodeExecutorTestCase(unittest.TestCase):
         opencode_returncode: int = 0,
         status_returncode: int = 0,
         diff_returncode: int = 0,
+        untracked_output: str = "",
+        untracked_returncode: int = 0,
     ):
         calls: list[list[str]] = []
 
@@ -81,6 +83,13 @@ class OpenCodeExecutorTestCase(unittest.TestCase):
                     args=command,
                     returncode=diff_returncode,
                     stdout="diff --git a/README.md b/README.md\n",
+                )
+
+            if command == ["git", "ls-files", "--others", "--exclude-standard"]:
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=untracked_returncode,
+                    stdout=untracked_output,
                 )
 
             raise AssertionError(f"Unexpected command: {command!r}")
@@ -310,6 +319,12 @@ class OpenCodeResultAndArtifactTests(OpenCodeExecutorTestCase):
                         returncode=0,
                         stdout="",
                     )
+                if command == ["git", "ls-files", "--others", "--exclude-standard"]:
+                    return subprocess.CompletedProcess(
+                        args=command,
+                        returncode=0,
+                        stdout="",
+                    )
                 raise AssertionError(f"Unexpected command: {command!r}")
 
             with patch(
@@ -323,6 +338,163 @@ class OpenCodeResultAndArtifactTests(OpenCodeExecutorTestCase):
             self.assertIn("failed to start", result.summary or "")
             self.assertIn(["git", "status", "--short"], calls)
             self.assertIn(["git", "diff"], calls)
+            self.assertIn(
+                ["git", "ls-files", "--others", "--exclude-standard"], calls
+            )
+
+
+class OpenCodeUntrackedEvidenceTests(OpenCodeExecutorTestCase):
+    def _run_with_untracked(
+        self,
+        tmp: Path,
+        *,
+        untracked_output: str,
+    ):
+        context = self.make_context(tmp)
+        _, side_effect = self.make_subprocess_side_effect(
+            untracked_output=untracked_output,
+        )
+        with patch(
+            "agent_taskflow.executors.opencode.subprocess.run",
+            side_effect=side_effect,
+        ):
+            result = OpenCodeExecutor().run(context)
+        return context, result
+
+    def test_untracked_text_file_content_is_captured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            context = self.make_context(tmp)
+            new_file = (
+                context.worktree_path / "docs" / "opencode-executor-real-run-smoke.md"
+            )
+            new_file.parent.mkdir(parents=True, exist_ok=True)
+            new_file.write_text(
+                "# OpenCode real-run smoke\nSMOKE_TASK_KEY guidance lives here.\n",
+                encoding="utf-8",
+            )
+
+            _, side_effect = self.make_subprocess_side_effect(
+                untracked_output="docs/opencode-executor-real-run-smoke.md\n",
+            )
+            with patch(
+                "agent_taskflow.executors.opencode.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = OpenCodeExecutor().run(context)
+
+            self.assertEqual(result.status, "completed")
+            untracked_path = result.artifacts["untracked_files"]
+            self.assertEqual(
+                untracked_path.name, "untracked-files-after-opencode.txt"
+            )
+            self.assertTrue(untracked_path.exists())
+
+            content = untracked_path.read_text(encoding="utf-8")
+            self.assertIn("Untracked files: 1", content)
+            self.assertIn("docs/opencode-executor-real-run-smoke.md", content)
+            self.assertIn("# OpenCode real-run smoke", content)
+            self.assertIn("SMOKE_TASK_KEY guidance lives here.", content)
+
+    def test_untracked_artifact_coexists_with_status_and_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            _, result = self._run_with_untracked(tmp, untracked_output="")
+
+            self.assertEqual(result.status, "completed")
+            self.assertTrue(result.artifacts["git_status"].exists())
+            self.assertTrue(result.artifacts["git_diff"].exists())
+            self.assertTrue(result.artifacts["untracked_files"].exists())
+            self.assertIn(
+                "Untracked files: 0",
+                result.artifacts["untracked_files"].read_text(encoding="utf-8"),
+            )
+
+    def test_binary_suffix_untracked_file_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            context = self.make_context(tmp)
+            blob = context.worktree_path / "module.pyc"
+            blob.write_bytes(b"\x00\x01\x02secret-bytes\x00\x03")
+
+            _, side_effect = self.make_subprocess_side_effect(
+                untracked_output="module.pyc\n",
+            )
+            with patch(
+                "agent_taskflow.executors.opencode.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = OpenCodeExecutor().run(context)
+
+            content = result.artifacts["untracked_files"].read_text(encoding="utf-8")
+            self.assertIn("module.pyc", content)
+            self.assertIn("[skipped: binary file type]", content)
+            self.assertNotIn("secret-bytes", content)
+
+    def test_binary_content_with_text_suffix_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            context = self.make_context(tmp)
+            weird = context.worktree_path / "payload.txt"
+            weird.write_bytes(b"leading\x00\x01\x02trailing-bytes")
+
+            _, side_effect = self.make_subprocess_side_effect(
+                untracked_output="payload.txt\n",
+            )
+            with patch(
+                "agent_taskflow.executors.opencode.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = OpenCodeExecutor().run(context)
+
+            content = result.artifacts["untracked_files"].read_text(encoding="utf-8")
+            self.assertIn("payload.txt", content)
+            self.assertIn("[skipped: binary content]", content)
+            self.assertNotIn("trailing-bytes", content)
+
+    def test_oversized_untracked_file_is_summarized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            context = self.make_context(tmp)
+            big = context.worktree_path / "big.txt"
+            big.write_text("A" * (64 * 1024 + 10), encoding="utf-8")
+
+            _, side_effect = self.make_subprocess_side_effect(
+                untracked_output="big.txt\n",
+            )
+            with patch(
+                "agent_taskflow.executors.opencode.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = OpenCodeExecutor().run(context)
+
+            content = result.artifacts["untracked_files"].read_text(encoding="utf-8")
+            self.assertIn("big.txt", content)
+            self.assertIn("content cap", content)
+            # The oversized blob itself must not be embedded.
+            self.assertNotIn("A" * 1000, content)
+
+    def test_untracked_listing_failure_is_reported_without_overriding_exit_code(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            context = self.make_context(tmp)
+            _, side_effect = self.make_subprocess_side_effect(
+                opencode_returncode=0,
+                untracked_returncode=128,
+                untracked_output="fatal: not a git repository\n",
+            )
+            with patch(
+                "agent_taskflow.executors.opencode.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = OpenCodeExecutor().run(context)
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.exit_code, 0)
+            self.assertTrue(result.artifacts["untracked_files"].exists())
+            self.assertIn("artifact capture failed", result.summary or "")
 
 
 class OpenCodeRegistryTests(unittest.TestCase):

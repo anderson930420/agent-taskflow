@@ -10,6 +10,21 @@ from typing import Sequence
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
 
 
+# Maximum byte size of a single untracked file whose content is embedded in
+# the untracked-files evidence artifact. Larger files are summarized (path and
+# size only) rather than embedded.
+_MAX_UNTRACKED_EMBED_SIZE = 64 * 1024
+
+# Suffixes treated as binary / non-text. Untracked files with these suffixes
+# are recorded (path + size) but their content is not embedded.
+_UNTRACKED_BINARY_SUFFIXES = frozenset({
+    ".pyc", ".pyo", ".so", ".dll", ".exe", ".o", ".a", ".class",
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp", ".svgz",
+    ".pdf", ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z",
+    ".whl", ".jar", ".war", ".bin", ".dat", ".wasm",
+})
+
+
 class OpenCodeExecutor(Executor):
     """Run OpenCode inside a verified task worktree."""
 
@@ -46,6 +61,7 @@ class OpenCodeExecutor(Executor):
         log_path = context.artifact_dir / "opencode-events.jsonl"
         git_status_path = context.artifact_dir / "git-status-after-opencode.txt"
         git_diff_path = context.artifact_dir / "diff-after-opencode.patch"
+        untracked_path = context.artifact_dir / "untracked-files-after-opencode.txt"
 
         selected_model = self.model or context.model
         if selected_model is None:
@@ -123,12 +139,14 @@ class OpenCodeExecutor(Executor):
             worktree_path=context.worktree_path,
             git_status_path=git_status_path,
             git_diff_path=git_diff_path,
+            untracked_path=untracked_path,
         )
 
         artifacts = {
             "opencode_log": log_path,
             "git_status": git_status_path,
             "git_diff": git_diff_path,
+            "untracked_files": untracked_path,
         }
 
         if start_error is not None:
@@ -174,6 +192,7 @@ class OpenCodeExecutor(Executor):
         worktree_path: Path,
         git_status_path: Path,
         git_diff_path: Path,
+        untracked_path: Path,
     ) -> list[str]:
         notes: list[str] = []
 
@@ -193,7 +212,101 @@ class OpenCodeExecutor(Executor):
         if diff_result is not None:
             notes.append(diff_result)
 
+        untracked_result = self._capture_untracked_files(
+            worktree_path=worktree_path,
+            output_path=untracked_path,
+        )
+        if untracked_result is not None:
+            notes.append(untracked_result)
+
         return notes
+
+    def _capture_untracked_files(
+        self,
+        *,
+        worktree_path: Path,
+        output_path: Path,
+    ) -> str | None:
+        """Record untracked files and their content as a deterministic artifact.
+
+        Plain ``git diff`` does not include the content of untracked files, so a
+        worker that creates new files leaves an empty diff. This artifact lists
+        untracked files via ``git ls-files --others --exclude-standard`` and, for
+        each text file within the size cap, records its path, size, and content.
+        Binary, oversized, or unreadable files are summarized (path + size) and
+        their bytes are not embedded.
+        """
+        try:
+            completed = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=worktree_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                shell=False,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            output_path.write_text(
+                f"Failed to list untracked files: {exc}\n", encoding="utf-8"
+            )
+            return "untracked-files artifact capture failed to start."
+
+        if completed.returncode != 0:
+            output_path.write_text(completed.stdout or "", encoding="utf-8")
+            return (
+                "git ls-files --others --exclude-standard artifact capture failed "
+                f"with exit code {completed.returncode}."
+            )
+
+        rel_paths = [
+            line.strip()
+            for line in (completed.stdout or "").splitlines()
+            if line.strip()
+        ]
+
+        sections = [f"Untracked files: {len(rel_paths)}"]
+        for rel_path in rel_paths:
+            sections.append(self._render_untracked_entry(worktree_path, rel_path))
+
+        output_path.write_text("\n".join(sections) + "\n", encoding="utf-8")
+        return None
+
+    def _render_untracked_entry(self, worktree_path: Path, rel_path: str) -> str:
+        """Render a single untracked file as path, size, and (text) content."""
+        header = f"=== {rel_path} ==="
+        file_path = worktree_path / rel_path
+
+        try:
+            size = file_path.stat().st_size
+        except OSError as exc:
+            return f"{header}\nsize: unknown\n[skipped: stat failed: {exc}]"
+
+        lines = [header, f"size: {size} bytes"]
+
+        if file_path.suffix.lower() in _UNTRACKED_BINARY_SUFFIXES:
+            lines.append("[skipped: binary file type]")
+            return "\n".join(lines)
+
+        if size > _MAX_UNTRACKED_EMBED_SIZE:
+            lines.append(
+                f"[skipped: exceeds {_MAX_UNTRACKED_EMBED_SIZE}-byte content cap]"
+            )
+            return "\n".join(lines)
+
+        try:
+            raw = file_path.read_bytes()
+        except OSError as exc:
+            lines.append(f"[skipped: unreadable: {exc}]")
+            return "\n".join(lines)
+
+        if b"\x00" in raw:
+            lines.append("[skipped: binary content]")
+            return "\n".join(lines)
+
+        lines.append("content:")
+        lines.append(raw.decode("utf-8", errors="replace"))
+        return "\n".join(lines)
 
     def _capture_command(
         self,

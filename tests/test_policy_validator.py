@@ -280,6 +280,51 @@ class SecretPatternTests(unittest.TestCase):
         self.assertTrue(len(findings) > 0)
 
 
+class SecretIdentifierAllowlistTests(unittest.TestCase):
+    """SMOKE_TASK_KEY and peers are non-secret task identifiers, not secrets.
+
+    The regex layer flags compound UPPERCASE identifiers ending in KEY. The
+    exact-name allowlist exempts known task/smoke identifiers without disabling
+    secret detection for real credentials.
+    """
+
+    def test_smoke_task_key_assignment_is_allowed(self) -> None:
+        findings = _find_secret_assignments('SMOKE_TASK_KEY="AT-OPENCODE-SMOKE"')
+        self.assertEqual(findings, [])
+
+    def test_exported_smoke_task_key_is_allowed(self) -> None:
+        findings = _find_secret_assignments(
+            'export SMOKE_TASK_KEY="AT-OPENCODE-SMOKE"'
+        )
+        self.assertEqual(findings, [])
+
+    def test_smoke_task_key_with_escaped_quotes_is_allowed(self) -> None:
+        # The original Level 10G false positive: the value appeared inside a
+        # JSONL event log with backslash-escaped quotes.
+        findings = _find_secret_assignments(r'SMOKE_TASK_KEY=\"AT-PI-SMOKE\"')
+        self.assertEqual(findings, [])
+
+    def test_openai_api_key_still_fails(self) -> None:
+        findings = _find_secret_assignments('OPENAI_API_KEY="sk-test"')
+        self.assertTrue(len(findings) > 0)
+
+    def test_github_token_still_fails(self) -> None:
+        findings = _find_secret_assignments('GITHUB_TOKEN="ghp_test"')
+        self.assertTrue(len(findings) > 0)
+
+    def test_secret_key_still_fails(self) -> None:
+        findings = _find_secret_assignments('SECRET_KEY="abc"')
+        self.assertTrue(len(findings) > 0)
+
+    def test_password_still_fails(self) -> None:
+        findings = _find_secret_assignments('PASSWORD="abc"')
+        self.assertTrue(len(findings) > 0)
+
+    def test_credential_still_fails(self) -> None:
+        findings = _find_secret_assignments('CREDENTIAL="abc"')
+        self.assertTrue(len(findings) > 0)
+
+
 class SuspiciousActionPatternTests(unittest.TestCase):
     def test_matches_git_push(self) -> None:
         findings = _find_suspicious_actions("Executing: git push origin main")
@@ -1063,6 +1108,32 @@ class PolicyExecutorEventLogTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "failed")
         self.assertIn("suspicious action", result.summary)
+
+    def test_smoke_task_key_in_event_log_passes(self) -> None:
+        # Reproduces the Level 10G false positive: SMOKE_TASK_KEY appears in a
+        # reasoning/text part of the event log and must not be treated as a
+        # secret assignment.
+        event = json.dumps({
+            "type": "assistant_message",
+            "part": {
+                "type": "text",
+                "text": 'Use SMOKE_TASK_KEY="AT-OPENCODE-SMOKE" for the smoke run.',
+            },
+        })
+        result = self._run_with_event_log(event + "\n")
+        self.assertEqual(result.status, "passed", result.summary)
+
+    def test_real_secret_in_event_log_still_fails(self) -> None:
+        event = json.dumps({
+            "type": "assistant_message",
+            "part": {
+                "type": "text",
+                "text": 'Leaked OPENAI_API_KEY="sk-realsecret1234567890".',
+            },
+        })
+        result = self._run_with_event_log(event + "\n")
+        self.assertEqual(result.status, "failed")
+        self.assertIn("secret", result.summary)
 
 
 class PolicyChangedFileStillScannedTests(unittest.TestCase):

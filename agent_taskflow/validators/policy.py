@@ -87,6 +87,15 @@ _SECRET_PATTERNS = (
     ),
 )
 
+# Exact variable names that resemble a secret assignment to the regex layer
+# (compound UPPERCASE identifiers ending in KEY/TOKEN/etc.) but are known
+# non-secret task/smoke identifiers. Matched by exact identifier name, not by
+# substring, so real secrets such as OPENAI_API_KEY, GITHUB_TOKEN, SECRET_KEY,
+# PASSWORD, and CREDENTIAL are unaffected.
+_NON_SECRET_IDENTIFIER_ALLOWLIST = frozenset({
+    "SMOKE_TASK_KEY",
+})
+
 # Suspicious action patterns that indicate a worker may have self-approved,
 # pushed, merged, cleaned up, etc. These must appear outside the mission
 # contract itself (which documents them as forbidden).
@@ -156,17 +165,38 @@ def _normalize_list(value: object) -> list[str]:
     return []
 
 
+def _extract_assignment_identifier(matched: str) -> str:
+    """Return the left-hand-side identifier of a matched secret-like assignment.
+
+    Splits on the first '=' or ':' and strips surrounding whitespace and
+    quotes. Used to apply _NON_SECRET_IDENTIFIER_ALLOWLIST as an exact-name
+    (not substring) match.
+    """
+    lhs = re.split(r"[=:]", matched, maxsplit=1)[0]
+    return lhs.strip().strip("\"'").strip()
+
+
 def _find_secret_assignments(text: str) -> list[str]:
     """Return a list of secret-like assignment patterns found in text.
 
     Uses high-confidence secret patterns (P1-P5) with post-filtering to avoid
     false positives on camelCase identifiers like normalizedTaskKey, taskKey,
-    and artifactKey that contain 'Key' as a substring.
+    and artifactKey that contain 'Key' as a substring. An exact-name allowlist
+    (_NON_SECRET_IDENTIFIER_ALLOWLIST) further exempts known non-secret
+    task/smoke identifiers such as SMOKE_TASK_KEY.
     """
     findings: list[str] = []
     for pattern in _SECRET_PATTERNS:
         for match in pattern.finditer(text):
             matched = match.group()
+            # Exact-name allowlist: skip known non-secret task/smoke identifiers
+            # (e.g. SMOKE_TASK_KEY) that otherwise resemble a KEY/TOKEN env var.
+            # Exact identifier match only — real secrets are not affected.
+            if (
+                _extract_assignment_identifier(matched).upper()
+                in _NON_SECRET_IDENTIFIER_ALLOWLIST
+            ):
+                continue
             # Post-filter P4 (compound uppercase KEY=VALUE): skip if identifier has
             # both uppercase and lowercase letters (camelCase false positive).
             # e.g. normalizedTaskKey, taskKey, artifactKey.
