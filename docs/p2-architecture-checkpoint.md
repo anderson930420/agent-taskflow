@@ -411,3 +411,44 @@ pass the deterministic changed-files validator regression test:
 - no auto-PR
 - no auto-merge
 - no auto-cleanup
+
+## 12. Local Self-Dogfood Chain
+
+After the Phase 6E+3 no-op handoff guard (commit e78fbdf), the local
+self-dogfood chain exercises the full orchestration stack without any
+GitHub mutation. The chain is:
+
+```
+offline issue/spec
+  -> deterministic intake
+  -> Task Execution Package
+  -> explicit queued-task handoff
+  -> approved_task_runner
+  -> deterministic validators (pytest, policy, changed-files)
+  -> waiting_approval
+```
+
+Key properties of this chain:
+
+- **Task Execution Package.** The deterministic package creation step
+  consumes a queued `TaskRecord` plus recorded issue/spec evidence and
+  writes `implementation_prompt.md` and `task_execution_package.json`.
+  This package is the executor input contract; it exists before the
+  queued-task handoff starts the runner.
+- **queued-task handoff.** The handoff verifies the Task Execution Package
+  and then explicitly invokes `approved_task_runner`. The runner prepares
+  the isolated workspace, starts the executor, runs deterministic
+  validators, and records proof-of-work evidence. No scheduler, polling,
+  or background loop is involved.
+- **waiting_approval.** After all validators pass, the task reaches
+  `waiting_approval` as a proof-of-work gate. Human review is the only
+  subsequent action.
+- **no auto-push.** Branch push requires an explicit `--confirm-branch-push`
+  confirmation. No auto-push exists in the chain.
+- **no auto-PR.** Draft PR creation requires an explicit `--confirm-draft-pr`
+  confirmation. No auto-PR exists in the chain.
+- **no auto-merge.** Merge is a manual GitHub-side action. Nothing in
+  the chain calls `gh pr merge` or equivalent.
+- **no auto-cleanup.** Local and remote cleanup each require their own
+  `--confirm-*` flags and explicit evidence. No auto-cleanup exists
+  in the chain.
