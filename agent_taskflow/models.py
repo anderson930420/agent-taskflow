@@ -34,6 +34,8 @@ TASK_STATUSES = {
     "cleaned",
     "completed",
     "canceled",
+    # Operator-confirmed evidence-only / superseded task archive terminal state.
+    "archived",
     # Common external Kanban/Hermes-style mirror values.
     "backlog",
     "todo",
@@ -57,6 +59,7 @@ TASK_EVENT_TYPES = {
     "local_cleanup_completed",
     "remote_branch_cleanup_completed",
     "task_closeout_completed",
+    "task_evidence_archived",
     "scheduler_proposal_created",
     "scheduler_confirmation_created",
     "scheduler_confirmation_verifier_report_created",
@@ -88,6 +91,7 @@ TASK_ARTIFACT_TYPES = {
     "local_cleanup",
     "remote_branch_cleanup",
     "task_closeout",
+    "task_evidence_archive",
     "scheduler_proposal",
     "scheduler_confirmation",
     "scheduler_confirmation_verifier_report",
