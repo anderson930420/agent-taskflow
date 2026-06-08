@@ -291,10 +291,16 @@ class AdapterRuntimeIsolationTests(unittest.TestCase):
     def test_no_runtime_module_imports_adapter(self) -> None:
         repo_root = Path(adapter_module.__file__).resolve().parents[1]
         adapter_stem = "execution_engine_approved_task_adapter"
+        # The adapter itself, plus the single P4-d manual runtime helper that is
+        # the one explicit, opt-in importer behind the engine facade.
+        allowed = {
+            f"{adapter_stem}.py",
+            "execution_engine_manual_runtime.py",
+        }
         offenders: list[str] = []
         for base in (repo_root / "agent_taskflow", repo_root / "scripts"):
             for py_file in base.rglob("*.py"):
-                if py_file.name == f"{adapter_stem}.py":
+                if py_file.name in allowed:
                     continue
                 if adapter_stem in py_file.read_text(encoding="utf-8"):
                     offenders.append(str(py_file.relative_to(repo_root)))
@@ -302,7 +308,8 @@ class AdapterRuntimeIsolationTests(unittest.TestCase):
         self.assertEqual(
             offenders,
             [],
-            f"runtime modules must not import the P4-c adapter: {offenders}",
+            "only the P4-d manual runtime helper may import the P4-c adapter: "
+            f"{offenders}",
         )
 
 
