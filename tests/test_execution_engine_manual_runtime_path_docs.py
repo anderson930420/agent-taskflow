@@ -70,6 +70,45 @@ class ManualRuntimePathDocTests(unittest.TestCase):
         ):
             self.assertIn(phrase, self.doc_normalized)
 
+    # -- P4-f observability summary -------------------------------------
+
+    def test_mentions_include_observability_summary_flag(self) -> None:
+        self.assertIn("--include-observability-summary", self.doc)
+
+    def test_mentions_observability_summary_only_flag(self) -> None:
+        self.assertIn("--observability-summary-only", self.doc)
+
+    def test_mentions_unified_execution_summary(self) -> None:
+        self.assertIn("UnifiedExecutionSummary", self.doc)
+
+    def test_says_default_output_unchanged(self) -> None:
+        self.assertIn("default output is unchanged", self.doc_normalized)
+
+    def test_says_p4f_scheduler_automation_cron_unchanged(self) -> None:
+        # The P4-f section must restate that the scheduler / automation / cron
+        # paths are not migrated and stay unchanged.
+        for token in ("scheduler", "automation", "cron", "unchanged"):
+            self.assertIn(token, self.doc_normalized)
+
+    def test_p4f_states_read_only_observability(self) -> None:
+        self.assertIn("read-only observability", self.doc_normalized)
+
+    def test_p4f_states_no_governance_side_effects(self) -> None:
+        # The P4-f flags must explicitly disclaim governance side effects.
+        for phrase in (
+            "no approval",
+            "no merge",
+            "no cleanup",
+            "no archive",
+            "no closeout",
+            "no issue close",
+            "no branch deletion",
+            "no worktree deletion",
+            "no github mutation",
+            "no pr publication",
+        ):
+            self.assertIn(phrase, self.doc_normalized)
+
 
 if __name__ == "__main__":
     unittest.main()

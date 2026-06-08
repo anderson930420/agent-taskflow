@@ -63,9 +63,53 @@ loop, or multi-task batch behavior. Whatever `run_approved_task` already does
 when called is the only behavior; the facade adds none. Human review remains the
 final gate.
 
+## P4-f: optional observability summary
+
+P4-f adds an **opt-in** way for the manual CLI to additionally emit a
+`UnifiedExecutionSummary` (the P4-e read-only observability shape) derived from
+the `ExecutionEngineResult`. It is purely additive and **behavior-preserving by
+default**.
+
+- **Default output is unchanged.** Without either new flag the CLI emits exactly
+  the same JSON (`to_json_dict(result)`) or text summary as P4-d.
+- **`--include-observability-summary`** emits *both* the raw
+  `ExecutionEngineResult` and the normalized summary. With JSON output
+  (`--json` and/or `--pretty`) the payload becomes an object with two keys:
+  - `execution_engine_result` — the unchanged contract serialization.
+  - `observability_summary` — the normalized `UnifiedExecutionSummary`.
+  With text output it prints the existing text summary plus a short read-only
+  observability section (source, schema version, task key, status, ok).
+- **`--observability-summary-only`** emits *only* the normalized
+  `UnifiedExecutionSummary` JSON. It implies JSON output and works with
+  `--pretty`. It is intended for future log / observability pipelines.
+
+The summary is always produced with
+`summarize_execution_engine_result(result, source="manual_engine_facade")`, so
+its `source` is `manual_engine_facade` and its `schema_version` is
+`execution_observability_summary.v1`.
+
+### What P4-f does not change
+
+The summary is **read-only observability**. The new flags do not change
+execution semantics: confirmation defaults are unchanged, dry-run remains the
+default, and a non-dry-run without `--confirm-execution-engine-run` still
+returns a blocked result (now also summarizable) without invoking the adapter.
+
+P4-f does **not** migrate the scheduler, automation, or cron paths onto the
+facade; the scheduler tick, one-task automation, dispatcher, and cron command
+are **unchanged**. It does not change `approved_task_runner`, executor, or
+validator behavior, and it does not change the DB schema or Mission Control.
+
+The new flags add **no approval, no merge, no cleanup, no archive, no closeout,
+no PR publication, no issue close, no branch deletion, no worktree deletion, and
+no GitHub mutation**. Human review remains the final gate.
+
 ## Future phases
 
-- **P4-d (this phase):** one explicit, opt-in manual runtime path behind the
-  engine facade, behavior-preserving.
-- **P4-e or later:** may migrate a real scheduled path onto the facade, but only
-  after this manual path is proven.
+- **P4-d:** one explicit, opt-in manual runtime path behind the engine facade,
+  behavior-preserving.
+- **P4-e:** read-only observability normalization (`UnifiedExecutionSummary`).
+- **P4-f (this phase):** opt-in observability summary emission from the manual
+  CLI, behavior-preserving.
+- **Later:** may migrate a real scheduled path onto the facade, but only after
+  this manual path is proven.

@@ -40,6 +40,11 @@ from agent_taskflow.execution_engine_manual_runtime import (  # noqa: E402
     build_manual_execution_engine_request,
     run_manual_execution_engine_request,
 )
+from agent_taskflow.execution_observability import (  # noqa: E402
+    SUMMARY_SOURCE_MANUAL_ENGINE_FACADE,
+    summarize_execution_engine_result,
+    to_observability_dict,
+)
 
 
 SAFETY_EPILOG = (
@@ -168,6 +173,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Pretty-print JSON output (implies JSON).",
     )
+    parser.add_argument(
+        "--include-observability-summary",
+        dest="include_observability_summary",
+        action="store_true",
+        help=(
+            "Additionally emit a read-only UnifiedExecutionSummary derived from "
+            "the ExecutionEngineResult. With JSON output, emits both "
+            "execution_engine_result and observability_summary; with text output, "
+            "appends a short observability section. Read-only observability; it "
+            "does not change execution and implies no approval, merge, cleanup, "
+            "archive, closeout, PR publication, branch deletion, worktree "
+            "deletion, or GitHub mutation."
+        ),
+    )
+    parser.add_argument(
+        "--observability-summary-only",
+        dest="observability_summary_only",
+        action="store_true",
+        help=(
+            "Emit only the read-only UnifiedExecutionSummary JSON (implies JSON "
+            "output). Useful for future log/observability pipelines. Read-only "
+            "observability; it does not change execution and implies no approval, "
+            "merge, cleanup, archive, closeout, PR publication, branch deletion, "
+            "worktree deletion, or GitHub mutation."
+        ),
+    )
     return parser
 
 
@@ -196,15 +227,46 @@ def _blocked_result(
     )
 
 
+def _print_json(payload: object, *, pretty: bool) -> None:
+    if pretty:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(json.dumps(payload, sort_keys=True))
+
+
+def _observability_summary(result: ExecutionEngineResult):
+    """Derive the read-only unified observability summary for the CLI."""
+
+    return summarize_execution_engine_result(
+        result, source=SUMMARY_SOURCE_MANUAL_ENGINE_FACADE
+    )
+
+
 def _emit(result: ExecutionEngineResult, args: argparse.Namespace) -> None:
-    if args.json or args.pretty:
-        payload = to_json_dict(result)
-        if args.json and not args.pretty:
-            print(json.dumps(payload, sort_keys=True))
-        else:
-            print(json.dumps(payload, indent=2, sort_keys=True))
+    summary_only = getattr(args, "observability_summary_only", False)
+    include_summary = getattr(args, "include_observability_summary", False)
+
+    # --observability-summary-only implies JSON output.
+    if summary_only:
+        summary = _observability_summary(result)
+        _print_json(to_observability_dict(summary), pretty=args.pretty)
         return
+
+    if args.json or args.pretty:
+        if include_summary:
+            summary = _observability_summary(result)
+            payload: object = {
+                "execution_engine_result": to_json_dict(result),
+                "observability_summary": to_observability_dict(summary),
+            }
+        else:
+            payload = to_json_dict(result)
+        _print_json(payload, pretty=args.pretty)
+        return
+
     _emit_text(result)
+    if include_summary:
+        _emit_observability_text(result)
 
 
 def _emit_text(result: ExecutionEngineResult) -> None:
@@ -215,6 +277,18 @@ def _emit_text(result: ExecutionEngineResult) -> None:
         print(f"summary: {result.summary}")
     next_action = result.next_operator_action or "human review (no automated next action)"
     print(f"next action: {next_action}")
+
+
+def _emit_observability_text(result: ExecutionEngineResult) -> None:
+    """Print a short read-only observability section after the text summary."""
+
+    summary = _observability_summary(result)
+    print("observability summary (read-only):")
+    print(f"  source: {summary.source}")
+    print(f"  schema_version: {summary.schema_version}")
+    print(f"  task_key: {summary.task_key}")
+    print(f"  status: {summary.status}")
+    print(f"  ok: {summary.ok}")
 
 
 def main(argv: list[str] | None = None) -> int:
