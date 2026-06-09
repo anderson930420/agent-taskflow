@@ -106,8 +106,34 @@ It performs no governance or GitHub side effects: **no approval**, **no merge**,
 issue close**, **no branch deletion**, **no worktree deletion**, and **no GitHub
 mutation**. It starts no daemon, webhook, background worker, or scheduler loop.
 
-A future phase may enable the cron command to include
-`--include-observability-summary`, but that is explicitly **not** done here.
+P4-h itself made no cron change. Updating the cron **example** to include
+`--include-observability-summary` is done in the later P4-i phase, described in
+the next section; P4-i still does not touch any active/installed crontab.
+
+## P4-i: cron example opts into the observability summary
+
+P4-i updates the committed real opencode cron **example**
+(`deploy/cron/github-issue-one-task-real-opencode.cron.example`) so the
+documented scheduler tick command includes `--include-observability-summary`.
+
+- With this flag, future scheduler tick JSONL lines additionally include a
+  top-level `observability_summary` (the normalized `UnifiedExecutionSummary`).
+- The real scheduled dashboard / summarizer reads that summary when it is
+  present, exactly as described in the P4-h section above.
+- Existing scheduler tick logs without `observability_summary` still work
+  through the **legacy fallback** — the summarizer reads the legacy scheduler
+  tick payload as before, so old log lines remain readable.
+
+P4-i is an example/documentation/test change and a read-only observability
+enhancement. It updates only the committed cron example file and **does not
+modify the active crontab**; installing or refreshing the schedule remains an
+explicit manual human action. It makes **no cron change** to any installed
+schedule, does not change scheduler execution semantics, and the **scheduler
+tick is not migrated to ExecutionEngine**. It performs **no approval**, **no
+merge**, **no cleanup**, **no archive**, **no closeout**, **no PR publication**,
+**no issue close**, **no branch deletion**, **no worktree deletion**, and **no
+GitHub mutation**, and it starts no daemon, webhook, background worker, or
+scheduler loop.
 
 ## How to run human-readable mode
 

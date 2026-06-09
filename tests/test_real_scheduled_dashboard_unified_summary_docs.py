@@ -58,6 +58,23 @@ class RealScheduledDashboardUnifiedSummaryDocTests(unittest.TestCase):
         ):
             self.assertIn(phrase, self.doc_normalized, msg=phrase)
 
+    def test_p4i_cron_example_opts_into_observability_summary(self) -> None:
+        # Strip markdown emphasis/backticks for robust phrase matching.
+        stripped = re.sub(
+            r"\s+",
+            " ",
+            self.doc_lower.replace("*", "").replace("`", ""),
+        )
+        self.assertIn("p4-i", stripped)
+        self.assertIn("--include-observability-summary", self.doc)
+        self.assertIn(
+            "github-issue-one-task-real-opencode.cron.example", self.doc
+        )
+        # The cron example is updated, but the active crontab is not.
+        self.assertIn("does not modify the active crontab", stripped)
+        # Old logs without the summary still read via the legacy fallback.
+        self.assertIn("legacy fallback", stripped)
+
 
 if __name__ == "__main__":
     unittest.main()

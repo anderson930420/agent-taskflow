@@ -39,6 +39,9 @@ it safer or more capable; it just runs it on a timer.
 - Relies on the shared non-overlap lock so a scheduled tick can never overlap a
   manual write-capable run or another tick. A contended tick returns a safe
   no-op result and stops.
+- Passes `--include-observability-summary`, so each appended JSONL line also
+  carries a top-level `observability_summary` (the read-only
+  `UnifiedExecutionSummary`).
 - Appends JSON results to
   `/home/ubuntu/agent-taskflow/logs/github-issue-one-task-real-opencode.jsonl`.
 
@@ -53,6 +56,29 @@ it safer or more capable; it just runs it on a timer.
 - It performs no cleanup automation and deletes no branches or worktrees.
 
 Human review and human merge remain the final gates.
+
+## Observability summary in the log (P4-i)
+
+The cron example now includes `--include-observability-summary` on the scheduler
+tick command. This is an observability enhancement only:
+
+- Future JSONL lines additionally include a top-level `observability_summary`,
+  the read-only `UnifiedExecutionSummary` derived from the existing tick payload
+  (`source=scheduler_tick`, `schema_version=execution_observability_summary.v1`).
+- The real scheduled dashboard / summarizer
+  (`scripts/summarize_real_scheduled_execution.py`) reads that summary when it is
+  present. See `docs/real-scheduled-execution-observability.md`.
+- Old log lines without `observability_summary` still work through the legacy
+  fallback; the summarizer reads the legacy scheduler tick payload exactly as
+  before, and a malformed summary does not crash the reader.
+
+This change only updates the committed cron **example** file. It does **not**
+modify your active crontab — installing or refreshing the schedule remains an
+explicit manual human action (see "How to install"). It does not change scheduler
+execution semantics, and the **scheduler tick is not migrated to
+ExecutionEngine**. It adds no approval, no merge, no cleanup, no archive, no
+closeout, no PR publication, no issue close, no branch deletion, no worktree
+deletion, and no GitHub mutation.
 
 ## Required environment / auth
 
