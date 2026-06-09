@@ -47,8 +47,67 @@ PYTHONPATH=. .venv/bin/python scripts/summarize_real_scheduled_execution.py \
 ```
 
 The JSON output includes `ok`, `schema_version`, `source`, `log_path`,
-`db_path`, `last_tick`, `recent_ticks`, `backlog`,
+`db_path`, `last_tick`, `last_tick_observability_summary`,
+`last_tick_uses_observability_summary`, `recent_ticks`, `backlog`,
 `ingestion_failure_registry`, `warnings`, and `safety`.
+
+## P4-h: reading the unified execution summary
+
+P4-h lets the real scheduled execution dashboard / summarizer read a normalized
+`UnifiedExecutionSummary` when it is present in a scheduler tick log line, while
+preserving the legacy fallback.
+
+The scheduler tick can optionally embed a JSON-safe `observability_summary`
+object on each tick line when the cron tick is run with
+`--include-observability-summary` (added in P4-g). When a parsed scheduler tick
+log line carries a valid `observability_summary` (a mapping whose
+`schema_version` is `execution_observability_summary.v1`), the summarizer:
+
+- treats it as the normalized execution summary for that tick;
+- exposes it verbatim under the stable key
+  `last_tick_observability_summary` for the latest tick;
+- sets `last_tick_uses_observability_summary` to `true`;
+- reads dashboard-level normalized fields from it — `source`, `schema_version`,
+  `ok`, `status`, `task_key`, `profile.executor`, `profile.model`,
+  `profile.validators`, `publication_mode`, and `safety`;
+- uses the unified summary `status` for the recent-tick status counts.
+
+### Legacy fallback is preserved
+
+This change is read-only and behavior-preserving:
+
+- **Existing scheduler tick logs without `observability_summary` still work.**
+  The summarizer falls back to the legacy scheduler tick payload exactly as
+  before, the legacy `last_tick` fields are unchanged, and
+  `last_tick_uses_observability_summary` is `false`.
+- When an `observability_summary` is present but malformed (not a mapping, or
+  carrying the wrong `schema_version`), the summarizer does not crash. It
+  ignores the malformed summary, records a `malformed observability_summary`
+  warning, falls back to the legacy tick payload, and still counts the tick as
+  parsed when the tick payload itself is valid.
+- Recent-tick counts (`ok_count`, `failure_count`, `no_eligible_count`,
+  `execution_completed_count`, `lock_contention_count`, `malformed_line_count`,
+  and `statuses`) keep their existing meaning. For logs with a valid
+  `observability_summary`, the tick status is read from the unified summary;
+  otherwise the legacy `status` field is used.
+
+### What P4-h does not do
+
+P4-h only changes the output reader / summarizer. It does **not** change cron and
+makes **no cron change**: the live cron command is unchanged and still does not
+pass `--include-observability-summary`. It does **not** migrate the scheduler
+tick to ExecutionEngine — the **scheduler tick is not migrated to
+ExecutionEngine** — and it does not change execution semantics, scheduler
+execution behavior, one-task automation, the approved task runner, executors,
+validators, or the database schema.
+
+It performs no governance or GitHub side effects: **no approval**, **no merge**,
+**no cleanup**, **no archive**, **no closeout**, **no PR publication**, **no
+issue close**, **no branch deletion**, **no worktree deletion**, and **no GitHub
+mutation**. It starts no daemon, webhook, background worker, or scheduler loop.
+
+A future phase may enable the cron command to include
+`--include-observability-summary`, but that is explicitly **not** done here.
 
 ## How to run human-readable mode
 

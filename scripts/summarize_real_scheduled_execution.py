@@ -112,6 +112,8 @@ def _error_payload(
         "log_path": log_path,
         "db_path": db_path,
         "last_tick": None,
+        "last_tick_observability_summary": None,
+        "last_tick_uses_observability_summary": False,
         "recent_ticks": None,
         "backlog": None,
         "ingestion_failure_registry": None,
