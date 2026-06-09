@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from agent_taskflow.execution_observability import (
+    summarize_scheduler_tick_payload,
+    to_observability_dict,
+)
 from agent_taskflow.github_issue_discovery import GitHubIssueDiscoveryIssue
 from agent_taskflow.github_issue_ingestion import GitHubIssueSnapshot
 from agent_taskflow.github_issue_one_task_scheduler_tick import (
@@ -623,6 +627,18 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertFalse(safety["approved_task_runner_called"])
         self.assertFalse(safety["branch_pushed"])
         self.assertFalse(safety["draft_pr_created"])
+
+        summary = to_observability_dict(summarize_scheduler_tick_payload(result))
+        self.assertEqual(
+            summary["schema_version"], "execution_observability_summary.v1"
+        )
+        self.assertEqual(summary["source"], "scheduler_tick")
+        self.assertEqual(summary["status"], "no_eligible_issues")
+        self.assertIsNone(summary["task_key"])
+        self.assertEqual(summary["publication_mode"], "execution_only")
+        self.assertFalse(summary["safety"]["github_mutated"])
+        self.assertFalse(summary["safety"]["branch_deleted"])
+        self.assertFalse(summary["safety"]["worktree_deleted"])
 
     def test_safety_invariants_preserve_human_final_gates(self) -> None:
         result = run_github_issue_one_task_scheduler_tick(
