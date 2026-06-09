@@ -76,5 +76,11 @@ class RealScheduledDashboardUnifiedSummaryDocTests(unittest.TestCase):
         self.assertIn("legacy fallback", stripped)
 
 
+    def test_points_to_active_cron_rollout_runbook(self) -> None:
+        self.assertIn(
+            "docs/active-cron-observability-rollout.md", self.doc
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

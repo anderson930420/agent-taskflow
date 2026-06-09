@@ -97,6 +97,10 @@ class RealOpenCodeCronProfileDocTests(unittest.TestCase):
         self.assertIn("--include-observability-summary", text)
         self.assertIn("observability_summary", text)
 
+    def test_doc_points_to_active_cron_rollout_runbook(self) -> None:
+        text = DOC.read_text(encoding="utf-8")
+        self.assertIn("docs/active-cron-observability-rollout.md", text)
+
     def test_doc_states_observability_safety_boundaries(self) -> None:
         raw = DOC.read_text(encoding="utf-8").lower()
         # Strip markdown emphasis/backticks so phrase assertions are robust.

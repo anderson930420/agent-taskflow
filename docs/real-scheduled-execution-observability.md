@@ -135,6 +135,16 @@ merge**, **no cleanup**, **no archive**, **no closeout**, **no PR publication**,
 GitHub mutation**, and it starts no daemon, webhook, background worker, or
 scheduler loop.
 
+### P4-j: rolling the example out to the active cron
+
+P4-i updates only the committed cron **example**. Safely rolling
+`--include-observability-summary` out to the *active* real `opencode` cron line
+is a separate, documentation-only operator procedure — see the
+[active cron observability rollout runbook](active-cron-observability-rollout.md)
+(`docs/active-cron-observability-rollout.md`). That runbook does not modify the
+active crontab; applying the change to the live schedule remains an explicit
+manual human action.
+
 ## How to run human-readable mode
 
 Omit `--json` for the default human-readable output:
