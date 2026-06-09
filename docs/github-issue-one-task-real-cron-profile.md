@@ -80,6 +80,13 @@ ExecutionEngine**. It adds no approval, no merge, no cleanup, no archive, no
 closeout, no PR publication, no issue close, no branch deletion, no worktree
 deletion, and no GitHub mutation.
 
+Rolling `--include-observability-summary` out to the *active* cron line (as
+opposed to the committed example) is a separate, documentation-only operator
+procedure. See the
+[active cron observability rollout runbook](active-cron-observability-rollout.md)
+(`docs/active-cron-observability-rollout.md`); it does not modify the active
+crontab.
+
 ## Required environment / auth
 
 API credentials must be provided through the environment, never committed in
