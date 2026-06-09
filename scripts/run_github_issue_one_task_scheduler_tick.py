@@ -15,6 +15,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS  # noqa: E402
+from agent_taskflow.execution_observability import (  # noqa: E402
+    summarize_scheduler_tick_payload,
+    to_observability_dict,
+)
 from agent_taskflow.github_issue_one_task_scheduler_tick import (  # noqa: E402
     GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SCHEMA_VERSION,
     GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SOURCE,
@@ -146,6 +150,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.set_defaults(approved_task_preflight=True)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--include-observability-summary",
+        action="store_true",
+        help=(
+            "Include a read-only UnifiedExecutionSummary derived from the "
+            "existing scheduler tick payload."
+        ),
+    )
+    parser.add_argument(
+        "--observability-summary-only",
+        action="store_true",
+        help=(
+            "Emit only the read-only UnifiedExecutionSummary JSON derived from "
+            "the existing scheduler tick payload. Implies JSON output."
+        ),
+    )
     return parser
 
 
@@ -206,10 +226,20 @@ def main(argv: list[str] | None = None) -> int:
                 else default_lock_path()
             ),
         )
-        _emit(payload, compact=bool(args.json))
+        _emit(
+            payload,
+            compact=bool(args.json),
+            include_observability_summary=bool(args.include_observability_summary),
+            observability_summary_only=bool(args.observability_summary_only),
+        )
         return 1
 
-    _emit(payload, compact=bool(args.json))
+    _emit(
+        payload,
+        compact=bool(args.json),
+        include_observability_summary=bool(args.include_observability_summary),
+        observability_summary_only=bool(args.observability_summary_only),
+    )
     return 0 if payload.get("ok") else 1
 
 
@@ -283,11 +313,33 @@ def _error_payload(
     }
 
 
-def _emit(payload: dict[str, object], *, compact: bool) -> None:
+def _observability_summary_payload(payload: dict[str, object]) -> object:
+    summary = summarize_scheduler_tick_payload(payload)
+    return to_observability_dict(summary)
+
+
+def _emit(
+    payload: dict[str, object],
+    *,
+    compact: bool,
+    include_observability_summary: bool = False,
+    observability_summary_only: bool = False,
+) -> None:
+    if observability_summary_only:
+        print(json.dumps(_observability_summary_payload(payload), sort_keys=True))
+        return
+
+    output_payload: object = payload
+    if include_observability_summary:
+        output_payload = {
+            **payload,
+            "observability_summary": _observability_summary_payload(payload),
+        }
+
     if compact:
-        print(json.dumps(payload, sort_keys=True))
+        print(json.dumps(output_payload, sort_keys=True))
     else:
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        print(json.dumps(output_payload, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

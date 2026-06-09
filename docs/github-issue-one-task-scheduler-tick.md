@@ -180,6 +180,40 @@ No merge, approval, or cleanup flag is exposed. Branch push and draft PR
 creation only happen through this explicit opt-in or through the separate
 `scripts/run_task_to_draft_pr_pipeline.py` workflow.
 
+## P4-g: Optional Unified Observability Summary
+
+The scheduler tick can optionally emit a `UnifiedExecutionSummary`, the P4-e
+read-only observability shape, derived from the existing scheduler tick payload.
+This is additive output only.
+
+Default output is unchanged. Without either observability flag, the scheduler
+tick emits the same JSON payload as before.
+
+- `--include-observability-summary` emits the existing scheduler tick payload
+  plus one additional top-level key, `observability_summary`.
+- `--observability-summary-only` emits only the normalized
+  `UnifiedExecutionSummary` JSON and implies JSON output.
+
+The summary is derived from the already-produced tick payload with
+`summarize_scheduler_tick_payload(payload)` and serialized with
+`to_observability_dict`. Its `source` is `scheduler_tick` and its
+`schema_version` is `execution_observability_summary.v1`.
+
+The summary is read-only observability. It reports existing tick fields such as
+`ok`, `status`, `selected_task_key`, `mode`, runner profile, publication mode,
+and safety flags. It does not invoke an additional runtime action.
+
+The scheduler tick is not migrated to ExecutionEngine. This does not migrate
+scheduler tick to ExecutionEngine, does not change cron behavior, and does not
+change execution semantics, confirmation behavior, one-task automation behavior,
+`approved_task_runner` behavior, executor behavior, validator behavior, or DB
+behavior.
+
+The observability flags add no approval, no merge, no cleanup, no archive, no
+closeout, no PR publication, no issue close, no branch deletion, no worktree
+deletion, and no GitHub mutation. They add no daemon, no webhook, no background
+worker, no scheduler loop, and no multi-task behavior.
+
 ## Safety Boundary
 
 Human Review and Human Merge remain final gates. The scheduler tick does not

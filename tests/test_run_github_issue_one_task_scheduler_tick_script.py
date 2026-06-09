@@ -62,6 +62,57 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
             str(self.lock_path),
         ]
 
+    def scheduler_tick_payload(self, **overrides: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": True,
+            "schema_version": "github_issue_one_task_scheduler_tick.v1",
+            "source": "github_issue_one_task_scheduler_tick",
+            "status": "execution_completed",
+            "mode": "confirmed",
+            "repo": "anderson930420/agent-taskflow",
+            "lock": {
+                "path": str(self.lock_path),
+                "acquired": True,
+                "contended": False,
+                "released": True,
+            },
+            "runner_config": {
+                "configured": True,
+                "executor": "pi",
+                "model": "claude-sonnet-4-6",
+                "provider": "anthropic",
+                "tools": ["read", "write"],
+                "validators": ["pytest", "changed-files"],
+            },
+            "publication_config": {
+                "publish_after_execution": False,
+                "mode": "execution_only",
+                "next_operator_action": "run explicit task-to-draft-pr workflow",
+            },
+            "selected_task_key": "AT-GH-900",
+            "selected_issue": {"number": 900, "title": "Scheduler tick test"},
+            "safety": {
+                "scheduled_tick": True,
+                "one_tick_only": True,
+                "one_issue_only": True,
+                "one_task_only": True,
+                "dry_run": False,
+                "confirmed": True,
+                "github_mutated": False,
+                "approved": False,
+                "merged": False,
+                "cleanup_performed": False,
+                "branch_deleted": False,
+                "worktree_deleted": False,
+                "scheduler_loop_started": False,
+                "background_worker_started": False,
+                "multi_task_batch_started": False,
+                "human_review_required": True,
+            },
+        }
+        payload.update(overrides)
+        return payload
+
     def invoke_with_fake_run(
         self,
         extra_args: list[str],
@@ -117,6 +168,8 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
             "--approved-task-preflight",
             "--skip-approved-task-preflight",
             "--json",
+            "--include-observability-summary",
+            "--observability-summary-only",
         ):
             self.assertIn(flag, result.stdout, flag)
         for forbidden in (
@@ -164,7 +217,9 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
         )
 
         self.assertEqual(rc, 0)
+        self.assertEqual(emitted, payload)
         self.assertEqual(emitted["status"], "dry_run")
+        self.assertNotIn("observability_summary", emitted)
         self.assertTrue(request.dry_run)
         self.assertFalse(request.confirmed)
         self.assertEqual(request.issue_limit, 25)
@@ -400,6 +455,190 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
         )
         for needle in forbidden:
             self.assertNotIn(needle, source, needle)
+
+    def test_include_observability_summary_json_emits_existing_payload_plus_summary(
+        self,
+    ) -> None:
+        payload = self.scheduler_tick_payload()
+
+        rc, emitted, request = self.invoke_with_fake_run(
+            ["--include-observability-summary", "--json"],
+            payload,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertFalse(request.confirmed)
+        self.assertIn("observability_summary", emitted)
+        summary = emitted["observability_summary"]
+        without_summary = {
+            key: value for key, value in emitted.items() if key != "observability_summary"
+        }
+        self.assertEqual(without_summary, payload)
+        self.assertEqual(
+            summary["schema_version"], "execution_observability_summary.v1"
+        )
+        self.assertEqual(summary["source"], "scheduler_tick")
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["status"], payload["status"])
+        self.assertEqual(summary["task_key"], payload["selected_task_key"])
+        self.assertEqual(summary["mode"], payload["mode"])
+        self.assertEqual(summary["profile"]["executor"], "pi")
+        self.assertEqual(summary["profile"]["model"], "claude-sonnet-4-6")
+        self.assertEqual(summary["profile"]["validators"], ["pytest", "changed-files"])
+        self.assertEqual(summary["publication_mode"], "execution_only")
+        self.assertTrue(summary["safety"]["human_review_required"])
+        self.assertTrue(summary["safety"]["one_task_only"])
+        self.assertTrue(summary["safety"]["execution_only"])
+        self.assertFalse(summary["safety"]["approved"])
+        self.assertFalse(summary["safety"]["merged"])
+        self.assertFalse(summary["safety"]["github_mutated"])
+        self.assertFalse(summary["safety"]["branch_deleted"])
+        self.assertFalse(summary["safety"]["worktree_deleted"])
+
+    def test_observability_summary_only_json_emits_only_summary(self) -> None:
+        payload = self.scheduler_tick_payload()
+
+        rc, emitted, _request = self.invoke_with_fake_run(
+            ["--observability-summary-only", "--json"],
+            payload,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            set(emitted),
+            {
+                "schema_version",
+                "source",
+                "ok",
+                "task_key",
+                "status",
+                "raw_status",
+                "dry_run",
+                "mode",
+                "publication_mode",
+                "next_operator_action",
+                "profile",
+                "safety",
+                "steps",
+                "artifacts",
+                "metadata",
+            },
+        )
+        self.assertEqual(
+            emitted["schema_version"], "execution_observability_summary.v1"
+        )
+        self.assertEqual(emitted["source"], "scheduler_tick")
+        self.assertEqual(emitted["status"], payload["status"])
+        self.assertEqual(emitted["profile"]["executor"], "pi")
+        self.assertNotIn("observability_summary", emitted)
+        self.assertNotIn("runner_config", emitted)
+        self.assertNotIn("publication_config", emitted)
+
+    def test_observability_summary_only_implies_json_output(self) -> None:
+        payload = self.scheduler_tick_payload()
+
+        rc, emitted, _request = self.invoke_with_fake_run(
+            ["--observability-summary-only"],
+            payload,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            emitted["schema_version"], "execution_observability_summary.v1"
+        )
+        self.assertEqual(emitted["source"], "scheduler_tick")
+        self.assertNotIn("runner_config", emitted)
+
+    def test_no_eligible_issues_payload_can_be_summarized(self) -> None:
+        payload = self.scheduler_tick_payload(
+            status="no_eligible_issues",
+            selected_task_key=None,
+            selected_issue=None,
+            runner_config={"configured": False, "executor": None, "validators": []},
+            publication_config={
+                "publish_after_execution": False,
+                "mode": "execution_only",
+                "next_operator_action": "run explicit task-to-draft-pr workflow",
+            },
+        )
+
+        rc, emitted, _request = self.invoke_with_fake_run(
+            ["--include-observability-summary", "--json"],
+            payload,
+        )
+
+        self.assertEqual(rc, 0)
+        summary = emitted["observability_summary"]
+        self.assertEqual(summary["source"], "scheduler_tick")
+        self.assertEqual(summary["status"], "no_eligible_issues")
+        self.assertIsNone(summary["task_key"])
+        self.assertEqual(summary["profile"]["validators"], [])
+        self.assertEqual(summary["publication_mode"], "execution_only")
+
+    def test_failed_payload_can_be_summarized(self) -> None:
+        payload = self.scheduler_tick_payload(
+            ok=False,
+            status="automation_error",
+            selected_task_key="AT-GH-901",
+            safety={
+                "scheduled_tick": True,
+                "one_task_only": True,
+                "dry_run": False,
+                "confirmed": True,
+                "github_mutated": False,
+                "approved": False,
+                "merged": False,
+                "cleanup_performed": False,
+                "branch_deleted": False,
+                "worktree_deleted": False,
+                "human_review_required": True,
+            },
+        )
+
+        rc, emitted, _request = self.invoke_with_fake_run(
+            ["--include-observability-summary", "--json"],
+            payload,
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertFalse(emitted["ok"])
+        summary = emitted["observability_summary"]
+        self.assertFalse(summary["ok"])
+        self.assertEqual(summary["status"], "automation_error")
+        self.assertEqual(summary["source"], "scheduler_tick")
+        self.assertFalse(summary["safety"]["github_mutated"])
+        self.assertFalse(summary["safety"]["branch_deleted"])
+        self.assertFalse(summary["safety"]["worktree_deleted"])
+
+    def test_observability_flags_expose_no_destructive_command_names(self) -> None:
+        parser = self.script.build_parser()
+        new_flags: list[str] = []
+        for action in parser._actions:
+            if action.dest in (
+                "include_observability_summary",
+                "observability_summary_only",
+            ):
+                new_flags.extend(action.option_strings)
+
+        self.assertIn("--include-observability-summary", new_flags)
+        self.assertIn("--observability-summary-only", new_flags)
+
+        joined = " ".join(new_flags).lower()
+        for token in (
+            "approve",
+            "merge",
+            "cleanup",
+            "archive",
+            "closeout",
+            "publish",
+            "create-pr",
+            "close-issue",
+            "delete-branch",
+            "delete-worktree",
+            "branch-delete",
+            "worktree-delete",
+        ):
+            self.assertNotIn(token, joined, token)
 
 
 if __name__ == "__main__":
