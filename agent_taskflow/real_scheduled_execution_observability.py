@@ -20,6 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_taskflow.execution_observability import (
+    EXECUTION_OBSERVABILITY_SUMMARY_SCHEMA_VERSION,
+)
 from agent_taskflow.store import TaskMirrorStore
 
 
@@ -84,8 +87,17 @@ def summarize_real_scheduled_execution(
         ticks,
         malformed_count=malformed_count,
         limit=request.recent_limit,
+        warnings=warnings,
     )
-    last_tick = _summarize_last_tick(ticks[-1]) if ticks else None
+
+    last_tick: dict[str, Any] | None = None
+    last_tick_observability_summary: dict[str, Any] | None = None
+    if ticks:
+        latest = ticks[-1]
+        last_tick = _summarize_last_tick(latest)
+        # The latest tick is always inside the recent window, so any malformed
+        # observability_summary warning was already recorded above.
+        last_tick_observability_summary, _ = _extract_observability_summary(latest)
 
     resolved_store = _resolve_store(request, store, warnings)
     backlog = _summarize_backlog(
@@ -106,6 +118,10 @@ def summarize_real_scheduled_execution(
         "log_path": str(request.log_path) if request.log_path is not None else None,
         "db_path": str(request.db_path) if request.db_path is not None else None,
         "last_tick": last_tick,
+        "last_tick_observability_summary": last_tick_observability_summary,
+        "last_tick_uses_observability_summary": (
+            last_tick_observability_summary is not None
+        ),
         "recent_ticks": recent_ticks,
         "backlog": backlog,
         "ingestion_failure_registry": ingestion_failure_registry,
@@ -194,32 +210,65 @@ def _summarize_recent_ticks(
     *,
     malformed_count: int,
     limit: int,
+    warnings: list[str],
 ) -> dict[str, Any]:
-    """Summarize counts over the most recent ``limit`` valid ticks."""
+    """Summarize counts over the most recent ``limit`` valid ticks.
+
+    P4-h: when a tick embeds a valid ``observability_summary`` (a normalized
+    :class:`~agent_taskflow.execution_observability.UnifiedExecutionSummary`),
+    its normalized status is used for the status-based counts. Older logs without
+    the field, or ticks whose summary is malformed, fall back to the legacy tick
+    ``status`` field, so behavior is unchanged for existing logs.
+    """
 
     window = ticks[-limit:] if limit else list(ticks)
 
-    ok_count = sum(1 for tick in window if tick.get("ok") is True)
-    failure_count = len(window) - ok_count
-    no_eligible_count = sum(
-        1 for tick in window if tick.get("status") == STATUS_NO_ELIGIBLE_ISSUES
-    )
-    execution_completed_count = sum(
-        1 for tick in window if tick.get("status") == STATUS_EXECUTION_COMPLETED
-    )
-    lock_contention_count = sum(1 for tick in window if _is_lock_contention(tick))
-
+    ok_count = 0
+    no_eligible_count = 0
+    execution_completed_count = 0
+    lock_contention_count = 0
+    observability_summary_count = 0
+    malformed_observability_summary_count = 0
     statuses: dict[str, int] = {}
+
     for tick in window:
-        status = tick.get("status")
+        summary, summary_malformed = _extract_observability_summary(tick)
+        if summary_malformed:
+            malformed_observability_summary_count += 1
+        if summary is not None:
+            observability_summary_count += 1
+        status = _effective_status(tick, summary)
+
+        if tick.get("ok") is True:
+            ok_count += 1
+        if status == STATUS_NO_ELIGIBLE_ISSUES:
+            no_eligible_count += 1
+        if status == STATUS_EXECUTION_COMPLETED:
+            execution_completed_count += 1
+        if _is_lock_contention(tick, status):
+            lock_contention_count += 1
+
         key = status if isinstance(status, str) and status else "unknown"
         statuses[key] = statuses.get(key, 0) + 1
+
+    failure_count = len(window) - ok_count
+
+    if malformed_observability_summary_count:
+        warnings.append(
+            "malformed observability_summary ignored on "
+            f"{malformed_observability_summary_count} tick(s); used legacy tick "
+            "payload"
+        )
 
     return {
         "limit": limit,
         "total_in_log": len(ticks),
         "total_parsed": len(window),
         "malformed_line_count": malformed_count,
+        "observability_summary_count": observability_summary_count,
+        "malformed_observability_summary_count": (
+            malformed_observability_summary_count
+        ),
         "ok_count": ok_count,
         "failure_count": failure_count,
         "no_eligible_count": no_eligible_count,
@@ -229,8 +278,50 @@ def _summarize_recent_ticks(
     }
 
 
-def _is_lock_contention(tick: dict[str, Any]) -> bool:
-    if tick.get("status") == STATUS_LOCKED:
+def _extract_observability_summary(
+    tick: dict[str, Any],
+) -> tuple[dict[str, Any] | None, bool]:
+    """Return the embedded ``UnifiedExecutionSummary`` and a malformed flag.
+
+    Scheduler tick logs may embed a JSON-safe ``observability_summary`` when the
+    cron tick is run with ``--include-observability-summary`` (P4-g). Older logs
+    do not have it, which is the normal case and must keep working.
+
+    Returns ``(summary, False)`` when a valid summary is present, ``(None, True)``
+    when an ``observability_summary`` key is present but malformed (not a mapping
+    or carrying the wrong schema version), and ``(None, False)`` when the key is
+    absent. A malformed summary is never treated as authoritative; the caller
+    falls back to the legacy tick payload.
+    """
+
+    raw = tick.get("observability_summary")
+    if raw is None:
+        return None, False
+    if (
+        isinstance(raw, dict)
+        and raw.get("schema_version")
+        == EXECUTION_OBSERVABILITY_SUMMARY_SCHEMA_VERSION
+    ):
+        return raw, False
+    return None, True
+
+
+def _effective_status(
+    tick: dict[str, Any], summary: dict[str, Any] | None
+) -> Any:
+    """Return the tick status, preferring a valid unified summary status.
+
+    Legacy ticks (no valid ``observability_summary``) fall back to the tick's own
+    ``status`` field, preserving existing behavior exactly.
+    """
+
+    if summary is not None:
+        return summary.get("status")
+    return tick.get("status")
+
+
+def _is_lock_contention(tick: dict[str, Any], status: Any) -> bool:
+    if status == STATUS_LOCKED:
         return True
     lock = tick.get("lock")
     return isinstance(lock, dict) and lock.get("contended") is True
@@ -542,6 +633,17 @@ def render_real_scheduled_execution_summary(summary: dict[str, Any]) -> str:
                 f"contended={lock.get('contended')} "
                 f"released={lock.get('released')}"
             )
+        if summary.get("last_tick_uses_observability_summary"):
+            obs = summary.get("last_tick_observability_summary") or {}
+            profile = obs.get("profile") or {}
+            lines.append(
+                "  observability summary: "
+                f"source={obs.get('source')} "
+                f"schema_version={obs.get('schema_version')} "
+                f"status={obs.get('status')} "
+                f"executor={profile.get('executor')} "
+                f"model={profile.get('model')}"
+            )
 
     lines.append("")
     recent = summary.get("recent_ticks") or {}
@@ -556,6 +658,10 @@ def render_real_scheduled_execution_summary(summary: dict[str, Any]) -> str:
     lines.append(f"  lock_contention: {recent.get('lock_contention_count')}")
     lines.append(
         f"  malformed lines skipped: {recent.get('malformed_line_count')}"
+    )
+    lines.append(
+        "  observability summaries read: "
+        f"{recent.get('observability_summary_count')}"
     )
 
     lines.append("")
