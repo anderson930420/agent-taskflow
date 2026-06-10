@@ -27,9 +27,13 @@ of this module runs. The opt-in path is strictly bounded:
   archive / closeout / branch or worktree deletion;
 * no daemon / webhook / background worker / scheduler loop / multi-task batch.
 
-A future **P5-e** stage will harden legacy-vs-engine fallback behavior. Rolling
-P5-d back is just removing the opt-in flag: the legacy scheduler tick path is
-the default and is never modified by opting out.
+P5-e (``agent_taskflow/scheduler_execution_engine_fallback.py``) hardens the
+legacy-vs-engine fallback semantics of this path: every ``execution_engine``
+evidence block carries a pure ``fallback_assessment`` classification pinning
+``effective_authority="legacy_scheduler"``, ``engine_authority=False``, and
+``engine_result_accepted_as_authority=False``. Rolling the opt-in back is just
+removing the opt-in flag: the legacy scheduler tick path is the default and is
+never modified by opting out.
 """
 
 from __future__ import annotations
@@ -50,6 +54,12 @@ from agent_taskflow.execution_engine_contract import (
 from agent_taskflow.execution_observability import (
     summarize_execution_engine_result,
     to_observability_dict,
+)
+from agent_taskflow.scheduler_execution_engine_fallback import (
+    EFFECTIVE_AUTHORITY_LEGACY_SCHEDULER,
+    SchedulerExecutionEngineFallbackAssessmentInput,
+    assess_scheduler_execution_engine_fallback,
+    scheduler_execution_engine_fallback_assessment_to_json_dict,
 )
 from agent_taskflow.scheduler_execution_engine_request_builder import (
     SchedulerExecutionEngineRequestBuildInput,
@@ -153,12 +163,21 @@ def route_scheduler_tick_through_execution_engine(
     cleans up, or starts any background / loop / multi-task behavior. If the
     engine raises or returns a non-ok result, the block records a structured
     failure and the caller does not fall through to any unsafe behavior.
+
+    Every block additionally carries the P5-e ``fallback_assessment``
+    classification: ``effective_authority`` is always ``"legacy_scheduler"``,
+    ``engine_authority`` is always ``False``, and
+    ``engine_result_accepted_as_authority`` is always ``False``. The assessment
+    is pure and machine-readable; it never changes the legacy tick decision.
     """
 
     selected_task_key = _selected_task_key(tick_payload)
     if not selected_task_key:
-        return _not_executed_block(
-            reason="no_selected_task_for_engine_path",
+        return _attach_fallback_assessment(
+            _not_executed_block(
+                reason="no_selected_task_for_engine_path",
+            ),
+            tick_payload,
         )
 
     engine_request = build_scheduler_tick_execution_engine_request(
@@ -188,33 +207,70 @@ def route_scheduler_tick_through_execution_engine(
     try:
         result = active_engine.execute(engine_request)
     except Exception as exc:  # noqa: BLE001 - surfaced as a structured failure.
-        return _engine_error_block(
-            task_key=selected_task_key,
-            engine=active_engine,
-            request_json=request_json,
-            shadow_compare_json=shadow_compare_json,
-            error=f"{exc.__class__.__name__}: {exc}",
+        return _attach_fallback_assessment(
+            _engine_error_block(
+                task_key=selected_task_key,
+                engine=active_engine,
+                request_json=request_json,
+                shadow_compare_json=shadow_compare_json,
+                error=f"{exc.__class__.__name__}: {exc}",
+            ),
+            tick_payload,
         )
 
     if not isinstance(result, ExecutionEngineResult):
-        return _engine_error_block(
+        return _attach_fallback_assessment(
+            _engine_error_block(
+                task_key=selected_task_key,
+                engine=active_engine,
+                request_json=request_json,
+                shadow_compare_json=shadow_compare_json,
+                error=(
+                    "engine returned a non-ExecutionEngineResult value: "
+                    f"{type(result).__name__}"
+                ),
+            ),
+            tick_payload,
+        )
+
+    return _attach_fallback_assessment(
+        _executed_block(
             task_key=selected_task_key,
             engine=active_engine,
             request_json=request_json,
+            result=result,
             shadow_compare_json=shadow_compare_json,
-            error=(
-                "engine returned a non-ExecutionEngineResult value: "
-                f"{type(result).__name__}"
-            ),
-        )
-
-    return _executed_block(
-        task_key=selected_task_key,
-        engine=active_engine,
-        request_json=request_json,
-        result=result,
-        shadow_compare_json=shadow_compare_json,
+        ),
+        tick_payload,
     )
+
+
+def _attach_fallback_assessment(
+    block: dict[str, Any],
+    tick_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach the P5-e fallback classification to one evidence block.
+
+    The assessment is a pure value over the legacy tick payload and the
+    evidence block. It pins the authority semantics on the block itself —
+    ``effective_authority="legacy_scheduler"``, ``engine_authority=False``,
+    ``engine_result_accepted_as_authority=False`` — and never changes the
+    legacy tick ``ok`` / ``status``.
+    """
+
+    assessment = assess_scheduler_execution_engine_fallback(
+        SchedulerExecutionEngineFallbackAssessmentInput(
+            legacy_tick_payload=tick_payload,
+            execution_engine_evidence=block,
+        )
+    )
+    block["fallback_assessment"] = (
+        scheduler_execution_engine_fallback_assessment_to_json_dict(assessment)
+    )
+    block["effective_authority"] = EFFECTIVE_AUTHORITY_LEGACY_SCHEDULER
+    block["engine_authority"] = False
+    block["engine_result_accepted_as_authority"] = False
+    return block
 
 
 # --------------------------------------------------------------------------
