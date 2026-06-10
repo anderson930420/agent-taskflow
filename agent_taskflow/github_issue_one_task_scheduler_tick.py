@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from agent_taskflow.approved_task_runner import ApprovedTaskRunRequest, run_approved_task
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS
+from agent_taskflow.execution_engine_contract import ExecutionEngine
 from agent_taskflow.github_issue_discovery import IssueListFetcher
 from agent_taskflow.github_issue_ingestion import IssueFetcher
 from agent_taskflow.github_issue_one_task_automation import (
@@ -27,6 +28,9 @@ from agent_taskflow.github_issue_one_task_lock import (
     default_github_issue_one_task_lock_path,
 )
 from agent_taskflow.models import require_absolute_path
+from agent_taskflow.scheduler_execution_engine_opt_in import (
+    route_scheduler_tick_through_execution_engine,
+)
 
 
 GITHUB_ISSUE_ONE_TASK_SCHEDULER_TICK_SCHEMA_VERSION = (
@@ -78,6 +82,13 @@ class GitHubIssueOneTaskSchedulerTickRequest:
     tools: tuple[str, ...] | None = None
     pi_bin: str | None = None
 
+    # P5-d opt-in: route the one selected confirmed task through the
+    # ExecutionEngine facade for runtime evidence. Off by default. The legacy
+    # scheduler tick path is unchanged unless this is explicitly enabled, and it
+    # is only valid in confirmed mode (see __post_init__). The active cron path
+    # never sets this flag.
+    use_execution_engine: bool = False
+
     def __post_init__(self) -> None:
         repo = str(self.repo or "").strip()
         if "/" not in repo or repo.startswith("/") or repo.endswith("/"):
@@ -117,6 +128,13 @@ class GitHubIssueOneTaskSchedulerTickRequest:
             object.__setattr__(self, "dry_run", False)
         elif not self.dry_run:
             raise ValueError("confirmed mode requires confirmed=True")
+
+        if self.use_execution_engine and not self.confirmed:
+            raise ValueError(
+                "use_execution_engine requires confirmed mode: the scheduler "
+                "ExecutionEngine opt-in path is execution-only and confirmed-"
+                "mode only; a dry-run tick cannot enable --use-execution-engine"
+            )
 
         if self.issue_limit <= 0:
             raise ValueError("issue_limit must be positive")
@@ -190,8 +208,18 @@ def run_github_issue_one_task_scheduler_tick(
     approved_task_runner_fn: Callable[..., dict[str, Any]] | None = None,
     branch_push_fn: Callable[..., dict[str, Any]] | None = None,
     draft_pr_fn: Callable[..., dict[str, Any]] | None = None,
+    execution_engine: ExecutionEngine | None = None,
 ) -> dict[str, Any]:
-    """Run one locked scheduler tick and stop."""
+    """Run one locked scheduler tick and stop.
+
+    The legacy path is the default. When ``request.use_execution_engine`` is set
+    (confirmed mode only), the one selected task is additionally routed through
+    the ExecutionEngine facade for runtime evidence, and an ``execution_engine``
+    opt-in evidence block is attached to the returned payload. The
+    ``execution_engine`` argument injects the engine facade for tests; it is
+    unused unless the opt-in is enabled, and the default facade is supplied by
+    the dedicated opt-in helper module.
+    """
 
     runner_fn = approved_task_runner_fn or _configured_approved_task_runner_fn(request)
 
@@ -199,17 +227,25 @@ def run_github_issue_one_task_scheduler_tick(
     try:
         acquired = lock.acquire(blocking=not request.fail_if_locked)
     except OSError as exc:
-        return _failure_response(
+        return _maybe_attach_execution_engine(
             request,
-            status="lock_failed",
-            reasons=[str(exc)],
-            lock_acquired=False,
-            lock_contended=False,
-            automation=None,
+            _failure_response(
+                request,
+                status="lock_failed",
+                reasons=[str(exc)],
+                lock_acquired=False,
+                lock_contended=False,
+                automation=None,
+            ),
+            execution_engine=execution_engine,
         )
 
     if not acquired:
-        return _locked_response(request)
+        return _maybe_attach_execution_engine(
+            request,
+            _locked_response(request),
+            execution_engine=execution_engine,
+        )
 
     automation: dict[str, Any] | None = None
     automation_error: str | None = None
@@ -229,34 +265,72 @@ def run_github_issue_one_task_scheduler_tick(
         lock.release()
 
     if automation_error is not None:
-        return _failure_response(
+        return _maybe_attach_execution_engine(
             request,
-            status="automation_error",
-            reasons=[automation_error],
-            lock_acquired=True,
-            lock_contended=False,
-            lock_released=True,
-            automation_called=True,
-            automation=automation,
+            _failure_response(
+                request,
+                status="automation_error",
+                reasons=[automation_error],
+                lock_acquired=True,
+                lock_contended=False,
+                lock_released=True,
+                automation_called=True,
+                automation=automation,
+            ),
+            execution_engine=execution_engine,
         )
 
     if automation is None:
-        return _failure_response(
+        return _maybe_attach_execution_engine(
             request,
-            status="automation_error",
-            reasons=["automation returned no result"],
-            lock_acquired=True,
-            lock_contended=False,
-            lock_released=True,
-            automation_called=True,
-            automation=None,
+            _failure_response(
+                request,
+                status="automation_error",
+                reasons=["automation returned no result"],
+                lock_acquired=True,
+                lock_contended=False,
+                lock_released=True,
+                automation_called=True,
+                automation=None,
+            ),
+            execution_engine=execution_engine,
         )
 
-    return _automation_response(
+    return _maybe_attach_execution_engine(
         request,
-        automation=automation,
-        lock_released=True,
+        _automation_response(
+            request,
+            automation=automation,
+            lock_released=True,
+        ),
+        execution_engine=execution_engine,
     )
+
+
+def _maybe_attach_execution_engine(
+    request: GitHubIssueOneTaskSchedulerTickRequest,
+    response: dict[str, Any],
+    *,
+    execution_engine: ExecutionEngine | None,
+) -> dict[str, Any]:
+    """Attach the P5-d ``execution_engine`` opt-in evidence block, if enabled.
+
+    Off by default: when ``use_execution_engine`` is not set, the legacy
+    response is returned unchanged. When enabled, the one selected confirmed
+    task is routed through the ExecutionEngine facade for runtime evidence only;
+    the engine result never changes the legacy ``ok`` / ``status`` / publication
+    / safety decision and never publishes, merges, approves, cleans up, or
+    deletes a branch or worktree.
+    """
+
+    if not request.use_execution_engine:
+        return response
+    response["execution_engine"] = route_scheduler_tick_through_execution_engine(
+        request,
+        response,
+        engine=execution_engine,
+    )
+    return response
 
 
 def _automation_request(

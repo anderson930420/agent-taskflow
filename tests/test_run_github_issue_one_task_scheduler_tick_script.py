@@ -170,6 +170,7 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
             "--json",
             "--include-observability-summary",
             "--observability-summary-only",
+            "--use-execution-engine",
         ):
             self.assertIn(flag, result.stdout, flag)
         for forbidden in (
@@ -609,6 +610,50 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
         self.assertFalse(summary["safety"]["github_mutated"])
         self.assertFalse(summary["safety"]["branch_deleted"])
         self.assertFalse(summary["safety"]["worktree_deleted"])
+
+    def test_use_execution_engine_defaults_off(self) -> None:
+        payload = {
+            "ok": True,
+            "status": "dry_run",
+            "mode": "dry_run",
+            "safety": {"dry_run": True, "confirmed": False},
+        }
+
+        rc, _emitted, request = self.invoke_with_fake_run(["--json"], payload)
+
+        self.assertEqual(rc, 0)
+        self.assertFalse(request.use_execution_engine)
+
+    def test_confirmed_use_execution_engine_flag_sets_request(self) -> None:
+        payload = {
+            "ok": True,
+            "status": "execution_completed",
+            "mode": "confirmed",
+            "safety": {"dry_run": False, "confirmed": True},
+        }
+
+        rc, _emitted, request = self.invoke_with_fake_run(
+            ["--confirmed", "--use-execution-engine", "--json"],
+            payload,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(request.confirmed)
+        self.assertTrue(request.use_execution_engine)
+
+    def test_dry_run_use_execution_engine_is_rejected(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            rc = self.script.main(
+                [*self.base_args(), "--use-execution-engine", "--json"]
+            )
+
+        emitted = json.loads(stdout.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertFalse(emitted["ok"])
+        self.assertEqual(emitted["status"], "error")
+        joined_reasons = " ".join(emitted["reasons"])
+        self.assertIn("use_execution_engine requires confirmed", joined_reasons)
 
     def test_observability_flags_expose_no_destructive_command_names(self) -> None:
         parser = self.script.build_parser()
