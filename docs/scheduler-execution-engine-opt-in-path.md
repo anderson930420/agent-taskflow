@@ -22,6 +22,9 @@ See also:
   builder that maps the selected task onto an `ExecutionEngineRequest`.
 - `docs/scheduler-execution-engine-shadow-compare.md` — the P5-c shadow /
   compare layer that produces the diagnostic comparison this stage records.
+- `docs/scheduler-execution-engine-fallback-hardening.md` — the P5-e fallback
+  hardening layer that classifies the `execution_engine` evidence block this
+  stage produces.
 - `docs/execution-engine-contract.md` — the P4-b `ExecutionEngineRequest` /
   `ExecutionEngineResult` contract.
 
@@ -116,7 +119,8 @@ legacy scheduler tick path is never modified by opting out.
 
 ## Next stage
 
-A future **P5-e** stage will harden legacy-vs-engine **fallback** behavior — for
-example, deciding how a confirmed tick should reconcile the legacy result and
-the engine result when they diverge. That fallback hardening is future work and
-is not implemented by P5-d.
+The **P5-e** stage hardens legacy-vs-engine **fallback** behavior: every
+`execution_engine` evidence block carries a pure, machine-readable
+`fallback_assessment` that pins `effective_authority="legacy_scheduler"`,
+`engine_authority=False`, and `engine_result_accepted_as_authority=False`. See
+`docs/scheduler-execution-engine-fallback-hardening.md`.

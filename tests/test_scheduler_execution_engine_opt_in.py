@@ -22,6 +22,9 @@ from agent_taskflow.execution_engine_contract import (
     ExecutionEngineResult,
     ExecutionEngineSafety,
 )
+from agent_taskflow.scheduler_execution_engine_fallback import (
+    SCHEDULER_EXECUTION_ENGINE_FALLBACK_SCHEMA_VERSION,
+)
 from agent_taskflow.scheduler_execution_engine_opt_in import (
     SCHEDULER_EXECUTION_ENGINE_OPT_IN_SCHEMA_VERSION,
     SCHEDULER_EXECUTION_ENGINE_OPT_IN_SOURCE,
@@ -256,6 +259,189 @@ class RouteThroughEngineTests(unittest.TestCase):
         self.assertTrue(block["executed"])
         self.assertFalse(block["ok"])
         self.assertEqual(block["status"], "validator_failed")
+
+
+class FallbackHardeningTests(unittest.TestCase):
+    """P5-e: every opt-in evidence block carries the fallback classification."""
+
+    def test_block_contains_fallback_assessment_with_authority_markers(
+        self,
+    ) -> None:
+        engine = RecordingEngine()
+        block = route_scheduler_tick_through_execution_engine(
+            scheduler_request(),
+            tick_payload(),
+            engine=engine,
+        )
+
+        # P5-e does not change the one-invocation contract.
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(block["engine_invocation_count"], 1)
+
+        assessment = block["fallback_assessment"]
+        self.assertEqual(
+            assessment["schema_version"],
+            SCHEDULER_EXECUTION_ENGINE_FALLBACK_SCHEMA_VERSION,
+        )
+        self.assertIs(assessment["fallback_required"], False)
+        self.assertIsNone(assessment["fallback_reason"])
+        self.assertIs(
+            assessment["engine_candidate_usable_for_future_migration"], True
+        )
+
+        # The authority markers are pinned on the block and the assessment.
+        self.assertEqual(block["effective_authority"], "legacy_scheduler")
+        self.assertIs(block["engine_authority"], False)
+        self.assertIs(block["engine_result_accepted_as_authority"], False)
+        self.assertEqual(assessment["effective_authority"], "legacy_scheduler")
+        self.assertIs(assessment["engine_authority"], False)
+        self.assertIs(assessment["engine_result_accepted_as_authority"], False)
+        json.dumps(block)  # must not raise
+
+    def test_engine_result_is_not_authority_even_when_ok(self) -> None:
+        block = route_scheduler_tick_through_execution_engine(
+            scheduler_request(),
+            tick_payload(),
+            engine=RecordingEngine(),
+        )
+
+        self.assertTrue(block["ok"])
+        assessment = block["fallback_assessment"]
+        self.assertIs(assessment["engine_authority"], False)
+        self.assertIs(assessment["engine_result_accepted_as_authority"], False)
+        self.assertEqual(assessment["effective_authority"], "legacy_scheduler")
+        # The legacy decision remains recorded as the effective authority.
+        summary = assessment["summary"]
+        self.assertIs(summary["legacy_ok"], True)
+        self.assertEqual(summary["legacy_status"], "execution_completed")
+        self.assertEqual(summary["effective_authority"], "legacy_scheduler")
+
+    def test_engine_failure_preserves_legacy_payload_and_requires_fallback(
+        self,
+    ) -> None:
+        class RaisingEngine:
+            def execute(self, request: ExecutionEngineRequest) -> ExecutionEngineResult:
+                raise RuntimeError("boom")
+
+        payload = tick_payload()
+        block = route_scheduler_tick_through_execution_engine(
+            scheduler_request(),
+            payload,
+            engine=RaisingEngine(),
+        )
+
+        # The legacy tick payload ok/status are untouched by the engine failure.
+        self.assertIs(payload["ok"], True)
+        self.assertEqual(payload["status"], "execution_completed")
+
+        assessment = block["fallback_assessment"]
+        self.assertIs(assessment["fallback_required"], True)
+        self.assertIn("engine_not_ok", assessment["fallback_reasons"])
+        self.assertIn(
+            "engine_failure_status:engine_error",
+            assessment["fallback_reasons"],
+        )
+        self.assertIs(
+            assessment["engine_candidate_usable_for_future_migration"], False
+        )
+        self.assertIs(assessment["summary"]["legacy_ok"], True)
+        self.assertEqual(
+            assessment["summary"]["legacy_status"], "execution_completed"
+        )
+
+    def test_shadow_mismatch_preserves_legacy_payload_and_requires_fallback(
+        self,
+    ) -> None:
+        # A legacy repo differing from the engine project forces a P5-c
+        # repo/project mismatch.
+        payload = tick_payload(repo="someone-else/other-repo")
+        block = route_scheduler_tick_through_execution_engine(
+            scheduler_request(),
+            payload,
+            engine=RecordingEngine(),
+        )
+
+        self.assertFalse(block["shadow_compare"]["matched"])
+        # The legacy tick payload ok/status are untouched by the mismatch.
+        self.assertIs(payload["ok"], True)
+        self.assertEqual(payload["status"], "execution_completed")
+
+        assessment = block["fallback_assessment"]
+        self.assertIs(assessment["fallback_required"], True)
+        self.assertIn("shadow_compare_mismatch", assessment["fallback_reasons"])
+        self.assertIs(
+            assessment["engine_candidate_usable_for_future_migration"], False
+        )
+        # Even an ok engine result stays evidence only on a mismatch.
+        self.assertTrue(block["ok"])
+        self.assertIs(assessment["engine_result_accepted_as_authority"], False)
+        mismatch_summary = assessment["summary"]["shadow_compare"]
+        self.assertGreaterEqual(mismatch_summary["mismatch_count"], 1)
+        self.assertTrue(mismatch_summary["mismatches"])
+
+    def test_not_executed_block_also_carries_fallback_assessment(self) -> None:
+        block = route_scheduler_tick_through_execution_engine(
+            scheduler_request(),
+            tick_payload(selected_task_key=None, automation=None),
+            engine=RecordingEngine(),
+        )
+
+        assessment = block["fallback_assessment"]
+        self.assertIs(assessment["fallback_required"], True)
+        self.assertEqual(assessment["fallback_reason"], "engine_not_executed")
+        self.assertEqual(block["effective_authority"], "legacy_scheduler")
+        self.assertIs(block["engine_authority"], False)
+
+    def test_fallback_assessment_absent_when_opt_in_off(self) -> None:
+        # The tick attaches engine evidence (and with it the fallback
+        # assessment) only behind the use_execution_engine gate.
+        from agent_taskflow.github_issue_one_task_scheduler_tick import (
+            _maybe_attach_execution_engine,
+        )
+
+        engine = RecordingEngine()
+        legacy_response = tick_payload()
+        result = _maybe_attach_execution_engine(
+            SimpleNamespace(use_execution_engine=False),
+            legacy_response,
+            execution_engine=engine,
+        )
+
+        self.assertIs(result, legacy_response)
+        self.assertEqual(len(engine.calls), 0)
+        self.assertNotIn("execution_engine", result)
+        self.assertNotIn("fallback_assessment", json.dumps(result))
+
+    def test_hardened_block_adds_no_publication_or_cleanup_side_effects(
+        self,
+    ) -> None:
+        block = route_scheduler_tick_through_execution_engine(
+            scheduler_request(),
+            tick_payload(),
+            engine=RecordingEngine(),
+        )
+
+        safety = block["safety"]
+        for marker in (
+            "approval_authority",
+            "approved",
+            "merged",
+            "branch_pushed",
+            "draft_pr_created",
+            "cleanup_performed",
+            "archived",
+            "closed_out",
+            "branch_deleted",
+            "worktree_deleted",
+        ):
+            self.assertFalse(safety[marker], msg=marker)
+        self.assertIs(
+            block["request_summary"]["publish_after_execution"], False
+        )
+        self.assertEqual(block["request_summary"]["mode"], "execution_only")
+        assessment = block["fallback_assessment"]
+        self.assertIs(assessment["publication_boundary_preserved"], True)
+        self.assertIs(assessment["safety_boundary_preserved"], True)
 
 
 class HelperSourceSafetyTests(unittest.TestCase):

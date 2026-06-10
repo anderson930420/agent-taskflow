@@ -114,9 +114,15 @@ class SchedulerExecutionEngineOptInPathDocTests(unittest.TestCase):
         self.assertIn("rollback", self.normalized)
         self.assertIn("remove the opt-in flag", self.normalized)
 
-    def test_mentions_p5e_fallback_hardening_future_stage(self) -> None:
+    def test_mentions_p5e_fallback_hardening_stage(self) -> None:
         self.assertIn("p5-e", self.normalized)
         self.assertIn("fallback", self.normalized)
+        self.assertIn("fallback_assessment", self.doc)
+
+    def test_points_to_p5e_fallback_hardening_doc(self) -> None:
+        self.assertIn(
+            "docs/scheduler-execution-engine-fallback-hardening.md", self.doc
+        )
 
     def test_mentions_module_and_request_source(self) -> None:
         self.assertIn(
