@@ -88,6 +88,11 @@ class ActiveCronObservabilityRolloutDocTests(unittest.TestCase):
             "scheduler tick is not migrated to executionengine", self.normalized
         )
 
+    def test_points_to_post_rollout_validation_record(self) -> None:
+        self.assertIn(
+            "docs/active-cron-observability-post-rollout-validation.md", self.doc
+        )
+
     def test_states_no_governance_or_runtime_side_effects(self) -> None:
         for phrase in (
             "no approval",

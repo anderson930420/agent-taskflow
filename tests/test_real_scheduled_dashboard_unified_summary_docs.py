@@ -81,6 +81,11 @@ class RealScheduledDashboardUnifiedSummaryDocTests(unittest.TestCase):
             "docs/active-cron-observability-rollout.md", self.doc
         )
 
+    def test_points_to_post_rollout_validation_record(self) -> None:
+        self.assertIn(
+            "docs/active-cron-observability-post-rollout-validation.md", self.doc
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
