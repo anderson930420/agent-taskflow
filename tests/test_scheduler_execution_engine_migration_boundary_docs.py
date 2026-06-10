@@ -137,6 +137,11 @@ class SchedulerExecutionEngineMigrationBoundaryDocTests(unittest.TestCase):
             "deterministic validators / human review gates", self.normalized
         )
 
+    def test_points_to_p5b_request_builder_doc(self) -> None:
+        self.assertIn(
+            "docs/scheduler-execution-engine-request-builder.md", self.doc
+        )
+
     def test_mentions_staged_plan_p5b_through_p5g(self) -> None:
         for stage in ("p5-b", "p5-c", "p5-d", "p5-e", "p5-f", "p5-g"):
             self.assertIn(stage, self.normalized, msg=stage)
