@@ -21,6 +21,8 @@ See also:
   engine-backed path would delegate to.
 - `docs/execution-engine-manual-runtime-path.md` — the manual opt-in engine
   facade, still the only runtime entry into the engine path.
+- `docs/scheduler-execution-engine-shadow-compare.md` — the P5-c shadow /
+  compare layer that consumes the request this builder produces.
 
 ## Purpose
 

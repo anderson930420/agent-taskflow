@@ -103,6 +103,11 @@ class SchedulerExecutionEngineRequestBuilderDocTests(unittest.TestCase):
         self.assertIn("shadow / compare summary", self.normalized)
         self.assertIn("future work", self.normalized)
 
+    def test_points_to_shadow_compare_doc(self) -> None:
+        self.assertIn(
+            "docs/scheduler-execution-engine-shadow-compare.md", self.doc
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
