@@ -18,6 +18,9 @@ See also:
   real cron profile this rollout targets.
 - `docs/real-scheduled-execution-observability.md` — the P4-h read-only
   dashboard / summarizer that consumes the rolled-out summary.
+- `docs/active-cron-observability-post-rollout-validation.md` — the P4-k
+  post-rollout validation record with the observed smoke evidence after the
+  operator manually applied this runbook.
 
 ## Purpose
 

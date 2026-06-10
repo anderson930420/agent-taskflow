@@ -143,7 +143,10 @@ is a separate, documentation-only operator procedure — see the
 [active cron observability rollout runbook](active-cron-observability-rollout.md)
 (`docs/active-cron-observability-rollout.md`). That runbook does not modify the
 active crontab; applying the change to the live schedule remains an explicit
-manual human action.
+manual human action. The observed evidence after the operator applied the
+rollout is recorded in the
+[post-rollout validation record](active-cron-observability-post-rollout-validation.md)
+(`docs/active-cron-observability-post-rollout-validation.md`).
 
 ## How to run human-readable mode
 
