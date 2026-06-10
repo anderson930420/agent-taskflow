@@ -25,6 +25,8 @@ See also:
   summarizer.
 - `docs/active-cron-observability-post-rollout-validation.md` — the validated
   live cron observability state this boundary must preserve.
+- `docs/scheduler-execution-engine-request-builder.md` — the P5-b
+  request-builder contract, the first implemented stage of this plan.
 
 ## Purpose
 
