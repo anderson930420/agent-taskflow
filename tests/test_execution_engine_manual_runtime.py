@@ -178,12 +178,16 @@ class RunManualRequestTests(unittest.TestCase):
 class ManualRuntimeIsolationTests(unittest.TestCase):
     def test_scheduler_and_automation_modules_do_not_use_the_facade(self) -> None:
         repo_root = Path(manual_runtime.__file__).resolve().parents[1]
-        # Only the new manual runtime helper, the adapter it wraps, and the new
-        # opt-in CLI are allowed to reference the engine-facade runtime symbols.
+        # Only the manual runtime helper, the adapter it wraps, the manual opt-in
+        # CLI, and the P5-d scheduler opt-in helper (off by default,
+        # confirmed-mode only) may reference the engine-facade runtime symbols.
+        # The scheduler tick and automation modules delegate to that helper and
+        # must not reference the facade symbols directly.
         allowed = {
             "execution_engine_manual_runtime.py",
             "execution_engine_approved_task_adapter.py",
             "run_execution_engine_approved_task.py",
+            "scheduler_execution_engine_opt_in.py",
         }
         tokens = (
             "execution_engine_manual_runtime",

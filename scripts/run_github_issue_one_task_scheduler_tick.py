@@ -90,6 +90,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--use-execution-engine",
+        dest="use_execution_engine",
+        action="store_true",
+        help=(
+            "P5-d opt-in (OFF BY DEFAULT): route the one selected confirmed "
+            "task through the ExecutionEngine facade for runtime evidence only. "
+            "Requires --confirmed; rejected in dry-run. Execution-only: no "
+            "publish, PR, branch push, merge, approval, or cleanup. The engine "
+            "result is evidence only, not approval authority; deterministic "
+            "validators and human review gates remain the validation authority. "
+            "The default scheduler path stays legacy and the active cron never "
+            "sets this flag."
+        ),
+    )
+    parser.add_argument(
         "--validator",
         action="append",
         dest="validators",
@@ -211,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             provider=args.provider,
             tools=tuple(args.tools) if args.tools else None,
             pi_bin=args.pi_bin,
+            use_execution_engine=bool(args.use_execution_engine),
         )
         payload = run_github_issue_one_task_scheduler_tick(request)
     except (ValueError, argparse.ArgumentTypeError, GitHubIssueOneTaskSchedulerTickError) as exc:

@@ -127,6 +127,11 @@ class SchedulerExecutionEngineShadowCompareDocTests(unittest.TestCase):
         self.assertIn("p5-d", self.normalized)
         self.assertIn("opt-in execution path", self.normalized)
 
+    def test_points_to_p5d_opt_in_path_doc(self) -> None:
+        self.assertIn(
+            "docs/scheduler-execution-engine-opt-in-path.md", self.doc
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

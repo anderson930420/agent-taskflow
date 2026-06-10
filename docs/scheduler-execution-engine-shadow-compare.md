@@ -19,6 +19,9 @@ See also:
   boundary this stage implements one diagnostic piece of.
 - `docs/scheduler-execution-engine-request-builder.md` — the P5-b request
   builder that produces the engine-shaped request this layer compares against.
+- `docs/scheduler-execution-engine-opt-in-path.md` — the P5-d opt-in execution
+  path that uses this compare layer before routing one confirmed task through
+  the engine.
 - `docs/execution-engine-contract.md` — the P4-b `ExecutionEngineRequest`
   contract the engine-shaped request conforms to.
 

@@ -291,11 +291,14 @@ class AdapterRuntimeIsolationTests(unittest.TestCase):
     def test_no_runtime_module_imports_adapter(self) -> None:
         repo_root = Path(adapter_module.__file__).resolve().parents[1]
         adapter_stem = "execution_engine_approved_task_adapter"
-        # The adapter itself, plus the single P4-d manual runtime helper that is
-        # the one explicit, opt-in importer behind the engine facade.
+        # The adapter itself, plus the explicit, opt-in importers behind the
+        # engine facade: the P4-d manual runtime helper and the P5-d scheduler
+        # opt-in helper (off by default, confirmed-mode only). No other
+        # scheduler/automation module may import the adapter.
         allowed = {
             f"{adapter_stem}.py",
             "execution_engine_manual_runtime.py",
+            "scheduler_execution_engine_opt_in.py",
         }
         offenders: list[str] = []
         for base in (repo_root / "agent_taskflow", repo_root / "scripts"):
