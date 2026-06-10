@@ -20,6 +20,9 @@ See also:
   dashboard / summarizer whose output is quoted below.
 - `docs/execution-observability-summary.md` — the normalized
   `UnifiedExecutionSummary` schema carried in `observability_summary`.
+- `docs/scheduler-execution-engine-migration-boundary.md` — the P5-a
+  scheduler-to-ExecutionEngine migration boundary inventory (future-work
+  boundaries only; the live path validated here is unchanged).
 
 ## Purpose
 
