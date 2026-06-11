@@ -20,15 +20,8 @@ SCRIPT = REPO_ROOT / "scripts" / "run_github_issue_one_task_scheduler_tick.py"
 
 
 def _load_script_module():
-    spec = importlib.util.spec_from_file_location(
-        "run_github_issue_one_task_scheduler_tick_for_tests",
-        SCRIPT,
-    )
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    from agent_taskflow.cli import github_issue_one_task_scheduler_tick as module
+
     return module
 
 
