@@ -100,6 +100,45 @@ substitute for human review: **deterministic validators and human review gates
 remain the validation and approval authority**, exactly as the P5-a boundary
 requires.
 
+## Not a live rollout path: expected post-legacy fallback
+
+P5-d is **not a live rollout-ready migration path**. The opt-in engine
+invocation runs *after* the legacy automation has already completed and the
+scheduler lock has been released. The default facade is the real
+`ApprovedTaskRunnerExecutionEngineAdapter`, whose underlying approved task
+runner requires the selected task to still be `queued`. When the legacy
+confirmed run succeeded, that same task has already moved out of `queued`
+(typically to `waiting_approval`), so the post-legacy engine invocation for the
+same task is **expected to block / fall back rather than produce a clean,
+migration-usable engine candidate**:
+
+- the engine evidence block records a non-clean result (`ok: false`,
+  `status: blocked`);
+- the P5-e `fallback_assessment` classifies the candidate with
+  `fallback_required: true` and
+  `engine_candidate_usable_for_future_migration: false`; and
+- the legacy tick `ok` / `status` are preserved untouched — the legacy
+  scheduler remains the effective authority.
+
+This is intentional for the current stage: P5-d exists to produce auditable
+runtime evidence about the engine wiring, not to execute the task a second
+time. There is **no duplicate execution**: the engine invocation is bounded by
+the queued-status requirement and blocks instead of re-running work the legacy
+path already performed.
+
+A future migration stage that wants the engine to actually execute the
+selected task would have to be an explicit new mode in which engine execution
+**replaces** legacy approved-task execution under the scheduler lock (instead
+of running after it), so the task is still `queued` when the engine runs and
+no duplicate execution can occur. That stage is out of scope for P5-d. Until
+it exists, treat `--use-execution-engine` as evidence-only instrumentation:
+engine output never silently becomes approval authority, and the active cron
+defaults are unchanged.
+
+Regression coverage:
+`tests/test_scheduler_execution_engine_opt_in_post_legacy.py` pins the
+post-legacy default-adapter and queued-status-gate behavior.
+
 ## Failure behavior
 
 If the engine raises, or returns anything other than an `ExecutionEngineResult`,
