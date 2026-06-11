@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-taskflow"
+version = "0.1.0"
+description = "Python-native, GitHub-oriented orchestration system for human-gated AI engineering workflows."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+  { name = "Anderson Liu" },
+]
+dependencies = [
+  "PyYAML>=6.0,<7",
+  "fastapi>=0.110,<1.0",
+  "uvicorn>=0.27,<1.0",
+  "httpx>=0.27,<1.0",
+]
+
+[project.urls]
+Repository = "https://github.com/anderson930420/agent-taskflow"
+
+[project.scripts]
+agent-taskflow-local-validation = "scripts.run_local_validation:main"
+agent-taskflow-github-issue-one-task-automation = "scripts.run_github_issue_one_task_automation:main"
+agent-taskflow-github-issue-one-task-scheduler-tick = "scripts.run_github_issue_one_task_scheduler_tick:main"
+
+[tool.setuptools.packages.find]
+include = ["agent_taskflow*", "scripts*"]
