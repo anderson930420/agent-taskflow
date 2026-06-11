@@ -14,12 +14,8 @@ SCRIPT = REPO_ROOT / "scripts" / "run_local_validation.py"
 
 
 def _load_runner_module():
-    spec = importlib.util.spec_from_file_location("run_local_validation", SCRIPT)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    from agent_taskflow.cli import local_validation as module
+
     return module
 
 
