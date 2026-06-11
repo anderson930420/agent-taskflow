@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,6 +23,40 @@ def _load_runner_module():
 
 
 class LocalValidationRunnerTests(unittest.TestCase):
+    def test_repo_checkout_detection_accepts_source_tree_shape(self) -> None:
+        runner = _load_runner_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+            (root / "agent_taskflow").mkdir()
+            (root / "scripts").mkdir()
+            (root / "tests").mkdir()
+
+            self.assertTrue(runner.is_repo_checkout(root))
+
+    def test_repo_checkout_detection_rejects_site_packages_shape(self) -> None:
+        runner = _load_runner_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            site_packages = Path(tmp) / "site-packages"
+            site_packages.mkdir()
+
+            self.assertFalse(runner.is_repo_checkout(site_packages))
+
+    def test_main_returns_clear_error_outside_repo_checkout(self) -> None:
+        runner = _load_runner_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            site_packages = Path(tmp) / "site-packages"
+            site_packages.mkdir()
+            stderr = io.StringIO()
+
+            with mock.patch.object(runner, "REPO_ROOT", site_packages):
+                with contextlib.redirect_stderr(stderr):
+                    rc = runner.main([])
+
+        self.assertEqual(rc, 2)
+        self.assertIn("repository checkout", stderr.getvalue())
+        self.assertIn(str(site_packages), stderr.getvalue())
+
     def test_dependency_import_detection_reports_missing_dependency(self) -> None:
         runner = _load_runner_module()
 
