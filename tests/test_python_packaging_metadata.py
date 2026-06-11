@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import sys
 import tomllib
 from pathlib import Path
 
@@ -82,4 +81,5 @@ def test_scripts_directory_is_importable_package() -> None:
     module = importlib.import_module("scripts")
 
     assert module.__doc__
-    assert str(REPO_ROOT) in sys.path
+    assert module.__file__ is not None
+    assert Path(module.__file__).name == "__init__.py"
