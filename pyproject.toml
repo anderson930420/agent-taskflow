@@ -27,4 +27,4 @@ agent-taskflow-github-issue-one-task-automation = "scripts.run_github_issue_one_
 agent-taskflow-github-issue-one-task-scheduler-tick = "scripts.run_github_issue_one_task_scheduler_tick:main"
 
 [tool.setuptools.packages.find]
-include = ["agent_taskflow*", "scripts*"]
+include = ["agent_taskflow*"]
