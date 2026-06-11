@@ -39,6 +39,23 @@ def command_to_text(command: Sequence[str]) -> str:
     return " ".join(command)
 
 
+def is_repo_checkout(path: Path) -> bool:
+    return (
+        (path / "pyproject.toml").is_file()
+        and (path / "agent_taskflow").is_dir()
+        and (path / "scripts").is_dir()
+        and (path / "tests").is_dir()
+    )
+
+
+def repo_checkout_error_message(path: Path) -> str:
+    return (
+        "agent-taskflow-local-validation must run from an agent-taskflow "
+        "repository checkout. Use an editable checkout or run the command "
+        f"from the project source tree. Resolved root: {path}"
+    )
+
+
 def import_dependency(name: str) -> tuple[bool, str | None]:
     try:
         importlib.import_module(name)
@@ -192,6 +209,10 @@ def print_summary(results: Sequence[CheckResult]) -> None:
 def main(argv: list[str] | None = None) -> int:
     if argv:
         print("local validation does not accept arguments", file=sys.stderr)
+        return 2
+
+    if not is_repo_checkout(REPO_ROOT):
+        print(f"ERROR: {repo_checkout_error_message(REPO_ROOT)}", file=sys.stderr)
         return 2
 
     results: list[CheckResult] = []
