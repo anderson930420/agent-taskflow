@@ -287,11 +287,37 @@ Current safety boundaries:
 
 ---
 
+## Scheduled Execution and ExecutionEngine Migration Status
+
+Beyond the operator-driven loop, a bounded scheduled path exists:
+
+* Scheduled one-task execution exists. A locked scheduler tick
+  (`scripts/run_github_issue_one_task_scheduler_tick.py`) can select, ingest,
+  and execute at most one confirmed task per tick under a non-overlap lock.
+  It is one tick only: no daemon, no scheduler loop, no multi-task batch.
+* Active cron observability exists. Scheduled tick runs record structured
+  observability evidence so cron-driven activity is reviewable.
+* Live cron remains execution-only. The active cron path never publishes,
+  pushes branches, creates PRs, merges, approves, or cleans up.
+* Publication, merge, and cleanup remain human-gated. Validation success never
+  implies publication; explicit human confirmation is required for every
+  outward-facing or destructive step.
+* ExecutionEngine migration is in progress and evidence-only. An explicit
+  `--use-execution-engine` opt-in (off by default, never part of active cron)
+  can route the one selected task through the ExecutionEngine facade for
+  runtime evidence. Engine results are evidence only, not approval authority:
+  deterministic validators and human review remain the validation and approval
+  gates.
+
+---
+
 ## Deferred Automation
 
 The following capabilities are intentionally deferred:
 
-* Queue or polling automation for selecting and starting new tasks.
+* Continuous queue or polling automation. A locked, single-tick, one-task
+  scheduled execution path exists; an always-on scheduler loop, daemon, or
+  background worker does not.
 * Webhook or background GitHub issue sync.
 * Dispatcher-driven workspace creation.
 * Dispatcher-driven branch push or PR creation.

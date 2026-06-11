@@ -27,6 +27,16 @@ of this module runs. The opt-in path is strictly bounded:
   archive / closeout / branch or worktree deletion;
 * no daemon / webhook / background worker / scheduler loop / multi-task batch.
 
+P5-d is evidence-only instrumentation, **not a live rollout path**: this path
+runs after the legacy automation has already executed the selected task and
+released the scheduler lock, and the default
+:class:`ApprovedTaskRunnerExecutionEngineAdapter` requires the task to still be
+queued. A successful legacy run is therefore expected to yield a blocked /
+fallback engine candidate rather than a clean one, with the legacy ``ok`` /
+``status`` preserved. There is no duplicate execution. See the "expected
+post-legacy fallback" section of
+``docs/scheduler-execution-engine-opt-in-path.md``.
+
 P5-e (``agent_taskflow/scheduler_execution_engine_fallback.py``) hardens the
 legacy-vs-engine fallback semantics of this path: every ``execution_engine``
 evidence block carries a pure ``fallback_assessment`` classification pinning
