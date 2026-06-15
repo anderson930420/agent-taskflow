@@ -110,6 +110,11 @@ class CodexAdvisoryReviewRequest:
     dry_run: bool = True
 
     def __post_init__(self) -> None:
+        if self.dry_run is not True:
+            raise ValueError(
+                "dry_run must be true; Codex advisory review is dry-run only "
+                "in this milestone"
+            )
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
         object.__setattr__(
             self,

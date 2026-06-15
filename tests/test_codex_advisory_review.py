@@ -123,6 +123,14 @@ class CodexAdvisoryReviewTests(unittest.TestCase):
         payload = build_review_payload(self._request(), detect_evidence(self.artifact_dir))
         validate_payload(payload)  # should not raise
 
+    def test_request_rejects_non_dry_run_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            CodexAdvisoryReviewRequest(
+                task_key="GH-1234",
+                artifact_dir=self.artifact_dir,
+                dry_run=False,
+            )
+
     def test_prompt_includes_advisory_only_language(self) -> None:
         prompt = build_review_prompt(self._request(), detect_evidence(self.artifact_dir))
         lowered = prompt.lower()
