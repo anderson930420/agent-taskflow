@@ -25,6 +25,7 @@ Repository = "https://github.com/anderson930420/agent-taskflow"
 agent-taskflow-local-validation = "agent_taskflow.cli.local_validation:main"
 agent-taskflow-github-issue-one-task-automation = "agent_taskflow.cli.github_issue_one_task_automation:main"
 agent-taskflow-github-issue-one-task-scheduler-tick = "agent_taskflow.cli.github_issue_one_task_scheduler_tick:main"
+agent-taskflow-codex-advisory-review = "agent_taskflow.cli.run_codex_advisory_review:main"
 
 [tool.setuptools.packages.find]
 include = ["agent_taskflow*"]
