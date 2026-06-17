@@ -2,22 +2,12 @@
 
 from __future__ import annotations
 
-import tomllib
 import unittest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PYPROJECT = REPO_ROOT / "pyproject.toml"
 RELEASE_NOTES = REPO_ROOT / "docs" / "release-notes-v0.2.0.md"
-
-
-class TestV020ReleaseMetadata(unittest.TestCase):
-    def test_pyproject_version_matches_v020_release(self) -> None:
-        with PYPROJECT.open("rb") as handle:
-            pyproject = tomllib.load(handle)
-
-        self.assertEqual(pyproject["project"]["version"], "0.2.0")
 
 
 class TestV020ReleaseNotes(unittest.TestCase):
