@@ -1,14 +1,22 @@
-"""Codex advisory reviewer dry-run contract.
+"""Codex advisory reviewer contract.
 
-This module builds a read-only Codex advisory review contract over an existing
-task artifact directory. It inspects evidence file presence, renders a Codex CLI
-review prompt, and generates dry-run review artifacts for a future Codex CLI
-design/code review stage.
+This module builds a Codex advisory review contract over an existing task
+artifact directory. It inspects evidence file presence, renders a Codex CLI
+review prompt, and generates review artifacts for the Codex CLI design/code
+review stage.
 
-This first version (v0.2.1) is dry-run only. It does not invoke the Codex CLI or
-any subprocess. The Codex advisory reviewer is advisory only: it is never
+The default mode (since v0.2.1) is dry-run: it does not invoke the Codex CLI or
+any subprocess. Since v0.2.2 the reviewer also supports an explicit opt-in
+confirm-run mode (``confirm_run=True``) that invokes the Codex CLI exactly once,
+captures stdout/stderr/exit-code/timeout/duration, and parses Codex output into
+advisory findings only.
+
+In every mode the Codex advisory reviewer is advisory only: it is never
 deterministic validation authority, and it never approves, blocks, merges,
-pushes, cleans up, deletes branches/worktrees, or changes task lifecycle.
+pushes, cleans up, deletes branches/worktrees, or changes task lifecycle. The
+two hard invariants ``validation_authority = false`` and
+``human_review_required = true`` are always enforced by agent-taskflow and can
+never be overridden by Codex output.
 
 Deterministic validators remain pytest / compileall / policy / changed-files.
 Human final approval is always required.
@@ -17,6 +25,10 @@ Human final approval is always required.
 from __future__ import annotations
 
 import json
+import re
+import shlex
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,11 +44,42 @@ SOURCE = "codex_advisory_review"
 PROMPT_FILENAME = "codex-advisory-review-prompt.md"
 JSON_FILENAME = "codex-advisory-review.json"
 MARKDOWN_FILENAME = "codex-advisory-review.md"
+STDOUT_FILENAME = "codex-advisory-review-stdout.txt"
+STDERR_FILENAME = "codex-advisory-review-stderr.txt"
 GENERATED_ARTIFACT_FILENAMES = (
     PROMPT_FILENAME,
     JSON_FILENAME,
     MARKDOWN_FILENAME,
 )
+
+DEFAULT_CODEX_COMMAND = "codex"
+DEFAULT_TIMEOUT_SECONDS = 300
+
+# Mutable advisory fields Codex output may contribute. Everything else (schema,
+# reviewer, task_key, validation_authority, human_review_required, artifacts,
+# generated_at, paths, governance) is canonical and Codex can never override it.
+CODEX_MUTABLE_FIELDS = (
+    "review_status",
+    "summary",
+    "design_findings",
+    "correctness_findings",
+    "test_coverage_findings",
+    "architecture_boundary_findings",
+    "risk_level",
+    "recommended_human_focus",
+    "suggested_followups",
+    "missing_evidence",
+)
+_CODEX_LIST_FIELDS = (
+    "design_findings",
+    "correctness_findings",
+    "test_coverage_findings",
+    "architecture_boundary_findings",
+    "recommended_human_focus",
+    "suggested_followups",
+    "missing_evidence",
+)
+_FENCED_BLOCK_RE = re.compile(r"```(?:[A-Za-z0-9_+-]+)?[ \t]*\n(.*?)```", re.DOTALL)
 
 ALLOWED_REVIEW_STATUSES = (
     "not_run",
@@ -54,6 +97,9 @@ ALLOWED_RISK_LEVELS = (
 
 DRY_RUN_REVIEW_STATUS = "not_run"
 DRY_RUN_RISK_LEVEL = "unknown"
+
+TOOL_ERROR_REVIEW_STATUS = "tool_error"
+TOOL_ERROR_RISK_LEVEL = "unknown"
 
 # Advisory review dimensions a future Codex CLI reviewer should cover.
 REVIEW_DIMENSIONS = (
@@ -101,20 +147,44 @@ class CodexAdvisoryReviewError(RuntimeError):
 
 @dataclass(frozen=True)
 class CodexAdvisoryReviewRequest:
-    """Request for generating a dry-run Codex advisory review."""
+    """Request for generating a Codex advisory review.
+
+    ``dry_run`` is the default and does not invoke any subprocess. ``confirm_run``
+    is the explicit opt-in that invokes the Codex CLI exactly once. The two modes
+    are mutually exclusive; ``codex_command`` and ``timeout_seconds`` only apply
+    when ``confirm_run`` is set.
+    """
 
     task_key: str
     artifact_dir: Path
     repo_path: Path | None = None
     worktree_path: Path | None = None
     dry_run: bool = True
+    confirm_run: bool = False
+    codex_command: str = DEFAULT_CODEX_COMMAND
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
-        if self.dry_run is not True:
+        if self.confirm_run and self.dry_run:
             raise ValueError(
-                "dry_run must be true; Codex advisory review is dry-run only "
-                "in this milestone"
+                "dry_run and confirm_run are mutually exclusive; confirm-run "
+                "mode must be requested with confirm_run=True and dry_run=False"
             )
+        if not self.confirm_run and not self.dry_run:
+            raise ValueError(
+                "dry_run must be true unless confirm_run is explicitly set; "
+                "Codex CLI is only invoked in confirm-run mode"
+            )
+        if isinstance(self.timeout_seconds, bool) or not isinstance(
+            self.timeout_seconds, int
+        ):
+            raise ValueError("timeout_seconds must be an integer")
+        if self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be a positive integer")
+        command = (self.codex_command or "").strip()
+        object.__setattr__(self, "codex_command", command)
+        if self.confirm_run and not shlex.split(command):
+            raise ValueError("codex_command must not be empty in confirm-run mode")
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
         object.__setattr__(
             self,
@@ -147,9 +217,20 @@ class CodexAdvisoryReviewResult:
     payload: dict[str, Any]
     evidence: dict[str, Any]
     dry_run: bool
+    confirm_run: bool = False
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
 
     def artifact_paths(self) -> list[Path]:
         return [self.prompt_path, self.json_path, self.markdown_path]
+
+    def codex_output_paths(self) -> list[Path]:
+        paths: list[Path] = []
+        if self.stdout_path is not None:
+            paths.append(self.stdout_path)
+        if self.stderr_path is not None:
+            paths.append(self.stderr_path)
+        return paths
 
 
 def _normalize_path(path: str | Path, *, name: str) -> Path:
@@ -293,6 +374,27 @@ Produce findings that map to the JSON contract `{SCHEMA_VERSION}` with
 `validation_authority` always false and `human_review_required` always true.
 Allowed review_status values: {', '.join(ALLOWED_REVIEW_STATUSES)}.
 Allowed risk_level values: {', '.join(ALLOWED_RISK_LEVELS)}.
+
+Return a JSON object with advisory findings. Do not claim validation authority.
+Do not claim approval authority. Do not use pass/fail/approved/rejected/blocked
+semantics. You may return any of the following advisory fields; omit any you
+cannot assess:
+
+- review_status
+- summary
+- design_findings
+- correctness_findings
+- test_coverage_findings
+- architecture_boundary_findings
+- risk_level
+- recommended_human_focus
+- suggested_followups
+- missing_evidence
+
+You may return the JSON object directly, or inside a fenced ```json block. Do
+not set `validation_authority`, `human_review_required`, `schema_version`,
+`reviewer`, `task_key`, `artifacts`, `generated_at`, or `governance`; those are
+owned by agent-taskflow and will be enforced regardless of your output.
 """
 
 
@@ -339,6 +441,11 @@ def build_review_payload(
         "missing_evidence": list(evidence["missing_evidence"]),
         "artifacts": artifacts,
         "dry_run": bool(request.dry_run),
+        "confirm_run": bool(request.confirm_run),
+        "codex_cli_invoked": False,
+        "subprocess_invoked": False,
+        "codex_invocation": None,
+        "tool_error": None,
         "generated_at": generated_at,
         "repo_path": str(request.repo_path) if request.repo_path is not None else None,
         "worktree_path": (
@@ -404,20 +511,27 @@ def validate_payload(payload: dict[str, Any]) -> None:
 
 
 def build_review_markdown(payload: dict[str, Any]) -> str:
-    """Render a human-readable dry-run review summary."""
+    """Render a human-readable review summary for dry-run or confirm-run."""
 
     evidence = payload.get("evidence", {})
     present = evidence.get("present_evidence", [])
     missing = payload.get("missing_evidence", [])
     logs = evidence.get("executor_logs", [])
 
+    dry_run = bool(payload.get("dry_run", True))
+    codex_invoked = bool(payload.get("codex_cli_invoked", False))
+    mode = "Dry Run" if dry_run else "Confirm Run"
+    review_status = payload["review_status"]
+
     lines = [
-        "# Codex Advisory Review (Dry Run)",
+        f"# Codex Advisory Review ({mode})",
         "",
         f"- Task key: {payload['task_key']}",
         f"- Reviewer: {payload['reviewer']}",
         f"- Schema version: {payload['schema_version']}",
-        f"- Review status: {payload['review_status']}",
+        f"- Mode: {'dry-run' if dry_run else 'confirm-run'}",
+        f"- Codex CLI invoked: {codex_invoked}",
+        f"- Review status: {review_status}",
         f"- Risk level: {payload['risk_level']}",
         f"- Validation authority: {payload['validation_authority']}",
         f"- Human review required: {payload['human_review_required']}",
@@ -426,20 +540,79 @@ def build_review_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Status",
         "",
-        "This is a dry-run advisory review. Codex CLI was not invoked and no "
-        "subprocess was run. No findings were produced.",
-        "",
-        "## Review Dimensions",
-        "",
     ]
-    lines.extend(f"- {dimension}" for dimension in payload["review_dimensions"])
-    lines.extend(
-        [
-            "",
-            "## Evidence Detected",
-            "",
-        ]
-    )
+    if dry_run:
+        lines.append(
+            "This is a dry-run advisory review. Codex CLI was not invoked and no "
+            "subprocess was run. No findings were produced."
+        )
+    else:
+        lines.append(
+            "This is a confirm-run advisory review. Codex CLI was invoked as an "
+            "advisory reviewer only. Its output is advisory signal, never a gate "
+            "decision."
+        )
+
+    summary = payload.get("summary") or ""
+    lines.extend(["", "## Summary", "", summary if summary else "(no summary)"])
+
+    for header, key in (
+        ("Design Findings", "design_findings"),
+        ("Correctness Findings", "correctness_findings"),
+        ("Test Coverage Findings", "test_coverage_findings"),
+        ("Architecture Boundary Findings", "architecture_boundary_findings"),
+        ("Recommended Human Focus", "recommended_human_focus"),
+        ("Suggested Followups", "suggested_followups"),
+    ):
+        items = payload.get(key) or []
+        lines.extend(["", f"## {header}", ""])
+        if items:
+            lines.extend(f"- {item}" for item in items)
+        else:
+            lines.append("- (none)")
+
+    tool_error = payload.get("tool_error")
+    if tool_error:
+        lines.extend(
+            [
+                "",
+                "## Tool Error",
+                "",
+                f"- Category: {tool_error.get('category')}",
+                f"- Message: {tool_error.get('message')}",
+            ]
+        )
+
+    invocation = payload.get("codex_invocation")
+    if invocation:
+        lines.extend(
+            [
+                "",
+                "## Codex Invocation",
+                "",
+                f"- Command: {invocation.get('command')}",
+                f"- Cwd: {invocation.get('cwd')}",
+                f"- Timeout seconds: {invocation.get('timeout_seconds')}",
+                f"- Duration seconds: {invocation.get('duration_seconds')}",
+                f"- Timed out: {invocation.get('timed_out')}",
+                f"- Exit code: {invocation.get('exit_code')}",
+                f"- Stdout artifact: {invocation.get('stdout_path')}",
+                f"- Stderr artifact: {invocation.get('stderr_path')}",
+            ]
+        )
+
+    if review_status in ("high_risk", "needs_attention", "tool_error"):
+        lines.extend(
+            [
+                "",
+                "## Advisory Note",
+                "",
+                "This is advisory signal only. Human review remains required. "
+                "This does not block or approve the task.",
+            ]
+        )
+
+    lines.extend(["", "## Evidence Detected", ""])
     if present:
         lines.extend(f"- {name}: present" for name in present)
     else:
@@ -448,17 +621,13 @@ def build_review_markdown(payload: dict[str, Any]) -> str:
         lines.append("")
         lines.append("Executor logs:")
         lines.extend(f"- {item['name']}" for item in logs)
-    lines.extend(
-        [
-            "",
-            "## Missing Evidence",
-            "",
-        ]
-    )
+
+    lines.extend(["", "## Missing Evidence", ""])
     if missing:
         lines.extend(f"- {name}" for name in missing)
     else:
         lines.append("- (none)")
+
     lines.extend(
         [
             "",
@@ -477,31 +646,350 @@ def build_review_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+@dataclass(frozen=True)
+class CodexInvocationOutcome:
+    """Normalized result of a single Codex CLI invocation attempt."""
+
+    stdout: str
+    stderr: str
+    exit_code: int | None
+    timed_out: bool
+    duration_seconds: float
+    error_kind: str | None  # None | "command_not_found" | "os_error"
+    error_message: str | None
+
+
+def parse_codex_command(codex_command: str) -> list[str]:
+    """Split ``codex_command`` safely into argv. Never uses a shell."""
+
+    args = shlex.split(codex_command or "")
+    if not args:
+        raise CodexAdvisoryReviewError("codex_command must not be empty")
+    return args
+
+
+def invoke_codex_cli(
+    command_args: list[str],
+    prompt_text: str,
+    *,
+    cwd: str | None,
+    timeout_seconds: int,
+) -> CodexInvocationOutcome:
+    """Invoke the Codex CLI once with ``shell=False`` and capture its output.
+
+    The advisory prompt is sent on stdin. Never raises for tool failures;
+    timeouts, missing commands, and OS errors are normalized into the returned
+    outcome so the caller can render a ``tool_error`` advisory artifact.
+    """
+
+    start = time.monotonic()
+    try:
+        completed = subprocess.run(
+            command_args,
+            input=prompt_text,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            cwd=cwd,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return CodexInvocationOutcome(
+            stdout=_as_text(exc.stdout),
+            stderr=_as_text(exc.stderr),
+            exit_code=None,
+            timed_out=True,
+            duration_seconds=time.monotonic() - start,
+            error_kind=None,
+            error_message=f"Codex CLI timed out after {timeout_seconds}s",
+        )
+    except FileNotFoundError as exc:
+        return CodexInvocationOutcome(
+            stdout="",
+            stderr="",
+            exit_code=None,
+            timed_out=False,
+            duration_seconds=time.monotonic() - start,
+            error_kind="command_not_found",
+            error_message=f"Codex command not found: {exc}",
+        )
+    except OSError as exc:
+        return CodexInvocationOutcome(
+            stdout="",
+            stderr="",
+            exit_code=None,
+            timed_out=False,
+            duration_seconds=time.monotonic() - start,
+            error_kind="os_error",
+            error_message=f"Codex CLI could not be executed: {exc}",
+        )
+    return CodexInvocationOutcome(
+        stdout=_as_text(completed.stdout),
+        stderr=_as_text(completed.stderr),
+        exit_code=completed.returncode,
+        timed_out=False,
+        duration_seconds=time.monotonic() - start,
+        error_kind=None,
+        error_message=None,
+    )
+
+
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def parse_codex_output(stdout: str) -> dict[str, Any]:
+    """Parse Codex stdout into a JSON object.
+
+    Supports a raw JSON object or a JSON object inside a fenced code block.
+    Raises ``CodexAdvisoryReviewError`` if no JSON object can be parsed.
+    """
+
+    text = (stdout or "").strip()
+    if not text:
+        raise CodexAdvisoryReviewError("Codex stdout was empty; nothing to parse")
+
+    candidates = [text, *_FENCED_BLOCK_RE.findall(text)]
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    raise CodexAdvisoryReviewError(
+        "Codex stdout could not be parsed into a JSON object"
+    )
+
+
+def merge_codex_findings(payload: dict[str, Any], codex_data: dict[str, Any]) -> None:
+    """Merge Codex-provided advisory fields into ``payload`` in place.
+
+    Validates every contributed field *before* mutating ``payload`` so that an
+    invariant violation leaves the canonical payload untouched. Raises
+    ``CodexAdvisoryReviewError`` on any invariant violation, invalid
+    review_status/risk_level, or wrong field type.
+    """
+
+    if not isinstance(codex_data, dict):
+        raise CodexAdvisoryReviewError("Codex output must be a JSON object")
+
+    if "validation_authority" in codex_data and bool(
+        codex_data["validation_authority"]
+    ):
+        raise CodexAdvisoryReviewError(
+            "Codex attempted to set validation_authority=true; "
+            "validation_authority is always false"
+        )
+    if "human_review_required" in codex_data and not bool(
+        codex_data["human_review_required"]
+    ):
+        raise CodexAdvisoryReviewError(
+            "Codex attempted to set human_review_required=false; "
+            "human_review_required is always true"
+        )
+
+    if "review_status" in codex_data:
+        review_status = codex_data["review_status"]
+        if review_status not in ALLOWED_REVIEW_STATUSES:
+            raise CodexAdvisoryReviewError(
+                f"Codex returned invalid review_status {review_status!r}"
+            )
+    if "risk_level" in codex_data:
+        risk_level = codex_data["risk_level"]
+        if risk_level not in ALLOWED_RISK_LEVELS:
+            raise CodexAdvisoryReviewError(
+                f"Codex returned invalid risk_level {risk_level!r}"
+            )
+    if "summary" in codex_data and not isinstance(codex_data["summary"], str):
+        raise CodexAdvisoryReviewError("Codex summary must be a string")
+    for field in _CODEX_LIST_FIELDS:
+        if field in codex_data and not isinstance(codex_data[field], list):
+            raise CodexAdvisoryReviewError(f"Codex field {field!r} must be a list")
+
+    for field in CODEX_MUTABLE_FIELDS:
+        if field in codex_data:
+            payload[field] = codex_data[field]
+
+
+def _apply_tool_error(
+    payload: dict[str, Any],
+    invocation_meta: dict[str, Any],
+    *,
+    category: str,
+    message: str,
+    parse_error: str | None = None,
+) -> None:
+    """Force a payload into a valid ``tool_error`` advisory state."""
+
+    payload["review_status"] = TOOL_ERROR_REVIEW_STATUS
+    payload["risk_level"] = TOOL_ERROR_RISK_LEVEL
+    payload["validation_authority"] = False
+    payload["human_review_required"] = True
+    tool_error = {"category": category, "message": message}
+    payload["tool_error"] = tool_error
+    invocation_meta["tool_error"] = tool_error
+    invocation_meta["parse_error"] = parse_error
+
+
+def build_confirm_run_payload(
+    request: CodexAdvisoryReviewRequest,
+    evidence: dict[str, Any],
+    prompt_text: str,
+    *,
+    stdout_path: Path,
+    stderr_path: Path,
+    generated_at: str | None = None,
+) -> tuple[dict[str, Any], CodexInvocationOutcome]:
+    """Invoke Codex, capture output, and build a confirm-run advisory payload.
+
+    The caller is responsible for writing the stdout/stderr artifacts using the
+    returned outcome. Hard invariants are always enforced and any tool/parse/
+    invariant failure is downgraded to a ``tool_error`` advisory payload.
+    """
+
+    command_args = parse_codex_command(request.codex_command)
+    cwd = request.worktree_path or request.repo_path
+    cwd_str = str(cwd) if cwd is not None else None
+
+    outcome = invoke_codex_cli(
+        command_args,
+        prompt_text,
+        cwd=cwd_str,
+        timeout_seconds=request.timeout_seconds,
+    )
+
+    payload = build_review_payload(request, evidence, generated_at=generated_at)
+    payload["codex_cli_invoked"] = True
+    payload["subprocess_invoked"] = True
+    payload["governance"]["codex_cli_invoked"] = True
+    payload["governance"]["subprocess_invoked"] = True
+    payload["artifacts"]["codex_outputs"] = {
+        STDOUT_FILENAME: str(stdout_path),
+        STDERR_FILENAME: str(stderr_path),
+    }
+
+    invocation_meta: dict[str, Any] = {
+        "command": list(command_args),
+        "cwd": cwd_str,
+        "timeout_seconds": request.timeout_seconds,
+        "duration_seconds": round(outcome.duration_seconds, 6),
+        "timed_out": outcome.timed_out,
+        "exit_code": outcome.exit_code,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "parse_error": None,
+        "tool_error": None,
+    }
+
+    if outcome.timed_out:
+        _apply_tool_error(
+            payload,
+            invocation_meta,
+            category="codex_cli_timeout",
+            message=outcome.error_message or "Codex CLI timed out",
+        )
+    elif outcome.error_kind == "command_not_found":
+        _apply_tool_error(
+            payload,
+            invocation_meta,
+            category="codex_cli_not_found",
+            message=outcome.error_message or "Codex command not found",
+        )
+    elif outcome.error_kind is not None:
+        _apply_tool_error(
+            payload,
+            invocation_meta,
+            category="codex_cli_error",
+            message=outcome.error_message or "Codex CLI could not be executed",
+        )
+    elif outcome.exit_code != 0:
+        _apply_tool_error(
+            payload,
+            invocation_meta,
+            category="codex_cli_nonzero_exit",
+            message=f"Codex CLI exited with code {outcome.exit_code}",
+        )
+    else:
+        try:
+            codex_data = parse_codex_output(outcome.stdout)
+        except CodexAdvisoryReviewError as exc:
+            _apply_tool_error(
+                payload,
+                invocation_meta,
+                category="codex_output_parse_error",
+                message=str(exc),
+                parse_error=str(exc),
+            )
+        else:
+            try:
+                merge_codex_findings(payload, codex_data)
+            except CodexAdvisoryReviewError as exc:
+                _apply_tool_error(
+                    payload,
+                    invocation_meta,
+                    category="codex_output_invariant_violation",
+                    message=str(exc),
+                )
+
+    payload["codex_invocation"] = invocation_meta
+    return payload, outcome
+
+
 def generate_codex_advisory_review(
     request: CodexAdvisoryReviewRequest,
 ) -> CodexAdvisoryReviewResult:
-    """Generate dry-run Codex advisory review artifacts in ``artifact_dir``.
+    """Generate Codex advisory review artifacts in ``artifact_dir``.
 
-    Writes ``codex-advisory-review-prompt.md``, ``codex-advisory-review.json``,
-    and ``codex-advisory-review.md`` into the artifact directory. Does not invoke
-    subprocess, Codex CLI, executors, validators, or lifecycle mutation.
+    Always writes ``codex-advisory-review-prompt.md``,
+    ``codex-advisory-review.json``, and ``codex-advisory-review.md``. In dry-run
+    mode (the default) no subprocess is invoked. In confirm-run mode the Codex
+    CLI is invoked exactly once and ``codex-advisory-review-stdout.txt`` /
+    ``codex-advisory-review-stderr.txt`` are also written.
+
+    This function never approves, blocks, merges, pushes, cleans up, deletes
+    branches/worktrees, or changes task lifecycle.
     """
 
     artifact_dir = request.artifact_dir
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     evidence = detect_evidence(artifact_dir)
-    payload = build_review_payload(request, evidence)
-    validate_payload(payload)
-
     prompt_text = build_review_prompt(request, evidence)
-    markdown_text = build_review_markdown(payload)
 
     prompt_path = artifact_dir / PROMPT_FILENAME
     json_path = artifact_dir / JSON_FILENAME
     markdown_path = artifact_dir / MARKDOWN_FILENAME
-
     prompt_path.write_text(prompt_text, encoding="utf-8")
+
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
+
+    if request.confirm_run:
+        stdout_path = artifact_dir / STDOUT_FILENAME
+        stderr_path = artifact_dir / STDERR_FILENAME
+        payload, outcome = build_confirm_run_payload(
+            request,
+            evidence,
+            prompt_text,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+        stdout_path.write_text(outcome.stdout, encoding="utf-8")
+        stderr_path.write_text(outcome.stderr, encoding="utf-8")
+    else:
+        payload = build_review_payload(request, evidence)
+
+    validate_payload(payload)
+
+    markdown_text = build_review_markdown(payload)
     json_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -517,15 +1005,22 @@ def generate_codex_advisory_review(
         payload=payload,
         evidence=evidence,
         dry_run=bool(request.dry_run),
+        confirm_run=bool(request.confirm_run),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
     )
 
 
 __all__ = [
     "ALLOWED_REVIEW_STATUSES",
     "ALLOWED_RISK_LEVELS",
+    "CODEX_MUTABLE_FIELDS",
     "CodexAdvisoryReviewError",
     "CodexAdvisoryReviewRequest",
     "CodexAdvisoryReviewResult",
+    "CodexInvocationOutcome",
+    "DEFAULT_CODEX_COMMAND",
+    "DEFAULT_TIMEOUT_SECONDS",
     "DRY_RUN_REVIEW_STATUS",
     "DRY_RUN_RISK_LEVEL",
     "GENERATED_ARTIFACT_FILENAMES",
@@ -537,10 +1032,19 @@ __all__ = [
     "REVIEWER",
     "SCHEMA_VERSION",
     "SOURCE",
+    "STDERR_FILENAME",
+    "STDOUT_FILENAME",
+    "TOOL_ERROR_REVIEW_STATUS",
+    "TOOL_ERROR_RISK_LEVEL",
+    "build_confirm_run_payload",
     "build_review_markdown",
     "build_review_payload",
     "build_review_prompt",
     "detect_evidence",
     "generate_codex_advisory_review",
+    "invoke_codex_cli",
+    "merge_codex_findings",
+    "parse_codex_command",
+    "parse_codex_output",
     "validate_payload",
 ]

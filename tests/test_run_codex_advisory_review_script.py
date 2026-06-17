@@ -65,6 +65,24 @@ class RunCodexAdvisoryReviewScriptTests(unittest.TestCase):
         self.assertIs(payload["validation_authority"], False)
         self.assertIs(payload["human_review_required"], True)
 
+    def test_no_mode_flag_defaults_to_dry_run(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = self.cli.main(self.base_args())
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(
+            (self.artifact_dir / "codex-advisory-review.json").read_text(encoding="utf-8")
+        )
+        self.assertIs(payload["dry_run"], True)
+        self.assertIs(payload["confirm_run"], False)
+        self.assertIs(payload["codex_cli_invoked"], False)
+        self.assertFalse(
+            (self.artifact_dir / "codex-advisory-review-stdout.txt").exists()
+        )
+        self.assertFalse(
+            (self.artifact_dir / "codex-advisory-review-stderr.txt").exists()
+        )
+
     def test_cli_accepts_repo_and_worktree_paths(self) -> None:
         repo = self.root / "repo"
         worktree = self.root / "worktree"
@@ -121,8 +139,81 @@ class RunCodexAdvisoryReviewScriptTests(unittest.TestCase):
             "--worktree-path",
             "--artifact-dir",
             "--dry-run",
+            "--confirm-run",
+            "--codex-command",
+            "--timeout-seconds",
         ):
             self.assertIn(flag, result.stdout, flag)
+        lowered = result.stdout.lower()
+        self.assertIn("advisory only", lowered)
+        self.assertIn("never deterministic validation authority", lowered)
+
+    def test_codex_command_without_confirm_run_errors(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = self.cli.main([*self.base_args(), "--codex-command", "codex"])
+        self.assertEqual(rc, 1)
+        self.assertIn("--confirm-run", stderr.getvalue())
+
+    def test_confirm_run_invokes_subprocess_and_exits_zero(self) -> None:
+        from agent_taskflow import codex_advisory_review as core
+
+        fake = subprocess.CompletedProcess(
+            args=["codex"], returncode=0, stdout='{"review_status": "looks_good"}', stderr=""
+        )
+        with mock.patch.object(core.subprocess, "run", return_value=fake) as run_mock:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = self.cli.main([*self.base_args(), "--confirm-run"])
+        self.assertEqual(rc, 0)
+        run_mock.assert_called_once()
+        self.assertIs(run_mock.call_args.kwargs["shell"], False)
+        payload = json.loads(
+            (self.artifact_dir / "codex-advisory-review.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(payload["review_status"], "looks_good")
+        self.assertIs(payload["codex_cli_invoked"], True)
+        for name in (
+            "codex-advisory-review-stdout.txt",
+            "codex-advisory-review-stderr.txt",
+        ):
+            self.assertTrue((self.artifact_dir / name).is_file(), name)
+
+    def test_confirm_run_tool_error_still_exits_zero(self) -> None:
+        from agent_taskflow import codex_advisory_review as core
+
+        with mock.patch.object(
+            core.subprocess, "run", side_effect=FileNotFoundError("codex")
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = self.cli.main([*self.base_args(), "--confirm-run"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(
+            (self.artifact_dir / "codex-advisory-review.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(payload["review_status"], "tool_error")
+
+    def test_confirm_run_high_risk_exits_zero(self) -> None:
+        from agent_taskflow import codex_advisory_review as core
+
+        fake = subprocess.CompletedProcess(
+            args=["codex"],
+            returncode=0,
+            stdout='{"review_status": "high_risk", "risk_level": "high"}',
+            stderr="",
+        )
+        with mock.patch.object(core.subprocess, "run", return_value=fake):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = self.cli.main([*self.base_args(), "--confirm-run"])
+        self.assertEqual(rc, 0)
+
+    def test_invalid_timeout_exits_one(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = self.cli.main(
+                [*self.base_args(), "--confirm-run", "--timeout-seconds", "0"]
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("ERROR", stderr.getvalue())
 
     def test_script_source_has_no_subprocess_or_mutation(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
