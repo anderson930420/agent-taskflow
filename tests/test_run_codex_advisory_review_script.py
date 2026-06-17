@@ -65,6 +65,24 @@ class RunCodexAdvisoryReviewScriptTests(unittest.TestCase):
         self.assertIs(payload["validation_authority"], False)
         self.assertIs(payload["human_review_required"], True)
 
+    def test_no_mode_flag_defaults_to_dry_run(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = self.cli.main(self.base_args())
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(
+            (self.artifact_dir / "codex-advisory-review.json").read_text(encoding="utf-8")
+        )
+        self.assertIs(payload["dry_run"], True)
+        self.assertIs(payload["confirm_run"], False)
+        self.assertIs(payload["codex_cli_invoked"], False)
+        self.assertFalse(
+            (self.artifact_dir / "codex-advisory-review-stdout.txt").exists()
+        )
+        self.assertFalse(
+            (self.artifact_dir / "codex-advisory-review-stderr.txt").exists()
+        )
+
     def test_cli_accepts_repo_and_worktree_paths(self) -> None:
         repo = self.root / "repo"
         worktree = self.root / "worktree"

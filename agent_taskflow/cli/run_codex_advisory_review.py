@@ -40,8 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        default=True,
-        help="Dry-run advisory contract (default). Invokes no subprocess.",
+        default=False,
+        help=(
+            "Explicitly request dry-run advisory contract. Dry-run is also the "
+            "default when neither --dry-run nor --confirm-run is provided. "
+            "Invokes no subprocess."
+        ),
     )
     parser.add_argument(
         "--confirm-run",
@@ -72,6 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.dry_run and args.confirm_run:
+        print(
+            "ERROR: --dry-run and --confirm-run are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 1
 
     if args.codex_command is not None and not args.confirm_run:
         print(
