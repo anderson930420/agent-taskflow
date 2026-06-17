@@ -219,13 +219,14 @@ class CodexAdvisoryReviewTests(unittest.TestCase):
         popen_mock.assert_not_called()
         call_mock.assert_not_called()
 
-    def test_module_source_has_no_subprocess_or_lifecycle_mutation(self) -> None:
+    def test_module_source_has_no_lifecycle_mutation_or_shell(self) -> None:
         source = (REPO_ROOT / "agent_taskflow" / "codex_advisory_review.py").read_text(
             encoding="utf-8"
         )
+        # The module invokes the Codex CLI in confirm-run mode, but it must never
+        # use a shell or perform any lifecycle / governance mutation.
         for forbidden in (
-            "import subprocess",
-            "subprocess.run",
+            "shell=True",
             "Popen",
             "git push",
             "gh pr create",
@@ -233,6 +234,24 @@ class CodexAdvisoryReviewTests(unittest.TestCase):
             "delete_worktree",
             "git worktree remove",
             "git branch -d",
+        ):
+            self.assertNotIn(forbidden, source, forbidden)
+        # Confirm-run must invoke Codex with shell=False only.
+        self.assertIn("shell=False", source)
+
+    def test_module_does_not_import_scheduler_lifecycle_or_approval(self) -> None:
+        source = (REPO_ROOT / "agent_taskflow" / "codex_advisory_review.py").read_text(
+            encoding="utf-8"
+        )
+        for forbidden in (
+            "import agent_taskflow.scheduler",
+            "import agent_taskflow.dispatcher",
+            "execution_engine",
+            "ExecutionEngine",
+            "approved_task_runner",
+            "waiting_approval",
+            "from agent_taskflow.scheduler",
+            "from agent_taskflow.dispatcher",
         ):
             self.assertNotIn(forbidden, source, forbidden)
 
@@ -245,6 +264,277 @@ class CodexAdvisoryReviewTests(unittest.TestCase):
         self.assertIn("human", text)
         self.assertIn("p5-f", text)
         self.assertIn("claude code executor", text)
+
+    def test_docs_mention_confirm_run_advisory_and_excluded_scope(self) -> None:
+        text = DOCS.read_text(encoding="utf-8").lower()
+        self.assertIn("--confirm-run", text)
+        self.assertIn("waiting_approval", text)
+        self.assertIn("v0.2.2", text)
+
+    def test_prompt_includes_json_output_instruction(self) -> None:
+        prompt = build_review_prompt(self._request(), detect_evidence(self.artifact_dir))
+        self.assertIn("Return a JSON object", prompt)
+        lowered = prompt.lower()
+        self.assertIn("do not claim validation authority", lowered)
+        self.assertIn("do not claim approval authority", lowered)
+
+
+class CodexAdvisoryConfirmRunTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.artifact_dir = self.root / "artifacts" / "GH-2222"
+        self.repo = self.root / "repo"
+        self.worktree = self.root / "worktree"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _request(self, **overrides) -> CodexAdvisoryReviewRequest:
+        kwargs = dict(
+            task_key="GH-2222",
+            artifact_dir=self.artifact_dir,
+            repo_path=self.repo,
+            worktree_path=self.worktree,
+            dry_run=False,
+            confirm_run=True,
+            codex_command="codex review",
+            timeout_seconds=120,
+        )
+        kwargs.update(overrides)
+        return CodexAdvisoryReviewRequest(**kwargs)
+
+    def _completed(self, *, stdout="", stderr="", returncode=0):
+        return subprocess.CompletedProcess(
+            args=["codex"], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def _run(self, *, request=None, **patch_kwargs):
+        request = request or self._request()
+        with mock.patch.object(
+            module.subprocess, "run", **patch_kwargs
+        ) as run_mock:
+            result = generate_codex_advisory_review(request)
+        payload = json.loads(result.json_path.read_text(encoding="utf-8"))
+        return result, payload, run_mock
+
+    # --- request validation -------------------------------------------------
+
+    def test_request_rejects_dry_run_and_confirm_run_together(self) -> None:
+        with self.assertRaises(ValueError):
+            CodexAdvisoryReviewRequest(
+                task_key="GH-2222",
+                artifact_dir=self.artifact_dir,
+                dry_run=True,
+                confirm_run=True,
+            )
+
+    def test_request_rejects_non_positive_timeout(self) -> None:
+        for bad in (0, -5):
+            with self.assertRaises(ValueError):
+                self._request(timeout_seconds=bad)
+
+    def test_request_rejects_empty_codex_command(self) -> None:
+        with self.assertRaises(ValueError):
+            self._request(codex_command="   ")
+
+    # --- invocation behavior ------------------------------------------------
+
+    def test_confirm_run_invokes_subprocess_once_with_shell_false(self) -> None:
+        fake = self._completed(stdout='{"review_status": "looks_good"}')
+        result, payload, run_mock = self._run(return_value=fake)
+        run_mock.assert_called_once()
+        args, kwargs = run_mock.call_args
+        self.assertEqual(args[0], ["codex", "review"])
+        self.assertIs(kwargs["shell"], False)
+        self.assertEqual(kwargs["timeout"], 120)
+        self.assertEqual(kwargs["cwd"], str(self.worktree.resolve()))
+        prompt_text = result.prompt_path.read_text(encoding="utf-8")
+        self.assertEqual(kwargs["input"], prompt_text)
+        self.assertIs(payload["codex_cli_invoked"], True)
+        self.assertIs(payload["subprocess_invoked"], True)
+
+    def test_confirm_run_cwd_falls_back_to_repo_then_none(self) -> None:
+        fake = self._completed(stdout='{"review_status": "looks_good"}')
+        _, _, run_mock = self._run(
+            request=self._request(worktree_path=None), return_value=fake
+        )
+        self.assertEqual(run_mock.call_args.kwargs["cwd"], str(self.repo.resolve()))
+
+        request = self._request(
+            worktree_path=None,
+            repo_path=None,
+            artifact_dir=self.root / "artifacts" / "GH-2223",
+        )
+        _, _, run_mock = self._run(request=request, return_value=fake)
+        self.assertIsNone(run_mock.call_args.kwargs["cwd"])
+
+    def test_confirm_run_writes_stdout_stderr_artifacts(self) -> None:
+        fake = self._completed(stdout="raw-out", stderr="raw-err")
+        result, _, _ = self._run(return_value=fake)
+        self.assertEqual(result.stdout_path.read_text(encoding="utf-8"), "raw-out")
+        self.assertEqual(result.stderr_path.read_text(encoding="utf-8"), "raw-err")
+        self.assertTrue(
+            (self.artifact_dir / "codex-advisory-review-stdout.txt").is_file()
+        )
+        self.assertTrue(
+            (self.artifact_dir / "codex-advisory-review-stderr.txt").is_file()
+        )
+
+    def test_dry_run_does_not_write_stdout_stderr_artifacts(self) -> None:
+        request = CodexAdvisoryReviewRequest(
+            task_key="GH-2222", artifact_dir=self.artifact_dir
+        )
+        generate_codex_advisory_review(request)
+        self.assertFalse(
+            (self.artifact_dir / "codex-advisory-review-stdout.txt").exists()
+        )
+        self.assertFalse(
+            (self.artifact_dir / "codex-advisory-review-stderr.txt").exists()
+        )
+
+    # --- successful Codex JSON ----------------------------------------------
+
+    def test_confirm_run_parses_raw_json_looks_good(self) -> None:
+        payload_in = {
+            "review_status": "looks_good",
+            "summary": "all good",
+            "risk_level": "low",
+            "design_findings": ["d1"],
+        }
+        fake = self._completed(stdout=json.dumps(payload_in))
+        _, payload, _ = self._run(return_value=fake)
+        self.assertEqual(payload["review_status"], "looks_good")
+        self.assertEqual(payload["summary"], "all good")
+        self.assertEqual(payload["risk_level"], "low")
+        self.assertEqual(payload["design_findings"], ["d1"])
+
+    def test_confirm_run_parses_fenced_json_needs_attention(self) -> None:
+        body = (
+            "Here is my advisory review:\n\n```json\n"
+            + json.dumps(
+                {
+                    "review_status": "needs_attention",
+                    "correctness_findings": ["c1", "c2"],
+                }
+            )
+            + "\n```\n\nThanks."
+        )
+        fake = self._completed(stdout=body)
+        _, payload, _ = self._run(return_value=fake)
+        self.assertEqual(payload["review_status"], "needs_attention")
+        self.assertEqual(payload["correctness_findings"], ["c1", "c2"])
+
+    def test_confirm_run_canonical_fields_override_codex(self) -> None:
+        payload_in = {
+            "review_status": "looks_good",
+            "schema_version": "hacked",
+            "reviewer": "evil",
+            "task_key": "GH-EVIL",
+            "artifacts": {"x": "y"},
+            "generated_at": "1999",
+            "governance": {"advisory_only": False},
+        }
+        fake = self._completed(stdout=json.dumps(payload_in))
+        _, payload, _ = self._run(return_value=fake)
+        self.assertEqual(payload["schema_version"], "codex_advisory_review.v1")
+        self.assertEqual(payload["reviewer"], "codex-cli")
+        self.assertEqual(payload["task_key"], "GH-2222")
+        self.assertNotEqual(payload["artifacts"], {"x": "y"})
+        self.assertIs(payload["governance"]["advisory_only"], True)
+
+    def test_confirm_run_rejects_codex_validation_authority_true(self) -> None:
+        fake = self._completed(
+            stdout=json.dumps(
+                {"review_status": "looks_good", "validation_authority": True}
+            )
+        )
+        _, payload, _ = self._run(return_value=fake)
+        self.assertIs(payload["validation_authority"], False)
+        self.assertEqual(payload["review_status"], "tool_error")
+        self.assertEqual(
+            payload["tool_error"]["category"], "codex_output_invariant_violation"
+        )
+
+    def test_confirm_run_rejects_codex_human_review_required_false(self) -> None:
+        fake = self._completed(
+            stdout=json.dumps(
+                {"review_status": "looks_good", "human_review_required": False}
+            )
+        )
+        _, payload, _ = self._run(return_value=fake)
+        self.assertIs(payload["human_review_required"], True)
+        self.assertEqual(payload["review_status"], "tool_error")
+
+    # --- tool error cases ---------------------------------------------------
+
+    def _assert_tool_error(self, payload, category=None) -> None:
+        self.assertEqual(payload["review_status"], "tool_error")
+        self.assertEqual(payload["risk_level"], "unknown")
+        self.assertIs(payload["validation_authority"], False)
+        self.assertIs(payload["human_review_required"], True)
+        if category is not None:
+            self.assertEqual(payload["tool_error"]["category"], category)
+
+    def test_confirm_run_command_not_found_tool_error(self) -> None:
+        _, payload, _ = self._run(side_effect=FileNotFoundError("codex"))
+        self._assert_tool_error(payload, "codex_cli_not_found")
+
+    def test_confirm_run_timeout_tool_error(self) -> None:
+        exc = subprocess.TimeoutExpired(
+            cmd=["codex"], timeout=120, output="partial", stderr="err"
+        )
+        _, payload, _ = self._run(side_effect=exc)
+        self._assert_tool_error(payload, "codex_cli_timeout")
+        self.assertIs(payload["codex_invocation"]["timed_out"], True)
+
+    def test_confirm_run_nonzero_exit_tool_error(self) -> None:
+        fake = self._completed(stdout='{"review_status": "looks_good"}', returncode=2)
+        _, payload, _ = self._run(return_value=fake)
+        self._assert_tool_error(payload, "codex_cli_nonzero_exit")
+        self.assertEqual(payload["codex_invocation"]["exit_code"], 2)
+
+    def test_confirm_run_unparseable_stdout_tool_error(self) -> None:
+        fake = self._completed(stdout="not json at all")
+        _, payload, _ = self._run(return_value=fake)
+        self._assert_tool_error(payload, "codex_output_parse_error")
+        self.assertIsNotNone(payload["codex_invocation"]["parse_error"])
+
+    def test_confirm_run_invalid_review_status_tool_error(self) -> None:
+        for invalid in ("approved", "passed", "failed", "blocked", "merge_ready"):
+            with self.subTest(invalid=invalid):
+                fake = self._completed(stdout=json.dumps({"review_status": invalid}))
+                _, payload, _ = self._run(return_value=fake)
+                self._assert_tool_error(payload, "codex_output_invariant_violation")
+
+    def test_confirm_run_invalid_risk_level_tool_error(self) -> None:
+        fake = self._completed(
+            stdout=json.dumps(
+                {"review_status": "looks_good", "risk_level": "catastrophic"}
+            )
+        )
+        _, payload, _ = self._run(return_value=fake)
+        self._assert_tool_error(payload, "codex_output_invariant_violation")
+
+    # --- authority boundary -------------------------------------------------
+
+    def test_confirm_run_high_risk_is_not_a_validation_failure(self) -> None:
+        fake = self._completed(
+            stdout=json.dumps({"review_status": "high_risk", "risk_level": "high"})
+        )
+        _, payload, _ = self._run(return_value=fake)
+        self.assertEqual(payload["review_status"], "high_risk")
+        self.assertIs(payload["validation_authority"], False)
+        self.assertIs(payload["human_review_required"], True)
+
+    def test_confirm_run_markdown_shows_invocation_and_advisory_note(self) -> None:
+        fake = self._completed(stdout="oops")
+        result, _, _ = self._run(return_value=fake)
+        md = result.markdown_path.read_text(encoding="utf-8")
+        self.assertIn("Confirm Run", md)
+        self.assertIn("Codex CLI invoked: True", md)
+        self.assertIn("advisory signal only", md.lower())
+        self.assertIn("Tool Error", md)
 
 
 if __name__ == "__main__":

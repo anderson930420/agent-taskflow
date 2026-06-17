@@ -1,13 +1,17 @@
-# Codex Advisory Reviewer Contract (v0.2.1)
+# Codex Advisory Reviewer Contract (v0.2.2)
 
-The Codex Advisory Reviewer Contract is a read-only, dry-run contract that
-inspects an existing task artifact directory and generates review artifacts for a
-future Codex CLI design/code review stage.
+The Codex Advisory Reviewer Contract inspects an existing task artifact directory
+and generates review artifacts for the Codex CLI design/code review stage.
 
-This milestone (`v0.2.1 — Codex Advisory Reviewer Dry-Run Contract`) is dry-run
-only. It does not invoke the Codex CLI or any subprocess. It produces artifacts
-that a future Codex CLI reviewer would consume, and it records the hard authority
-boundaries that any Codex advisory output must respect.
+The default mode (since `v0.2.1 — Codex Advisory Reviewer Dry-Run Contract`) is
+dry-run: it does not invoke the Codex CLI or any subprocess. It produces
+artifacts that a Codex CLI reviewer would consume, and it records the hard
+authority boundaries that any Codex advisory output must respect.
+
+`v0.2.2 — Codex Advisory Reviewer Confirm-Run Support` adds an explicit opt-in
+confirm-run mode (`--confirm-run`) that invokes the Codex CLI exactly once,
+captures its output, and parses it into advisory findings only. Dry-run remains
+the default. See [Confirm-run support (v0.2.2)](#confirm-run-support-v022) below.
 
 ## What it is
 
@@ -114,11 +118,88 @@ Implementer executor
 The Codex advisory reviewer sits after deterministic validators and before human
 final approval. It adds advisory signal; it never adds authority.
 
+## Confirm-run support (v0.2.2)
+
+Dry-run remains the default. Confirm-run is an explicit opt-in that invokes the
+Codex CLI exactly once:
+
+```bash
+agent-taskflow-codex-advisory-review \
+  --task-key GH-1234 \
+  --repo-path /path/to/repo \
+  --worktree-path /path/to/worktree \
+  --artifact-dir /path/to/artifacts/GH-1234 \
+  --confirm-run \
+  --codex-command codex \
+  --timeout-seconds 300
+```
+
+- Dry-run remains the default. The Codex CLI is **never** invoked unless
+  `--confirm-run` is explicitly supplied.
+- `--codex-command` (default `codex`) may only be used together with
+  `--confirm-run`. The command is split with `shlex.split` and always run with
+  `shell=False`.
+- `--timeout-seconds` (default `300`) must be a positive integer.
+- The advisory prompt is sent to Codex on stdin. The reviewer captures stdout,
+  stderr, exit code, timeout status, and duration.
+- Codex stdout/stderr are written as artifacts:
+  - `codex-advisory-review-stdout.txt`
+  - `codex-advisory-review-stderr.txt`
+  - (these are not written in dry-run mode.)
+- Codex output is parsed into advisory findings only. A raw JSON object or a
+  JSON object inside a fenced ```json block is accepted. Only the advisory
+  fields (`review_status`, `summary`, `*_findings`, `risk_level`,
+  `recommended_human_focus`, `suggested_followups`, `missing_evidence`) are
+  merged. Canonical fields (`schema_version`, `reviewer`, `task_key`,
+  `validation_authority`, `human_review_required`, `artifacts`, `generated_at`,
+  `repo_path`, `worktree_path`, `artifact_dir`, `governance`) always win.
+- The two hard invariants are always enforced by agent-taskflow:
+  `validation_authority` is always `false` and `human_review_required` is always
+  `true`, even if Codex output tries to set them otherwise.
+
+### Tool errors become advisory artifacts
+
+Confirm-run never crashes the workflow on a Codex problem. Each of the following
+is downgraded to a valid advisory artifact with `review_status = tool_error` and
+`risk_level = unknown` (invariants still enforced):
+
+- command not found (`FileNotFoundError`)
+- timeout
+- non-zero exit code
+- stdout that cannot be parsed into a JSON object
+- output that violates an invariant (e.g. `validation_authority = true`,
+  `human_review_required = false`, an invalid `review_status` such as
+  `approved` / `passed` / `failed` / `blocked` / `merge_ready`, or an invalid
+  `risk_level`)
+
+A `tool_error`, `needs_attention`, or `high_risk` result is advisory signal
+only. It does not exit non-zero and it does not block or approve the task. The
+CLI exits `0` whenever a valid advisory artifact was written, and exits `1` only
+on invalid input or artifact write failure.
+
+### Confirm-run remains advisory-only and non-authoritative
+
+Confirm-run does not change any of the boundaries above. Codex cannot approve,
+block, validate, merge, push, cleanup, delete branches, delete worktrees, or
+change lifecycle. It does not create commits, push branches, or create PRs.
+Human final approval remains required and deterministic validators remain
+pytest / compileall / policy / changed-files.
+
 ## Scope of this milestone
 
-This milestone does not add a Claude Code executor and does not implement P5-f.
-It does not change scheduler execution authority, lifecycle transitions,
+`v0.2.2` adds confirm-run invocation only. It intentionally does **not** include
+the following, which remain out of scope:
+
+- the `waiting_approval` summary integration is intentionally not included in
+  `v0.2.2`
+- the Claude Code executor is intentionally not included in `v0.2.2`
+- P5-f is intentionally not included in `v0.2.2`
+
+It does not add a Claude Code executor and does not implement P5-f. It does not
+change scheduler execution authority, `ExecutionEngine` authority, the
+`approved_task_runner`, the confirmation verifier authority, the
+`waiting_approval` transition or its summary integration, lifecycle transitions,
 approval/blocking behavior, merge, branch push, PR creation, cleanup, branch
-deletion, worktree deletion, or approval record mutation. There is no real
-`--run-codex` implementation in this milestone; `--dry-run` is the default and
-only supported mode.
+deletion, worktree deletion, or approval record mutation. The reviewer never
+uses `shell=True` and never adds ambiguous flags such as `--approve`,
+`--validate`, `--merge`, `--execute-approval`, or `--run-validator`.
