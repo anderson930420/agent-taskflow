@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 import subprocess
 from typing import Any, Mapping, Sequence
 
 from agent_taskflow.api.schemas import json_safe
+from agent_taskflow.codex_advisory_evidence_gate import (
+    RequiredCodexAdvisoryEvidenceRequest,
+    RequiredCodexAdvisoryEvidenceResult,
+    check_required_codex_advisory_evidence,
+)
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
 from agent_taskflow.executors.implementation_prompt import (
@@ -37,6 +42,7 @@ RUN_STATUS_PREPARING = "preparing"
 RUN_STATUS_IMPLEMENTING = "implementing"
 RUN_STATUS_VALIDATING = "validating"
 RUN_STATUS_BLOCKED = "blocked"
+PHASE_CODEX_ADVISORY_EVIDENCE = "codex_advisory_evidence"
 DEFAULT_BASE_BRANCH = "main"
 SUPPORTED_EXECUTORS = tuple(list_executor_names())
 BUILTIN_VALIDATORS = {"pytest", "openspec", "policy", "changed-files", "typecheck", "lint"}
@@ -70,6 +76,10 @@ class ApprovedTaskRunRequest:
     confirm_approved_task: bool = False
     dry_run: bool = False
     preflight: bool = True
+    # v0.2.5: require valid Codex advisory artifact contract evidence before a
+    # task may transition into waiting_approval. This requires advisory evidence,
+    # not Codex approval; the deterministic contract validator must pass.
+    require_codex_advisory_evidence: bool = True
     command: tuple[str, ...] | None = None
     # Executor profile overrides. When provided these take precedence over the
     # TaskRecord profile fields; otherwise the recorded TaskRecord profile is
@@ -131,6 +141,7 @@ class ApprovedTaskRunResult:
     summary: dict[str, Any]
     safety: dict[str, Any]
     error: str | None = None
+    codex_advisory_evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return json_safe(asdict(self))
@@ -486,6 +497,42 @@ def run_approved_task(
                 ),
             )
 
+    # v0.2.5 pre-waiting-approval gate: deterministic validators have passed, but
+    # the task may only enter waiting_approval when valid Codex advisory artifact
+    # contract evidence is also present. This requires advisory evidence, not
+    # Codex approval; review_status looks_good/needs_attention/high_risk and a
+    # structurally valid tool_error are all acceptable evidence.
+    evidence_result = _check_codex_advisory_evidence(request, effective_task)
+    if evidence_result is not None and not evidence_result.satisfied:
+        reason = evidence_result.blocking_summary()
+        _block_task(current_store, effective_task.task_key, reason)
+        return _blocked_failure(
+            request,
+            task=effective_task,
+            phase=PHASE_CODEX_ADVISORY_EVIDENCE,
+            error=reason,
+            task_status_changed=True,
+            preflight=preflight_payload,
+            workspace=_workspace_payload(workspace_result),
+            executor_run=_executor_run_payload(
+                executor_run_id,
+                request.executor,
+                executor_result=executor_result,
+                started=True,
+                finished=True,
+                ok=True,
+            ),
+            validators=[_validator_payload(item) for item in validator_results],
+            artifacts=_collect_artifacts(
+                current_store,
+                effective_task.task_key,
+                contract_path=contract_path,
+                executor_result=executor_result,
+                validation_results=validator_results,
+            ),
+            codex_advisory_evidence=evidence_result.to_dict(),
+        )
+
     current_store.update_task_status(
         effective_task.task_key,
         APPROVED_TASK_STATUS,
@@ -518,12 +565,21 @@ def run_approved_task(
             executor_result=executor_result,
             validation_results=validator_results,
         ),
+        codex_advisory_evidence=(
+            evidence_result.to_dict() if evidence_result is not None else {}
+        ),
         summary={
             "final_task_status": APPROVED_TASK_STATUS,
             "requires_human_review": True,
             "next_allowed_phase": "waiting_approval_handoff",
             "task_key": effective_task.task_key,
             "executor": request.executor,
+            "codex_advisory_evidence_required": (
+                request.require_codex_advisory_evidence
+            ),
+            "codex_advisory_evidence_satisfied": (
+                evidence_result.satisfied if evidence_result is not None else None
+            ),
         },
         safety=_final_safety(
             request,
@@ -780,6 +836,7 @@ def _blocked_failure(
     executor_run: dict[str, Any] | None = None,
     validators: list[dict[str, Any]] | None = None,
     artifacts: list[dict[str, Any]] | None = None,
+    codex_advisory_evidence: dict[str, Any] | None = None,
 ) -> ApprovedTaskRunResult:
     payload_workspace = workspace if workspace is not None else _workspace_preview(request, task.task_key)
     payload_executor_run = (
@@ -829,6 +886,31 @@ def _blocked_failure(
             read_only=False,
         ),
         error=error,
+        codex_advisory_evidence=codex_advisory_evidence or {},
+    )
+
+
+def _check_codex_advisory_evidence(
+    request: ApprovedTaskRunRequest,
+    task: TaskRecord,
+) -> RequiredCodexAdvisoryEvidenceResult | None:
+    """Check required Codex advisory artifact evidence before waiting_approval.
+
+    Returns ``None`` when the requirement is explicitly disabled. Otherwise it
+    returns the deterministic evidence gate result. This reads files only; it
+    never invokes Codex, runs a subprocess, or mutates state.
+    """
+
+    if not request.require_codex_advisory_evidence:
+        return None
+    artifact_dir = task.artifact_dir
+    if artifact_dir is None:  # pragma: no cover - guarded earlier in the runner.
+        artifact_dir = Path(".")
+    return check_required_codex_advisory_evidence(
+        RequiredCodexAdvisoryEvidenceRequest(
+            artifact_dir=artifact_dir,
+            task_key=task.task_key,
+        )
     )
 
 

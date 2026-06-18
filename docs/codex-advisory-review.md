@@ -362,3 +362,102 @@ summary behavior.
 **not** make the validator required before `waiting_approval`; that required
 evidence gate is reserved for `v0.2.5`. Human final approval remains required and
 deterministic validators remain pytest / compileall / policy / changed-files.
+
+## Required Codex advisory evidence before waiting_approval (v0.2.5)
+
+`v0.2.5` makes valid Codex advisory artifact contract evidence **required**
+before a task may transition into `waiting_approval`.
+
+The core semantic is:
+
+```text
+Require Codex advisory evidence, not Codex approval.
+```
+
+A task may enter `waiting_approval` only when:
+
+```text
+existing deterministic validators pass
+AND
+the v0.2.4 codex_advisory_artifact_contract validator passes
+```
+
+This is **required evidence, not required approval**. The deterministic validator
+validates the artifact *contract*; the human reviewer evaluates the advisory
+*content*. Codex is never validation, approval, or merge authority.
+
+### Where it is enforced
+
+The requirement is enforced at the approved-task transition boundary
+(`approved_task_runner.run_approved_task`), after the existing deterministic
+validators pass and before the task status is moved to `waiting_approval`. A
+small explicit gate helper, `codex_advisory_evidence_gate`, wraps the v0.2.4
+validator:
+
+```text
+check_required_codex_advisory_evidence(...)
+  -> validate_codex_advisory_artifact_contract(...)
+```
+
+All flows that reach `waiting_approval` through `run_approved_task` (the
+one-shot runner, the queued-task handoff, the scheduler one-task tick, the
+one-shot pipeline, and the execution-engine adapter) inherit the gate.
+
+### When the gate blocks waiting_approval
+
+The gate withholds `waiting_approval` (the runner blocks at the
+`codex_advisory_evidence` phase and surfaces the contract validator errors as
+blocking evidence) when:
+
+```text
+codex-advisory-review.json is missing
+the advisory artifact JSON is malformed
+the advisory artifact JSON is not an object
+task_key mismatches the expected task_key
+review_status is missing or invalid
+risk_level is missing or invalid
+validation_authority is missing or not false
+human_review_required is missing or not true
+required companion artifacts are missing
+confirm-run stdout/stderr companions are required but missing
+tool_error is structurally invalid
+schema / identity fields are missing or invalid
+```
+
+A missing or invalid artifact is surfaced as **required-evidence** blocking, not
+as a Codex judgment failure.
+
+### What does NOT block by itself
+
+The gate must **not** fail merely because Codex reported a particular advisory
+status. All of the following are valid evidence statuses and reach
+`waiting_approval` when the contract is otherwise valid:
+
+```text
+review_status = "looks_good"      -> can enter waiting_approval
+review_status = "needs_attention" -> can enter waiting_approval
+review_status = "high_risk"       -> can enter waiting_approval
+review_status = "tool_error"      -> can enter waiting_approval (if structurally valid)
+```
+
+`tool_error` means the Codex advisory attempt failed or timed out; a
+structurally valid `tool_error` artifact is still valid required evidence.
+
+### What it does not do
+
+The `v0.2.5` gate:
+
+- requires valid contract evidence, **not** Codex approval;
+- does **not** require `review_status == looks_good`;
+- does **not** block on `high_risk` / `needs_attention` / `tool_error` by itself;
+- does **not** invoke the Codex CLI and adds **no** subprocess behavior;
+- does **not** import or call `subprocess`;
+- does **not** push branches, create PRs, merge, clean up, delete branches, or
+  delete worktrees;
+- does **not** change approval authority, validator authority, `ExecutionEngine`
+  authority, or the human final review requirement;
+- does **not** change the `v0.2.3` waiting-approval summary, which continues to
+  display the Codex advisory artifact details once `waiting_approval` is reached.
+
+Once a task reaches `waiting_approval`, human final approval remains required and
+deterministic validators remain pytest / compileall / policy / changed-files.

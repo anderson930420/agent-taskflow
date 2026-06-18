@@ -161,6 +161,31 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         )
         return resolved_artifact_dir
 
+    def _write_codex_advisory_evidence(
+        self, task_key: str, artifact_dir: Path | None = None
+    ) -> Path:
+        """Generate a valid dry-run Codex advisory artifact for the task.
+
+        v0.2.5 requires valid Codex advisory artifact contract evidence before a
+        task may reach waiting_approval. This uses the real artifact generator so
+        the runner gate sees genuine, contract-valid evidence.
+        """
+
+        from agent_taskflow.codex_advisory_review import (
+            CodexAdvisoryReviewRequest,
+            generate_codex_advisory_review,
+        )
+
+        target = artifact_dir or (self.artifact_root / task_key)
+        result = generate_codex_advisory_review(
+            CodexAdvisoryReviewRequest(
+                task_key=task_key,
+                artifact_dir=target,
+                dry_run=True,
+            )
+        )
+        return result.json_path
+
     def _request(
         self,
         *,
@@ -341,6 +366,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
 
     def test_executor_success_and_validator_success_end_waiting_approval(self) -> None:
         self._add_task("AT-GH-407")
+        self._write_codex_advisory_evidence("AT-GH-407")
 
         result = run_approved_task(
             self._request(task_key="AT-GH-407", validators=("policy",)),
@@ -407,6 +433,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
     def test_opencode_generates_implementation_prompt_from_issue_spec(self) -> None:
         artifact_dir = self._add_task("AT-GH-67", title="Add the widget")
         self._write_issue_spec(artifact_dir, title="Add the widget", body="Please add a widget.")
+        self._write_codex_advisory_evidence("AT-GH-67", artifact_dir)
         opencode = FakeExecutor(name="opencode", status="completed")
 
         result = run_approved_task(
@@ -475,6 +502,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self._write_issue_spec(artifact_dir, title="ignored", body="ignored body")
         prompt_path = artifact_dir / "implementation_prompt.md"
         prompt_path.write_text("# Pre-supplied prompt\n", encoding="utf-8")
+        self._write_codex_advisory_evidence("AT-GH-69", artifact_dir)
         opencode = FakeExecutor(name="opencode", status="completed")
 
         result = run_approved_task(
@@ -498,6 +526,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
     def test_noop_does_not_generate_implementation_prompt(self) -> None:
         artifact_dir = self._add_task("AT-GH-70", title="Noop task")
         self._write_issue_spec(artifact_dir, title="Noop task", body="should be ignored by noop")
+        self._write_codex_advisory_evidence("AT-GH-70", artifact_dir)
 
         result = run_approved_task(
             self._request(task_key="AT-GH-70", executor="noop", validators=("policy",)),
@@ -518,6 +547,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
     def test_shell_does_not_generate_implementation_prompt(self) -> None:
         artifact_dir = self._add_task("AT-GH-71", title="Shell task")
         self._write_issue_spec(artifact_dir, title="Shell task", body="should be ignored by shell")
+        self._write_codex_advisory_evidence("AT-GH-71", artifact_dir)
 
         result = run_approved_task(
             self._request(
@@ -541,6 +571,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
 
     def test_request_executor_profile_flows_to_real_executor(self) -> None:
         self._add_task("AT-GH-410")
+        self._write_codex_advisory_evidence("AT-GH-410")
         captured: dict[str, object] = {}
         fake_executor = FakeExecutor(name="pi", status="completed")
 
@@ -583,6 +614,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
 
     def test_noop_execution_still_works_with_profile_metadata(self) -> None:
         self._add_task("AT-GH-411")
+        self._write_codex_advisory_evidence("AT-GH-411")
 
         result = run_approved_task(
             self._request(

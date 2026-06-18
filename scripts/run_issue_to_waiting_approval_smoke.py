@@ -44,6 +44,10 @@ from agent_taskflow.executors.base import (  # noqa: E402
     ExecutorContext,
     ExecutorResult,
 )
+from agent_taskflow.codex_advisory_review import (  # noqa: E402
+    CodexAdvisoryReviewRequest,
+    generate_codex_advisory_review,
+)
 from agent_taskflow.github_issue_ingestion import GitHubIssueSnapshot  # noqa: E402
 from agent_taskflow.github_issue_intake_gate import (  # noqa: E402
     GitHubIssueIntakeRequest,
@@ -574,6 +578,23 @@ def run_smoke(
         artifact_root=paths.artifact_root,
         db_path=paths.db_path,
         task_key=task_key,
+    )
+
+    # 3b. v0.2.5: the chain must produce valid Codex advisory artifact contract
+    #     evidence before a task may transition into waiting_approval. Generate
+    #     the dry-run advisory artifact (no Codex CLI, no subprocess) so the
+    #     runner's required-evidence gate is satisfied by genuine evidence. This
+    #     is required evidence, not Codex approval.
+    codex_review_result = generate_codex_advisory_review(
+        CodexAdvisoryReviewRequest(
+            task_key=task_key,
+            artifact_dir=artifact_dir,
+            dry_run=True,
+        )
+    )
+    _require(
+        Path(codex_review_result.json_path).is_file(),
+        f"codex advisory review json missing: {codex_review_result.json_path}",
     )
 
     # 4. Phase 6E+1 explicit handoff to approved_task_runner, with injected

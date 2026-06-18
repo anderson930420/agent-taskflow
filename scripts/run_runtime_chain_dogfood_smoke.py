@@ -58,6 +58,10 @@ if str(REPO_ROOT) not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 from agent_taskflow.api.main import create_app  # noqa: E402
+from agent_taskflow.codex_advisory_review import (  # noqa: E402
+    CodexAdvisoryReviewRequest,
+    generate_codex_advisory_review,
+)
 from agent_taskflow.executors.base import (  # noqa: E402
     Executor,
     ExecutorContext,
@@ -459,6 +463,23 @@ def run_smoke(
     _require(
         Path(str(verifier_report_path)).is_file(),
         f"verifier report artifact missing on disk: {verifier_report_path}",
+    )
+
+    # 5b. v0.2.5: produce valid Codex advisory artifact contract evidence before
+    #     the task may transition into waiting_approval. Generate the dry-run
+    #     advisory artifact (no Codex CLI, no subprocess) so the runner's
+    #     required-evidence gate is satisfied by genuine evidence. This is
+    #     required evidence, not Codex approval.
+    codex_review_result = generate_codex_advisory_review(
+        CodexAdvisoryReviewRequest(
+            task_key=task_key,
+            artifact_dir=package_artifact_dir,
+            dry_run=True,
+        )
+    )
+    _require(
+        Path(codex_review_result.json_path).is_file(),
+        f"codex advisory review json missing: {codex_review_result.json_path}",
     )
 
     # 6. Real queued_task_handoff in confirmed mode with the real handoff
