@@ -324,6 +324,12 @@ class WaitingApprovalSummaryTests(unittest.TestCase):
         self.assertEqual(codex["json_path"], str(artifact_dir / JSON_FILENAME))
         self.assertEqual(codex["markdown_path"], str(artifact_dir / MARKDOWN_FILENAME))
         self.assertIn("Codex Advisory Review", markdown)
+        self.assertIn("## Codex Advisory Review", markdown)
+        self.assertIn("JSON artifact:", markdown)
+        self.assertIn("Markdown artifact:", markdown)
+        self.assertIn("Stdout artifact:", markdown)
+        self.assertIn("Stderr artifact:", markdown)
+        self.assertIn("## Review Readiness", markdown)
 
     def test_codex_advisory_status_does_not_change_authority(self) -> None:
         # A high_risk advisory artifact must not block readiness, change the

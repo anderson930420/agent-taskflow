@@ -1086,11 +1086,19 @@ def _format_markdown(result: WaitingApprovalSummaryResult) -> str:
         f"- Risk level: {result.codex_advisory_review['risk_level']}",
         f"- Validation authority: {result.codex_advisory_review['validation_authority']}",
         f"- Human review required: {result.codex_advisory_review['human_review_required']}",
+        f"- JSON artifact: {result.codex_advisory_review['json_path'] or '(none)'}",
+        f"- Markdown artifact: {result.codex_advisory_review['markdown_path'] or '(none)'}",
+        f"- Stdout artifact: {result.codex_advisory_review['stdout_path'] or '(none)'}",
+        f"- Stderr artifact: {result.codex_advisory_review['stderr_path'] or '(none)'}",
         "- Advisory evidence only; does not approve, block, validate, or merge.",
         "",
-        "## Review Readiness",
         f"- Ready for human review: {result.review_readiness['ready_for_human_review']}",
     ]
+    codex_warnings = result.codex_advisory_review.get("warnings") or []
+    if codex_warnings:
+        lines.extend(["- Codex advisory warnings:"])
+        lines.extend(f"  - {warning}" for warning in codex_warnings)
+    lines.extend(["", "## Review Readiness", f"- Ready for human review: {result.review_readiness['ready_for_human_review']}"])
     if result.review_readiness["blocking_warnings"]:
         lines.extend(["- Blocking warnings:"])
         lines.extend(f"  - {warning}" for warning in result.review_readiness["blocking_warnings"])
