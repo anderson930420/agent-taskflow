@@ -41,6 +41,7 @@ from agent_taskflow.codex_advisory_review import (
     SCHEMA_VERSION,
     STDERR_FILENAME,
     STDOUT_FILENAME,
+    build_default_checklist,
 )
 from agent_taskflow.executors.manual import NoopExecutor
 from agent_taskflow.models import TaskRecord
@@ -100,6 +101,15 @@ def _confirm_payload(task_key: str, artifact_dir: Path, **overrides) -> dict:
                 STDERR_FILENAME: str(artifact_dir / STDERR_FILENAME),
             }
         },
+        "review_checklist": build_default_checklist(status="pass", summary="ok"),
+        "human_review_priorities": [
+            {
+                "priority": 1,
+                "area": "design_risk",
+                "reason": "confirm the design risk is acceptable",
+                "suggested_checks": ["review design findings"],
+            }
+        ],
     }
     base.update(overrides)
     return base
@@ -239,6 +249,41 @@ class RequiredCodexAdvisoryEvidenceHelperTests(unittest.TestCase):
         self.assertTrue(
             any("human_review_required" in e for e in result.blocking_errors)
         )
+
+    def test_missing_checklist_is_not_satisfied(self) -> None:
+        # v0.2.6: a contract-valid-but-checklist-missing artifact must block,
+        # because the contract validator now requires the checklist.
+        payload = _confirm_payload("AT-GH-1", self.artifact_dir)
+        del payload["review_checklist"]
+        _write_codex_artifact(self.artifact_dir, payload)
+        result = self._check()
+        self.assertFalse(result.satisfied)
+        self.assertTrue(any("review_checklist" in e for e in result.blocking_errors))
+
+    def test_invalid_checklist_area_status_is_not_satisfied(self) -> None:
+        checklist = build_default_checklist(status="pass", summary="ok")
+        checklist["silent_failure"]["status"] = "approved"
+        _write_codex_artifact(
+            self.artifact_dir,
+            _confirm_payload("AT-GH-1", self.artifact_dir, review_checklist=checklist),
+        )
+        result = self._check()
+        self.assertFalse(result.satisfied)
+        self.assertTrue(any("silent_failure" in e for e in result.blocking_errors))
+
+    def test_checklist_with_concern_is_satisfied(self) -> None:
+        # `concern` is advisory evidence, never an automatic blocker.
+        checklist = build_default_checklist(status="concern", summary="a concern")
+        _write_codex_artifact(
+            self.artifact_dir,
+            _confirm_payload(
+                "AT-GH-1", self.artifact_dir,
+                review_status="needs_attention", risk_level="medium",
+                review_checklist=checklist,
+            ),
+        )
+        result = self._check()
+        self.assertTrue(result.satisfied, result.blocking_errors)
 
     def test_missing_is_surfaced_as_blocking_evidence_not_judgment(self) -> None:
         # A missing artifact is required-evidence-blocking, not a Codex judgment
@@ -470,6 +515,45 @@ class CodexAdvisoryEvidenceBoundaryTests(unittest.TestCase):
                 for e in result.codex_advisory_evidence["blocking_errors"]
             )
         )
+
+    def test_missing_checklist_blocks_waiting_approval(self) -> None:
+        # v0.2.6: an otherwise contract-valid artifact missing the checklist
+        # blocks the transition into waiting_approval.
+        artifact_dir = self._add_task("AT-GH-520")
+        payload = _confirm_payload("AT-GH-520", artifact_dir)
+        del payload["review_checklist"]
+        _write_codex_artifact(artifact_dir, payload)
+
+        result = self._run("AT-GH-520")
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, PHASE_CODEX_ADVISORY_EVIDENCE)
+        self.assertNotEqual(
+            self.store.get_task("AT-GH-520").status, APPROVED_TASK_STATUS
+        )
+        self.assertTrue(
+            any(
+                "review_checklist" in e
+                for e in result.codex_advisory_evidence["blocking_errors"]
+            )
+        )
+
+    def test_checklist_concern_reaches_waiting_approval(self) -> None:
+        artifact_dir = self._add_task("AT-GH-521")
+        checklist = build_default_checklist(status="concern", summary="a concern")
+        _write_codex_artifact(
+            artifact_dir,
+            _confirm_payload(
+                "AT-GH-521", artifact_dir,
+                review_status="needs_attention", risk_level="medium",
+                review_checklist=checklist,
+            ),
+        )
+
+        result = self._run("AT-GH-521")
+
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
 
     def test_deterministic_validator_failure_blocks_before_gate(self) -> None:
         # When a deterministic validator fails, the run blocks at validation and

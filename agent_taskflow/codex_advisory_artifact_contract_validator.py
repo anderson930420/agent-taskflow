@@ -9,9 +9,18 @@ The validator validates the *artifact contract only*:
     Validate artifact contract, not advisory judgment.
 
 It checks artifact presence, JSON shape, schema/identity fields, task binding,
-allowed enums, authority invariants, companion artifacts, and structural
-validity of ``tool_error``. It never judges the quality, correctness, severity,
-or usefulness of Codex's advisory findings.
+allowed enums, authority invariants, companion artifacts, structural validity of
+``tool_error``, and (since ``v0.2.6``) structured review-checklist coverage. It
+never judges the quality, correctness, severity, or usefulness of Codex's
+advisory findings.
+
+The ``v0.2.6`` checklist hardening requires every artifact to carry a
+``review_checklist`` that covers each required review area (with a status, a
+non-empty summary, and a findings list) plus ``human_review_priorities``
+guidance. This enforces *checklist coverage, not Codex approval*: a checklist
+area reporting ``concern``, ``unknown``, or ``not_applicable`` is valid advisory
+evidence and never fails the contract by itself; only a missing or structurally
+invalid checklist is a contract failure.
 
 In particular the advisory statuses ``looks_good``, ``needs_attention``,
 ``high_risk``, and ``tool_error`` are all valid Codex advisory statuses. They are
@@ -37,10 +46,13 @@ from pathlib import Path
 from typing import Any
 
 from agent_taskflow.codex_advisory_review import (
+    ALLOWED_CHECKLIST_STATUSES,
+    ALLOWED_PRIORITY_AREAS,
     ALLOWED_REVIEW_STATUSES,
     ALLOWED_RISK_LEVELS,
     JSON_FILENAME,
     MARKDOWN_FILENAME,
+    REVIEW_CHECKLIST_AREAS,
     REVIEWER,
     SCHEMA_VERSION,
     STDERR_FILENAME,
@@ -310,7 +322,16 @@ def validate_codex_advisory_artifact_contract(
             "(expected an object with non-empty string 'category' and 'message')"
         )
 
-    # 11. Timestamp is validated when present (established artifact format).
+    # 11. Review checklist coverage (v0.2.6). Every required review area must be
+    # present with a valid status, a non-empty summary, and a findings list, and
+    # human reviewer priority guidance must be present and well-formed. Checklist
+    # *statuses* (concern / unknown / not_applicable) are advisory evidence and
+    # never fail the contract by themselves; only a missing or structurally
+    # invalid checklist fails the contract.
+    _validate_review_checklist(data, errors)
+    _validate_human_review_priorities(data, errors)
+
+    # 12. Timestamp is validated when present (established artifact format).
     if "generated_at" in data:
         generated_at = data.get("generated_at")
         if not isinstance(generated_at, str) or not generated_at.strip():
@@ -336,6 +357,122 @@ def validate_codex_advisory_artifact_contract(
         errors=errors,
         warnings=warnings,
     )
+
+
+def _validate_review_checklist(data: dict[str, Any], errors: list[str]) -> None:
+    """Validate the v0.2.6 ``review_checklist`` structure.
+
+    Appends a contract error for a missing checklist, a non-object checklist, any
+    missing required area, a non-object area, an invalid/missing status, a
+    missing/empty summary, or a non-list ``findings``. A valid ``concern`` /
+    ``unknown`` / ``not_applicable`` status is never an error.
+    """
+
+    if "review_checklist" not in data:
+        errors.append(
+            "Codex advisory review JSON is missing required review_checklist"
+        )
+        return
+    checklist = data.get("review_checklist")
+    if not isinstance(checklist, dict):
+        errors.append("Codex advisory review review_checklist must be an object")
+        return
+
+    for area in REVIEW_CHECKLIST_AREAS:
+        if area not in checklist:
+            errors.append(
+                f"Codex advisory review review_checklist is missing required area "
+                f"{area!r}"
+            )
+            continue
+        entry = checklist.get(area)
+        if not isinstance(entry, dict):
+            errors.append(
+                f"Codex advisory review review_checklist area {area!r} must be an "
+                "object"
+            )
+            continue
+        status = entry.get("status")
+        if status not in ALLOWED_CHECKLIST_STATUSES:
+            errors.append(
+                f"Codex advisory review review_checklist area {area!r} status must "
+                f"be one of {ALLOWED_CHECKLIST_STATUSES}, got {status!r}"
+            )
+        summary = entry.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            errors.append(
+                f"Codex advisory review review_checklist area {area!r} must have a "
+                "non-empty summary"
+            )
+        findings = entry.get("findings")
+        if not isinstance(findings, list):
+            errors.append(
+                f"Codex advisory review review_checklist area {area!r} findings "
+                "must be a list"
+            )
+
+
+def _validate_human_review_priorities(
+    data: dict[str, Any], errors: list[str]
+) -> None:
+    """Validate the v0.2.6 ``human_review_priorities`` structure.
+
+    Appends a contract error when the field is missing, is not a list, is empty,
+    or any entry is malformed. The contract requires human reviewer priority
+    guidance to be *present* (non-empty): an empty list is a contract failure.
+    Dry-run and ``tool_error`` artifacts satisfy this with a single fallback
+    entry directing the human reviewer to prioritize the review manually.
+    """
+
+    if "human_review_priorities" not in data:
+        errors.append(
+            "Codex advisory review JSON is missing required human_review_priorities"
+        )
+        return
+    priorities = data.get("human_review_priorities")
+    if not isinstance(priorities, list):
+        errors.append(
+            "Codex advisory review human_review_priorities must be a list"
+        )
+        return
+    if not priorities:
+        errors.append(
+            "Codex advisory review human_review_priorities must be non-empty; "
+            "human reviewer priority guidance must be present"
+        )
+        return
+
+    for index, item in enumerate(priorities):
+        if not isinstance(item, dict):
+            errors.append(
+                f"Codex advisory review human_review_priorities entry {index} must "
+                "be an object"
+            )
+            continue
+        priority = item.get("priority")
+        if isinstance(priority, bool) or not isinstance(priority, int) or priority <= 0:
+            errors.append(
+                f"Codex advisory review human_review_priorities entry {index} must "
+                "have a positive integer priority"
+            )
+        area = item.get("area")
+        if area not in ALLOWED_PRIORITY_AREAS:
+            errors.append(
+                f"Codex advisory review human_review_priorities entry {index} area "
+                f"must be one of {ALLOWED_PRIORITY_AREAS}, got {area!r}"
+            )
+        reason = item.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append(
+                f"Codex advisory review human_review_priorities entry {index} must "
+                "have a non-empty reason"
+            )
+        suggested_checks = item.get("suggested_checks")
+        if not isinstance(suggested_checks, list):
+            errors.append(
+                f"Codex advisory review human_review_priorities entry {index} "
+                "suggested_checks must be a list"
+            )
 
 
 def _expects_codex_outputs(data: dict[str, Any]) -> bool:

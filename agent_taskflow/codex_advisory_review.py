@@ -58,6 +58,9 @@ DEFAULT_TIMEOUT_SECONDS = 300
 # Mutable advisory fields Codex output may contribute. Everything else (schema,
 # reviewer, task_key, validation_authority, human_review_required, artifacts,
 # generated_at, paths, governance) is canonical and Codex can never override it.
+# ``review_checklist`` and ``human_review_priorities`` are also Codex-contributed
+# but are merged/validated specially (see ``merge_codex_findings``) rather than
+# through the generic mutable-field copy.
 CODEX_MUTABLE_FIELDS = (
     "review_status",
     "summary",
@@ -93,6 +96,71 @@ ALLOWED_RISK_LEVELS = (
     "low",
     "medium",
     "high",
+)
+
+# v0.2.6 — Codex advisory review checklist hardening.
+#
+# Every Codex advisory artifact must carry a structured review checklist that
+# explicitly covers each of the review areas a human reviewer cares about, plus
+# explicit human reviewer priority guidance. This is *checklist coverage, not
+# Codex approval*: the checklist statuses are advisory evidence only and never
+# grant Codex validator/approval authority. A ``concern`` / ``unknown`` /
+# ``not_applicable`` status never blocks by itself; only a missing or
+# structurally invalid checklist makes the artifact contract-invalid.
+REVIEW_CHECKLIST_AREAS = (
+    "architecture_boundary",
+    "design_risk",
+    "test_quality",
+    "silent_failure",
+    "fallback_correctness",
+    "race_concurrency",
+    "path_cwd_repo_root",
+    "human_review_priority",
+)
+ALLOWED_CHECKLIST_STATUSES = (
+    "pass",
+    "concern",
+    "not_applicable",
+    "unknown",
+)
+# Human reviewer priority entries may reference any checklist area or "other".
+ALLOWED_PRIORITY_AREAS = REVIEW_CHECKLIST_AREAS + ("other",)
+
+DRY_RUN_CHECKLIST_STATUS = "unknown"
+DRY_RUN_CHECKLIST_SUMMARY = (
+    "Not assessed in dry-run mode; Codex CLI was not invoked, so no advisory "
+    "checklist finding was produced for this area."
+)
+CONFIRM_PENDING_CHECKLIST_SUMMARY = (
+    "Codex advisory review did not report a finding for this area; treat as "
+    "unknown and review manually."
+)
+TOOL_ERROR_CHECKLIST_STATUS = "unknown"
+TOOL_ERROR_CHECKLIST_SUMMARY = (
+    "Not assessed; the Codex advisory review failed or timed out before "
+    "producing a checklist finding for this area."
+)
+
+# Human reviewer priority guidance must always be *present* (non-empty), not just
+# a present field. When Codex produced no priority guidance (dry-run, confirm-run
+# with no priorities, or tool_error) the artifact still carries a single fallback
+# priority entry directing the human reviewer to prioritize the review manually.
+DRY_RUN_PRIORITY_REASON = (
+    "Dry-run advisory review produced no Codex priority guidance; a human "
+    "reviewer must independently prioritize every required review area."
+)
+CONFIRM_PENDING_PRIORITY_REASON = (
+    "Codex advisory review did not report priority guidance; a human reviewer "
+    "must independently prioritize every required review area."
+)
+TOOL_ERROR_PRIORITY_REASON = (
+    "Codex advisory review failed or timed out before producing priority "
+    "guidance; a human reviewer must independently prioritize every required "
+    "review area."
+)
+DEFAULT_PRIORITY_SUGGESTED_CHECKS = (
+    "Independently review every checklist area listed in review_checklist",
+    "Decide review priority manually; no Codex priority guidance is available",
 )
 
 DRY_RUN_REVIEW_STATUS = "not_run"
@@ -239,6 +307,41 @@ def _normalize_path(path: str | Path, *, name: str) -> Path:
     return Path(path).expanduser().resolve()
 
 
+def build_default_checklist(*, status: str, summary: str) -> dict[str, dict[str, Any]]:
+    """Build a structurally valid review checklist covering every required area.
+
+    Every required area gets ``status``, a non-empty ``summary``, and an empty
+    ``findings`` list. This is the fallback checklist used by dry-run and
+    ``tool_error`` artifacts (where Codex never produced a real review) so that
+    every artifact still deterministically expresses coverage of every required
+    review area.
+    """
+
+    return {
+        area: {"status": status, "summary": summary, "findings": []}
+        for area in REVIEW_CHECKLIST_AREAS
+    }
+
+
+def build_default_human_review_priorities(*, reason: str) -> list[dict[str, Any]]:
+    """Build a structurally valid, non-empty human reviewer priority list.
+
+    Used as the fallback when Codex produced no priority guidance (dry-run,
+    confirm-run that omitted priorities, or ``tool_error``). The v0.2.6 contract
+    requires the guidance to be *present* (non-empty), so this always returns at
+    least one entry directing the human reviewer to prioritize the review.
+    """
+
+    return [
+        {
+            "priority": 1,
+            "area": "human_review_priority",
+            "reason": reason,
+            "suggested_checks": list(DEFAULT_PRIORITY_SUGGESTED_CHECKS),
+        }
+    ]
+
+
 def detect_evidence(artifact_dir: Path) -> dict[str, Any]:
     """Inspect file presence in ``artifact_dir`` and build an evidence manifest.
 
@@ -299,6 +402,9 @@ def build_review_prompt(
     """Render the Codex CLI advisory review prompt."""
 
     dimension_lines = "\n".join(f"- {dimension}" for dimension in REVIEW_DIMENSIONS)
+    checklist_lines = "\n".join(f"- {area}" for area in REVIEW_CHECKLIST_AREAS)
+    checklist_statuses = ", ".join(ALLOWED_CHECKLIST_STATUSES)
+    priority_areas = ", ".join(ALLOWED_PRIORITY_AREAS)
     evidence_lines = "\n".join(
         f"- {item['name']}: {'present' if item['present'] else 'missing'}"
         for item in evidence["files"]
@@ -391,6 +497,32 @@ cannot assess:
 - suggested_followups
 - missing_evidence
 
+## Required Review Checklist (v0.2.6)
+
+You must also return a `review_checklist` object that explicitly covers every
+one of the following review areas, so a human reviewer can see that each area was
+considered:
+
+{checklist_lines}
+
+Each checklist area must be an object with:
+
+- `status`: one of {checklist_statuses}
+- `summary`: a non-empty string describing what you found for that area
+- `findings`: a list (possibly empty) of specific advisory finding strings
+
+`concern`, `unknown`, and `not_applicable` are advisory statuses, not blockers.
+They report coverage; they never approve, block, or validate. Use `unknown` when
+you could not assess an area rather than omitting it.
+
+Also return a `human_review_priorities` list ordered by importance. Each entry is
+an object with:
+
+- `priority`: an integer (1 is highest priority)
+- `area`: one of {priority_areas}
+- `reason`: a non-empty string explaining why a human should look here
+- `suggested_checks`: a list of concrete things a human reviewer should check
+
 You may return the JSON object directly, or inside a fenced ```json block. Do
 not set `validation_authority`, `human_review_required`, `schema_version`,
 `reviewer`, `task_key`, `artifacts`, `generated_at`, or `governance`; those are
@@ -439,6 +571,21 @@ def build_review_payload(
         "recommended_human_focus": [],
         "suggested_followups": [],
         "missing_evidence": list(evidence["missing_evidence"]),
+        "review_checklist": build_default_checklist(
+            status=DRY_RUN_CHECKLIST_STATUS,
+            summary=(
+                DRY_RUN_CHECKLIST_SUMMARY
+                if request.dry_run
+                else CONFIRM_PENDING_CHECKLIST_SUMMARY
+            ),
+        ),
+        "human_review_priorities": build_default_human_review_priorities(
+            reason=(
+                DRY_RUN_PRIORITY_REASON
+                if request.dry_run
+                else CONFIRM_PENDING_PRIORITY_REASON
+            ),
+        ),
         "artifacts": artifacts,
         "dry_run": bool(request.dry_run),
         "confirm_run": bool(request.confirm_run),
@@ -570,6 +717,40 @@ def build_review_markdown(payload: dict[str, Any]) -> str:
             lines.extend(f"- {item}" for item in items)
         else:
             lines.append("- (none)")
+
+    checklist = payload.get("review_checklist")
+    lines.extend(["", "## Review Checklist", ""])
+    if isinstance(checklist, dict):
+        for area in REVIEW_CHECKLIST_AREAS:
+            entry = checklist.get(area)
+            if isinstance(entry, dict):
+                status = entry.get("status")
+                summary_text = entry.get("summary") or "(no summary)"
+                findings = entry.get("findings") or []
+            else:
+                status = "(missing)"
+                summary_text = "(missing)"
+                findings = []
+            lines.append(f"- {area}: {status} — {summary_text}")
+            for finding in findings:
+                lines.append(f"  - {finding}")
+    else:
+        lines.append("- (no checklist present)")
+
+    priorities = payload.get("human_review_priorities") or []
+    lines.extend(["", "## Human Review Priorities", ""])
+    if priorities:
+        for item in priorities:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- [{item.get('priority')}] {item.get('area')}: "
+                f"{item.get('reason')}"
+            )
+            for check in item.get("suggested_checks") or []:
+                lines.append(f"  - {check}")
+    else:
+        lines.append("- (none)")
 
     tool_error = payload.get("tool_error")
     if tool_error:
@@ -814,9 +995,126 @@ def merge_codex_findings(payload: dict[str, Any], codex_data: dict[str, Any]) ->
         if field in codex_data and not isinstance(codex_data[field], list):
             raise CodexAdvisoryReviewError(f"Codex field {field!r} must be a list")
 
+    # Validate the v0.2.6 checklist contributions before mutating anything so a
+    # malformed checklist leaves the canonical (valid) default checklist intact.
+    merged_checklist: dict[str, Any] | None = None
+    if "review_checklist" in codex_data:
+        merged_checklist = _validated_codex_checklist(
+            payload.get("review_checklist"), codex_data["review_checklist"]
+        )
+    validated_priorities: list[dict[str, Any]] | None = None
+    if "human_review_priorities" in codex_data:
+        validated_priorities = _validated_codex_priorities(
+            codex_data["human_review_priorities"]
+        )
+
     for field in CODEX_MUTABLE_FIELDS:
         if field in codex_data:
             payload[field] = codex_data[field]
+    if merged_checklist is not None:
+        payload["review_checklist"] = merged_checklist
+    if validated_priorities is not None:
+        payload["human_review_priorities"] = validated_priorities
+
+
+def _validated_codex_checklist(
+    default_checklist: Any,
+    codex_checklist: Any,
+) -> dict[str, Any]:
+    """Validate a Codex-provided checklist and merge it over the default.
+
+    Raises ``CodexAdvisoryReviewError`` if the checklist or any contributed area
+    is structurally invalid. Areas Codex omits keep the canonical default entry,
+    guaranteeing every required area remains covered.
+    """
+
+    if not isinstance(codex_checklist, dict):
+        raise CodexAdvisoryReviewError("Codex review_checklist must be an object")
+
+    merged: dict[str, Any] = dict(default_checklist or {})
+    for area, entry in codex_checklist.items():
+        if not isinstance(entry, dict):
+            raise CodexAdvisoryReviewError(
+                f"Codex review_checklist area {area!r} must be an object"
+            )
+        status = entry.get("status")
+        if status not in ALLOWED_CHECKLIST_STATUSES:
+            raise CodexAdvisoryReviewError(
+                f"Codex review_checklist area {area!r} has invalid status "
+                f"{status!r}"
+            )
+        summary = entry.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            raise CodexAdvisoryReviewError(
+                f"Codex review_checklist area {area!r} must have a non-empty "
+                "summary"
+            )
+        findings = entry.get("findings", [])
+        if not isinstance(findings, list):
+            raise CodexAdvisoryReviewError(
+                f"Codex review_checklist area {area!r} findings must be a list"
+            )
+        merged[area] = {
+            "status": status,
+            "summary": summary,
+            "findings": list(findings),
+        }
+    return merged
+
+
+def _validated_codex_priorities(codex_priorities: Any) -> list[dict[str, Any]]:
+    """Validate a Codex-provided human reviewer priority list.
+
+    Raises ``CodexAdvisoryReviewError`` if the list or any entry is malformed.
+    """
+
+    if not isinstance(codex_priorities, list):
+        raise CodexAdvisoryReviewError(
+            "Codex human_review_priorities must be a list"
+        )
+    if not codex_priorities:
+        raise CodexAdvisoryReviewError(
+            "Codex human_review_priorities must be non-empty"
+        )
+    validated: list[dict[str, Any]] = []
+    for index, item in enumerate(codex_priorities):
+        if not isinstance(item, dict):
+            raise CodexAdvisoryReviewError(
+                f"Codex human_review_priorities entry {index} must be an object"
+            )
+        priority = item.get("priority")
+        if isinstance(priority, bool) or not isinstance(priority, int) or priority <= 0:
+            raise CodexAdvisoryReviewError(
+                f"Codex human_review_priorities entry {index} must have a "
+                "positive integer priority"
+            )
+        area = item.get("area")
+        if area not in ALLOWED_PRIORITY_AREAS:
+            raise CodexAdvisoryReviewError(
+                f"Codex human_review_priorities entry {index} has invalid area "
+                f"{area!r}"
+            )
+        reason = item.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise CodexAdvisoryReviewError(
+                f"Codex human_review_priorities entry {index} must have a "
+                "non-empty reason"
+            )
+        suggested_checks = item.get("suggested_checks", [])
+        if not isinstance(suggested_checks, list):
+            raise CodexAdvisoryReviewError(
+                f"Codex human_review_priorities entry {index} suggested_checks "
+                "must be a list"
+            )
+        validated.append(
+            {
+                "priority": priority,
+                "area": area,
+                "reason": reason,
+                "suggested_checks": list(suggested_checks),
+            }
+        )
+    return validated
 
 
 def _apply_tool_error(
@@ -833,6 +1131,15 @@ def _apply_tool_error(
     payload["risk_level"] = TOOL_ERROR_RISK_LEVEL
     payload["validation_authority"] = False
     payload["human_review_required"] = True
+    # Codex never produced a real review, so fall back to a structurally valid
+    # checklist of `unknown` findings rather than leaving a partial/stale one.
+    payload["review_checklist"] = build_default_checklist(
+        status=TOOL_ERROR_CHECKLIST_STATUS,
+        summary=TOOL_ERROR_CHECKLIST_SUMMARY,
+    )
+    payload["human_review_priorities"] = build_default_human_review_priorities(
+        reason=TOOL_ERROR_PRIORITY_REASON,
+    )
     tool_error = {"category": category, "message": message}
     payload["tool_error"] = tool_error
     invocation_meta["tool_error"] = tool_error
@@ -1012,9 +1319,12 @@ def generate_codex_advisory_review(
 
 
 __all__ = [
+    "ALLOWED_CHECKLIST_STATUSES",
+    "ALLOWED_PRIORITY_AREAS",
     "ALLOWED_REVIEW_STATUSES",
     "ALLOWED_RISK_LEVELS",
     "CODEX_MUTABLE_FIELDS",
+    "REVIEW_CHECKLIST_AREAS",
     "CodexAdvisoryReviewError",
     "CodexAdvisoryReviewRequest",
     "CodexAdvisoryReviewResult",
@@ -1037,6 +1347,8 @@ __all__ = [
     "TOOL_ERROR_REVIEW_STATUS",
     "TOOL_ERROR_RISK_LEVEL",
     "build_confirm_run_payload",
+    "build_default_checklist",
+    "build_default_human_review_priorities",
     "build_review_markdown",
     "build_review_payload",
     "build_review_prompt",
