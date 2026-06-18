@@ -265,3 +265,100 @@ lifecycle transitions or the `waiting_approval` transition, and does not change
 `ready_for_human_review`. It does not integrate a Claude Code executor and does
 not implement P5-f. Human final approval remains required and deterministic
 validators remain pytest / compileall / policy / changed-files.
+
+## Codex Advisory Artifact Contract Validator (v0.2.4)
+
+`v0.2.4 — Codex Advisory Artifact Contract Validator` adds a deterministic,
+file-read-only validator that checks whether a Codex advisory review artifact
+exists and satisfies the expected artifact contract established by `v0.2.1` /
+`v0.2.2` / `v0.2.3`.
+
+The validator name is:
+
+```text
+codex_advisory_artifact_contract
+```
+
+The validator lives in a pure helper module
+(`agent_taskflow/codex_advisory_artifact_contract_validator.py`) and exposes
+`validate_codex_advisory_artifact_contract(request)` returning a
+`CodexAdvisoryArtifactContractValidationResult`. The request takes the task
+artifact directory and an optional expected `task_key`.
+
+The guiding principle is:
+
+```text
+Validate artifact contract, not advisory judgment.
+```
+
+### What it validates
+
+The validator validates the artifact contract only:
+
+- artifact presence (`codex-advisory-review.json` exists)
+- the JSON parses and is a JSON object
+- required schema/identity fields (`schema_version`, `reviewer`, `task_key`)
+- task binding (the artifact `task_key` matches the expected `task_key` when one
+  is provided)
+- allowed advisory enums (`review_status`, `risk_level`)
+- authority invariants (`validation_authority` is `false`,
+  `human_review_required` is `true`)
+- the companion `codex-advisory-review.md` artifact exists
+- confirm-run output artifacts (`codex-advisory-review-stdout.txt` and
+  `codex-advisory-review-stderr.txt`) exist when the artifact metadata indicates
+  a confirm-run / `codex_cli_invoked` / `codex_outputs`
+- `tool_error` is structurally valid when present
+- `generated_at` is a valid timestamp string when present
+
+It inspects only the established Codex advisory artifact files
+(`codex-advisory-review.json`, `codex-advisory-review.md`,
+`codex-advisory-review-stdout.txt`, `codex-advisory-review-stderr.txt`,
+`codex-advisory-review-prompt.md`).
+
+### PASS / FAIL semantics
+
+The validator **passes** when the artifact exists and satisfies every contract
+invariant above. It **fails** when the JSON is missing, malformed, or not an
+object; when `task_key` mismatches; when `review_status`/`risk_level` are missing
+or invalid; when `validation_authority` is missing or not `false`; when
+`human_review_required` is missing or not `true`; when the companion markdown is
+missing; when required confirm-run stdout/stderr companions are missing; when
+`tool_error` is present but structurally invalid; or when required
+schema/identity fields are missing or invalid.
+
+Unlike the `v0.2.3` waiting-approval summary (which never fails and downgrades
+problems to warnings), this validator is strict: a missing artifact, malformed
+JSON, or any invariant violation is a validator failure.
+
+### What it does not judge
+
+The validator does **not** judge the quality, correctness, severity, or
+usefulness of Codex's advisory review content. The advisory statuses
+`looks_good`, `needs_attention`, `high_risk`, and `tool_error` are all valid
+Codex advisory statuses and are human-review evidence, not deterministic
+validator outcomes. In particular:
+
+```text
+review_status = "high_risk"       -> contract can pass
+review_status = "needs_attention" -> contract can pass
+review_status = "tool_error"      -> contract can pass (if structurally valid)
+```
+
+`tool_error` means the Codex invocation failed or timed out; if the artifact
+records that failure in the expected contract shape, the contract validator
+passes.
+
+### What it does not do
+
+In `v0.2.4` this validator reads files only. It does not judge Codex's review
+content, does not fail on `high_risk` / `needs_attention` / `tool_error` by
+itself, does not invoke Codex, does not import or call `subprocess`, does not
+change the scheduler / runner required evidence flow, does not change the
+`waiting_approval` transition, and does not change approval / validator /
+`ExecutionEngine` authority. It does not change the `v0.2.3` waiting-approval
+summary behavior.
+
+`v0.2.4` adds the deterministic validator capability only. It intentionally does
+**not** make the validator required before `waiting_approval`; that required
+evidence gate is reserved for `v0.2.5`. Human final approval remains required and
+deterministic validators remain pytest / compileall / policy / changed-files.
