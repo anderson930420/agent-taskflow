@@ -152,7 +152,7 @@ class RunPiExecutorGoldenPathSmokeTests(unittest.TestCase):
     def test_no_product_executor_registry_entry_is_added(self) -> None:
         self.assertEqual(
             list_executor_names(),
-            ["manual", "noop", "shell", "opencode", "pi"],
+            ["manual", "noop", "shell", "opencode", "pi", "claude-code"],
         )
 
     def test_script_does_not_introduce_forbidden_surface_area(self) -> None:

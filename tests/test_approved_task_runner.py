@@ -394,6 +394,61 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertFalse(result.safety["approved"])
         self.assertFalse(result.safety["cleanup_performed"])
 
+    def test_claude_code_dry_run_then_validators_then_waiting_approval(self) -> None:
+        # v0.2.7: the Claude Code bounded implementer executor runs as a dry-run
+        # by default through the runner. Deterministic validators must still run
+        # after it, and waiting_approval still requires Codex advisory evidence.
+        self._add_task("AT-GH-727")
+        self._write_codex_advisory_evidence("AT-GH-727")
+
+        result = run_approved_task(
+            self._request(task_key="AT-GH-727", executor="claude-code", validators=("policy",)),
+            store=self.store,
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
+        self.assertEqual(result.executor, "claude-code")
+        self.assertTrue(result.executor_run["ok"])
+        # Deterministic validators ran after the executor.
+        self.assertTrue(result.safety["validators_started"])
+        self.assertEqual(result.validators[0]["name"], "policy")
+        self.assertTrue(result.validators[0]["ok"])
+        # No branch/PR/merge/cleanup/approval side effects from the executor.
+        self.assertFalse(result.safety["branch_pushed"])
+        self.assertFalse(result.safety["pr_created"])
+        self.assertFalse(result.safety["merged"])
+        self.assertFalse(result.safety["approved"])
+        self.assertFalse(result.safety["cleanup_performed"])
+        # Execution artifact recorded with no authority granted.
+        artifact_dir = self.artifact_root / "AT-GH-727"
+        execution = json.loads(
+            (artifact_dir / "claude-code-execution.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(execution["status"], "dry_run")
+        self.assertEqual(execution["validation_authority"], "none")
+        self.assertEqual(execution["approval_authority"], "none")
+        self.assertIs(execution["human_review_required"], True)
+
+    def test_claude_code_cannot_reach_waiting_approval_without_codex_evidence(self) -> None:
+        # The executor itself cannot set waiting_approval: with no Codex advisory
+        # evidence present, the deterministic gate blocks the transition.
+        self._add_task("AT-GH-728")
+
+        result = run_approved_task(
+            self._request(task_key="AT-GH-728", executor="claude-code", validators=("policy",)),
+            store=self.store,
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "codex_advisory_evidence")
+        self.assertEqual(result.status, RUN_STATUS_BLOCKED)
+        self.assertNotEqual(self.store.get_task("AT-GH-728").status, APPROVED_TASK_STATUS)
+
     def test_opencode_without_model_is_explicitly_blocked(self) -> None:
         self._add_task("AT-GH-409")
 

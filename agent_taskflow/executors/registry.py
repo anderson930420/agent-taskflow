@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Sequence
 
 from agent_taskflow.executors.base import Executor
+from agent_taskflow.executors.claude_code import ClaudeCodeExecutor
 from agent_taskflow.executors.manual import ManualExecutor, NoopExecutor
 from agent_taskflow.executors.opencode import OpenCodeExecutor
 from agent_taskflow.executors.pi import PiExecutor
@@ -28,6 +29,9 @@ def get_executor(
     provider: str | None = None,
     tools: Sequence[str] | None = None,
     pi_bin: str = "pi",
+    claude_command: Sequence[str] | None = None,
+    claude_enable_invocation: bool = False,
+    worktree_root: str | None = None,
 ) -> Executor:
     """Return a built-in executor by name."""
 
@@ -54,6 +58,12 @@ def get_executor(
             tools=list(tools) if tools is not None else None,
             pi_bin=pi_bin,
         )
+    if normalized == "claude-code":
+        return ClaudeCodeExecutor(
+            command=claude_command,
+            enable_invocation=claude_enable_invocation,
+            worktree_root=worktree_root,
+        )
 
     raise ValueError(f"Unknown executor: {name!r}")
 
@@ -79,6 +89,25 @@ def build_opencode_executor(
     )
 
 
+def build_claude_code_executor(
+    *,
+    command: Sequence[str] | None = None,
+    enable_invocation: bool = False,
+    worktree_root: str | None = None,
+) -> ClaudeCodeExecutor:
+    """Build a Claude Code bounded implementer executor.
+
+    Prompt-only / dry-run by default. Real invocation requires both
+    ``enable_invocation=True`` and an explicit ``command``.
+    """
+
+    return ClaudeCodeExecutor(
+        command=command,
+        enable_invocation=enable_invocation,
+        worktree_root=worktree_root,
+    )
+
+
 def build_pi_executor(
     *,
     provider: str | None = None,
@@ -101,10 +130,11 @@ def build_pi_executor(
 def list_executor_names() -> list[str]:
     """Return supported executor names."""
 
-    return ["manual", "noop", "shell", "opencode", "pi"]
+    return ["manual", "noop", "shell", "opencode", "pi", "claude-code"]
 
 
 __all__ = [
+    "build_claude_code_executor",
     "build_opencode_executor",
     "build_pi_executor",
     "build_shell_executor",

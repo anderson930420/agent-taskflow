@@ -149,6 +149,12 @@ _INSTRUCTION_ARTIFACT_NAMES = frozenset({
     "codex-advisory-review-prompt.md",
     "codex-advisory-review-stdout.txt",
     "codex-advisory-review-stderr.txt",
+    # The Claude Code bounded implementer prompt (v0.2.7) is adapter-generated
+    # documentation that enumerates the same governance prohibitions ("do not
+    # push", "do not delete branches/worktrees", "do not merge") as the mission
+    # contract and implementation prompt. Mentioning a forbidden action here is
+    # not evidence it was executed. Scan for secrets only.
+    "claude-code-implementer-prompt.md",
 })
 
 # Structured executor event logs. Free-text reasoning and embedded file-read
@@ -163,6 +169,12 @@ _EXECUTOR_EVENT_LOGS = frozenset({
 # argument and worker reasoning. Scan for secrets only.
 _EXECUTOR_TEXT_LOGS = frozenset({
     "pi-executor.log",
+    # Claude Code bounded implementer executor (v0.2.7) opt-in invocation
+    # captures. These embed the prompt argument and the worker's free-text
+    # reasoning, which may mention forbidden phrases verbatim without
+    # representing an executed action. Scan for secrets only, like pi-executor.log.
+    "claude-code-stdout.log",
+    "claude-code-stderr.log",
 })
 
 
