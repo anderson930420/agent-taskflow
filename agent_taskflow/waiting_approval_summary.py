@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from agent_taskflow._helpers import dedupe_preserve_order as _dedupe_preserve_order
+from agent_taskflow.codex_advisory_review_summary import (
+    summarize_codex_advisory_review_artifacts,
+)
 from agent_taskflow.api.review import (
     build_artifact_file_summaries,
     build_review_evidence,
@@ -99,6 +102,7 @@ class WaitingApprovalSummaryResult:
     validators: dict[str, Any]
     artifacts: list[dict[str, Any]]
     approval_review: dict[str, Any]
+    codex_advisory_review: dict[str, Any]
     evidence: dict[str, Any]
     review_readiness: dict[str, Any]
     next_allowed_actions: list[str]
@@ -172,6 +176,14 @@ def summarize_waiting_approval_task(
     executor = _build_executor_summary(events, warnings=warnings)
     validators = _build_validator_summary(events, warnings=warnings)
     approval_review = _build_approval_review_summary(events)
+
+    # Codex advisory review is human-review evidence only. It never affects
+    # execution_allowed, the waiting_approval status, the approval decision, the
+    # validator result, the scheduler decision, the runtime preflight, or
+    # ExecutionEngine authority, and it never changes ready_for_human_review.
+    codex_advisory_review = summarize_codex_advisory_review_artifacts(
+        effective_artifact_dir
+    ).to_dict()
 
     combined_artifacts = _build_artifact_summary(
         artifacts=artifacts,
@@ -262,6 +274,7 @@ def summarize_waiting_approval_task(
         validators=validators,
         artifacts=combined_artifacts,
         approval_review=approval_review,
+        codex_advisory_review=codex_advisory_review,
         evidence=evidence,
         review_readiness=review_readiness,
         next_allowed_actions=list(_NEXT_ALLOWED_ACTIONS),
@@ -988,6 +1001,7 @@ def _error_result(task_key: str, *, status: str, error: str) -> WaitingApprovalS
             "latest_decision": None,
             "latest_decision_kind": None,
         },
+        codex_advisory_review=summarize_codex_advisory_review_artifacts(None).to_dict(),
         evidence={
             "available": False,
             "task_evidence": {
@@ -1065,6 +1079,14 @@ def _format_markdown(result: WaitingApprovalSummaryResult) -> str:
         "## Validators",
         f"- Available: {result.validators['available']}",
         f"- All passed: {result.validators['all_passed']}",
+        "",
+        "## Codex Advisory Review",
+        f"- Present: {result.codex_advisory_review['present']}",
+        f"- Review status: {result.codex_advisory_review['review_status']}",
+        f"- Risk level: {result.codex_advisory_review['risk_level']}",
+        f"- Validation authority: {result.codex_advisory_review['validation_authority']}",
+        f"- Human review required: {result.codex_advisory_review['human_review_required']}",
+        "- Advisory evidence only; does not approve, block, validate, or merge.",
         "",
         "## Review Readiness",
         f"- Ready for human review: {result.review_readiness['ready_for_human_review']}",
