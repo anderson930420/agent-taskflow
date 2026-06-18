@@ -994,6 +994,7 @@ def _build_executor_context(task: TaskRecord, workspace_result: WorkspacePrepara
         artifact_dir=artifact_dir,
         prompt_path=prompt_path,
         model=task.model,
+        repo_root=task.repo_path,
     )
 
 

@@ -46,6 +46,7 @@ class ExecutorContext:
     model: str | None = None
     timeout_seconds: int | None = None
     env: dict[str, str] | None = None
+    repo_root: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
@@ -60,6 +61,13 @@ class ExecutorContext:
             "artifact_dir",
             require_absolute_path(self.artifact_dir, "artifact_dir"),
         )
+
+        if self.repo_root is not None:
+            object.__setattr__(
+                self,
+                "repo_root",
+                require_absolute_path(self.repo_root, "repo_root"),
+            )
 
         if self.prompt_path is not None:
             object.__setattr__(
