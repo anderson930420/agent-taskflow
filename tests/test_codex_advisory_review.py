@@ -89,9 +89,30 @@ class CodexAdvisoryReviewTests(unittest.TestCase):
             "recommended_human_focus",
             "suggested_followups",
             "missing_evidence",
+            "review_checklist",
+            "human_review_priorities",
             "artifacts",
         ):
             self.assertIn(key, payload, key)
+
+    def test_dry_run_payload_includes_full_checklist_coverage(self) -> None:
+        from agent_taskflow.codex_advisory_review import REVIEW_CHECKLIST_AREAS
+
+        payload = build_review_payload(
+            self._request(), detect_evidence(self.artifact_dir)
+        )
+        checklist = payload["review_checklist"]
+        for area in REVIEW_CHECKLIST_AREAS:
+            self.assertIn(area, checklist)
+            self.assertEqual(checklist[area]["status"], "unknown")
+            self.assertTrue(checklist[area]["summary"].strip())
+            self.assertEqual(checklist[area]["findings"], [])
+        priorities = payload["human_review_priorities"]
+        self.assertTrue(priorities)
+        self.assertEqual(priorities[0]["priority"], 1)
+        self.assertEqual(priorities[0]["area"], "human_review_priority")
+        self.assertTrue(priorities[0]["reason"].strip())
+        self.assertIsInstance(priorities[0]["suggested_checks"], list)
 
     def test_validate_payload_rejects_validation_authority_true(self) -> None:
         payload = build_review_payload(self._request(), detect_evidence(self.artifact_dir))
@@ -515,6 +536,95 @@ class CodexAdvisoryConfirmRunTests(unittest.TestCase):
         )
         _, payload, _ = self._run(return_value=fake)
         self._assert_tool_error(payload, "codex_output_invariant_violation")
+
+    # --- v0.2.6 checklist merge ---------------------------------------------
+
+    def test_confirm_run_merges_codex_checklist_and_priorities(self) -> None:
+        from agent_taskflow.codex_advisory_review import (
+            REVIEW_CHECKLIST_AREAS,
+            build_default_checklist,
+        )
+
+        codex_checklist = build_default_checklist(status="pass", summary="reviewed")
+        codex_checklist["silent_failure"] = {
+            "status": "concern",
+            "summary": "swallowed exception in fallback path",
+            "findings": ["bare except in runner"],
+        }
+        payload_in = {
+            "review_status": "needs_attention",
+            "review_checklist": codex_checklist,
+            "human_review_priorities": [
+                {
+                    "priority": 1,
+                    "area": "silent_failure",
+                    "reason": "verify the swallowed exception is intentional",
+                    "suggested_checks": ["read the fallback branch"],
+                }
+            ],
+        }
+        fake = self._completed(stdout=json.dumps(payload_in))
+        _, payload, _ = self._run(return_value=fake)
+
+        self.assertEqual(payload["review_status"], "needs_attention")
+        self.assertEqual(
+            payload["review_checklist"]["silent_failure"]["status"], "concern"
+        )
+        for area in REVIEW_CHECKLIST_AREAS:
+            self.assertIn(area, payload["review_checklist"])
+        self.assertEqual(
+            payload["human_review_priorities"][0]["area"], "silent_failure"
+        )
+
+    def test_confirm_run_keeps_default_checklist_when_codex_omits_it(self) -> None:
+        from agent_taskflow.codex_advisory_review import REVIEW_CHECKLIST_AREAS
+
+        fake = self._completed(stdout=json.dumps({"review_status": "looks_good"}))
+        _, payload, _ = self._run(return_value=fake)
+
+        self.assertEqual(payload["review_status"], "looks_good")
+        for area in REVIEW_CHECKLIST_AREAS:
+            entry = payload["review_checklist"][area]
+            self.assertIn(entry["status"], ("pass", "concern", "not_applicable", "unknown"))
+            self.assertTrue(entry["summary"].strip())
+            self.assertIsInstance(entry["findings"], list)
+
+    def test_confirm_run_keeps_non_empty_priorities_when_codex_omits_them(self) -> None:
+        fake = self._completed(stdout=json.dumps({"review_status": "looks_good"}))
+        _, payload, _ = self._run(return_value=fake)
+        self.assertEqual(payload["review_status"], "looks_good")
+        self.assertTrue(payload["human_review_priorities"])
+        self.assertEqual(payload["human_review_priorities"][0]["priority"], 1)
+
+    def test_confirm_run_empty_codex_priorities_tool_error(self) -> None:
+        payload_in = {
+            "review_status": "looks_good",
+            "human_review_priorities": [],
+        }
+        fake = self._completed(stdout=json.dumps(payload_in))
+        _, payload, _ = self._run(return_value=fake)
+        # An empty Codex priority list violates the contract; downgrade to a
+        # tool_error fallback that still carries non-empty fallback priorities.
+        self._assert_tool_error(payload, "codex_output_invariant_violation")
+        self.assertTrue(payload["human_review_priorities"])
+
+    def test_confirm_run_malformed_codex_checklist_tool_error(self) -> None:
+        from agent_taskflow.codex_advisory_review import REVIEW_CHECKLIST_AREAS
+
+        payload_in = {
+            "review_status": "looks_good",
+            "review_checklist": {"design_risk": {"status": "approved"}},
+        }
+        fake = self._completed(stdout=json.dumps(payload_in))
+        _, payload, _ = self._run(return_value=fake)
+
+        # Malformed checklist downgrades to tool_error but keeps a valid fallback
+        # checklist of unknown findings (so the artifact stays contract-valid).
+        self._assert_tool_error(payload, "codex_output_invariant_violation")
+        for area in REVIEW_CHECKLIST_AREAS:
+            entry = payload["review_checklist"][area]
+            self.assertEqual(entry["status"], "unknown")
+            self.assertTrue(entry["summary"].strip())
 
     # --- authority boundary -------------------------------------------------
 

@@ -461,3 +461,165 @@ The `v0.2.5` gate:
 
 Once a task reaches `waiting_approval`, human final approval remains required and
 deterministic validators remain pytest / compileall / policy / changed-files.
+
+## Codex Advisory Review Checklist Hardening (v0.2.6)
+
+`v0.2.6` hardens the Codex advisory artifact so every required Codex advisory
+review consistently covers the review areas human reviewers care about.
+
+The core semantic is:
+
+```text
+Require checklist coverage, not Codex approval.
+```
+
+`v0.2.5` already requires valid Codex advisory artifact contract evidence before
+`waiting_approval`. `v0.2.6` makes that evidence more useful by requiring a
+structured review checklist (and explicit human reviewer priority guidance)
+inside the Codex advisory artifact, validated by the deterministic
+`codex_advisory_artifact_contract` validator.
+
+### Required checklist coverage
+
+Every Codex advisory artifact must include a `review_checklist` object that
+explicitly covers each of these required review areas:
+
+```text
+architecture_boundary
+design_risk
+test_quality
+silent_failure
+fallback_correctness
+race_concurrency
+path_cwd_repo_root
+human_review_priority
+```
+
+Each area is an object with:
+
+- `status`: one of `pass`, `concern`, `not_applicable`, `unknown`
+- `summary`: a non-empty string
+- `findings`: a list (possibly empty) of advisory finding strings
+
+The artifact must also include `human_review_priorities`: a **non-empty** list of
+priority entries. Human reviewer priority guidance must be *present*, not merely
+a present field, so an empty list is contract-invalid. Each entry is an object
+with:
+
+- `priority`: a positive integer (1 is highest priority)
+- `area`: one of the checklist areas or `other`
+- `reason`: a non-empty string
+- `suggested_checks`: a list of concrete checks for a human reviewer
+
+A suggested shape:
+
+```json
+{
+  "review_checklist": {
+    "architecture_boundary": {
+      "status": "pass|concern|not_applicable|unknown",
+      "summary": "non-empty string",
+      "findings": ["..."]
+    }
+  },
+  "human_review_priorities": [
+    {
+      "priority": 1,
+      "area": "architecture_boundary",
+      "reason": "non-empty string",
+      "suggested_checks": ["..."]
+    }
+  ]
+}
+```
+
+### Valid checklist statuses are advisory, not blockers
+
+`concern`, `unknown`, and `not_applicable` are advisory checklist statuses. They
+report coverage; they are **not** automatic blockers. The contract validator
+does **not** fail merely because a checklist area reports `concern`, `unknown`,
+or `not_applicable`, and the evidence gate still reaches `waiting_approval` when
+the checklist is structurally valid even if areas report `concern`.
+
+Likewise, the runner still does **not** require `review_status == looks_good`.
+`looks_good`, `needs_attention`, `high_risk`, and a structurally valid
+`tool_error` all remain valid advisory evidence.
+
+### Missing or malformed checklists are contract-invalid
+
+The `codex_advisory_artifact_contract` validator now **fails** when:
+
+```text
+review_checklist is missing
+review_checklist is not an object
+any required checklist area is missing
+a checklist area is not an object
+a checklist area has a missing/invalid status
+a checklist area has a missing/empty summary
+a checklist area has non-list findings
+human_review_priorities is missing
+human_review_priorities is not a list
+human_review_priorities is empty
+a human_review_priorities entry is malformed (non-object, non-positive priority,
+  invalid area, empty reason, or non-list suggested_checks)
+```
+
+The validator does **not** fail merely because:
+
+```text
+a checklist area status is concern / unknown / not_applicable
+review_status is needs_attention / high_risk / structurally valid tool_error
+```
+
+Because the evidence gate (v0.2.5) delegates to this validator, a missing or
+malformed checklist now blocks the transition into `waiting_approval` as
+required-evidence blocking — never as a Codex judgment failure.
+
+### Dry-run and tool_error fallback checklists
+
+The dry-run generator (`review_status = not_run`) and the `tool_error` fallback
+both emit a structured checklist where every required area has status `unknown`
+and a non-empty fallback summary. Because `human_review_priorities` must be
+non-empty, they also emit a single fallback priority entry (area
+`human_review_priority`, priority `1`) directing the human reviewer to
+independently prioritize every required review area, with a fallback `reason`
+that names the situation (dry-run, no Codex priorities, or Codex failure/timeout).
+
+This is a deliberate choice: when Codex never produced a review (dry-run,
+timeout, command not found, parse error, or invariant violation), the artifact
+still deterministically expresses that every required area was considered, with
+`unknown` evidence and explicit (fallback) human reviewer priority guidance, so
+it remains contract-valid.
+
+### Confirm-run checklist merge
+
+In confirm-run mode, a Codex-provided `review_checklist` is validated and merged
+over the default checklist (areas Codex omits keep the default entry, so every
+required area stays covered), and a Codex-provided `human_review_priorities` list
+is validated and applied (a Codex-provided `human_review_priorities` must itself
+be non-empty and well-formed). A structurally invalid or empty Codex checklist or
+priority list is downgraded to a `tool_error` advisory artifact with the
+`unknown` fallback checklist and the non-empty fallback priority entry, exactly
+like other Codex output problems; it never crashes the workflow and never blocks
+by itself.
+
+### Human reviewer priority guidance is surfaced
+
+The generated `codex-advisory-review.md` artifact renders a `## Review Checklist`
+section and a `## Human Review Priorities` section, and the v0.2.3
+waiting-approval summary exposes `review_checklist` and `human_review_priorities`
+under its `codex_advisory_review` section (and surfaces the priorities in its
+markdown), so human reviewers can see the checklist coverage and where to focus.
+
+### What v0.2.6 does not change
+
+`v0.2.6` is a contract-hardening layer only. It does **not** invoke the Codex CLI
+beyond the existing v0.2.2 behavior, adds **no** new subprocess behavior, does
+**not** make Codex judgment validator or approval authority, does **not** require
+`review_status == looks_good`, and does **not** block merely because
+`review_status` is `high_risk`, `needs_attention`, or `tool_error`. It does not
+change approval authority, merge behavior, branch push, PR creation, cleanup,
+branch deletion, or worktree deletion, and it does not change the v0.2.5 required
+evidence gate semantics except through stricter contract validation. Human final
+approval remains required and deterministic validators remain pytest /
+compileall / policy / changed-files.

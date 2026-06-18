@@ -21,10 +21,13 @@ from pathlib import Path
 from agent_taskflow.codex_advisory_review import (
     JSON_FILENAME,
     MARKDOWN_FILENAME,
+    REVIEW_CHECKLIST_AREAS,
     REVIEWER,
     SCHEMA_VERSION,
     STDERR_FILENAME,
     STDOUT_FILENAME,
+    build_default_checklist,
+    build_default_human_review_priorities,
 )
 from agent_taskflow.codex_advisory_artifact_contract_validator import (
     VALIDATOR_NAME,
@@ -69,6 +72,17 @@ class CodexAdvisoryArtifactContractValidatorTests(unittest.TestCase):
             "tool_error": None,
             "generated_at": "2026-06-18T00:00:00Z",
             "artifacts": {},
+            "review_checklist": build_default_checklist(
+                status="pass", summary="reviewed"
+            ),
+            "human_review_priorities": [
+                {
+                    "priority": 1,
+                    "area": "architecture_boundary",
+                    "reason": "confirm executor/validator boundary is respected",
+                    "suggested_checks": ["inspect changed files"],
+                }
+            ],
         }
         base.update(overrides)
         return base
@@ -495,6 +509,324 @@ class CodexAdvisoryArtifactContractValidatorTests(unittest.TestCase):
             "cleanup",
         ):
             self.assertNotIn(forbidden, MODULE_SOURCE, forbidden)
+
+    # --- v0.2.6 review checklist coverage --------------------------------
+
+    def test_valid_checklist_passes(self) -> None:
+        self._write_json(self._payload())
+        self._write_markdown()
+
+        result = self._validate(task_key="AT-GH-1")
+
+        self.assertTrue(result.passed, result.errors)
+
+    def test_missing_review_checklist_fails(self) -> None:
+        payload = self._payload()
+        del payload["review_checklist"]
+        self._write_json(payload)
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("review_checklist" in e for e in result.errors))
+
+    def test_review_checklist_not_object_fails(self) -> None:
+        self._write_json(self._payload(review_checklist=["not", "an", "object"]))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("review_checklist must be an object" in e for e in result.errors)
+        )
+
+    def test_missing_required_checklist_area_fails(self) -> None:
+        checklist = build_default_checklist(status="pass", summary="ok")
+        del checklist["silent_failure"]
+        self._write_json(self._payload(review_checklist=checklist))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("silent_failure" in e for e in result.errors))
+
+    def test_checklist_area_not_object_fails(self) -> None:
+        checklist = build_default_checklist(status="pass", summary="ok")
+        checklist["design_risk"] = "not an object"
+        self._write_json(self._payload(review_checklist=checklist))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("design_risk" in e and "object" in e for e in result.errors)
+        )
+
+    def test_checklist_area_invalid_status_fails(self) -> None:
+        checklist = build_default_checklist(status="pass", summary="ok")
+        checklist["test_quality"]["status"] = "approved"
+        self._write_json(self._payload(review_checklist=checklist))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("test_quality" in e and "status" in e for e in result.errors)
+        )
+
+    def test_checklist_area_empty_summary_fails(self) -> None:
+        checklist = build_default_checklist(status="pass", summary="ok")
+        checklist["race_concurrency"]["summary"] = "   "
+        self._write_json(self._payload(review_checklist=checklist))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("race_concurrency" in e and "summary" in e for e in result.errors)
+        )
+
+    def test_checklist_area_findings_not_list_fails(self) -> None:
+        checklist = build_default_checklist(status="pass", summary="ok")
+        checklist["fallback_correctness"]["findings"] = "nope"
+        self._write_json(self._payload(review_checklist=checklist))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any(
+                "fallback_correctness" in e and "findings" in e
+                for e in result.errors
+            )
+        )
+
+    def test_checklist_status_concern_passes(self) -> None:
+        checklist = build_default_checklist(status="concern", summary="a concern")
+        self._write_json(self._payload(review_checklist=checklist))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertTrue(result.passed, result.errors)
+
+    def test_checklist_status_unknown_passes(self) -> None:
+        checklist = build_default_checklist(status="unknown", summary="not assessed")
+        self._write_json(self._payload(review_checklist=checklist))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertTrue(result.passed, result.errors)
+
+    def test_checklist_status_not_applicable_passes(self) -> None:
+        checklist = build_default_checklist(status="not_applicable", summary="n/a")
+        self._write_json(self._payload(review_checklist=checklist))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertTrue(result.passed, result.errors)
+
+    def test_needs_attention_with_valid_checklist_passes(self) -> None:
+        self._write_json(
+            self._confirm_payload(review_status="needs_attention", risk_level="medium")
+        )
+        self._write_markdown()
+        self._write_outputs()
+
+        result = self._validate()
+
+        self.assertTrue(result.passed, result.errors)
+
+    def test_high_risk_with_valid_checklist_passes(self) -> None:
+        self._write_json(
+            self._confirm_payload(review_status="high_risk", risk_level="high")
+        )
+        self._write_markdown()
+        self._write_outputs()
+
+        result = self._validate()
+
+        self.assertTrue(result.passed, result.errors)
+
+    def test_tool_error_with_unknown_fallback_checklist_passes(self) -> None:
+        # The chosen tool_error behavior: a structured fallback checklist of
+        # `unknown` findings is required and sufficient.
+        self._write_json(
+            self._confirm_payload(
+                review_status="tool_error",
+                risk_level="unknown",
+                tool_error={"category": "codex_cli_timeout", "message": "timed out"},
+                review_checklist=build_default_checklist(
+                    status="unknown", summary="not assessed; codex failed"
+                ),
+                human_review_priorities=build_default_human_review_priorities(
+                    reason="codex failed; prioritize manually"
+                ),
+            )
+        )
+        self._write_markdown()
+        self._write_outputs()
+
+        result = self._validate()
+
+        self.assertTrue(result.passed, result.errors)
+
+    def test_missing_human_review_priorities_fails(self) -> None:
+        payload = self._payload()
+        del payload["human_review_priorities"]
+        self._write_json(payload)
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("human_review_priorities" in e for e in result.errors)
+        )
+
+    def test_human_review_priorities_not_list_fails(self) -> None:
+        self._write_json(self._payload(human_review_priorities={"not": "a list"}))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("human_review_priorities must be a list" in e for e in result.errors)
+        )
+
+    def test_malformed_human_review_priority_entry_fails(self) -> None:
+        self._write_json(
+            self._payload(
+                human_review_priorities=[{"priority": 1, "area": "architecture_boundary"}]
+            )
+        )
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("human_review_priorities" in e and "reason" in e for e in result.errors)
+        )
+
+    def test_empty_human_review_priorities_fails(self) -> None:
+        # v0.2.6: human reviewer priority guidance must be present (non-empty).
+        # An empty list is a contract failure, not valid evidence.
+        self._write_json(self._payload(human_review_priorities=[]))
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any(
+                "human_review_priorities" in e and "non-empty" in e
+                for e in result.errors
+            )
+        )
+
+    def test_non_positive_priority_fails(self) -> None:
+        self._write_json(
+            self._payload(
+                human_review_priorities=[
+                    {
+                        "priority": 0,
+                        "area": "design_risk",
+                        "reason": "look here",
+                        "suggested_checks": [],
+                    }
+                ]
+            )
+        )
+        self._write_markdown()
+
+        result = self._validate()
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("positive integer priority" in e for e in result.errors)
+        )
+
+    def test_default_payload_has_non_empty_human_review_priorities(self) -> None:
+        # The real dry-run generator must emit non-empty fallback priorities.
+        from agent_taskflow.codex_advisory_review import (
+            CodexAdvisoryReviewRequest,
+            build_review_payload,
+            detect_evidence,
+        )
+
+        payload = build_review_payload(
+            CodexAdvisoryReviewRequest(
+                task_key="AT-GH-1",
+                artifact_dir=self.artifact_dir,
+                dry_run=True,
+            ),
+            detect_evidence(self.artifact_dir),
+        )
+        priorities = payload["human_review_priorities"]
+        self.assertTrue(priorities)
+        self.assertEqual(priorities[0]["priority"], 1)
+        self.assertTrue(priorities[0]["reason"].strip())
+
+        self._write_json(payload)
+        self._write_markdown()
+        self.assertTrue(self._validate(task_key="AT-GH-1").passed)
+
+    def test_tool_error_fallback_has_non_empty_human_review_priorities(self) -> None:
+        # The tool_error fallback (via _apply_tool_error) must keep non-empty,
+        # structurally valid priorities so the artifact stays contract-valid.
+        from agent_taskflow.codex_advisory_review import (
+            build_default_human_review_priorities as _fallback,
+        )
+
+        self._write_json(
+            self._confirm_payload(
+                review_status="tool_error",
+                risk_level="unknown",
+                tool_error={"category": "codex_cli_timeout", "message": "timed out"},
+                review_checklist=build_default_checklist(
+                    status="unknown", summary="not assessed"
+                ),
+                human_review_priorities=_fallback(reason="codex failed"),
+            )
+        )
+        self._write_markdown()
+        self._write_outputs()
+
+        result = self._validate()
+
+        self.assertTrue(result.passed, result.errors)
+
+    def test_generated_dry_run_artifact_passes_contract(self) -> None:
+        # The real dry-run generator must produce a contract-valid checklist.
+        from agent_taskflow.codex_advisory_review import (
+            CodexAdvisoryReviewRequest,
+            generate_codex_advisory_review,
+        )
+
+        generate_codex_advisory_review(
+            CodexAdvisoryReviewRequest(
+                task_key="AT-GH-1",
+                artifact_dir=self.artifact_dir,
+                dry_run=True,
+            )
+        )
+
+        result = self._validate(task_key="AT-GH-1")
+
+        self.assertTrue(result.passed, result.errors)
+        for area in REVIEW_CHECKLIST_AREAS:
+            self.assertIn(area, REVIEW_CHECKLIST_AREAS)
 
     def test_tests_guard_against_authority_confusing_language(self) -> None:
         # The validator validates the artifact contract, not advisory judgment.

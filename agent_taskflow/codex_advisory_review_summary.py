@@ -56,6 +56,8 @@ class CodexAdvisoryReviewSummary:
     stderr_path: str | None
     summary: str
     tool_error: dict[str, Any] | None
+    review_checklist: dict[str, Any] | None
+    human_review_priorities: list[dict[str, Any]]
     warnings: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,6 +73,8 @@ class CodexAdvisoryReviewSummary:
             "stderr_path": self.stderr_path,
             "summary": self.summary,
             "tool_error": self.tool_error,
+            "review_checklist": self.review_checklist,
+            "human_review_priorities": list(self.human_review_priorities),
             "warnings": list(self.warnings),
         }
 
@@ -173,6 +177,20 @@ def summarize_codex_advisory_review_artifacts(
     if not isinstance(tool_error, dict):
         tool_error = None
 
+    # v0.2.6 review checklist coverage and human reviewer priority guidance are
+    # surfaced as human-review evidence only. They are reported as-is; this
+    # lenient summary never fails on a missing or malformed checklist.
+    review_checklist = data.get("review_checklist")
+    if not isinstance(review_checklist, dict):
+        review_checklist = None
+    human_review_priorities_raw = data.get("human_review_priorities")
+    if isinstance(human_review_priorities_raw, list):
+        human_review_priorities = [
+            item for item in human_review_priorities_raw if isinstance(item, dict)
+        ]
+    else:
+        human_review_priorities = []
+
     # Companion artifact consistency. The markdown summary is always generated
     # alongside the JSON; stdout/stderr exist only for confirm-run output.
     if markdown_path is None:
@@ -204,6 +222,8 @@ def summarize_codex_advisory_review_artifacts(
         stderr_path=stderr_path,
         summary=summary_text,
         tool_error=tool_error,
+        review_checklist=review_checklist,
+        human_review_priorities=human_review_priorities,
         warnings=tuple(warnings),
     )
 
@@ -233,6 +253,8 @@ def _absent_summary(
         stderr_path=stderr_path,
         summary="",
         tool_error=None,
+        review_checklist=None,
+        human_review_priorities=[],
         warnings=(),
     )
 
@@ -257,6 +279,8 @@ def _malformed_summary(
         stderr_path=stderr_path,
         summary="",
         tool_error=None,
+        review_checklist=None,
+        human_review_priorities=[],
         warnings=(warning,),
     )
 

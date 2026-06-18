@@ -415,6 +415,8 @@ class CodexAdvisoryReviewSummaryTests(unittest.TestCase):
                 "stderr_path",
                 "summary",
                 "tool_error",
+                "review_checklist",
+                "human_review_priorities",
                 "warnings",
             },
         )

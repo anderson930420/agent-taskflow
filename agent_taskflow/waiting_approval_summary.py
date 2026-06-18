@@ -1091,9 +1091,27 @@ def _format_markdown(result: WaitingApprovalSummaryResult) -> str:
         f"- Stdout artifact: {result.codex_advisory_review['stdout_path'] or '(none)'}",
         f"- Stderr artifact: {result.codex_advisory_review['stderr_path'] or '(none)'}",
         "- Advisory evidence only; does not approve, block, validate, or merge.",
-        "",
-        f"- Ready for human review: {result.review_readiness['ready_for_human_review']}",
     ]
+    human_review_priorities = (
+        result.codex_advisory_review.get("human_review_priorities") or []
+    )
+    if human_review_priorities:
+        lines.append("- Codex human review priorities:")
+        for item in human_review_priorities:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"  - [{item.get('priority')}] {item.get('area')}: "
+                f"{item.get('reason')}"
+            )
+    else:
+        lines.append("- Codex human review priorities: (none)")
+    lines.extend(
+        [
+            "",
+            f"- Ready for human review: {result.review_readiness['ready_for_human_review']}",
+        ]
+    )
     codex_warnings = result.codex_advisory_review.get("warnings") or []
     if codex_warnings:
         lines.extend(["- Codex advisory warnings:"])
