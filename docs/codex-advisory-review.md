@@ -203,3 +203,65 @@ approval/blocking behavior, merge, branch push, PR creation, cleanup, branch
 deletion, worktree deletion, or approval record mutation. The reviewer never
 uses `shell=True` and never adds ambiguous flags such as `--approve`,
 `--validate`, `--merge`, `--execute-approval`, or `--run-validator`.
+
+## Waiting approval summary integration (v0.2.3)
+
+`v0.2.3 — Waiting Approval Summary Includes Codex Advisory Review Artifact` adds
+a read-only summary layer that surfaces any Codex advisory review artifacts as
+human-review evidence inside the waiting-approval review summary.
+
+A pure helper module
+(`agent_taskflow/codex_advisory_review_summary.py`) exposes
+`summarize_codex_advisory_review_artifacts(artifact_dir)` returning a
+`CodexAdvisoryReviewSummary`. The waiting-approval summary
+(`agent_taskflow/waiting_approval_summary.py`) wires this into its JSON output
+under the `codex_advisory_review` key and into its markdown output under a
+`## Codex Advisory Review` section.
+
+### What it detects
+
+Only the Codex advisory review artifacts produced by `v0.2.1` / `v0.2.2` are
+detected, by file presence in the task artifact directory:
+
+- `codex-advisory-review.json`
+- `codex-advisory-review.md`
+- `codex-advisory-review-stdout.txt`
+- `codex-advisory-review-stderr.txt`
+
+### What it exposes
+
+The `codex_advisory_review` section exposes `present`, `review_status`,
+`risk_level`, `validation_authority` (always `false`), `human_review_required`
+(always `true`), `json_path`, `markdown_path`, `stdout_path`, `stderr_path`,
+`summary`, `tool_error`, and `warnings`.
+
+### How it behaves
+
+- **Artifact absent:** `present = false`, `review_status = "missing"`,
+  `risk_level = "unknown"`, `validation_authority = false`,
+  `human_review_required = true`, `warnings = []`. The summary does not fail.
+- **JSON valid:** advisory fields (`review_status`, `risk_level`, `summary`,
+  `tool_error`) are surfaced and artifact/companion paths are included.
+- **JSON malformed:** `present = true`, `review_status = "malformed"`, a parse
+  warning is added, and the whole summary still succeeds.
+- **Invariant violation:** a JSON claiming `validation_authority = true` or
+  `human_review_required = false` is not trusted; the summary forces
+  `validation_authority = false` and `human_review_required = true` and adds a
+  warning.
+- **Invalid `review_status` / `risk_level`:** coerced to `unknown` with a
+  warning.
+- **Missing companion files:** referenced markdown/stdout/stderr files that are
+  absent produce warnings but never fail the summary.
+
+### What it does not do
+
+This summary is evidence only. It reads files only. In `v0.2.3` it does not
+invoke Codex, does not run a subprocess, does not validate, does not approve,
+does not block, does not merge, does not push, does not cleanup, does not delete
+branches or worktrees, does not change scheduler behavior, does not change
+lifecycle transitions or the `waiting_approval` transition, and does not change
+`ExecutionEngine` authority. Codex advisory status never affects
+`execution_allowed`, the validator result, the approval decision, or
+`ready_for_human_review`. It does not integrate a Claude Code executor and does
+not implement P5-f. Human final approval remains required and deterministic
+validators remain pytest / compileall / policy / changed-files.

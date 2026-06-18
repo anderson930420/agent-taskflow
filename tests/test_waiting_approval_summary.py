@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from agent_taskflow.codex_advisory_review import (
+    CodexAdvisoryReviewRequest,
+    JSON_FILENAME,
+    MARKDOWN_FILENAME,
+    generate_codex_advisory_review,
+)
 from agent_taskflow.github_issue_ingestion import GitHubIssueSnapshot, render_issue_spec
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.waiting_approval_summary import (
     WaitingApprovalSummaryRequest,
     summarize_waiting_approval_task,
+    summarize_waiting_approval_task_markdown,
 )
 
 
@@ -279,6 +287,92 @@ class WaitingApprovalSummaryTests(unittest.TestCase):
         self.assertFalse(result.safety["approved"])
         self.assertFalse(result.safety["cleanup_performed"])
         self.assertFalse(result.safety["background_worker_started"])
+
+    def test_codex_advisory_review_absent_is_backward_compatible(self) -> None:
+        self._seed_task(with_approval=True)
+
+        result = self._summarize(self._task_key())
+
+        # New section is always present; absence does not break readiness.
+        self.assertIn("present", result.codex_advisory_review)
+        self.assertFalse(result.codex_advisory_review["present"])
+        self.assertEqual(result.codex_advisory_review["review_status"], "missing")
+        self.assertFalse(result.codex_advisory_review["validation_authority"])
+        self.assertTrue(result.codex_advisory_review["human_review_required"])
+        self.assertTrue(result.review_readiness["ready_for_human_review"])
+
+    def test_codex_advisory_review_section_is_surfaced_when_present(self) -> None:
+        artifact_dir = self._seed_task(with_approval=True)
+        generate_codex_advisory_review(
+            CodexAdvisoryReviewRequest(
+                task_key=self._task_key(), artifact_dir=artifact_dir
+            )
+        )
+
+        result, markdown = summarize_waiting_approval_task_markdown(
+            WaitingApprovalSummaryRequest(
+                task_key=self._task_key(), db_path=self.db_path
+            )
+        )
+
+        codex = result.codex_advisory_review
+        self.assertTrue(codex["present"])
+        self.assertEqual(codex["review_status"], "not_run")
+        self.assertEqual(codex["risk_level"], "unknown")
+        self.assertFalse(codex["validation_authority"])
+        self.assertTrue(codex["human_review_required"])
+        self.assertEqual(codex["json_path"], str(artifact_dir / JSON_FILENAME))
+        self.assertEqual(codex["markdown_path"], str(artifact_dir / MARKDOWN_FILENAME))
+        self.assertIn("Codex Advisory Review", markdown)
+        self.assertIn("## Codex Advisory Review", markdown)
+        self.assertIn("JSON artifact:", markdown)
+        self.assertIn("Markdown artifact:", markdown)
+        self.assertIn("Stdout artifact:", markdown)
+        self.assertIn("Stderr artifact:", markdown)
+        self.assertIn("## Review Readiness", markdown)
+
+    def test_codex_advisory_status_does_not_change_authority(self) -> None:
+        # A high_risk advisory artifact must not block readiness, change the
+        # validator result, the lifecycle status, the approval authority, or any
+        # execution-allowed signal.
+        artifact_dir = self._seed_task(with_approval=True)
+        baseline = self._summarize(self._task_key())
+
+        (artifact_dir / JSON_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": "codex_advisory_review.v1",
+                    "reviewer": "codex-cli",
+                    "task_key": self._task_key(),
+                    "review_status": "high_risk",
+                    "risk_level": "high",
+                    "validation_authority": False,
+                    "human_review_required": True,
+                    "summary": "advisory only",
+                    "confirm_run": True,
+                    "codex_cli_invoked": True,
+                    "tool_error": None,
+                    "artifacts": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (artifact_dir / MARKDOWN_FILENAME).write_text("# md\n", encoding="utf-8")
+
+        result = self._summarize(self._task_key())
+
+        self.assertEqual(result.codex_advisory_review["review_status"], "high_risk")
+        # Authority and readiness are unchanged versus the no-Codex baseline.
+        self.assertEqual(
+            result.review_readiness["ready_for_human_review"],
+            baseline.review_readiness["ready_for_human_review"],
+        )
+        self.assertTrue(result.review_readiness["ready_for_human_review"])
+        self.assertEqual(result.validators["all_passed"], baseline.validators["all_passed"])
+        self.assertEqual(result.task["status"], "waiting_approval")
+        self.assertFalse(result.safety["approved"])
+        self.assertFalse(result.safety["task_status_changed"])
+        self.assertFalse(result.codex_advisory_review["validation_authority"])
 
     def test_summary_does_not_write_db_or_change_status(self) -> None:
         self._seed_task(with_approval=True)
