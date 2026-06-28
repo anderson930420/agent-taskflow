@@ -35,6 +35,36 @@ def _resolve_path(value: str | None) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
+def _parse_claude_code_command(value: str | None) -> tuple[str, ...] | None:
+    """Parse the Claude Code command argv from a JSON array of strings.
+
+    Returns ``None`` when no command is provided. Raises ``ValueError`` for any
+    malformed input so the CLI blocks deterministically before invocation. The
+    command is always argv; it is never parsed or executed through a shell.
+    """
+
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"--claude-code-command-json must be valid JSON: {exc}"
+        ) from exc
+    if not isinstance(parsed, list) or not parsed:
+        raise ValueError(
+            "--claude-code-command-json must be a non-empty JSON array of strings"
+        )
+    command: list[str] = []
+    for part in parsed:
+        if not isinstance(part, str) or not part.strip():
+            raise ValueError(
+                "--claude-code-command-json entries must be non-empty strings"
+            )
+        command.append(part)
+    return tuple(command)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run one explicitly approved queued task and stop at waiting_approval.",
@@ -86,6 +116,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--command",
         nargs="+",
         help="Shell command to run when --executor shell is selected.",
+    )
+    parser.add_argument(
+        "--claude-code-enable-invocation",
+        action="store_true",
+        help=(
+            "Opt in to real Claude Code invocation for --executor claude-code. "
+            "Requires --claude-code-command-json. Omitting this keeps the executor "
+            "prompt-only / dry-run."
+        ),
+    )
+    parser.add_argument(
+        "--claude-code-command-json",
+        help=(
+            "Explicit Claude Code command argv as a JSON array of strings, for "
+            'example \'["claude", "-p"]\'. Required to enable real invocation. The '
+            "command is executed as argv (never through a shell)."
+        ),
+    )
+    parser.add_argument(
+        "--claude-code-timeout-seconds",
+        type=int,
+        help="Timeout in seconds enforced on a real Claude Code invocation.",
     )
     preflight_group = parser.add_mutually_exclusive_group()
     preflight_group.add_argument(
@@ -144,6 +196,9 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             preflight=args.preflight,
             command=tuple(args.command) if args.command is not None else None,
+            claude_code_enable_invocation=args.claude_code_enable_invocation,
+            claude_code_command=_parse_claude_code_command(args.claude_code_command_json),
+            claude_code_timeout_seconds=args.claude_code_timeout_seconds,
         )
         result = run_approved_task(request)
     except (ValueError, ApprovedTaskRunnerError) as exc:

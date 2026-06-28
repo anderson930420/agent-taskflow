@@ -284,6 +284,71 @@ class RealInvocationTests(ClaudeCodeTestCase):
             self.assertEqual(claude_call[0][-1], result.artifacts["claude_code_prompt"]
                              .read_text(encoding="utf-8"))
 
+    def test_real_invocation_records_command_argv_and_enabled_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_context(Path(tmp))
+            _, side_effect = self.make_side_effect(returncode=0)
+            executor = ClaudeCodeExecutor(
+                command=["claude", "-p", "--model", "x"], enable_invocation=True
+            )
+            with patch(
+                "agent_taskflow.executors.claude_code.subprocess.run",
+                side_effect=side_effect,
+            ):
+                executor.run(context)
+            artifact = self.read_execution_artifact(context)
+            self.assertEqual(artifact["command"], ["claude", "-p", "--model", "x"])
+            self.assertIs(artifact["invocation_enabled"], True)
+
+    def test_real_invocation_records_changed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_context(Path(tmp))
+            _, side_effect = self.make_side_effect(returncode=0)
+            executor = ClaudeCodeExecutor(
+                command=["claude", "-p"], enable_invocation=True
+            )
+            with patch(
+                "agent_taskflow.executors.claude_code.subprocess.run",
+                side_effect=side_effect,
+            ):
+                executor.run(context)
+            artifact = self.read_execution_artifact(context)
+            self.assertIn("README.md", artifact["changed_files"])
+
+    def test_real_invocation_preserves_authority_invariants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_context(Path(tmp))
+            _, side_effect = self.make_side_effect(returncode=0)
+            executor = ClaudeCodeExecutor(
+                command=["claude", "-p"], enable_invocation=True
+            )
+            with patch(
+                "agent_taskflow.executors.claude_code.subprocess.run",
+                side_effect=side_effect,
+            ):
+                executor.run(context)
+            artifact = self.read_execution_artifact(context)
+            self.assertEqual(artifact["validation_authority"], "none")
+            self.assertEqual(artifact["approval_authority"], "none")
+            self.assertEqual(artifact["merge_authority"], "none")
+            self.assertEqual(artifact["cleanup_authority"], "none")
+            self.assertIs(artifact["human_review_required"], True)
+
+    def test_timeout_passed_to_subprocess(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_context(Path(tmp), timeout_seconds=42)
+            calls, side_effect = self.make_side_effect(returncode=0)
+            executor = ClaudeCodeExecutor(
+                command=["claude", "-p"], enable_invocation=True
+            )
+            with patch(
+                "agent_taskflow.executors.claude_code.subprocess.run",
+                side_effect=side_effect,
+            ):
+                executor.run(context)
+            claude_call = next(c for c in calls if c[0][:1] == ["claude"])
+            self.assertEqual(claude_call[1]["timeout"], 42)
+
     def test_nonzero_exit_records_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self.make_context(Path(tmp))

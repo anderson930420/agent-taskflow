@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -201,6 +202,9 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         provider: str | None = None,
         tools: tuple[str, ...] | None = None,
         pi_bin: str | None = None,
+        claude_code_enable_invocation: bool = False,
+        claude_code_command: tuple[str, ...] | None = None,
+        claude_code_timeout_seconds: int | None = None,
     ) -> ApprovedTaskRunRequest:
         return ApprovedTaskRunRequest(
             task_key=task_key,
@@ -219,7 +223,35 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             provider=provider,
             tools=tools,
             pi_bin=pi_bin,
+            claude_code_enable_invocation=claude_code_enable_invocation,
+            claude_code_command=claude_code_command,
+            claude_code_timeout_seconds=claude_code_timeout_seconds,
         )
+
+    def _write_fake_claude_script(self, *, exit_code: int = 0) -> Path:
+        """Write a fake Claude Code executable that mutates the worktree.
+
+        It writes a file into its cwd (the prepared worktree), emits stdout and
+        stderr, and exits with the requested code. It is plain argv — never a
+        shell string — so it exercises the real subprocess path without invoking
+        a real Claude Code binary.
+        """
+
+        script = self.root / "fake_claude.py"
+        script.write_text(
+            "\n".join(
+                [
+                    "import pathlib, sys",
+                    "pathlib.Path('claude_made_this.txt').write_text('made by fake claude\\n')",
+                    "print('fake claude stdout')",
+                    "sys.stderr.write('fake claude stderr\\n')",
+                    f"sys.exit({exit_code})",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return script
 
     def test_missing_confirmation_flag_refuses_to_run(self) -> None:
         self._add_task("AT-GH-401")
@@ -448,6 +480,140 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertEqual(result.phase, "codex_advisory_evidence")
         self.assertEqual(result.status, RUN_STATUS_BLOCKED)
         self.assertNotEqual(self.store.get_task("AT-GH-728").status, APPROVED_TASK_STATUS)
+
+    def test_claude_code_real_invocation_runs_then_validators_then_waiting_approval(self) -> None:
+        # v0.2.8: opt-in real invocation runs the configured argv with cwd set to
+        # the prepared worktree, records execution artifacts, and STILL passes
+        # through deterministic validators and the Codex advisory evidence gate
+        # before reaching waiting_approval.
+        self._add_task("AT-GH-820")
+        self._write_codex_advisory_evidence("AT-GH-820")
+        script = self._write_fake_claude_script(exit_code=0)
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-820",
+                executor="claude-code",
+                validators=("policy",),
+                claude_code_enable_invocation=True,
+                claude_code_command=(sys.executable, str(script)),
+                claude_code_timeout_seconds=60,
+            ),
+            store=self.store,
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertTrue(result.ok, msg=result.error)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
+        self.assertTrue(result.executor_run["ok"])
+        # Deterministic validators still ran after the executor.
+        self.assertEqual(result.validators[0]["name"], "policy")
+        self.assertTrue(result.validators[0]["ok"])
+
+        artifact_dir = self.artifact_root / "AT-GH-820"
+        execution = json.loads(
+            (artifact_dir / "claude-code-execution.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(execution["status"], "completed")
+        self.assertIs(execution["invocation_enabled"], True)
+        self.assertEqual(execution["exit_code"], 0)
+        self.assertEqual(execution["command"], [sys.executable, str(script)])
+        # cwd recorded as the prepared worktree.
+        worktree_path = self.store.get_task_worktree("AT-GH-820").worktree_path
+        self.assertEqual(execution["cwd"], str(worktree_path))
+        # The fake command's file change is recorded as changed-file evidence.
+        self.assertIn("claude_made_this.txt", execution["changed_files"])
+        # stdout/stderr captured to their own logs.
+        self.assertIn(
+            "fake claude stdout",
+            (artifact_dir / "claude-code-stdout.log").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "fake claude stderr",
+            (artifact_dir / "claude-code-stderr.log").read_text(encoding="utf-8"),
+        )
+        # Authority invariants preserved through a real invocation.
+        self.assertEqual(execution["validation_authority"], "none")
+        self.assertEqual(execution["approval_authority"], "none")
+        self.assertEqual(execution["merge_authority"], "none")
+        self.assertEqual(execution["cleanup_authority"], "none")
+        self.assertIs(execution["human_review_required"], True)
+        # No push/PR/merge/cleanup/approval side effects.
+        self.assertFalse(result.safety["branch_pushed"])
+        self.assertFalse(result.safety["merged"])
+        self.assertFalse(result.safety["approved"])
+        self.assertFalse(result.safety["cleanup_performed"])
+
+    def test_claude_code_real_invocation_cannot_bypass_codex_evidence_gate(self) -> None:
+        # A successful Claude Code exit must not let the task skip the Codex
+        # advisory evidence gate: with no evidence present it stays blocked.
+        self._add_task("AT-GH-821")
+        script = self._write_fake_claude_script(exit_code=0)
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-821",
+                executor="claude-code",
+                validators=("policy",),
+                claude_code_enable_invocation=True,
+                claude_code_command=(sys.executable, str(script)),
+            ),
+            store=self.store,
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "codex_advisory_evidence")
+        self.assertEqual(result.status, RUN_STATUS_BLOCKED)
+        self.assertNotEqual(
+            self.store.get_task("AT-GH-821").status, APPROVED_TASK_STATUS
+        )
+
+    def test_claude_code_enable_invocation_without_command_blocks(self) -> None:
+        # enable-invocation with no command is blocked deterministically before
+        # any subprocess can run; the executor is never resolved.
+        self._add_task("AT-GH-822")
+
+        with mock.patch(
+            "agent_taskflow.approved_task_runner.prepare_task_workspace"
+        ) as prepare_mock:
+            result = run_approved_task(
+                self._request(
+                    task_key="AT-GH-822",
+                    executor="claude-code",
+                    claude_code_enable_invocation=True,
+                ),
+                store=self.store,
+                preflight_runner=lambda **kwargs: _preflight_result(),
+            )
+
+        prepare_mock.assert_not_called()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "selection")
+        self.assertEqual(result.status, RUN_STATUS_BLOCKED)
+        self.assertIn("requires an explicit command", result.error or "")
+        self.assertFalse(result.safety["executor_started"])
+
+    def test_claude_code_options_rejected_for_other_executor(self) -> None:
+        self._add_task("AT-GH-823")
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-823",
+                executor="noop",
+                claude_code_enable_invocation=True,
+                claude_code_command=("claude", "-p"),
+            ),
+            store=self.store,
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "selection")
+        self.assertEqual(result.status, RUN_STATUS_BLOCKED)
+        self.assertIn("only be provided when executor is claude-code", result.error or "")
 
     def test_opencode_without_model_is_explicitly_blocked(self) -> None:
         self._add_task("AT-GH-409")

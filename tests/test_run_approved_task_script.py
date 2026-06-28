@@ -205,6 +205,119 @@ class RunApprovedTaskScriptTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_task_artifacts("AT-GH-505")), before_artifacts)
         self.assertIsNone(self.store.get_task_worktree("AT-GH-505"))
 
+    def test_script_claude_code_dry_run_does_not_invoke(self) -> None:
+        # Without --claude-code-enable-invocation the executor stays dry-run even
+        # in a confirmed run; no subprocess command is recorded.
+        self._add_task("AT-GH-510")
+        result = self.run_script(
+            "--task-key",
+            "AT-GH-510",
+            "--executor",
+            "claude-code",
+            "--confirm-approved-task",
+            "--dry-run",
+            "--json",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["executor"], "claude-code")
+        self.assertEqual(payload["status"], "preview")
+
+    def test_script_claude_code_enable_without_command_blocks(self) -> None:
+        self._add_task("AT-GH-511")
+        result = self.run_script(
+            "--task-key",
+            "AT-GH-511",
+            "--executor",
+            "claude-code",
+            "--confirm-approved-task",
+            "--claude-code-enable-invocation",
+            "--json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("requires an explicit command", payload["error"])
+        self.assertFalse(payload["safety"]["executor_started"])
+
+    def test_script_claude_code_rejects_malformed_command_json(self) -> None:
+        self._add_task("AT-GH-512")
+        result = self.run_script(
+            "--task-key",
+            "AT-GH-512",
+            "--executor",
+            "claude-code",
+            "--confirm-approved-task",
+            "--claude-code-enable-invocation",
+            "--claude-code-command-json",
+            "not-json",
+            "--json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("valid JSON", payload["summary"])
+
+    def test_script_claude_code_real_invocation_runs_fake_command(self) -> None:
+        # A fake argv command (never a shell string) is invoked with cwd set to
+        # the prepared worktree; execution artifacts are written and the task
+        # still progresses through validators + Codex evidence to waiting_approval.
+        from agent_taskflow.codex_advisory_review import (
+            CodexAdvisoryReviewRequest,
+            generate_codex_advisory_review,
+        )
+
+        self._add_task("AT-GH-513")
+        generate_codex_advisory_review(
+            CodexAdvisoryReviewRequest(
+                task_key="AT-GH-513",
+                artifact_dir=self.artifact_root / "AT-GH-513",
+                dry_run=True,
+            )
+        )
+        script = self.root / "fake_claude.py"
+        script.write_text(
+            "\n".join(
+                [
+                    "import pathlib, sys",
+                    "pathlib.Path('cli_claude_made_this.txt').write_text('x\\n')",
+                    "print('cli fake claude stdout')",
+                    "sys.exit(0)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        command_json = json.dumps([sys.executable, str(script)])
+
+        result = self.run_script(
+            "--task-key",
+            "AT-GH-513",
+            "--executor",
+            "claude-code",
+            "--confirm-approved-task",
+            "--skip-preflight",
+            "--claude-code-enable-invocation",
+            "--claude-code-command-json",
+            command_json,
+            "--claude-code-timeout-seconds",
+            "60",
+            "--json",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "waiting_approval")
+        execution = json.loads(
+            (self.artifact_root / "AT-GH-513" / "claude-code-execution.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(execution["status"], "completed")
+        self.assertIs(execution["invocation_enabled"], True)
+        self.assertEqual(execution["command"], [sys.executable, str(script)])
+        self.assertIn("cli_claude_made_this.txt", execution["changed_files"])
+
     def test_script_and_runner_do_not_reference_recommendation_or_forbidden_helpers(self) -> None:
         text = (SCRIPT.read_text(encoding="utf-8") + "\n" + (REPO_ROOT / "agent_taskflow" / "approved_task_runner.py").read_text(encoding="utf-8")).lower()
         forbidden = [
