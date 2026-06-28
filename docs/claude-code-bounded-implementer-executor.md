@@ -1,6 +1,6 @@
 # Claude Code Bounded Implementer Executor
 
-Status: v0.2.8
+Status: v0.2.9
 
 ## Purpose
 
@@ -310,6 +310,81 @@ cannot bypass this gate or set `waiting_approval` directly.
 
 `waiting_approval` is a handoff to a human reviewer, not approval. Final approval
 is always a human decision; the executor never approves.
+
+## v0.2.9 — Real Invocation Workflow Policy + Golden Path Smoke
+
+v0.2.9 adds no new executor behavior. It aligns workflow policy and
+documentation with the v0.2.8 opt-in real invocation profile and adds focused
+golden-path smoke coverage. The core semantic is unchanged:
+
+```text
+Claude Code may be selected as a bounded implementer executor.
+Real invocation remains explicit opt-in.
+Claude Code still does not decide whether the task is done.
+```
+
+### Explicitly selectable bounded implementer executor
+
+`claude-code` is an explicitly selectable bounded implementer executor. It is a
+registered executor name (`list_executor_names()` / `SUPPORTED_EXECUTORS`),
+selected with `--executor claude-code`. Selecting it never grants it validator,
+approval, merge, cleanup, scheduler, or lifecycle authority.
+
+### Real invocation remains opt-in; dry-run remains default
+
+Selecting the executor does not invoke Claude Code. The default remains
+prompt-only / dry-run: the executor generates the implementer prompt and a
+`dry_run` execution artifact and never spawns a subprocess. Real invocation
+requires **all three** of `--executor claude-code`,
+`--claude-code-enable-invocation`, and `--claude-code-command-json` with an
+explicit argv. Omitting the enable flag keeps the run dry-run regardless of any
+other Claude Code option.
+
+### Workflow-policy / allowed-executor alignment
+
+The workflow policy schema documents `claude-code` as a defined, explicitly
+selectable bounded implementer executor adapter. It is not added to the canonical
+`allowed_executors` example (`["manual", "shell", "opencode", "pi"]`) and is not a
+default: to permit it under a given policy, that policy's `allowed_executors`
+must list `"claude-code"`. See
+[workflow-schema.md](workflow-schema.md#allowed_executors).
+
+### Golden-path smoke coverage
+
+Golden-path smokes exercise the v0.2.8 real invocation path end-to-end in a safe
+fake-command environment (no real Claude Code is invoked):
+
+- `tests/test_approved_task_runner.py::ApprovedTaskRunnerTests::test_claude_code_real_invocation_golden_path_smoke`
+- `tests/test_run_approved_task_script.py::RunApprovedTaskScriptTests::test_run_approved_task_claude_code_real_invocation_golden_path_smoke`
+
+They use a fake argv command (never a shell string) that runs with `cwd` set to
+the prepared worktree, writes one file into the worktree, emits stdout and
+stderr, and exits 0. They assert the command is passed as argv, stdout/stderr are
+captured to `claude-code-stdout.log` / `claude-code-stderr.log`, and
+`claude-code-execution.json` records `schema_version = "claude_code_executor.v1"`,
+`executor = "claude-code"`, `invocation_enabled = true`, the command argv, `cwd`,
+exit code, timeout state, changed files, and the always-`none` authority
+invariants with `human_review_required = true`. They also assert that
+deterministic validators still run after the executor, that without Codex
+advisory evidence a successful invocation stays blocked, that with valid Codex
+advisory evidence it can reach `waiting_approval`, and that `waiting_approval` is
+a handoff to a human reviewer — not approval.
+
+### What does not change in v0.2.9
+
+- No scheduler default change. `claude-code` is not the scheduler default
+  executor.
+- No cron/systemd live profile change. Claude Code is not wired into any live
+  profile, daemon, webhook, or loop.
+- No validator authority. Deterministic validators still run after the executor
+  and own pass/fail.
+- No approval authority. The executor never approves and never sets
+  `waiting_approval`.
+- No merge authority and no cleanup authority. No branch push, PR creation,
+  merge, branch deletion, worktree deletion, or cleanup.
+- The Codex advisory evidence gate remains authoritative for the transition into
+  `waiting_approval`.
+- Human final review remains required.
 
 ## Non-goals
 

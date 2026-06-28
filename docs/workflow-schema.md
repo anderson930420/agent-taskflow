@@ -54,8 +54,17 @@ Lists executor adapters allowed by policy. The current example includes:
 ["manual", "shell", "opencode", "pi"]
 ```
 
-Future adapters such as Codex or Claude Code can be added after their adapter
-contracts are defined.
+`claude-code` is also a defined, explicitly selectable bounded implementer
+executor adapter (its adapter contract landed in v0.2.7, and opt-in real
+invocation in v0.2.8). It is not in the example list above and is not a default:
+to permit it under a given policy, add `"claude-code"` to that policy's
+`allowed_executors`. Like every executor adapter it is a bounded implementation
+worker with no validator, approval, merge, cleanup, or scheduler/lifecycle
+authority. See
+[claude-code-bounded-implementer-executor.md](claude-code-bounded-implementer-executor.md).
+
+Future adapters such as Codex can be added after their adapter contracts are
+defined.
 
 ### required_validators
 
