@@ -1,6 +1,6 @@
 # Claude Code Bounded Implementer Executor
 
-Status: v0.2.7
+Status: v0.2.8
 
 ## Purpose
 
@@ -199,6 +199,117 @@ waiting_approval
 ↓
 human final review
 ```
+
+## v0.2.8 — Opt-in Real Invocation Profile
+
+v0.2.8 wires the executor's existing opt-in invocation capability into the
+approved task runner CLI (`scripts/run_approved_task.py`) so an operator can run a
+confirmed task with Claude Code as a real bounded implementer. Real invocation
+remains strictly opt-in; nothing about the default changes.
+
+### How to run prompt-only / dry-run (default)
+
+Select the executor without the enable flag. The executor generates the
+implementer prompt and the `dry_run` execution artifact and never spawns a
+subprocess:
+
+```bash
+python3 scripts/run_approved_task.py \
+  --task-key AT-GH-123 \
+  --executor claude-code \
+  --repo-path /abs/path/to/repo \
+  --db-path /abs/path/to/state.db \
+  --artifact-root /abs/path/to/artifacts \
+  --worktree-root /abs/path/to/worktrees \
+  --confirm-approved-task
+```
+
+### How to explicitly enable real invocation
+
+Real invocation requires **all three** of:
+
+1. `--executor claude-code`
+2. `--claude-code-enable-invocation`
+3. `--claude-code-command-json` with an explicit argv
+
+```bash
+python3 scripts/run_approved_task.py \
+  --task-key AT-GH-123 \
+  --executor claude-code \
+  --repo-path /abs/path/to/repo \
+  --db-path /abs/path/to/state.db \
+  --artifact-root /abs/path/to/artifacts \
+  --worktree-root /abs/path/to/worktrees \
+  --confirm-approved-task \
+  --claude-code-enable-invocation \
+  --claude-code-command-json '["claude", "-p"]' \
+  --claude-code-timeout-seconds 900
+```
+
+If `--claude-code-enable-invocation` is omitted, the run stays prompt-only /
+dry-run regardless of any other Claude Code option. If it is provided without
+`--claude-code-command-json`, the runner blocks deterministically in the
+`selection` phase before any workspace is prepared or any subprocess runs. Claude
+Code-specific options are rejected when another executor is selected.
+
+### How to configure command argv
+
+The command is supplied as a JSON array of strings and is always executed as
+argv. There is no shell parsing and `shell=True` is never used. The generated
+implementer prompt text is appended as the final argument before execution.
+
+### How timeout works
+
+`--claude-code-timeout-seconds` sets the per-invocation timeout passed to the
+executor context. When the configured command exceeds it, the run is recorded as
+`timed_out` and the task is blocked; it never reaches `waiting_approval`.
+
+### Where artifacts are written
+
+Real invocation preserves the v0.2.7 artifact behavior, written under the task
+artifact directory:
+
+```text
+claude-code-implementer-prompt.md
+claude-code-execution.json
+claude-code-stdout.log
+claude-code-stderr.log
+```
+
+### How to inspect `claude-code-execution.json`
+
+`claude-code-execution.json` records `schema_version`, `executor`, `status`,
+`started_at`/`finished_at`, `worktree_path`, `repo_root`, `cwd` (always the
+prepared worktree), `command`, `invocation_enabled`, `prompt_path`,
+`stdout_path`, `stderr_path`, `exit_code`, `timed_out`, `blocking_errors`,
+`warnings`, `changed_files`, and the always-`none` authority invariants with
+`human_review_required: true`. A successful real invocation records
+`status: completed`, `invocation_enabled: true`, the exit code, the exact command
+argv, and the changed files reported by `git status --porcelain` in the worktree.
+
+### What authority remains denied
+
+A real invocation does not change the executor's authority. It does not validate,
+approve, merge, cleanup, push branches, open PRs, delete branches or worktrees,
+or set any approval state. The artifact authority fields remain `"none"` and
+`human_review_required` remains `true`.
+
+### Why deterministic validators still run afterward
+
+A successful Claude Code exit means only that the bounded implementer attempt
+completed. The runner still runs the deterministic validators after the executor.
+If any validator fails, the task is blocked and does not proceed.
+
+### Why the Codex advisory evidence gate still controls `waiting_approval`
+
+Even after validators pass, the task may only enter `waiting_approval` when valid
+Codex advisory artifact contract evidence is present. A successful invocation
+cannot bypass this gate or set `waiting_approval` directly.
+
+### Why human final review remains required
+
+`waiting_approval` is a handoff to a human reviewer, not approval. Final approval
+is always a human decision; the executor never approves.
 
 ## Non-goals
 

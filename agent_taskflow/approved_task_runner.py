@@ -88,6 +88,13 @@ class ApprovedTaskRunRequest:
     provider: str | None = None
     tools: tuple[str, ...] | None = None
     pi_bin: str | None = None
+    # v0.2.8: opt-in Claude Code real invocation profile. Real invocation
+    # requires executor == "claude-code", claude_code_enable_invocation=True, and
+    # an explicit claude_code_command argv. Absent the enable flag the executor
+    # stays prompt-only / dry-run exactly as in v0.2.7.
+    claude_code_enable_invocation: bool = False
+    claude_code_command: tuple[str, ...] | None = None
+    claude_code_timeout_seconds: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
@@ -121,6 +128,25 @@ class ApprovedTaskRunRequest:
         if self.tools is not None:
             tools = tuple(part.strip() for part in self.tools if str(part).strip())
             object.__setattr__(self, "tools", tools or None)
+        object.__setattr__(
+            self, "claude_code_enable_invocation", bool(self.claude_code_enable_invocation)
+        )
+        if self.claude_code_command is not None:
+            claude_command = tuple(
+                part.strip() for part in self.claude_code_command if str(part).strip()
+            )
+            if not claude_command:
+                raise ValueError(
+                    "claude_code_command must not be empty when provided"
+                )
+            object.__setattr__(self, "claude_code_command", claude_command)
+        if self.claude_code_timeout_seconds is not None:
+            timeout = int(self.claude_code_timeout_seconds)
+            if timeout <= 0:
+                raise ValueError(
+                    "claude_code_timeout_seconds must be positive when provided"
+                )
+            object.__setattr__(self, "claude_code_timeout_seconds", timeout)
 
 
 @dataclass(frozen=True)
@@ -281,7 +307,15 @@ def run_approved_task(
     _record_artifact(current_store, effective_task.task_key, "manifest", contract_path)
 
     executor = _resolve_executor(request, effective_task, executor_registry=executor_registry)
-    executor_context = _build_executor_context(effective_task, workspace_result)
+    executor_context = _build_executor_context(
+        effective_task,
+        workspace_result,
+        timeout_seconds=(
+            request.claude_code_timeout_seconds
+            if request.executor == "claude-code"
+            else None
+        ),
+    )
     model_requirement_error = _model_requirement_error(request, effective_task)
     if model_requirement_error is not None:
         _block_task(current_store, effective_task.task_key, model_requirement_error)
@@ -609,7 +643,42 @@ def _validate_selection(
     if request.executor == "shell" and request.command is None:
         return "shell executor requires --command"
 
+    claude_error = _validate_claude_code_options(request)
+    if claude_error is not None:
+        return claude_error
+
     return _validate_validator_names(request, validator_registry=validator_registry)
+
+
+def _validate_claude_code_options(request: ApprovedTaskRunRequest) -> str | None:
+    """Validate Claude Code opt-in invocation options (v0.2.8).
+
+    Claude Code-specific options are only meaningful for the ``claude-code``
+    executor. Real invocation must be explicitly enabled *and* carry an explicit
+    command argv; enabling invocation without a command is blocked deterministically
+    before any subprocess can run.
+    """
+
+    is_claude = request.executor == "claude-code"
+    has_claude_options = (
+        request.claude_code_enable_invocation
+        or request.claude_code_command is not None
+        or request.claude_code_timeout_seconds is not None
+    )
+    if not is_claude:
+        if has_claude_options:
+            return (
+                "Claude Code invocation options may only be provided when "
+                "executor is claude-code"
+            )
+        return None
+
+    if request.claude_code_enable_invocation and request.claude_code_command is None:
+        return (
+            "Claude Code real invocation requires an explicit command; provide "
+            "--claude-code-command-json"
+        )
+    return None
 
 
 def _validate_validator_names(
@@ -680,6 +749,21 @@ def _resolve_executor(
     if request.executor == "shell":
         assert request.command is not None
         return build_shell_executor(request.command, name="shell")
+    if request.executor == "claude-code":
+        return get_executor(
+            "claude-code",
+            claude_command=(
+                list(request.claude_code_command)
+                if request.claude_code_command is not None
+                else None
+            ),
+            claude_enable_invocation=request.claude_code_enable_invocation,
+            worktree_root=(
+                str(request.worktree_root)
+                if request.worktree_root is not None
+                else None
+            ),
+        )
     return get_executor(
         request.executor,
         model=task.model,
@@ -982,7 +1066,12 @@ def _ensure_implementation_prompt(task: TaskRecord) -> tuple[Path | None, str | 
     return prompt_path, None
 
 
-def _build_executor_context(task: TaskRecord, workspace_result: WorkspacePreparationResult) -> ExecutorContext:
+def _build_executor_context(
+    task: TaskRecord,
+    workspace_result: WorkspacePreparationResult,
+    *,
+    timeout_seconds: int | None = None,
+) -> ExecutorContext:
     artifact_dir = task.artifact_dir or workspace_result.worktree_path
     prompt_path = artifact_dir / IMPLEMENTATION_PROMPT_FILENAME
     if not prompt_path.exists():
@@ -994,6 +1083,7 @@ def _build_executor_context(task: TaskRecord, workspace_result: WorkspacePrepara
         artifact_dir=artifact_dir,
         prompt_path=prompt_path,
         model=task.model,
+        timeout_seconds=timeout_seconds,
         repo_root=task.repo_path,
     )
 
