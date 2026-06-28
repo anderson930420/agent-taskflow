@@ -1,23 +1,19 @@
-"""Doc and metadata tests for the v0.2.8 release."""
+"""Historical doc tests for the v0.2.8 release.
+
+These tests are historical: they verify that the v0.2.8 release notes still
+exist and carry the important v0.2.8 content. They no longer assert that
+``pyproject.toml`` is currently ``0.2.8`` -- the current version is tracked by
+the latest release-doc test (see ``tests/test_v029_release_docs.py``).
+"""
 
 from __future__ import annotations
 
-import tomllib
 import unittest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PYPROJECT = REPO_ROOT / "pyproject.toml"
 RELEASE_NOTES = REPO_ROOT / "docs" / "release-notes-v0.2.8-github-release-body.md"
-
-
-class TestV028ReleaseMetadata(unittest.TestCase):
-    def test_pyproject_version_matches_v028_release(self) -> None:
-        with PYPROJECT.open("rb") as handle:
-            pyproject = tomllib.load(handle)
-
-        self.assertEqual(pyproject["project"]["version"], "0.2.8")
 
 
 class TestV028ReleaseNotes(unittest.TestCase):
