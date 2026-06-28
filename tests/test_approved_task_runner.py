@@ -615,6 +615,122 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertEqual(result.status, RUN_STATUS_BLOCKED)
         self.assertIn("only be provided when executor is claude-code", result.error or "")
 
+    def test_claude_code_real_invocation_golden_path_smoke(self) -> None:
+        # v0.2.9 golden-path smoke: one consolidated check of the v0.2.8 opt-in
+        # real invocation profile end-to-end through the runner, in a safe fake-
+        # command environment (no real Claude Code is invoked). It proves the
+        # full invariant set in one place: argv (never a shell string) runs in
+        # the prepared worktree, stdout/stderr are captured to their own logs,
+        # the execution artifact records the bounded-implementer contract, the
+        # deterministic validators still run afterward, the Codex advisory
+        # evidence gate stays authoritative, and waiting_approval is not approval.
+        self._add_task("AT-GH-901")
+        self._write_codex_advisory_evidence("AT-GH-901")
+        script = self._write_fake_claude_script(exit_code=0)
+        command = (sys.executable, str(script))
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-901",
+                executor="claude-code",
+                validators=("policy",),
+                claude_code_enable_invocation=True,
+                claude_code_command=command,
+                claude_code_timeout_seconds=60,
+            ),
+            store=self.store,
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        # Reached waiting_approval through the full pipeline.
+        self.assertTrue(result.ok, msg=result.error)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
+        self.assertEqual(result.executor, "claude-code")
+        self.assertTrue(result.executor_run["ok"])
+
+        # Deterministic validators still ran after the executor.
+        self.assertTrue(result.safety["validators_started"])
+        self.assertEqual(result.validators[0]["name"], "policy")
+        self.assertTrue(result.validators[0]["ok"])
+
+        # Execution artifact records the full bounded-implementer contract.
+        artifact_dir = self.artifact_root / "AT-GH-901"
+        execution = json.loads(
+            (artifact_dir / "claude-code-execution.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(execution["schema_version"], "claude_code_executor.v1")
+        self.assertEqual(execution["executor"], "claude-code")
+        self.assertEqual(execution["status"], "completed")
+        self.assertIs(execution["invocation_enabled"], True)
+        self.assertEqual(execution["exit_code"], 0)
+        self.assertIs(execution["timed_out"], False)
+        # Command is passed as argv (a list), never a shell string.
+        self.assertEqual(execution["command"], list(command))
+        self.assertIsInstance(execution["command"], list)
+        # cwd is the prepared worktree; the fake command ran there.
+        worktree_path = self.store.get_task_worktree("AT-GH-901").worktree_path
+        self.assertEqual(execution["cwd"], str(worktree_path))
+        self.assertTrue((worktree_path / "claude_made_this.txt").exists())
+        self.assertIn("claude_made_this.txt", execution["changed_files"])
+        # Authority invariants are all denied; human review remains required.
+        self.assertEqual(execution["validation_authority"], "none")
+        self.assertEqual(execution["approval_authority"], "none")
+        self.assertEqual(execution["merge_authority"], "none")
+        self.assertEqual(execution["cleanup_authority"], "none")
+        self.assertIs(execution["human_review_required"], True)
+
+        # stdout and stderr captured to their own logs.
+        self.assertIn(
+            "fake claude stdout",
+            (artifact_dir / "claude-code-stdout.log").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "fake claude stderr",
+            (artifact_dir / "claude-code-stderr.log").read_text(encoding="utf-8"),
+        )
+
+        # waiting_approval is a handoff to a human reviewer, not approval, and
+        # the executor produced no push/PR/merge/cleanup side effects.
+        self.assertTrue(result.safety["human_approval_required"])
+        self.assertFalse(result.safety["approved"])
+        self.assertFalse(result.safety["branch_pushed"])
+        self.assertFalse(result.safety["pr_created"])
+        self.assertFalse(result.safety["merged"])
+        self.assertFalse(result.safety["cleanup_performed"])
+
+        # Without Codex advisory evidence, the same successful invocation stays
+        # blocked at the evidence gate: the executor cannot reach waiting_approval.
+        self._add_task("AT-GH-902")
+        blocked = run_approved_task(
+            self._request(
+                task_key="AT-GH-902",
+                executor="claude-code",
+                validators=("policy",),
+                claude_code_enable_invocation=True,
+                claude_code_command=command,
+                claude_code_timeout_seconds=60,
+            ),
+            store=self.store,
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+        self.assertFalse(blocked.ok)
+        self.assertEqual(blocked.phase, "codex_advisory_evidence")
+        self.assertEqual(blocked.status, RUN_STATUS_BLOCKED)
+        self.assertNotEqual(
+            self.store.get_task("AT-GH-902").status, APPROVED_TASK_STATUS
+        )
+        # The bounded invocation itself still ran (its exit was successful); only
+        # the deterministic evidence gate withheld the waiting_approval transition.
+        blocked_execution = json.loads(
+            (self.artifact_root / "AT-GH-902" / "claude-code-execution.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(blocked_execution["status"], "completed")
+        self.assertIs(blocked_execution["human_review_required"], True)
+
     def test_opencode_without_model_is_explicitly_blocked(self) -> None:
         self._add_task("AT-GH-409")
 
