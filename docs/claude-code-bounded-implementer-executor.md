@@ -386,6 +386,21 @@ a handoff to a human reviewer — not approval.
   `waiting_approval`.
 - Human final review remains required.
 
+## v0.3.0 — Operator Invocation Runbook
+
+v0.3.0 adds operator-facing manual invocation guidance only and does not change
+executor behavior. It turns the v0.2.8/v0.2.9 opt-in real invocation capability
+into a safe, copy-pasteable manual procedure for a human operator, including a
+dry-run / prompt-only command, a real invocation command, artifact inspection
+guidance, and pre-run / post-run safety checklists.
+
+See [Claude Code Operator Invocation Runbook](claude-code-operator-invocation-runbook.md).
+
+The runbook adds no new executor, runner, validator, Codex advisory, approval,
+scheduler, or cron/systemd behavior. Real invocation remains explicit opt-in,
+deterministic validators still run, the Codex advisory evidence gate remains
+authoritative, and human final review remains required.
+
 ## Non-goals
 
 - Not the default executor.
