@@ -164,8 +164,8 @@ Important properties:
 - The command is executed as argv.
 - The command is argv-based; there is no shell parsing.
 - `shell=True` is not used.
-- The generated implementer prompt text is appended as the final argument by the
-  executor before execution.
+- The generated implementer prompt text is delivered to the command over stdin
+  by the executor; it is never appended as an argv argument.
 - The cwd is the prepared worktree; the cwd is always the prepared worktree,
   never an arbitrary operator cwd.
 

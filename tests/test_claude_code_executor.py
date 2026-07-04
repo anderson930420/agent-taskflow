@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import subprocess
 import tempfile
@@ -281,8 +282,12 @@ class RealInvocationTests(ClaudeCodeTestCase):
             claude_call = next(c for c in calls if c[0][:1] == ["claude"])
             self.assertEqual(claude_call[1]["cwd"], context.worktree_path)
             self.assertFalse(claude_call[1]["shell"])
-            self.assertEqual(claude_call[0][-1], result.artifacts["claude_code_prompt"]
-                             .read_text(encoding="utf-8"))
+            # The prompt travels over stdin; argv is the configured command only.
+            self.assertEqual(claude_call[0], ["claude", "-p"])
+            self.assertEqual(
+                claude_call[1]["input"],
+                result.artifacts["claude_code_prompt"].read_text(encoding="utf-8"),
+            )
 
     def test_real_invocation_records_command_argv_and_enabled_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -415,6 +420,124 @@ class RealInvocationTests(ClaudeCodeTestCase):
             self.assertEqual(result.status, "blocked")
             artifact = self.read_execution_artifact(context)
             self.assertEqual(artifact["status"], "tool_error")
+
+    def test_permission_error_records_tool_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_context(Path(tmp))
+            executor = ClaudeCodeExecutor(
+                command=["claude", "-p"], enable_invocation=True
+            )
+
+            def side_effect(command, **kwargs):
+                if command[:1] == ["git"]:
+                    return subprocess.CompletedProcess(
+                        args=command, returncode=0, stdout=""
+                    )
+                raise PermissionError(errno.EACCES, "Permission denied")
+
+            with patch(
+                "agent_taskflow.executors.claude_code.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = executor.run(context)
+
+            self.assertEqual(result.status, "blocked")
+            artifact = self.read_execution_artifact(context)
+            self.assertEqual(artifact["status"], "tool_error")
+            self.assertTrue(
+                any("failed to start" in e for e in artifact["blocking_errors"])
+            )
+
+    def test_argument_list_too_long_records_tool_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_context(Path(tmp))
+            executor = ClaudeCodeExecutor(
+                command=["claude", "-p"], enable_invocation=True
+            )
+
+            def side_effect(command, **kwargs):
+                if command[:1] == ["git"]:
+                    return subprocess.CompletedProcess(
+                        args=command, returncode=0, stdout=""
+                    )
+                raise OSError(errno.E2BIG, "Argument list too long")
+
+            with patch(
+                "agent_taskflow.executors.claude_code.subprocess.run",
+                side_effect=side_effect,
+            ):
+                result = executor.run(context)
+
+            self.assertEqual(result.status, "blocked")
+            artifact = self.read_execution_artifact(context)
+            self.assertEqual(artifact["status"], "tool_error")
+
+
+class StartupFailureIntegrationTests(ClaudeCodeTestCase):
+    """Real-subprocess regression tests for command startup failures."""
+
+    def test_non_executable_command_does_not_raise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            context = self.make_context(tmp_path)
+            not_executable = tmp_path / "claude-not-executable"
+            not_executable.write_text("#!/bin/sh\necho unreachable\n", encoding="utf-8")
+            not_executable.chmod(0o644)
+            executor = ClaudeCodeExecutor(
+                command=[str(not_executable)], enable_invocation=True
+            )
+
+            result = executor.run(context)
+
+            self.assertEqual(result.status, "blocked")
+            artifact = self.read_execution_artifact(context)
+            self.assertEqual(artifact["status"], "tool_error")
+            self.assertTrue(
+                any("failed to start" in e for e in artifact["blocking_errors"])
+            )
+            self.assertIs(artifact["human_review_required"], True)
+            stderr_path = result.artifacts["claude_code_stderr"]
+            self.assertIn("failed to start", stderr_path.read_text(encoding="utf-8"))
+
+
+class StdinTransportIntegrationTests(ClaudeCodeTestCase):
+    """Real-subprocess regression tests for prompt delivery over stdin."""
+
+    def test_large_prompt_delivered_via_stdin_not_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Large enough that a single argv element would exceed the Linux
+            # per-argument limit (MAX_ARG_STRLEN, 128 KiB) and raise E2BIG.
+            large_summary = "PROMPT-MARKER " + ("x" * 200_000)
+            context = self.make_context(tmp_path, prompt=large_summary)
+            script = tmp_path / "fake-claude.sh"
+            script.write_text(
+                "#!/bin/sh\n"
+                'printf \'%s\\n\' "$@" > "$PWD/argv.txt"\n'
+                'cat > "$PWD/received-stdin.txt"\n'
+                "echo ok\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            executor = ClaudeCodeExecutor(
+                command=[str(script)], enable_invocation=True
+            )
+
+            result = executor.run(context)
+
+            self.assertEqual(result.status, "completed")
+            prompt_text = (
+                context.artifact_dir / CLAUDE_CODE_PROMPT_FILENAME
+            ).read_text(encoding="utf-8")
+            received = (context.worktree_path / "received-stdin.txt").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("PROMPT-MARKER", received)
+            self.assertEqual(received, prompt_text)
+            argv_dump = (context.worktree_path / "argv.txt").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("PROMPT-MARKER", argv_dump)
 
 
 class RegistryTests(unittest.TestCase):

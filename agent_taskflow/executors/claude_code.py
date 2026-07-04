@@ -15,8 +15,9 @@ By default this executor is prompt-only (a ``dry_run``): it generates the
 implementer prompt and a deterministic execution artifact but never invokes
 Claude Code. Real invocation is opt-in and requires an explicitly configured
 command plus ``enable_invocation=True``. Execution always runs with ``cwd`` set
-to the prepared worktree, captures stdout/stderr, records the exit code, and
-enforces the context timeout.
+to the prepared worktree, delivers the implementer prompt over stdin (never as
+an argv element), captures stdout/stderr, records the exit code, and enforces
+the context timeout.
 
 The deterministic validators, the Codex advisory artifact contract validator,
 the Codex advisory evidence gate, and human final review remain the authorities
@@ -335,7 +336,10 @@ class ClaudeCodeExecutor(Executor):
         prompt_text: str,
     ) -> ExecutorResult:
         assert self.command  # guaranteed by preflight + constructor
-        command = [*self.command, prompt_text]
+        # The implementer prompt is delivered over stdin, never as an argv
+        # element: argv would leak prompt content through process listings and
+        # can exceed the OS argument-size limit for large task summaries.
+        command = list(self.command)
 
         stdout_path = context.artifact_dir / "claude-code-stdout.log"
         stderr_path = context.artifact_dir / "claude-code-stderr.log"
@@ -354,6 +358,7 @@ class ClaudeCodeExecutor(Executor):
             completed = subprocess.run(
                 command,
                 cwd=context.worktree_path,
+                input=prompt_text,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=context.timeout_seconds,
@@ -366,7 +371,11 @@ class ClaudeCodeExecutor(Executor):
             timed_out = True
             stdout_path.write_text(_decode_stream(exc.stdout), encoding="utf-8")
             stderr_path.write_text(_decode_stream(exc.stderr), encoding="utf-8")
-        except FileNotFoundError as exc:
+        except OSError as exc:
+            # Covers FileNotFoundError, PermissionError (command exists but is
+            # not executable), NotADirectoryError, E2BIG, and other startup
+            # failures. These must be recorded as a blocked result with an
+            # execution artifact rather than escaping the executor.
             tool_error = f"Claude Code command failed to start: {exc}"
             stdout_path.write_text("", encoding="utf-8")
             stderr_path.write_text(f"{tool_error}\n", encoding="utf-8")
