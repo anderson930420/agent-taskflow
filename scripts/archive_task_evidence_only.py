@@ -43,6 +43,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import TaskRecord, utc_now_iso, validate_task_status
 from agent_taskflow.store import TaskMirrorStore, default_db_path
 from agent_taskflow.tasks import normalize_task_key
@@ -310,11 +311,7 @@ def _write_evidence_artifact(
 ) -> Path:
     output_root = _resolve_artifact_root(task, artifact_root)
     artifact_path = output_root / task.task_key / "task_evidence_archive.json"
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(artifact_payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, artifact_payload, sort_keys=True)
     return artifact_path
 
 

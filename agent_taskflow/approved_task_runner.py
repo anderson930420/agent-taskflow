@@ -8,6 +8,7 @@ import subprocess
 from typing import Any, Mapping, Sequence
 
 from agent_taskflow.api.schemas import json_safe
+from agent_taskflow.atomic_write import atomic_write_text
 from agent_taskflow.codex_advisory_evidence_gate import (
     RequiredCodexAdvisoryEvidenceRequest,
     RequiredCodexAdvisoryEvidenceResult,
@@ -1054,14 +1055,13 @@ def _ensure_implementation_prompt(task: TaskRecord) -> tuple[Path | None, str | 
             f"{task.executor or 'opencode'} executor: {issue_spec_path}"
         )
     issue_spec_text = issue_spec_path.read_text(encoding="utf-8")
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    prompt_path.write_text(
+    atomic_write_text(
+        prompt_path,
         render_implementation_prompt(
             task_key=task.task_key,
             title=task.title,
             issue_spec=issue_spec_text,
         ),
-        encoding="utf-8",
     )
     return prompt_path, None
 

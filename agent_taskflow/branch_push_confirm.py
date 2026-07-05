@@ -15,6 +15,7 @@ import shlex
 import subprocess
 from typing import Any, Callable, Protocol
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.pr_handoff_package import (
     PrHandoffPackageRequest,
@@ -537,11 +538,7 @@ def confirm_branch_push(
         push_stderr=push_stderr,
     )
     current_store.init_db()
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, evidence, sort_keys=True)
     artifact_recorded = _record_artifact_once(current_store, handoff.task_key, artifact_path)
     event_recorded = _record_event_once(current_store, handoff.task_key, evidence, artifact_path)
 

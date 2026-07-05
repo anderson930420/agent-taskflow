@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.scheduler_confirmation_verifier_report import (
     VERIFIER_REPORT_ARTIFACT_TYPE,
@@ -424,11 +425,7 @@ def create_intake_runner_handoff_from_verifier_report(
         }
 
     artifact_path = Path(handoff["artifact_path"])
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(handoff, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, handoff, sort_keys=True, trailing_newline=False)
 
     store = TaskMirrorStore(request.db_path)
     store.record_task_artifact(

@@ -16,6 +16,7 @@ import shlex
 import subprocess
 from typing import Any, Callable, Protocol
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -246,11 +247,7 @@ def create_draft_pr(
         command_preview=preview,
         handoff_json_path=context["handoff_json_path"],
     )
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, evidence, sort_keys=True)
     current_store.record_task_artifact(request.task_key, ARTIFACT_TYPE, artifact_path)
     current_store.record_task_event(
         request.task_key,

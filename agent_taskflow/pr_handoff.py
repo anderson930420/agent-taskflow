@@ -15,6 +15,7 @@ import subprocess
 from typing import Any
 
 from agent_taskflow.api.review import build_review_evidence
+from agent_taskflow.atomic_write import atomic_write_json, atomic_write_text
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -185,11 +186,8 @@ def create_pr_handoff(
     event_recorded = False
     if not request.dry_run:
         package_dir.mkdir(parents=True, exist_ok=True)
-        json_path.write_text(
-            json.dumps(package_data, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        markdown_path.write_text(markdown, encoding="utf-8")
+        atomic_write_json(json_path, package_data, sort_keys=True)
+        atomic_write_text(markdown_path, markdown)
         artifact_recorded = _record_artifact_once(current_store, task.task_key, json_path)
         event_recorded = _record_event_once(
             current_store,

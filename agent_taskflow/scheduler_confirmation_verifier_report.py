@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.scheduler_confirmation_readback import (
     list_task_scheduler_confirmation_readbacks,
@@ -380,10 +381,11 @@ def create_scheduler_confirmation_verifier_report(
         }
 
     artifact_path = Path(verifier_report["artifact_path"])
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(verifier_report, indent=2, sort_keys=True),
-        encoding="utf-8",
+    atomic_write_json(
+        artifact_path,
+        verifier_report,
+        sort_keys=True,
+        trailing_newline=False,
     )
 
     store = TaskMirrorStore(request.db_path)

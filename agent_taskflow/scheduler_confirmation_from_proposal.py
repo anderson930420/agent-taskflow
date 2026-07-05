@@ -26,12 +26,12 @@ left untouched and is not imported here.
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.scheduler_confirmation_eligibility import (
     SchedulerConfirmationEligibilityRequest,
@@ -265,10 +265,11 @@ def create_scheduler_confirmation_from_proposal(
             "safety": _safety(confirmation_created=False),
         }
 
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(confirmation_payload, indent=2, sort_keys=True),
-        encoding="utf-8",
+    atomic_write_json(
+        artifact_path,
+        confirmation_payload,
+        sort_keys=True,
+        trailing_newline=False,
     )
 
     store = TaskMirrorStore(request.db_path)

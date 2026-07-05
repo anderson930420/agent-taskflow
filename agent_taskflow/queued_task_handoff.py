@@ -50,6 +50,7 @@ from agent_taskflow.approved_task_runner import (
     ApprovedTaskRunnerError,
     run_approved_task,
 )
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS
 from agent_taskflow.executors.base import Executor
 from agent_taskflow.intake_runner_handoff import (
@@ -992,11 +993,7 @@ def _write_runtime_artifact(
     payload: dict[str, Any],
 ) -> Path:
     artifact_path = _runtime_artifact_path(artifact_dir, runtime_execution_id)
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, payload, sort_keys=True, trailing_newline=False)
     return artifact_path
 
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_taskflow._helpers import dedupe_preserve_order as _dedupe_preserve_order
+from agent_taskflow.atomic_write import atomic_write_json, atomic_write_text
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -802,14 +803,10 @@ def _write_local_evidence(
     markdown_path = output_paths["markdown_path"]
     if json_path is None or markdown_path is None:
         return False, False
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(
-        json.dumps(package_data, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(json_path, package_data, sort_keys=True)
 
     markdown = _build_markdown(package_data)
-    markdown_path.write_text(markdown, encoding="utf-8")
+    atomic_write_text(markdown_path, markdown)
 
     stored = store or TaskMirrorStore(request.db_path or DEFAULT_DB_PATH)
     artifact_recorded = _record_artifact_once(

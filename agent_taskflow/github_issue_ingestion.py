@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from agent_taskflow.atomic_write import atomic_write_text
 from agent_taskflow.models import TaskRecord, require_absolute_path, utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -250,14 +251,14 @@ def ingest_github_issue(
     )
 
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    issue_spec_path.write_text(
+    atomic_write_text(
+        issue_spec_path,
         render_issue_spec(
             repo=request.repo,
             task_key=task_key,
             issue=issue,
             ingested_at=utc_now_iso(),
         ),
-        encoding="utf-8",
     )
     _record_artifact_once(store, task_key, issue_spec_path)
     store.record_task_event(

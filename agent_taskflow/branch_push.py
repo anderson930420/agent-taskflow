@@ -9,12 +9,12 @@ worktrees, or runs automatically from other workflow phases.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from pathlib import Path
 import shlex
 import subprocess
 from typing import Any, Callable, Protocol
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -203,11 +203,7 @@ def push_task_branch(
         ahead_count=context["ahead_count"],
         command_preview=preview,
     )
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, evidence, sort_keys=True)
     current_store.record_task_artifact(request.task_key, ARTIFACT_TYPE, artifact_path)
     current_store.record_task_event(
         request.task_key,

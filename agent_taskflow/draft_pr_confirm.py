@@ -14,6 +14,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Callable, Protocol
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.draft_pr_confirm_helpers import (
     DraftPrConfirmError,
     PROTECTED_HEAD_BRANCHES,
@@ -514,10 +515,7 @@ def confirm_draft_pr(
         body_file=request.body_file,
         target_repo_block=_target_repo_block(request, handoff),
     )
-    artifact_path.write_text(
-        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, evidence, sort_keys=True)
     artifact_recorded = current_store.record_task_artifact(request.task_key, ARTIFACT_TYPE, artifact_path)
     event_recorded = current_store.record_task_event(
         request.task_key,

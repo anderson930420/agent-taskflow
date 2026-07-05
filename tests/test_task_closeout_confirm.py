@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
@@ -377,3 +379,33 @@ class TaskCloseoutConfirmTests(unittest.TestCase):
 
         command_prefixes = [call["args"][:3] for call in runner.calls]
         self.assertEqual(command_prefixes, [["gh", "pr", "view"], ["git", "ls-remote", "--heads"]])
+
+    def test_closeout_artifact_preserves_formatting(self) -> None:
+        self._seed_task()
+        confirm_task_closeout(self._request(confirm=True), store=self.store, runner=FakeCloseoutRunner())
+
+        artifact_path = self.artifact_root / "task_closeout" / self.task_key / "task_closeout.json"
+        text = artifact_path.read_text(encoding="utf-8")
+        self.assertEqual(text, json.dumps(json.loads(text), indent=2, sort_keys=True) + "\n")
+
+    def test_failed_closeout_artifact_write_preserves_existing_file(self) -> None:
+        self._seed_task()
+        artifact_path = self.artifact_root / "task_closeout" / self.task_key / "task_closeout.json"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        previous = '{"status": "previous-complete-artifact"}\n'
+        artifact_path.write_text(previous, encoding="utf-8")
+
+        real_replace = os.replace
+
+        def failing_replace(src, dst, *args, **kwargs):
+            if Path(dst).name == "task_closeout.json":
+                raise OSError("simulated crash before replace")
+            return real_replace(src, dst, *args, **kwargs)
+
+        with patch("agent_taskflow.atomic_write.os.replace", side_effect=failing_replace):
+            with self.assertRaises(OSError):
+                confirm_task_closeout(self._request(confirm=True), store=self.store, runner=FakeCloseoutRunner())
+
+        self.assertEqual(artifact_path.read_text(encoding="utf-8"), previous)
+        leftovers = [path for path in artifact_path.parent.iterdir() if path.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent_taskflow._helpers import require_non_empty as _require_non_empty
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import require_absolute_path
 
 
@@ -441,9 +442,11 @@ def write_mission_contract(
         assert path is not None
         output_path = Path(path).expanduser().resolve()
 
+    if not output_path.parent.is_dir():
+        raise FileNotFoundError(output_path.parent)
+
     d = mission_contract_to_dict(contract)
-    raw = json.dumps(d, indent=2, sort_keys=True)
-    output_path.write_text(raw, encoding="utf-8")
+    atomic_write_json(output_path, d, sort_keys=True, trailing_newline=False)
     return output_path
 
 

@@ -23,13 +23,13 @@ intentionally disjoint from the workflow's action evidence types.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.scheduler_proposal_review import (
     SchedulerProposalReviewError,
@@ -379,11 +379,7 @@ def create_scheduler_confirmation(
 
     assert artifact_path is not None
     payload["summary"]["confirmation_evidence_recorded"] = True
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, payload, sort_keys=True, trailing_newline=False)
 
     store = TaskMirrorStore(request.db_path)
     recorded_task_keys: set[str] = set()
