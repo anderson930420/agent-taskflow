@@ -17,6 +17,7 @@ from typing import Any, Callable, Protocol
 from agent_taskflow._helpers import (
     dedupe_non_empty_preserve_order as _dedupe_preserve_order,
 )
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord, utc_now_iso
 from agent_taskflow.post_merge_cleanup_recommendation import (
     PostMergeCleanupRecommendationError,
@@ -928,11 +929,7 @@ def _record_local_cleanup_evidence(
 ) -> tuple[bool, bool, Path | None]:
     output_root = _resolve_cleanup_artifact_root(task, artifact_root)
     artifact_path = output_root / task.task_key / "local_cleanup.json"
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(artifact_payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, artifact_payload, sort_keys=True)
     store.record_task_artifact(task.task_key, ARTIFACT_KIND, artifact_path)
     store.record_task_event(
         task.task_key,

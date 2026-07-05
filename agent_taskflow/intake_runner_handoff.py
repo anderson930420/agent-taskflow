@@ -38,7 +38,6 @@ artifact, no handoff artifact, and no DB event is ever written.
 
 from __future__ import annotations
 
-import json
 import re
 import secrets
 from dataclasses import dataclass
@@ -46,6 +45,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.scheduler_confirmation_verifier import (
     STATUS_VALID,
@@ -326,10 +326,11 @@ def create_intake_runner_handoff(
         verifier_run_id=verifier_run_id,
         created_at=created_at,
     )
-    verifier_report_path.parent.mkdir(parents=True, exist_ok=True)
-    verifier_report_path.write_text(
-        json.dumps(verifier_report_artifact, indent=2, sort_keys=True),
-        encoding="utf-8",
+    atomic_write_json(
+        verifier_report_path,
+        verifier_report_artifact,
+        sort_keys=True,
+        trailing_newline=False,
     )
 
     payload = _build_payload(
@@ -344,11 +345,7 @@ def create_intake_runner_handoff(
         verifier_report_path=verifier_report_path,
     )
 
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, payload, sort_keys=True, trailing_newline=False)
 
     task_key = verifier_report.get("task_key")
     if isinstance(task_key, str) and task_key:

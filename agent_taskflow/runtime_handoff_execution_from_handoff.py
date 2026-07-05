@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.intake_runner_handoff_from_verifier_report import (
     HANDOFF_ARTIFACT_TYPE,
     HANDOFF_EVENT_TYPE,
@@ -550,10 +551,11 @@ def run_runtime_handoff_execution_from_handoff(
         runner_safety=runner_safety,
     )
     artifact_path = Path(artifact_payload["artifact_path"])
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(artifact_payload, indent=2, sort_keys=True),
-        encoding="utf-8",
+    atomic_write_json(
+        artifact_path,
+        artifact_payload,
+        sort_keys=True,
+        trailing_newline=False,
     )
     store.record_task_artifact(
         request.task_key,

@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from agent_taskflow.atomic_write import atomic_write_text
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -142,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     prompt_text = args.prompt_text or SMOKE_PROMPT_TEMPLATE
     write_prompt = args.overwrite_prompt or not prompt_path.exists()
     if write_prompt:
-        prompt_path.write_text(prompt_text, encoding="utf-8")
+        atomic_write_text(prompt_path, prompt_text)
 
     # Parse tools
     tools_list = _parse_tools(args.tools)

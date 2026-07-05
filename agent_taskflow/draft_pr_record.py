@@ -35,6 +35,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Callable, Protocol
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.draft_pr_confirm import (
     ARTIFACT_TYPE,
     BRANCH_PUSH_ARTIFACT_TYPE,
@@ -554,10 +555,7 @@ def record_existing_draft_pr(
         created_at=utc_now_iso(),
         target_repo_block=target_repo_block,
     )
-    artifact_path.write_text(
-        json.dumps(evidence_dict, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, evidence_dict, sort_keys=True)
     current_store.record_task_artifact(request.task_key, ARTIFACT_TYPE, artifact_path)
     current_store.record_task_event(
         request.task_key,

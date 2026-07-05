@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_taskflow.atomic_write import atomic_write_json, atomic_write_text
 from agent_taskflow.models import (
     TaskRecord,
     require_absolute_path,
@@ -198,11 +199,8 @@ def create_task_execution_package(
         )
 
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    prompt_path.write_text(prompt_text, encoding="utf-8")
-    package_path.write_text(
-        json.dumps(package_payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_text(prompt_path, prompt_text)
+    atomic_write_json(package_path, package_payload, sort_keys=True)
 
     _record_artifact_once(
         current_store,

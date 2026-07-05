@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agent_taskflow.artifacts import artifact_dir_for
+from agent_taskflow.atomic_write import atomic_write_text
 from agent_taskflow.github_issue_discovery import BLOCKED_LABELS, LocalIssueMatch, read_local_issue_matches
 from agent_taskflow.github_issue_ingestion import (
     GitHubIssueSnapshot,
@@ -257,14 +258,14 @@ def _write_selected_issue(
     )
 
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    issue_spec_path.write_text(
+    atomic_write_text(
+        issue_spec_path,
         render_issue_spec(
             repo=repo,
             task_key=task_key,
             issue=issue,
             ingested_at=utc_now_iso(),
         ),
-        encoding="utf-8",
     )
     store.record_task_artifact(task_key, "issue_spec", issue_spec_path)
     store.record_task_event(

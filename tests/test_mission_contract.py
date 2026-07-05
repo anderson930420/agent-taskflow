@@ -549,6 +549,24 @@ class WriteMissionContractTests(unittest.TestCase):
             self.assertIn("approve", d["forbidden_actions"])
 
 
+    def test_write_requires_existing_parent_directory(self) -> None:
+        contract = MissionContract(
+            schema_version="1",
+            task_key="AT-WRITE",
+            goal="x",
+            repo_path=Path("/tmp/repo"),
+            worktree_path=Path("/tmp/worktree"),
+            artifact_dir=Path("/tmp/artifacts"),
+            executor="manual",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing-parent" / "mission_contract.json"
+            with self.assertRaises(FileNotFoundError):
+                write_mission_contract(contract, path=path)
+            self.assertFalse(path.exists())
+            self.assertFalse(path.parent.exists())
+
+
 class ReadMissionContractTests(unittest.TestCase):
     def test_roundtrip_write_read(self) -> None:
         contract = MissionContract(

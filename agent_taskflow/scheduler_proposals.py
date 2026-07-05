@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso, validate_task_status
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.task_recommendations import (
@@ -289,11 +290,7 @@ def create_scheduler_proposal(request: SchedulerProposalRequest) -> dict[str, An
 
     assert artifact_path is not None
     payload["summary"]["proposal_evidence_recorded"] = True
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    atomic_write_json(artifact_path, payload, sort_keys=True, trailing_newline=False)
 
     if selected:
         store = TaskMirrorStore(request.db_path)

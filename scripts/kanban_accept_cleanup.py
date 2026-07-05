@@ -66,6 +66,7 @@ if str(_REPO_ROOT_FOR_IMPORTS) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT_FOR_IMPORTS))
 
 from agent_taskflow.artifacts import artifact_dir_for as package_artifact_dir_for
+from agent_taskflow.atomic_write import atomic_write_json, atomic_write_text
 from agent_taskflow.projects import get_project_config, load_projects_config
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.worktree import worktree_path_from_base
@@ -185,47 +186,46 @@ def verify_merged_commit(commit: str, repo: str, base_branch: str) -> tuple[bool
 
 def write_decision_md(artifact_dir: str, data: dict) -> str:
     """Write decision.md artifact and return path."""
-    os.makedirs(artifact_dir, exist_ok=True)
     path = os.path.join(artifact_dir, "decision.md")
-    with open(path, "w") as f:
-        f.write("# Task Decision\n\n")
-        f.write(f"- project: {data['project']}\n")
-        f.write(f"- task_key: {data['task_key']}\n")
-        if data.get("task_id"):
-            f.write(f"- task_id: {data['task_id']}\n")
-        f.write(f"- decision: {data['decision']}\n")
-        if data.get("pr_url"):
-            f.write(f"- pr_url: {data['pr_url']}\n")
-        if data.get("pr_number"):
-            f.write(f"- pr_number: {data['pr_number']}\n")
-        if data.get("merged_commit"):
-            f.write(f"- merged_commit: {data['merged_commit']}\n")
-        f.write(f"- decided_by: {data.get('decided_by', 'operator_cli')}\n")
-        f.write(f"- recorded_by: kanban_accept_cleanup.py\n")
-        f.write(f"- recorded_at: {data.get('recorded_at', '')}\n")
-        f.write("\n## Notes\n\n")
-        notes = data.get("notes", "")
-        if notes:
-            f.write(f"{notes}\n")
-        else:
-            if data["decision"] == "accepted":
-                # Case A: accepted with PR/merged commit → "PR has been merged"
-                # Case B: accepted with --allow-missing-merged-commit and no PR/commit → "No PR was required"
-                pr_url = data.get("pr_url")
-                pr_number = data.get("pr_number")
-                merged_commit = data.get("merged_commit")
-                has_pr_info = bool(pr_url or pr_number or merged_commit)
-                if has_pr_info:
-                    f.write("Operator-attested review accepted. PR has been merged to main.\n")
-                else:
-                    f.write(
-                        "Operator-attested review accepted. No PR was required "
-                        "because this task produced no repo changes.\n"
-                    )
-            elif data["decision"] == "rejected":
-                f.write("Operator-attested review rejected.\n")
-            elif data["decision"] == "abandoned":
-                f.write("Task was abandoned.\n")
+    lines = ["# Task Decision\n\n"]
+    lines.append(f"- project: {data['project']}\n")
+    lines.append(f"- task_key: {data['task_key']}\n")
+    if data.get("task_id"):
+        lines.append(f"- task_id: {data['task_id']}\n")
+    lines.append(f"- decision: {data['decision']}\n")
+    if data.get("pr_url"):
+        lines.append(f"- pr_url: {data['pr_url']}\n")
+    if data.get("pr_number"):
+        lines.append(f"- pr_number: {data['pr_number']}\n")
+    if data.get("merged_commit"):
+        lines.append(f"- merged_commit: {data['merged_commit']}\n")
+    lines.append(f"- decided_by: {data.get('decided_by', 'operator_cli')}\n")
+    lines.append("- recorded_by: kanban_accept_cleanup.py\n")
+    lines.append(f"- recorded_at: {data.get('recorded_at', '')}\n")
+    lines.append("\n## Notes\n\n")
+    notes = data.get("notes", "")
+    if notes:
+        lines.append(f"{notes}\n")
+    else:
+        if data["decision"] == "accepted":
+            # Case A: accepted with PR/merged commit → "PR has been merged"
+            # Case B: accepted with --allow-missing-merged-commit and no PR/commit → "No PR was required"
+            pr_url = data.get("pr_url")
+            pr_number = data.get("pr_number")
+            merged_commit = data.get("merged_commit")
+            has_pr_info = bool(pr_url or pr_number or merged_commit)
+            if has_pr_info:
+                lines.append("Operator-attested review accepted. PR has been merged to main.\n")
+            else:
+                lines.append(
+                    "Operator-attested review accepted. No PR was required "
+                    "because this task produced no repo changes.\n"
+                )
+        elif data["decision"] == "rejected":
+            lines.append("Operator-attested review rejected.\n")
+        elif data["decision"] == "abandoned":
+            lines.append("Task was abandoned.\n")
+    atomic_write_text(path, "".join(lines))
     return path
 
 
@@ -271,8 +271,7 @@ def update_manifest(manifest_path: str, data: dict) -> bool:
                 changed = True
 
         if changed:
-            with open(manifest_path, "w") as f:
-                json.dump(manifest, f, indent=2)
+            atomic_write_json(manifest_path, manifest, trailing_newline=False)
             return True
         return False
 

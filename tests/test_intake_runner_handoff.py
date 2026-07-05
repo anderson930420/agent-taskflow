@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_taskflow.intake_runner_handoff import (
     HANDOFF_ARTIFACT_TYPE,
@@ -933,6 +935,71 @@ class VerifierReportBindingTests(_Base):
             first["verifier_report"]["verifier_report_path"],
             second["verifier_report"]["verifier_report_path"],
         )
+
+
+class AtomicHandoffArtifactTests(_Base):
+    """Regression coverage: handoff artifacts are written atomically."""
+
+    def test_confirmed_handoff_artifact_preserves_formatting(self) -> None:
+        proposal = self._proposal(["AT-IRH-ATOMIC-001"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        payload = create_intake_runner_handoff(
+            IntakeRunnerHandoffRequest(
+                db_path=self.db_path,
+                artifact_root=self.artifact_root,
+                proposal_item_id=item_id,
+                latest=True,
+                dry_run=False,
+                confirm_create_handoff=True,
+            )
+        )
+
+        for path_value in (
+            payload["artifact_path"],
+            payload["verifier_report"]["verifier_report_path"],
+        ):
+            text = Path(path_value).read_text(encoding="utf-8")
+            self.assertEqual(
+                text, json.dumps(json.loads(text), indent=2, sort_keys=True)
+            )
+
+    def test_failed_handoff_write_leaves_no_artifact_or_temp_files(self) -> None:
+        proposal = self._proposal(["AT-IRH-ATOMIC-002"])
+        item_id = self._safe_item_id(proposal)
+        self._confirm(proposal, (item_id,))
+
+        real_replace = os.replace
+
+        def failing_replace(src, dst, *args, **kwargs):
+            if Path(dst).name == "intake_runner_handoff.json":
+                raise OSError("simulated crash before replace")
+            return real_replace(src, dst, *args, **kwargs)
+
+        with patch(
+            "agent_taskflow.atomic_write.os.replace",
+            side_effect=failing_replace,
+        ):
+            with self.assertRaises(OSError):
+                create_intake_runner_handoff(
+                    IntakeRunnerHandoffRequest(
+                        db_path=self.db_path,
+                        artifact_root=self.artifact_root,
+                        proposal_item_id=item_id,
+                        latest=True,
+                        dry_run=False,
+                        confirm_create_handoff=True,
+                    )
+                )
+
+        leftovers = [
+            path
+            for path in self.artifact_root.rglob("*")
+            if path.name.endswith(".tmp")
+            or path.name == "intake_runner_handoff.json"
+        ]
+        self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":
