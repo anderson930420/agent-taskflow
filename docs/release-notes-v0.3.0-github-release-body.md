@@ -1,5 +1,8 @@
 ## v0.3.0 — Claude Code Operator Invocation Runbook
 
+> **Erratum / superseded behavior:** v0.3.0 documented the then-current Claude Code prompt transport as argv-based. This was changed in v0.3.1: Claude Code implementer prompts are delivered through stdin instead of being appended to subprocess argv. Operators should prefer v0.3.1 or later for real invocation.
+
+
 This release builds on the v0.2.7 Claude Code bounded implementer executor, the
 v0.2.8 Claude Code opt-in real invocation profile, and the v0.2.9 workflow-policy
 alignment and golden-path smoke coverage. It is a documentation-only release: it
