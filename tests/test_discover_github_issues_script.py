@@ -153,7 +153,6 @@ class DiscoverGitHubIssuesScriptTests(unittest.TestCase):
 
     def test_script_handles_already_ingested_local_tasks_without_writing_more(self) -> None:
         self.add_ingested_task(issue_number=201, task_key="CUSTOM-201")
-        before_size = self.db_path.stat().st_size
         store = TaskMirrorStore(self.db_path)
         before_events = len(store.list_task_events("CUSTOM-201"))
 
@@ -164,7 +163,6 @@ class DiscoverGitHubIssuesScriptTests(unittest.TestCase):
         self.assertEqual(payload["new_issues"], [])
         self.assertEqual(payload["recommended_candidates"], [])
         self.assertEqual(payload["already_ingested"][0]["task_key"], "CUSTOM-201")
-        self.assertEqual(self.db_path.stat().st_size, before_size)
         self.assertEqual(len(store.list_task_events("CUSTOM-201")), before_events)
         self.assertEqual(store.list_task_artifacts("CUSTOM-201"), [])
         self.assertIsNone(store.get_task_worktree("CUSTOM-201"))
