@@ -238,7 +238,7 @@ class RealInvocationTests(ClaudeCodeTestCase):
             calls.append((command, kwargs))
             if command[:1] == ["git"]:
                 return subprocess.CompletedProcess(
-                    args=command, returncode=0, stdout=" M README.md\n"
+                    args=command, returncode=0, stdout=b" M README.md\0"
                 )
             return subprocess.CompletedProcess(
                 args=command,
@@ -472,6 +472,71 @@ class RealInvocationTests(ClaudeCodeTestCase):
             artifact = self.read_execution_artifact(context)
             self.assertEqual(artifact["status"], "tool_error")
 
+
+
+class ChangedFilesEvidenceTests(ClaudeCodeTestCase):
+    def git(self, repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False,
+            check=True,
+        )
+
+    def init_repo(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        self.git(repo, "init")
+        self.git(repo, "config", "user.email", "agent-taskflow@example.invalid")
+        self.git(repo, "config", "user.name", "Agent TaskFlow Tests")
+        return repo
+
+    def test_changed_files_reports_rename_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.init_repo(Path(tmp))
+
+            old_path = repo / "old.txt"
+            old_path.write_text("old\n", encoding="utf-8")
+            self.git(repo, "add", "old.txt")
+            self.git(repo, "commit", "-m", "initial")
+
+            new_path = repo / "new.txt"
+            old_path.rename(new_path)
+            self.git(repo, "add", "-A")
+
+            changed = ClaudeCodeExecutor()._changed_files(repo)
+
+            self.assertIn("new.txt", changed)
+            self.assertNotIn("old.txt -> new.txt", changed)
+            self.assertNotIn("old.txt", changed)
+
+    def test_changed_files_preserves_space_paths_without_quotes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.init_repo(Path(tmp))
+
+            path_with_space = repo / "file one.txt"
+            path_with_space.write_text("content\n", encoding="utf-8")
+
+            changed = ClaudeCodeExecutor()._changed_files(repo)
+
+            self.assertIn("file one.txt", changed)
+            self.assertNotIn('"file one.txt"', changed)
+
+    def test_changed_files_preserves_non_ascii_paths_without_octal_escapes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.init_repo(Path(tmp))
+
+            non_ascii_path = repo / "文件.txt"
+            non_ascii_path.write_text("content\n", encoding="utf-8")
+
+            changed = ClaudeCodeExecutor()._changed_files(repo)
+
+            self.assertIn("文件.txt", changed)
+            self.assertTrue(all("\\346" not in path for path in changed))
+            self.assertTrue(all(not path.startswith('"') for path in changed))
 
 class StartupFailureIntegrationTests(ClaudeCodeTestCase):
     """Real-subprocess regression tests for command startup failures."""

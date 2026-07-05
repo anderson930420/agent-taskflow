@@ -54,9 +54,6 @@ CLAUDE_CODE_ARTIFACT_STATUSES = frozenset(
     {"dry_run", "completed", "failed", "timed_out", "blocked", "tool_error"}
 )
 
-# Maximum number of bytes embedded from a captured stdout/stderr stream when
-# summarizing it inline. The full stream is always written to its own file.
-_MAX_STREAM_EMBED_SIZE = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -489,30 +486,66 @@ class ClaudeCodeExecutor(Executor):
         return text.strip() or None
 
     def _changed_files(self, worktree_path: Path) -> list[str]:
-        """Return changed file paths reported by ``git status --porcelain``.
+        """Return changed file paths from ``git status --porcelain -z``.
 
         Best-effort evidence only; failures yield an empty list rather than
         raising. This never mutates the worktree.
+
+        ``-z`` avoids quotePath escaping and represents rename/copy records as
+        NUL-delimited path pairs. For rename/copy entries, porcelain v1 with
+        ``-z`` reports the destination path first, followed by the source path;
+        the destination is the useful evidence for reviewer-facing artifacts.
         """
         try:
             completed = subprocess.run(
-                ["git", "status", "--porcelain"],
+                ["git", "-c", "core.quotePath=false", "status", "--porcelain", "-z"],
                 cwd=worktree_path,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True,
                 shell=False,
                 check=False,
             )
-        except (OSError, FileNotFoundError):
+        except OSError:
             return []
+
         if completed.returncode != 0:
             return []
+
+        stdout = completed.stdout or b""
+        if isinstance(stdout, str):
+            raw = stdout
+        else:
+            raw = stdout.decode("utf-8", errors="surrogateescape")
+
+        entries = raw.split("\0")
         changed: list[str] = []
-        for line in (completed.stdout or "").splitlines():
-            entry = line[3:].strip() if len(line) > 3 else line.strip()
-            if entry:
-                changed.append(entry)
+        index = 0
+
+        while index < len(entries):
+            record = entries[index]
+            index += 1
+
+            if not record:
+                continue
+
+            if len(record) <= 3:
+                entry = record.strip()
+                if entry:
+                    changed.append(entry)
+                continue
+
+            status = record[:2]
+            path = record[3:]
+
+            if path:
+                changed.append(path)
+
+            # With porcelain v1 -z, rename/copy entries include a second NUL
+            # field containing the source path. Skip that source path because
+            # the artifact should report the current destination path.
+            if ("R" in status or "C" in status) and index < len(entries):
+                index += 1
+
         return changed
 
     def _write_execution_artifact(
