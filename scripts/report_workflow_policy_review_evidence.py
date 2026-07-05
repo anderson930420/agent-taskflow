@@ -32,6 +32,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from agent_taskflow.api.review import build_artifact_file_summaries
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.workflow_policy_artifacts import (
     WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME,
     WORKFLOW_POLICY_SUMMARY_FILENAME,
@@ -124,10 +125,7 @@ def _build_report(
     }
 
     if report_output_path is not None:
-        report_output_path.write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        atomic_write_json(report_output_path, report, sort_keys=True)
 
     return report
 
@@ -234,18 +232,12 @@ def main(argv: list[str] | None = None) -> int:
             # Generate summary artifact.
             summary_path = artifact_dir / WORKFLOW_POLICY_SUMMARY_FILENAME
             summary_artifact = write_module.build_artifact(policy)
-            summary_path.write_text(
-                json.dumps(summary_artifact, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+            atomic_write_json(summary_path, summary_artifact, sort_keys=True)
 
             # Generate artifact index.
             index_path = artifact_dir / WORKFLOW_POLICY_ARTIFACT_INDEX_FILENAME
             index_artifact = smoke_module.build_artifact_index()
-            index_path.write_text(
-                json.dumps(index_artifact, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+            atomic_write_json(index_path, index_artifact, sort_keys=True)
 
         # Build and output report.
         report = _build_report(

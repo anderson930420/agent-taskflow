@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_taskflow.atomic_write import atomic_write_json, atomic_write_text
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.tasks import normalize_task_key
 
@@ -1274,7 +1275,7 @@ def generate_codex_advisory_review(
     prompt_path = artifact_dir / PROMPT_FILENAME
     json_path = artifact_dir / JSON_FILENAME
     markdown_path = artifact_dir / MARKDOWN_FILENAME
-    prompt_path.write_text(prompt_text, encoding="utf-8")
+    atomic_write_text(prompt_path, prompt_text)
 
     stdout_path: Path | None = None
     stderr_path: Path | None = None
@@ -1289,19 +1290,16 @@ def generate_codex_advisory_review(
             stdout_path=stdout_path,
             stderr_path=stderr_path,
         )
-        stdout_path.write_text(outcome.stdout, encoding="utf-8")
-        stderr_path.write_text(outcome.stderr, encoding="utf-8")
+        atomic_write_text(stdout_path, outcome.stdout)
+        atomic_write_text(stderr_path, outcome.stderr)
     else:
         payload = build_review_payload(request, evidence)
 
     validate_payload(payload)
 
     markdown_text = build_review_markdown(payload)
-    json_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    markdown_path.write_text(markdown_text, encoding="utf-8")
+    atomic_write_json(json_path, payload, sort_keys=True)
+    atomic_write_text(markdown_path, markdown_text)
 
     return CodexAdvisoryReviewResult(
         task_key=request.task_key,

@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.workflow_schema import load_workflow_policy
 from agent_taskflow.workflow_policy_artifacts import WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE
 
@@ -130,11 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     artifact = build_artifact(policy)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(artifact, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(output_path, artifact, sort_keys=True)
 
     print_summary(
         source_path=policy.source_path,

@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
+from agent_taskflow.atomic_write import atomic_write_text
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
 
 
@@ -247,13 +248,13 @@ class OpenCodeExecutor(Executor):
                 check=False,
             )
         except FileNotFoundError as exc:
-            output_path.write_text(
-                f"Failed to list untracked files: {exc}\n", encoding="utf-8"
+            atomic_write_text(
+                output_path, f"Failed to list untracked files: {exc}\n"
             )
             return "untracked-files artifact capture failed to start."
 
         if completed.returncode != 0:
-            output_path.write_text(completed.stdout or "", encoding="utf-8")
+            atomic_write_text(output_path, completed.stdout or "")
             return (
                 "git ls-files --others --exclude-standard artifact capture failed "
                 f"with exit code {completed.returncode}."
@@ -269,7 +270,7 @@ class OpenCodeExecutor(Executor):
         for rel_path in rel_paths:
             sections.append(self._render_untracked_entry(worktree_path, rel_path))
 
-        output_path.write_text("\n".join(sections) + "\n", encoding="utf-8")
+        atomic_write_text(output_path, "\n".join(sections) + "\n")
         return None
 
     def _render_untracked_entry(self, worktree_path: Path, rel_path: str) -> str:
@@ -326,10 +327,10 @@ class OpenCodeExecutor(Executor):
                 check=False,
             )
         except FileNotFoundError as exc:
-            output_path.write_text(f"Failed to start command: {exc}\n", encoding="utf-8")
+            atomic_write_text(output_path, f"Failed to start command: {exc}\n")
             return f"{command[0]} artifact capture failed to start."
 
-        output_path.write_text(completed.stdout or "", encoding="utf-8")
+        atomic_write_text(output_path, completed.stdout or "")
 
         if completed.returncode != 0:
             return (

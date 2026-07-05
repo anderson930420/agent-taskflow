@@ -145,8 +145,9 @@ class RunCodexAdvisoryReviewScriptTests(unittest.TestCase):
         ):
             self.assertIn(flag, result.stdout, flag)
         lowered = result.stdout.lower()
+        normalized_help = " ".join(lowered.split())
         self.assertIn("advisory only", lowered)
-        self.assertIn("never deterministic validation authority", lowered)
+        self.assertIn("never deterministic validation authority", normalized_help)
 
     def test_codex_command_without_confirm_run_errors(self) -> None:
         stderr = io.StringIO()

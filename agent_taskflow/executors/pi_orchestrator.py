@@ -21,6 +21,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.mission_contract import (
     MissionContract,
     read_mission_contract,
@@ -504,8 +505,7 @@ def write_pi_mission_plan(
 
     resolved_dir.mkdir(parents=True, exist_ok=True)
     d = pi_mission_plan_to_dict(plan)
-    raw = json.dumps(d, indent=2, sort_keys=True)
-    output_path.write_text(raw, encoding="utf-8")
+    atomic_write_json(output_path, d, sort_keys=True, trailing_newline=False)
     return output_path
 
 

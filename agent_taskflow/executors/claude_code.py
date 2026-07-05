@@ -29,13 +29,13 @@ lifecycle behavior.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from agent_taskflow.atomic_write import atomic_write_json, atomic_write_text
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
 from agent_taskflow.models import utc_now_iso
 
@@ -280,7 +280,7 @@ class ClaudeCodeExecutor(Executor):
             repo_root=context.repo_root,
             task_summary=self._load_task_summary(context),
         )
-        prompt_path.write_text(prompt_text, encoding="utf-8")
+        atomic_write_text(prompt_path, prompt_text)
 
         if not self.enable_invocation:
             return self._dry_run_result(context, prompt_path)
@@ -366,22 +366,22 @@ class ClaudeCodeExecutor(Executor):
             )
         except subprocess.TimeoutExpired as exc:
             timed_out = True
-            stdout_path.write_text(_decode_stream(exc.stdout), encoding="utf-8")
-            stderr_path.write_text(_decode_stream(exc.stderr), encoding="utf-8")
+            atomic_write_text(stdout_path, _decode_stream(exc.stdout))
+            atomic_write_text(stderr_path, _decode_stream(exc.stderr))
         except OSError as exc:
             # Covers FileNotFoundError, PermissionError (command exists but is
             # not executable), NotADirectoryError, E2BIG, and other startup
             # failures. These must be recorded as a blocked result with an
             # execution artifact rather than escaping the executor.
             tool_error = f"Claude Code command failed to start: {exc}"
-            stdout_path.write_text("", encoding="utf-8")
-            stderr_path.write_text(f"{tool_error}\n", encoding="utf-8")
+            atomic_write_text(stdout_path, "")
+            atomic_write_text(stderr_path, f"{tool_error}\n")
 
         finished_at = utc_now_iso()
 
         if completed is not None:
-            stdout_path.write_text(completed.stdout or "", encoding="utf-8")
-            stderr_path.write_text(completed.stderr or "", encoding="utf-8")
+            atomic_write_text(stdout_path, completed.stdout or "")
+            atomic_write_text(stderr_path, completed.stderr or "")
 
         artifacts = {
             "claude_code_prompt": prompt_path,
@@ -600,10 +600,7 @@ class ClaudeCodeExecutor(Executor):
         }
 
         artifact_path = context.artifact_dir / CLAUDE_CODE_EXECUTION_ARTIFACT_FILENAME
-        artifact_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        atomic_write_json(artifact_path, payload, sort_keys=True)
         return artifact_path
 
 
