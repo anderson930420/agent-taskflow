@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_taskflow.atomic_write import atomic_write_text
 from agent_taskflow.mission_contract import (
     MissionContract,
     read_mission_contract,
@@ -329,7 +330,7 @@ def write_pi_mission_prompt(
         ) from exc
 
     resolved_dir.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(content, encoding="utf-8")
+    atomic_write_text(output_path, content)
     return output_path
 
 

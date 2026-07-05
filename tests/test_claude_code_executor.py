@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -622,6 +623,52 @@ class RegistryTests(unittest.TestCase):
         )
         self.assertIsInstance(executor, ClaudeCodeExecutor)
         self.assertTrue(executor.enable_invocation)
+
+
+class AtomicExecutionArtifactTests(ClaudeCodeTestCase):
+    """Regression coverage: the execution artifact is written atomically."""
+
+    def test_failed_artifact_write_preserves_previous_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_context(Path(tmp))
+            artifact_path = (
+                context.artifact_dir / CLAUDE_CODE_EXECUTION_ARTIFACT_FILENAME
+            )
+            previous = '{"status": "previous-complete-artifact"}\n'
+            artifact_path.write_text(previous, encoding="utf-8")
+
+            real_replace = os.replace
+
+            def failing_replace(src, dst, *args, **kwargs):
+                if Path(dst).name == CLAUDE_CODE_EXECUTION_ARTIFACT_FILENAME:
+                    raise OSError("simulated crash before replace")
+                return real_replace(src, dst, *args, **kwargs)
+
+            with patch(
+                "agent_taskflow.atomic_write.os.replace",
+                side_effect=failing_replace,
+            ):
+                with self.assertRaises(OSError):
+                    ClaudeCodeExecutor().run(context)
+
+            self.assertEqual(artifact_path.read_text(encoding="utf-8"), previous)
+            leftovers = [
+                path
+                for path in context.artifact_dir.iterdir()
+                if path.name.endswith(".tmp")
+            ]
+            self.assertEqual(leftovers, [])
+
+    def test_dry_run_leaves_no_temp_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self.make_context(Path(tmp))
+            ClaudeCodeExecutor().run(context)
+            leftovers = [
+                path
+                for path in context.artifact_dir.iterdir()
+                if path.name.endswith(".tmp")
+            ]
+            self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":

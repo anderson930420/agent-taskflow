@@ -7,12 +7,12 @@ executor.
 
 from __future__ import annotations
 
-import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.mission_contract import read_mission_contract
 from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
 
@@ -266,7 +266,7 @@ class ChangedFilesValidator(Validator):
                 collection_error=collection_error,
                 allow_no_changes=self.allow_no_changes,
             )
-            audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True), encoding="utf-8")
+            atomic_write_json(audit_path, audit, sort_keys=True, trailing_newline=False)
 
             if collection_error is not None:
                 return ValidatorResult(
