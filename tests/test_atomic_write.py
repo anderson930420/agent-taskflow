@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,6 +43,41 @@ class AtomicWriteBytesTests(AtomicWriteTestCase):
         target.write_bytes(b"old")
         atomic_write_bytes(target, b"new")
         self.assertEqual(target.read_bytes(), b"new")
+
+    def test_new_file_honors_umask(self) -> None:
+        target = self.tmp_path / "artifact.bin"
+        previous_umask = os.umask(0o027)
+        try:
+            atomic_write_bytes(target, b"data")
+        finally:
+            os.umask(previous_umask)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+
+    def test_overwrite_preserves_0644_permissions(self) -> None:
+        target = self.tmp_path / "artifact.bin"
+        target.write_bytes(b"old")
+        target.chmod(0o644)
+        atomic_write_bytes(target, b"new")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+
+    def test_overwrite_preserves_0600_permissions(self) -> None:
+        target = self.tmp_path / "artifact.bin"
+        target.write_bytes(b"old")
+        target.chmod(0o600)
+        atomic_write_bytes(target, b"new")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_replaces_symlink_without_changing_symlink_target(self) -> None:
+        symlink_target = self.tmp_path / "original.bin"
+        symlink_target.write_bytes(b"original-content")
+        target = self.tmp_path / "artifact.bin"
+        target.symlink_to(symlink_target)
+
+        atomic_write_bytes(target, b"replacement-content")
+
+        self.assertFalse(target.is_symlink())
+        self.assertEqual(target.read_bytes(), b"replacement-content")
+        self.assertEqual(symlink_target.read_bytes(), b"original-content")
 
     def test_leaves_no_temp_files_on_success(self) -> None:
         target = self.tmp_path / "artifact.bin"
