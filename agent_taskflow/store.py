@@ -746,27 +746,54 @@ class TaskMirrorStore:
         message: str | None = None,
         source: str = "local_mirror",
         blocked_reason: str | None = None,
+        expected_current_status: str | None = None,
     ) -> None:
         validated_status = validate_task_status(status)
+        validated_expected_status = (
+            validate_task_status(expected_current_status)
+            if expected_current_status is not None
+            else None
+        )
         now = utc_now_iso()
         stored_blocked_reason = (
             blocked_reason or message if validated_status == "blocked" else None
         )
 
+        where_clause = "task_key = ?"
+        update_params: tuple[Any, ...] = (
+            validated_status,
+            stored_blocked_reason,
+            now,
+            now,
+            task_key,
+        )
+        if validated_expected_status is not None:
+            where_clause += " AND status = ?"
+            update_params += (validated_expected_status,)
+
         with connect(self.db_path) as conn:
             cursor = conn.execute(
-                """
+                f"""
                 UPDATE tasks
                 SET status = ?,
                     blocked_reason = ?,
                     updated_at = ?,
                     last_synced_at = ?
-                WHERE task_key = ?
+                WHERE {where_clause}
                 """,
-                (validated_status, stored_blocked_reason, now, now, task_key),
+                update_params,
             )
             if cursor.rowcount == 0:
-                raise KeyError(f"Task not found: {task_key}")
+                current_row = conn.execute(
+                    "SELECT status FROM tasks WHERE task_key = ?",
+                    (task_key,),
+                ).fetchone()
+                if current_row is None:
+                    raise KeyError(f"Task not found: {task_key}")
+                raise ValueError(
+                    f"Task {task_key} status is {current_row['status']!r}; "
+                    f"expected {validated_expected_status!r}"
+                )
 
             conn.execute(
                 """
