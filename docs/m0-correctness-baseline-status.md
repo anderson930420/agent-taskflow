@@ -1,7 +1,7 @@
 # Milestone 0 Correctness Baseline Status
 
 > Decision date: 2026-07-11  
-> Scope: atomic permission, Task/Attempt schema, and PR-3 runtime admission reconciliation
+> Scope: atomic permission, Task/Attempt schema, PR-3 leases, and PR-4 canonical runtime admission
 
 ## Decision
 
@@ -10,13 +10,14 @@ The atomic-write permission and orphan-audit slice is closed.
 PR-2 implements the Task/Attempt/lifecycle persistence foundation and the
 SQLite one-active-attempt constraint. PR-3 adds Atomic attempt claim,
 execution ownership, runtime lease, heartbeat, and fail-closed executor-start
-guards for every current persisted runtime pickup after migration.
+guards. PR-4 installs the canonical runtime admission path and propagates one
+explicit owner/token claim through Dispatcher, `ApprovedTaskRunner`, queued
+runtime handoff, and the scheduler delegation chain.
 
-The overall Level 2 Milestone 0 exit gate is **not complete** because reset does
-not yet create a new Attempt, the canonical runtime admission path does not yet
-propagate explicit owner tokens through every caller, and fresh-worktree retry
-semantics are not implemented. This document must not be used as evidence that
-Level 2 Milestone 0 has passed.
+The overall Level 2 Milestone 0 exit gate is **not complete** because retry/reset
+does not yet create a new Attempt with a fresh worktree, and branch, worktree,
+lock, PID, and artifact resources are not yet Attempt-scoped. This document must
+not be used as evidence that Level 2 Milestone 0 has passed.
 
 ## Atomic-write slice: closed
 
@@ -68,58 +69,57 @@ PR-2 adds:
 - additive legacy migration that does not synthesize historical attempts; and
 - transactional create/close storage operations.
 
-## Runtime pickup boundary: implemented after PR-3 migration
+## Runtime ownership boundary: implemented after migration
 
-Migration `level2_runtime_admission_v1` adds:
+PR-3 migration `level2_runtime_admission_v1` provides the lease table, partial
+unique indexes, token-authenticated claim/heartbeat/release APIs, live-lease
+transition guards, and stale-lease reaping.
 
-- atomic `queued/blocked -> preparing` Attempt and lease creation;
-- partial unique indexes allowing one active lease per task and Attempt;
-- unique persisted execution ownership;
-- token-authenticated explicit heartbeat and release APIs;
-- compatibility heartbeat from persisted runtime/task events;
-- a guard denying `implementing` and `validating` without a live lease;
-- a guard denying `executor_run_started` without a live lease;
-- automatic compatibility release at `blocked`, `waiting_approval`, `canceled`,
-  or `completed`; and
-- stale-lease reaping to `execution_aborted` plus task status `blocked`.
+PR-4 migration `level2_canonical_runtime_admission_v1` makes explicit ownership
+the only new pickup path:
 
-The current executor call sites are `ApprovedTaskRunner` and `Dispatcher`; both
-persist `create_executor_run(...)` before `executor.run(...)` and are therefore
-covered by the database guard. `queued_task_handoff` delegates to
-`run_approved_task(...)` and cannot start an executor independently.
+- ordinary `TaskMirrorStore` updates cannot transition a task to `preparing`;
+- `CanonicalRuntimeTaskStore` performs the token-authenticated claim;
+- the raw token remains only in process memory;
+- a heartbeat supervisor renews long-running work;
+- synchronous runtime boundaries also heartbeat with the same owner/token;
+- executor-start evidence must match the active `attempt_id`, `lease_id`, and
+  `owner_id`;
+- terminal status requires token-authenticated owned release; and
+- PR-3 trigger names remain occupied by canonical-safe definitions so rerunning
+  the older migration cannot restore implicit pickup or token heartbeat.
 
-Existing callers use a database-enforced `implicit_status` ownership record.
-The next canonical runtime admission path PR will propagate explicit owner/token
-credentials through all runtime callers and remove reliance on compatibility
-ownership. The bypass is closed after migration, but the Python call graph is
-not yet unified.
+The direct executor roots are `ApprovedTaskRunner` and `Dispatcher`. Package
+bootstrap wraps both. `queued_task_handoff` and the GitHub Issue scheduler import
+and delegate to the same canonical `run_approved_task(...)`; they cannot create
+independent runtime ownership.
 
 ## Milestone 0 exit-gate reconciliation
 
 | Exit-gate item | Status | Evidence or blocker |
 | --- | --- | --- |
 | New-file and overwrite permission tests pass | **Passed** | Atomic-write implementation plus mode regression tests. |
-| Runtime concurrent pickup cannot create two active attempts | **Passed after migration** | PR-3 concurrent pickup tests produce one winner and one fail-closed rejection. |
-| Concurrent reset cannot create two active attempts | **Partial** | The one-active-attempt constraint and runtime claim are authoritative, but the reset command still does not create Attempts through the claim transaction. |
-| Executor start requires active ownership | **Passed after migration** | SQLite rejects persisted `executor_run_started` without an active, unexpired lease. |
-| Reset can successfully rerun with correct retry identity | **Blocked** | Legacy `blocked -> queued` status reset does not close the prior Attempt or create a new Attempt identity. |
-| Retry uses destroy-and-recreate worktree semantics | **Blocked** | Current legacy behavior can retain/reuse the prior task worktree. |
-| Reset and atomic write have authoritative audit evidence | **Partial** | Atomic behavior, orphan audit, runtime leases, and append-only lifecycle storage exist; reset evidence is not yet Attempt-scoped. |
+| Runtime concurrent pickup cannot create two active attempts | **Passed after migration** | One active Attempt and one active token lease are enforced transactionally. |
+| Concurrent reset cannot create two active attempts | **Partial** | The one-active-attempt constraint and Atomic attempt claim are authoritative, but reset still does not allocate a retry Attempt. |
+| Executor start requires active ownership | **Passed after migration** | SQLite requires matching canonical claim metadata and a live token lease. |
+| Canonical runtime admission path is used by current executor roots | **Passed after migration** | Dispatcher and ApprovedTaskRunner use the claim-aware store; runtime handoff and scheduler delegate to the wrapped runner. |
+| Reset can successfully rerun with correct retry identity | **Blocked** | Legacy `blocked -> queued` reset does not close the prior Attempt and allocate the next retry identity. |
+| Retry uses destroy-and-recreate worktree semantics | **Blocked** | Retry must create a fresh worktree; current legacy behavior can retain or reuse the prior task worktree. |
+| Reset and atomic write have authoritative audit evidence | **Partial** | Atomic behavior, orphan audit, leases, and lifecycle storage exist; reset evidence is not yet bound to old and new Attempts. |
 | Existing full test suite is green | **Required per PR** | GitHub Actions on the exact PR head is the authority. |
 
 ## Remaining blockers and ownership
 
 Milestone 0 can be closed only after the following foundations land:
 
-1. A canonical runtime admission path that passes explicit owner identity and
-   lease token through Dispatcher, `ApprovedTaskRunner`, scheduler/runtime
-   handoff, and future execution entrypoints.
-2. Attempt-scoped branch, worktree, lock, PID, and artifact resources.
-3. Retry/reset semantics that close the prior attempt, create a new attempt, and
-   create a fresh worktree without overwriting historical evidence.
-4. Process-group lifecycle and crash recovery tied to lease expiry and PID
+1. Attempt-scoped branch, worktree, lock, PID, and artifact resources.
+2. Retry/reset semantics that close the prior Attempt, allocate a new Attempt,
+   and create a fresh worktree without overwriting historical evidence.
+3. Process-group lifecycle and crash recovery tied to lease expiry and PID
    evidence.
-5. Reset audit events bound to both the closed Attempt and newly created Attempt.
+4. Reset audit events bound to both the closed Attempt and newly created Attempt.
+5. Regression coverage proving two simultaneous reset requests produce exactly
+   one new retry Attempt and one fail-closed rejection.
 
 Until those items pass their own regression tests, the canonical status is:
 
@@ -131,23 +131,31 @@ one_active_attempt_constraint = implemented
 atomic_attempt_claim = implemented_after_migration
 execution_ownership = implemented_after_migration
 runtime_lease = implemented_after_migration
-runtime_heartbeat = implemented_after_migration
+runtime_heartbeat = explicit_token_supervised_after_migration
 executor_start_without_lease = denied_after_migration
-runtime_attempt_admission = implemented_compatibility_boundary
-canonical_explicit_token_wiring = open_blocked
+runtime_attempt_admission = canonical_explicit_token_path
+canonical_explicit_token_wiring = implemented_after_migration
+implicit_status_pickup = disabled_after_migration
 milestone_0 = open_blocked
 level_2_eligible = false
 ```
 
 ## Migration and rollback
 
-PR-2 and PR-3 introduce additive forward-only migrations. A deployment must run
-`python3 scripts/migrate_runtime_admission.py --db-path /absolute/path/state.db`
-before claiming runtime admission enforcement.
+Deployments must apply both runtime migrations in order. PR-4's command applies
+its prerequisites automatically:
 
-Application rollback leaves the new tables and evidence intact. Removing the
-runtime triggers without a replacement admission control would reopen executor
-pickup bypass and therefore requires an explicit operator-approved migration.
-Destructive rollback requires restoring a pre-migration database backup or an
-explicit rebuild; Attempt, lifecycle, and runtime-lease audit history must not
-be dropped casually.
+```bash
+python3 scripts/migrate_canonical_runtime_admission.py \
+  --db-path /absolute/path/state.db
+```
+
+The PR-4 migration refuses to run while an active `implicit_status` lease exists.
+Finish or reap that compatibility run first. Reverting application code while
+canonical triggers remain installed causes legacy pickup to fail closed, which
+is the safe rollback state.
+
+Restoring implicit pickup requires an explicit operator-approved replacement
+migration. Destructive rollback requires restoring a database backup or an
+explicit rebuild; Attempt, lifecycle, and runtime-lease audit history must not be
+dropped casually.
