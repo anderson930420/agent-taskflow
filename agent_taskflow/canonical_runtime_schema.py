@@ -175,6 +175,78 @@ def migrate_canonical_runtime_admission(
             """
         )
 
+        # Keep the PR-3 trigger names occupied with canonical-safe definitions.
+        # ``migrate_runtime_admission`` uses CREATE TRIGGER IF NOT EXISTS, so
+        # read-only PR-3 tooling cannot reinstall the old implicit pickup or
+        # event-driven token heartbeat behavior after this migration.
+        conn.execute(
+            """
+            CREATE TRIGGER runtime_pickup_claim_after_preparing
+            AFTER UPDATE OF status ON tasks
+            WHEN 0
+            BEGIN
+                SELECT 1;
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER runtime_executor_start_requires_live_lease
+            BEFORE INSERT ON task_events
+            WHEN 0
+            BEGIN
+                SELECT 1;
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER runtime_terminal_status_releases_lease
+            AFTER UPDATE OF status ON tasks
+            WHEN 0
+            BEGIN
+                SELECT 1;
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER runtime_task_event_heartbeat
+            AFTER INSERT ON task_events
+            WHEN EXISTS (
+                SELECT 1
+                FROM tasks
+                JOIN runtime_leases
+                  ON runtime_leases.task_id = tasks.task_id
+                 AND runtime_leases.attempt_id = tasks.active_attempt_id
+                WHERE tasks.task_key = NEW.task_key
+                  AND runtime_leases.auth_mode = 'implicit_status'
+                  AND runtime_leases.is_active = 1
+                  AND julianday(runtime_leases.expires_at) >
+                      julianday(COALESCE(NEW.created_at, 'now'))
+            )
+            BEGIN
+                UPDATE runtime_leases
+                SET heartbeat_at = NEW.created_at,
+                    expires_at = strftime(
+                        '%Y-%m-%dT%H:%M:%fZ',
+                        NEW.created_at,
+                        '+' || ttl_seconds || ' seconds'
+                    )
+                WHERE task_id = (
+                        SELECT task_id FROM tasks WHERE task_key = NEW.task_key
+                    )
+                  AND attempt_id = (
+                        SELECT active_attempt_id
+                        FROM tasks
+                        WHERE task_key = NEW.task_key
+                    )
+                  AND auth_mode = 'implicit_status'
+                  AND is_active = 1;
+            END
+            """
+        )
+
         conn.execute(
             """
             INSERT OR IGNORE INTO schema_migrations(name, applied_at)
