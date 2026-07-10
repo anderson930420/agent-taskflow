@@ -15,6 +15,7 @@ class ChangedFilesNoExclusionDecisionDocsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.text = DECISION_RECORD.read_text(encoding="utf-8")
+        cls.normalized_text = " ".join(cls.text.split())
         cls.text_lower = cls.text.lower()
 
     def test_decision_record_exists(self) -> None:
@@ -38,7 +39,7 @@ class ChangedFilesNoExclusionDecisionDocsTests(unittest.TestCase):
             "separate, explicit, human-confirmed cleanup workflow",
         ):
             with self.subTest(phrase=phrase):
-                self.assertIn(phrase, self.text)
+                self.assertIn(phrase, self.normalized_text)
 
     def test_preserves_canonical_roadmap_reconciliation(self) -> None:
         for phrase in (
@@ -54,7 +55,7 @@ class ChangedFilesNoExclusionDecisionDocsTests(unittest.TestCase):
             "documentation-only",
         ):
             with self.subTest(phrase=phrase):
-                self.assertIn(phrase, self.text)
+                self.assertIn(phrase, self.normalized_text)
 
     def test_rejects_affirmative_unsafe_guidance(self) -> None:
         for phrase in (
