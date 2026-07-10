@@ -12,11 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import wraps
-import json
 from pathlib import Path
 import threading
 from types import ModuleType
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 from uuid import uuid4
 
 from agent_taskflow.canonical_runtime_schema import (
@@ -428,7 +427,10 @@ def install_canonical_runtime_path(
     if getattr(approved_task_runner_module.run_approved_task, "__canonical_runtime__", False):
         return
 
-    runtime_admission_module.RuntimeAdmissionStore = CanonicalRuntimeAdmissionStore
+    # Keep the PR-3 RuntimeAdmissionStore import stable for compatibility tests
+    # and read-only tooling. Canonical entrypoints instantiate the explicit
+    # subclass directly; they do not globally replace the legacy API symbol.
+    _ = runtime_admission_module
 
     original_run_approved_task = approved_task_runner_module.run_approved_task
 
