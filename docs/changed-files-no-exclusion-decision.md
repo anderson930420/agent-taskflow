@@ -23,6 +23,31 @@ artifact or evidence context that operators need to inspect, so hiding them
 globally would make validator output less trustworthy. The safer resolution is
 visibility plus operator review, not global exclusion.
 
+## Canonical roadmap wording
+
+This decision supersedes any roadmap item that describes atomic-write orphan
+temp files as changed-files noise to exclude. The Level 2 roadmap must use the
+following policy instead:
+
+- Detect and report atomic-write orphan temp candidates; never silently filter
+  them from changed-files evidence.
+- A candidate inside a task worktree remains an unexpected repository change
+  and blocks Level 2 eligibility until it is explicitly inspected and resolved.
+- A candidate outside the repository working tree, within an attempt-scoped
+  artifact root, is recorded by the orphan audit and does not create a
+  repository path-policy exclusion.
+- Cleanup, when needed, is a separate, explicit, human-confirmed, auditable
+  operation. Cleanup is never part of changed-files validation.
+
+The corresponding Milestone 0 work item is therefore:
+
+> Detect and surface atomic-write orphan temp candidates. Keep candidates
+> visible to evidence, fail closed for candidates inside the task worktree, and
+> handle any cleanup through a separate audited operator workflow.
+
+This section defines roadmap wording only. P6-E remains documentation-only and
+does not implement a new validator, cleanup path, or Level 2 eligibility gate.
+
 ## Approved alternative
 
 Use the read-only orphan audit to surface atomic temp candidates. For
