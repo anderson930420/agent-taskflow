@@ -60,7 +60,7 @@ class CanonicalRuntimeAdmissionTests(unittest.TestCase):
             getattr(approved_task_runner_module.run_approved_task, "__canonical_runtime__", False)
         )
         self.assertTrue(getattr(dispatcher_module.Dispatcher, "__canonical_runtime__", False))
-        self.assertIs(
+        self.assertIsNot(
             runtime_admission_module.RuntimeAdmissionStore,
             CanonicalRuntimeAdmissionStore,
         )
@@ -92,9 +92,10 @@ class CanonicalRuntimeAdmissionTests(unittest.TestCase):
             ).fetchone()
 
         self.assertIsNotNone(recorded)
-        self.assertNotIn("runtime_pickup_claim_after_preparing", names)
-        self.assertNotIn("runtime_task_event_heartbeat", names)
-        self.assertNotIn("runtime_terminal_status_releases_lease", names)
+        self.assertIn("runtime_pickup_claim_after_preparing", names)
+        self.assertIn("runtime_task_event_heartbeat", names)
+        self.assertIn("runtime_terminal_status_releases_lease", names)
+        self.assertIn("runtime_executor_start_requires_live_lease", names)
         self.assertIn("runtime_preparing_requires_canonical_claim", names)
         self.assertIn("runtime_executor_start_requires_canonical_claim", names)
         self.assertIn("runtime_token_terminal_requires_owned_release", names)
@@ -209,11 +210,16 @@ class CanonicalRuntimeAdmissionTests(unittest.TestCase):
         lease = CanonicalRuntimeAdmissionStore(self.db_path).get_active_lease(
             "AT-CANONICAL-1"
         )
+        with sqlite3.connect(self.db_path) as conn:
+            active_attempt_id = conn.execute(
+                "SELECT active_attempt_id FROM tasks WHERE task_key = ?",
+                ("AT-CANONICAL-1",),
+            ).fetchone()[0]
         self.assertIsNotNone(task)
         assert task is not None
         self.assertEqual(task.status, "blocked")
         self.assertEqual(task.blocked_reason, "executor failed")
-        self.assertIsNone(task.__dict__.get("active_attempt_id"))
+        self.assertIsNone(active_attempt_id)
         self.assertIsNone(lease)
         self.assertIsNone(store.runtime_claim("AT-CANONICAL-1"))
 
