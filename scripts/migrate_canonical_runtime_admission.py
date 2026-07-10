@@ -6,14 +6,34 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sqlite3
 import sys
+import types
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+PACKAGE_ROOT = REPO_ROOT / "agent_taskflow"
 
-from agent_taskflow.canonical_runtime_path import (  # noqa: E402
+
+def _bootstrap_source_package_without_runtime_imports() -> None:
+    """Expose package submodules without executing agent_taskflow.__init__.
+
+    Database migrations use only the SQLite/model layers. Importing the package
+    initializer would eagerly load ApprovedTaskRunner and FastAPI/Pydantic, which
+    makes a source-checkout migration depend on application runtime extras.
+    """
+    if "agent_taskflow" in sys.modules:
+        return
+    package = types.ModuleType("agent_taskflow")
+    package.__file__ = str(PACKAGE_ROOT / "__init__.py")
+    package.__package__ = "agent_taskflow"
+    package.__path__ = [str(PACKAGE_ROOT)]
+    sys.modules["agent_taskflow"] = package
+
+
+_bootstrap_source_package_without_runtime_imports()
+
+from agent_taskflow.canonical_runtime_schema import (  # noqa: E402
     CANONICAL_RUNTIME_ADMISSION_MIGRATION,
     migrate_canonical_runtime_admission,
 )
@@ -29,6 +49,20 @@ def _parse_args() -> argparse.Namespace:
         help="Absolute path to the Agent Taskflow SQLite state database.",
     )
     return parser.parse_args()
+
+
+def _normalized_sql(value: str | None) -> str:
+    return " ".join((value or "").lower().split())
+
+
+def _implicit_pickup_disabled(trigger_sql: dict[str, str | None]) -> bool:
+    """Verify that canonical claim enforcement exists and PR-3 pickup is inert."""
+    canonical_guard = trigger_sql.get("runtime_preparing_requires_canonical_claim")
+    compatibility_trigger = trigger_sql.get("runtime_pickup_claim_after_preparing")
+    if canonical_guard is None or compatibility_trigger is None:
+        return False
+    normalized = _normalized_sql(compatibility_trigger)
+    return re.search(r"\bwhen\s+0\b", normalized) is not None
 
 
 def main() -> int:
@@ -50,32 +84,28 @@ def main() -> int:
             ORDER BY auth_mode
             """
         ).fetchall()
-        trigger_names = [
-            row[0]
-            for row in conn.execute(
-                """
-                SELECT name
-                FROM sqlite_master
-                WHERE type = 'trigger' AND name LIKE 'runtime_%'
-                ORDER BY name
-                """
-            ).fetchall()
-        ]
+        trigger_rows = conn.execute(
+            """
+            SELECT name, sql
+            FROM sqlite_master
+            WHERE type = 'trigger' AND name LIKE 'runtime_%'
+            ORDER BY name
+            """
+        ).fetchall()
+        trigger_sql = {name: sql for name, sql in trigger_rows}
+        trigger_names = list(trigger_sql)
 
     payload = {
         "db_path": str(db_path),
         "migration": CANONICAL_RUNTIME_ADMISSION_MIGRATION,
         "migration_recorded": migration_recorded,
         "active_leases_by_auth_mode": dict(active_rows),
-        "implicit_pickup_disabled": (
-            "runtime_pickup_claim_after_preparing" not in trigger_names
-            and "runtime_preparing_requires_canonical_claim" in trigger_names
-        ),
+        "implicit_pickup_disabled": _implicit_pickup_disabled(trigger_sql),
         "executor_start_requires_claim_metadata": (
-            "runtime_executor_start_requires_canonical_claim" in trigger_names
+            "runtime_executor_start_requires_canonical_claim" in trigger_sql
         ),
         "token_terminal_requires_owned_release": (
-            "runtime_token_terminal_requires_owned_release" in trigger_names
+            "runtime_token_terminal_requires_owned_release" in trigger_sql
         ),
         "runtime_triggers": trigger_names,
     }

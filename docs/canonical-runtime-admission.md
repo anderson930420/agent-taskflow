@@ -141,8 +141,15 @@ python3 scripts/migrate_canonical_runtime_admission.py \
   --db-path "$HOME/.agent-taskflow/state.db"
 ```
 
-The script adds the repository root to `sys.path`, so it does not require a
-manual `PYTHONPATH` prefix when run from a source checkout.
+The migration CLI bootstraps only the local database/model modules and does not
+execute `agent_taskflow.__init__`. It therefore works from a source checkout with
+the system Python even when FastAPI and Pydantic are not installed. A manual
+`PYTHONPATH` prefix and editable package installation are not required.
+
+The output verifies disabled implicit pickup by inspecting the retained
+`runtime_pickup_claim_after_preparing` compatibility trigger definition. PR-4
+intentionally preserves that trigger name with an inert `WHEN 0` body so an
+older idempotent PR-3 migration cannot restore implicit pickup.
 
 Migration `level2_canonical_runtime_admission_v1`:
 
