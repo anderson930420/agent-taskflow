@@ -1,16 +1,17 @@
 # Milestone 0 Correctness Baseline Status
 
 > Decision date: 2026-07-11  
-> Scope: PR-1 atomic permission status confirmation and Milestone 0 reconciliation
+> Scope: atomic permission closeout plus PR-2 Task/Attempt schema reconciliation
 
 ## Decision
 
 The atomic-write permission and orphan-audit slice is closed.
 
-The overall Level 2 Milestone 0 exit gate is **not complete**. It remains blocked
-on the Task/Attempt model, atomic execution ownership, and fresh-worktree retry
-semantics. This document must not be used as evidence that Level 2 Milestone 0
-has passed.
+PR-2 implements the Task/Attempt/lifecycle persistence foundation and the
+SQLite one-active-attempt constraint. The overall Level 2 Milestone 0 exit gate
+is **not complete** because reset and runtime pickup do not yet use that
+foundation, and fresh-worktree retry semantics are not implemented. This
+document must not be used as evidence that Level 2 Milestone 0 has passed.
 
 ## Atomic-write slice: closed
 
@@ -29,8 +30,8 @@ The following behavior is implemented and protected by regression tests:
 - Normal exceptions attempt best-effort temporary-file cleanup.
 
 The implementation authority is `agent_taskflow/atomic_write.py`. The primary
-regression suite is `tests/test_atomic_write.py`; PR-1 adds explicit closeout
-coverage in `tests/test_m0_correctness_baseline_status.py`.
+regression suite is `tests/test_atomic_write.py`; explicit closeout coverage is
+in `tests/test_m0_correctness_baseline_status.py`.
 
 ## Atomic-temp policy: closed as a policy decision
 
@@ -50,42 +51,62 @@ Canonical handling:
 The policy authority is `docs/changed-files-no-exclusion-decision.md`. The
 operator procedure is `docs/atomic-artifact-safety-runbook.md`.
 
+## Task/Attempt persistence foundation: implemented, not yet adopted by runtime
+
+PR-2 adds:
+
+- stable `task_id`, `task_class`, `active_attempt_id`, final-outcome, close-time,
+  and legacy markers on mirrored tasks;
+- `attempts` with unique `(task_id, attempt_number)` identity;
+- partial unique index `ux_attempts_one_active_per_task`;
+- append-only `lifecycle_events` with task/attempt integrity guards;
+- additive legacy migration that does not synthesize historical attempts; and
+- transactional create/close storage operations.
+
+This foundation does not yet make reset or executor pickup Attempt-safe. The
+legacy execution paths can still bypass it until the canonical admission and
+claim PRs land.
+
 ## Milestone 0 exit-gate reconciliation
 
 | Exit-gate item | Status | Evidence or blocker |
 | --- | --- | --- |
 | New-file and overwrite permission tests pass | **Passed** | Atomic-write implementation plus mode regression tests. |
-| Concurrent reset cannot create two active attempts | **Blocked** | The current data model has no canonical Attempt entity or one-active-attempt constraint. |
-| Reset can successfully rerun with correct retry identity | **Blocked** | Legacy `blocked -> queued` status reset does not create a new attempt identity. |
+| Concurrent reset cannot create two active attempts | **Partial** | The SQLite one-active-attempt constraint and concurrent create tests now exist, but the reset command does not yet create Attempts through that transaction. |
+| Reset can successfully rerun with correct retry identity | **Blocked** | Legacy `blocked -> queued` status reset does not close the prior Attempt or create a new Attempt identity. |
 | Retry uses destroy-and-recreate worktree semantics | **Blocked** | Current legacy behavior can retain/reuse the prior task worktree. |
-| Reset and atomic write have authoritative audit evidence | **Partial** | Atomic behavior and orphan audit are documented; reset evidence is not yet attempt-scoped. |
+| Reset and atomic write have authoritative audit evidence | **Partial** | Atomic behavior, orphan audit, and append-only lifecycle storage exist; reset evidence is not yet Attempt-scoped. |
 | Existing full test suite is green | **Required per PR** | GitHub Actions on the exact PR head is the authority. |
 
 ## Remaining blockers and ownership
 
-Milestone 0 can be closed only after the following foundations land:
+Milestone 0 can be closed only after the following runtime foundations land:
 
-1. Task/Attempt/lifecycle schema, migration, and a one-active-attempt constraint.
-2. Atomic attempt claim with explicit execution ownership.
-3. A canonical runtime admission path that all runners use.
-4. Attempt-scoped branch, worktree, lock, PID, and artifact resources.
-5. Retry/reset semantics that close the prior attempt, create a new attempt, and
+1. Atomic attempt claim using the new one-active-attempt constraint and explicit
+   execution ownership.
+2. A canonical runtime admission path that all runners use.
+3. Attempt-scoped branch, worktree, lock, PID, and artifact resources.
+4. Retry/reset semantics that close the prior attempt, create a new attempt, and
    create a fresh worktree without overwriting historical evidence.
+5. Migration of legacy executor entrypoints so every executor run obtains a
+   unique `attempt_id` before side effects.
 
 Until those items pass their own regression tests, the canonical status is:
 
 ```text
 atomic_permission_slice = closed
 atomic_temp_policy = closed
+task_attempt_schema = implemented
+one_active_attempt_constraint = implemented
+runtime_attempt_admission = open_blocked
 milestone_0 = open_blocked
 level_2_eligible = false
 ```
 
 ## Migration and rollback
 
-This PR introduces no schema migration and changes no runtime behavior.
-
-Rollback consists of reverting this status document and its regression test.
-Reverting it must not be interpreted as reverting the atomic-write safety
-implementation or the no-exclusion policy, which were established by earlier
-merged changes.
+PR-2 introduces an additive forward-only schema migration. Application rollback
+leaves the new tables and columns inert while legacy mirror code continues to
+use its original schema. Destructive rollback requires restoring a pre-migration
+database backup or an explicit operator-approved rebuild; Attempt and lifecycle
+audit history must not be dropped casually.
