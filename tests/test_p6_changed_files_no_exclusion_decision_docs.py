@@ -40,6 +40,22 @@ class ChangedFilesNoExclusionDecisionDocsTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.text)
 
+    def test_preserves_canonical_roadmap_reconciliation(self) -> None:
+        for phrase in (
+            "Canonical roadmap wording",
+            "supersedes any roadmap item",
+            "never silently filter",
+            "inside a task worktree",
+            "blocks Level 2 eligibility",
+            "attempt-scoped artifact root",
+            "does not create a repository path-policy exclusion",
+            "fail closed for candidates inside the task worktree",
+            "roadmap wording only",
+            "documentation-only",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.text)
+
     def test_rejects_affirmative_unsafe_guidance(self) -> None:
         for phrase in (
             "add changed-files validator exclusions",
