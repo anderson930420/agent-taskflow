@@ -1,17 +1,22 @@
 # Milestone 0 Correctness Baseline Status
 
 > Decision date: 2026-07-11  
-> Scope: atomic permission closeout plus PR-2 Task/Attempt schema reconciliation
+> Scope: atomic permission, Task/Attempt schema, and PR-3 runtime admission reconciliation
 
 ## Decision
 
 The atomic-write permission and orphan-audit slice is closed.
 
 PR-2 implements the Task/Attempt/lifecycle persistence foundation and the
-SQLite one-active-attempt constraint. The overall Level 2 Milestone 0 exit gate
-is **not complete** because reset and runtime pickup do not yet use that
-foundation, and fresh-worktree retry semantics are not implemented. This
-document must not be used as evidence that Level 2 Milestone 0 has passed.
+SQLite one-active-attempt constraint. PR-3 adds Atomic attempt claim,
+execution ownership, runtime lease, heartbeat, and fail-closed executor-start
+guards for every current persisted runtime pickup after migration.
+
+The overall Level 2 Milestone 0 exit gate is **not complete** because reset does
+not yet create a new Attempt, the canonical runtime admission path does not yet
+propagate explicit owner tokens through every caller, and fresh-worktree retry
+semantics are not implemented. This document must not be used as evidence that
+Level 2 Milestone 0 has passed.
 
 ## Atomic-write slice: closed
 
@@ -51,7 +56,7 @@ Canonical handling:
 The policy authority is `docs/changed-files-no-exclusion-decision.md`. The
 operator procedure is `docs/atomic-artifact-safety-runbook.md`.
 
-## Task/Attempt persistence foundation: implemented, not yet adopted by runtime
+## Task/Attempt persistence foundation: implemented
 
 PR-2 adds:
 
@@ -63,33 +68,58 @@ PR-2 adds:
 - additive legacy migration that does not synthesize historical attempts; and
 - transactional create/close storage operations.
 
-This foundation does not yet make reset or executor pickup Attempt-safe. The
-legacy execution paths can still bypass it until the canonical admission and
-claim PRs land.
+## Runtime pickup boundary: implemented after PR-3 migration
+
+Migration `level2_runtime_admission_v1` adds:
+
+- atomic `queued/blocked -> preparing` Attempt and lease creation;
+- partial unique indexes allowing one active lease per task and Attempt;
+- unique persisted execution ownership;
+- token-authenticated explicit heartbeat and release APIs;
+- compatibility heartbeat from persisted runtime/task events;
+- a guard denying `implementing` and `validating` without a live lease;
+- a guard denying `executor_run_started` without a live lease;
+- automatic compatibility release at `blocked`, `waiting_approval`, `canceled`,
+  or `completed`; and
+- stale-lease reaping to `execution_aborted` plus task status `blocked`.
+
+The current executor call sites are `ApprovedTaskRunner` and `Dispatcher`; both
+persist `create_executor_run(...)` before `executor.run(...)` and are therefore
+covered by the database guard. `queued_task_handoff` delegates to
+`run_approved_task(...)` and cannot start an executor independently.
+
+Existing callers use a database-enforced `implicit_status` ownership record.
+The next canonical runtime admission path PR will propagate explicit owner/token
+credentials through all runtime callers and remove reliance on compatibility
+ownership. The bypass is closed after migration, but the Python call graph is
+not yet unified.
 
 ## Milestone 0 exit-gate reconciliation
 
 | Exit-gate item | Status | Evidence or blocker |
 | --- | --- | --- |
 | New-file and overwrite permission tests pass | **Passed** | Atomic-write implementation plus mode regression tests. |
-| Concurrent reset cannot create two active attempts | **Partial** | The SQLite one-active-attempt constraint and concurrent create tests now exist, but the reset command does not yet create Attempts through that transaction. |
+| Runtime concurrent pickup cannot create two active attempts | **Passed after migration** | PR-3 concurrent pickup tests produce one winner and one fail-closed rejection. |
+| Concurrent reset cannot create two active attempts | **Partial** | The one-active-attempt constraint and runtime claim are authoritative, but the reset command still does not create Attempts through the claim transaction. |
+| Executor start requires active ownership | **Passed after migration** | SQLite rejects persisted `executor_run_started` without an active, unexpired lease. |
 | Reset can successfully rerun with correct retry identity | **Blocked** | Legacy `blocked -> queued` status reset does not close the prior Attempt or create a new Attempt identity. |
 | Retry uses destroy-and-recreate worktree semantics | **Blocked** | Current legacy behavior can retain/reuse the prior task worktree. |
-| Reset and atomic write have authoritative audit evidence | **Partial** | Atomic behavior, orphan audit, and append-only lifecycle storage exist; reset evidence is not yet Attempt-scoped. |
+| Reset and atomic write have authoritative audit evidence | **Partial** | Atomic behavior, orphan audit, runtime leases, and append-only lifecycle storage exist; reset evidence is not yet Attempt-scoped. |
 | Existing full test suite is green | **Required per PR** | GitHub Actions on the exact PR head is the authority. |
 
 ## Remaining blockers and ownership
 
-Milestone 0 can be closed only after the following runtime foundations land:
+Milestone 0 can be closed only after the following foundations land:
 
-1. Atomic attempt claim using the new one-active-attempt constraint and explicit
-   execution ownership.
-2. A canonical runtime admission path that all runners use.
-3. Attempt-scoped branch, worktree, lock, PID, and artifact resources.
-4. Retry/reset semantics that close the prior attempt, create a new attempt, and
+1. A canonical runtime admission path that passes explicit owner identity and
+   lease token through Dispatcher, `ApprovedTaskRunner`, scheduler/runtime
+   handoff, and future execution entrypoints.
+2. Attempt-scoped branch, worktree, lock, PID, and artifact resources.
+3. Retry/reset semantics that close the prior attempt, create a new attempt, and
    create a fresh worktree without overwriting historical evidence.
-5. Migration of legacy executor entrypoints so every executor run obtains a
-   unique `attempt_id` before side effects.
+4. Process-group lifecycle and crash recovery tied to lease expiry and PID
+   evidence.
+5. Reset audit events bound to both the closed Attempt and newly created Attempt.
 
 Until those items pass their own regression tests, the canonical status is:
 
@@ -98,15 +128,26 @@ atomic_permission_slice = closed
 atomic_temp_policy = closed
 task_attempt_schema = implemented
 one_active_attempt_constraint = implemented
-runtime_attempt_admission = open_blocked
+atomic_attempt_claim = implemented_after_migration
+execution_ownership = implemented_after_migration
+runtime_lease = implemented_after_migration
+runtime_heartbeat = implemented_after_migration
+executor_start_without_lease = denied_after_migration
+runtime_attempt_admission = implemented_compatibility_boundary
+canonical_explicit_token_wiring = open_blocked
 milestone_0 = open_blocked
 level_2_eligible = false
 ```
 
 ## Migration and rollback
 
-PR-2 introduces an additive forward-only schema migration. Application rollback
-leaves the new tables and columns inert while legacy mirror code continues to
-use its original schema. Destructive rollback requires restoring a pre-migration
-database backup or an explicit operator-approved rebuild; Attempt and lifecycle
-audit history must not be dropped casually.
+PR-2 and PR-3 introduce additive forward-only migrations. A deployment must run
+`python3 scripts/migrate_runtime_admission.py --db-path /absolute/path/state.db`
+before claiming runtime admission enforcement.
+
+Application rollback leaves the new tables and evidence intact. Removing the
+runtime triggers without a replacement admission control would reopen executor
+pickup bypass and therefore requires an explicit operator-approved migration.
+Destructive rollback requires restoring a pre-migration database backup or an
+explicit rebuild; Attempt, lifecycle, and runtime-lease audit history must not
+be dropped casually.
