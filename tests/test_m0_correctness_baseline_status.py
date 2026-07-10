@@ -88,10 +88,14 @@ class MilestoneZeroStatusDocumentTests(unittest.TestCase):
             "milestone_0 = closed",
             "milestone_0 = complete",
             "level_2_eligible = true",
-            "milestone 0 has passed",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, self.normalized_lower)
+
+        self.assertIn(
+            "overall level 2 milestone 0 exit gate is **not complete**",
+            self.normalized_lower,
+        )
 
 
 if __name__ == "__main__":
