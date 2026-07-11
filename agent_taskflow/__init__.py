@@ -31,6 +31,10 @@ from agent_taskflow.attempt_scoped_runtime_compat import (
 
 install_attempt_scoped_runtime_compat()
 
+from agent_taskflow.lifecycle_reason_compat import install_lifecycle_reason_compat
+
+install_lifecycle_reason_compat()
+
 from agent_taskflow.lifecycle_runtime_path import install_lifecycle_runtime_path
 
 install_lifecycle_runtime_path(
