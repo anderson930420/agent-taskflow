@@ -20,7 +20,19 @@ jobs:
           python-version: "3.12"
 
       - name: Apply PR-7 executor launch hardening
-        run: python scripts/_pr7_harden_executor_launch.py
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/_pr7_harden_executor_launch.py")
+          text = path.read_text(encoding="utf-8")
+          old = 'terminate_end = text.index("def _write_preamble(\\n", terminate_start)'
+          new = 'terminate_end = text.index("def _write_preamble(", terminate_start)'
+          if old not in text:
+              raise SystemExit("hardening anchor-fix target missing")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+          python scripts/_pr7_harden_executor_launch.py
 
       - name: Commit hardening and restore standard CI
         shell: bash
