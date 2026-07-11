@@ -1,4 +1,4 @@
-"""Regression tests for PR-1 atomic permission and M0 status reconciliation."""
+"""Regression tests for atomic permission and Milestone 0 status reconciliation."""
 
 from __future__ import annotations
 
@@ -51,11 +51,10 @@ class MilestoneZeroStatusDocumentTests(unittest.TestCase):
     def test_status_document_exists(self) -> None:
         self.assertTrue(STATUS_DOC.is_file())
 
-    def test_closes_only_the_atomic_slice(self) -> None:
+    def test_closes_m0_implementation_but_not_deployment(self) -> None:
         for phrase in (
-            "atomic_permission_slice = closed",
-            "atomic_temp_policy = closed",
-            "milestone_0 = open_blocked",
+            "milestone_0_implementation_gate = closed",
+            "milestone_0_deployment_gate = pending",
             "level_2_eligible = false",
             "A standard `0o022` umask therefore produces a `0o644` file.",
             "Executable permission bits on an existing regular file are preserved.",
@@ -63,13 +62,32 @@ class MilestoneZeroStatusDocumentTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.normalized)
 
-    def test_records_all_remaining_m0_blockers(self) -> None:
+        self.assertNotIn("level_2_eligible = true", self.normalized_lower)
+
+    def test_records_all_closed_m0_foundations(self) -> None:
         for phrase in (
             "one-active-attempt constraint",
             "Atomic attempt claim",
             "canonical runtime admission path",
             "Attempt-scoped branch, worktree, lock, PID, and artifact resources",
-            "create a fresh worktree",
+            "fresh-worktree retry identity",
+            "validator_process_group = implemented",
+            "verified_runtime_process_exit = implemented",
+            "concurrent_reset_cas = implemented",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.normalized)
+
+    def test_validator_commands_are_inside_managed_boundary(self) -> None:
+        for phrase in (
+            "pytest",
+            "OpenSpec",
+            "lint",
+            "typecheck",
+            "changed-files git status",
+            "process_role = executor | validator",
+            "SIGTERM-to-SIGKILL escalation",
+            "whole-group verified exit",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.normalized)
@@ -83,17 +101,23 @@ class MilestoneZeroStatusDocumentTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.normalized)
 
-    def test_does_not_claim_m0_or_level2_completion(self) -> None:
-        for forbidden in (
-            "milestone_0 = closed",
-            "milestone_0 = complete",
-            "level_2_eligible = true",
+    def test_requires_validator_migration_before_level2_eligibility(self) -> None:
+        for phrase in (
+            "level2_validator_process_lifecycle_v1",
+            "process_role_column_installed = true",
+            "active_validator_processes = 0",
+            "termination.verified_exit_required = true",
+            "termination.shared_registry = executor_processes",
         ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, self.normalized_lower)
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.normalized)
 
         self.assertIn(
-            "overall level 2 milestone 0 exit gate is **not complete**",
+            "repository implementation and ci evidence can close the code gate",
+            self.normalized_lower,
+        )
+        self.assertIn(
+            "they cannot prove that a specific vps database has been migrated",
             self.normalized_lower,
         )
 
