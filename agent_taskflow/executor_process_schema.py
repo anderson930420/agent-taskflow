@@ -125,7 +125,8 @@ def migrate_executor_process_lifecycle(db_path: str | Path | None = None) -> Non
                 )) OR
                 (OLD.state = 'kill_sent' AND NEW.state IN (
                     'exited', 'exit_unverified'
-                ))
+                )) OR
+                (OLD.state = 'exit_unverified' AND NEW.state = 'exited')
              )
             BEGIN
                 SELECT RAISE(ABORT, 'illegal executor process state transition');
