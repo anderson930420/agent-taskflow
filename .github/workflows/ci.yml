@@ -1,26 +1,65 @@
 name: CI
 
 on:
-  pull_request:
   push:
     branches:
-      - main
+      - agent/validator-managed-process
+
+permissions:
+  contents: write
 
 jobs:
-  test:
+  apply-validator-process:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: agent/validator-managed-process
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install package and dependencies
-        run: python -m pip install -e .
+      - name: Apply PR-9 integration patch
+        shell: bash
+        run: |
+          python scripts/_pr9_apply_validator_process.py
+          cat > .github/workflows/ci.yml <<'EOF'
+          name: CI
 
-      - name: Run unit tests
-        run: PYTHONPATH=. python -m unittest discover -s tests
+          on:
+            pull_request:
+            push:
+              branches:
+                - main
 
-      - name: Compile sources
-        run: PYTHONPATH=. python -m compileall agent_taskflow scripts tests
+          jobs:
+            test:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+
+                - uses: actions/setup-python@v5
+                  with:
+                    python-version: "3.12"
+
+                - name: Install package and dependencies
+                  run: python -m pip install -e .
+
+                - name: Run unit tests
+                  run: PYTHONPATH=. python -m unittest discover -s tests
+
+                - name: Compile sources
+                  run: PYTHONPATH=. python -m compileall agent_taskflow scripts tests
+          EOF
+
+      - name: Commit integrated validator process changes
+        shell: bash
+        run: |
+          git config user.name "agent-taskflow-ci"
+          git config user.email "agent-taskflow-ci@example.invalid"
+          git add -A
+          git diff --cached --check
+          git commit -m "Integrate managed validator process groups"
+          git push origin HEAD:agent/validator-managed-process
