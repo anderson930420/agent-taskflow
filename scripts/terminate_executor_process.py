@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect or hard-terminate registered executor process groups."""
+"""Inspect or hard-terminate registered executor or validator process groups."""
 
 from __future__ import annotations
 
@@ -60,6 +60,8 @@ def _record_payload(record: ExecutorProcessRecord) -> dict[str, object]:
         "process_id": record.process_id,
         "attempt_id": record.attempt_id,
         "task_key": record.task_key,
+        "process_role": record.process_role,
+        "process_name": record.executor_name,
         "executor_name": record.executor_name,
         "pid": record.pid,
         "pgid": record.pgid,
@@ -85,12 +87,12 @@ def _select(
     if process_id is not None:
         record = store.get(process_id)
         if record is None:
-            raise KeyError(f"Executor process not found: {process_id}")
+            raise KeyError(f"Managed process not found: {process_id}")
         return [record]
     if attempt_id is not None:
         record = store.active_for_attempt(attempt_id)
         if record is None:
-            raise KeyError(f"No active executor process for Attempt: {attempt_id}")
+            raise KeyError(f"No active managed process for Attempt: {attempt_id}")
         return [record]
     return store.list_active()
 

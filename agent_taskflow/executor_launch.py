@@ -33,23 +33,45 @@ from agent_taskflow.models import require_absolute_path, utc_now_iso
 from agent_taskflow.store import connect, default_db_path
 from agent_taskflow.tasks import normalize_task_key
 
-PROCESS_REASON_CODES = frozenset(
+_ROLE_REASON_SUFFIXES = frozenset(
     {
-        "executor_launch_allocated",
-        "executor_launch_preflight_failed",
-        "executor_process_start_failed",
-        "executor_process_started",
-        "executor_process_exited",
-        "executor_timeout",
-        "operator_kill_requested",
-        "executor_descendant_cleanup",
-        "executor_process_sigterm_sent",
-        "executor_process_sigkill_sent",
-        "executor_process_exit_verified",
-        "executor_process_exit_unverified",
-        "executor_process_identity_mismatch",
+        "launch_allocated",
+        "launch_preflight_failed",
+        "process_start_failed",
+        "process_started",
+        "process_exited",
+        "timeout",
+        "descendant_cleanup",
+        "process_sigterm_sent",
+        "process_sigkill_sent",
+        "process_exit_verified",
+        "process_exit_unverified",
+        "process_identity_mismatch",
     }
 )
+PROCESS_REASON_CODES = frozenset(
+    {f"{role}_{suffix}" for role in ("executor", "validator") for suffix in _ROLE_REASON_SUFFIXES}
+    | {"operator_kill_requested"}
+)
+
+
+def _validate_process_role(process_role: str) -> str:
+    normalized = str(process_role).strip().lower()
+    if normalized not in {"executor", "validator"}:
+        raise ValueError(f"Invalid process_role: {process_role!r}")
+    return normalized
+
+
+def _role_reason(process_role: str, suffix: str) -> str:
+    role = _validate_process_role(process_role)
+    reason = f"{role}_{suffix}"
+    if reason not in PROCESS_REASON_CODES:
+        raise ValueError(f"Unknown runtime process reason_code: {reason!r}")
+    return reason
+
+
+def _role_label(process_role: str) -> str:
+    return "validator" if _validate_process_role(process_role) == "validator" else "executor"
 
 _DEAD_PROCESS_STATES = frozenset({"Z", "X", "x"})
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -116,6 +138,7 @@ class ExecutorLaunchSpec:
     timeout_seconds: int | None
     stdin_mode: str
     combined_output: bool
+    process_role: str = "executor"
     environment_mode: str = "inherit_with_overrides"
     environment_keys: tuple[str, ...] = ()
     redacted_arg_indexes: tuple[int, ...] = ()
@@ -131,6 +154,7 @@ class ExecutorLaunchSpec:
         if not argv or any(not isinstance(part, str) or not part for part in argv):
             raise ValueError("argv must be a non-empty tuple of non-empty strings")
         object.__setattr__(self, "argv", argv)
+        object.__setattr__(self, "process_role", _validate_process_role(self.process_role))
         object.__setattr__(self, "cwd", require_absolute_path(self.cwd, "cwd"))
         object.__setattr__(
             self,
@@ -167,7 +191,12 @@ class ExecutorLaunchSpec:
             json.dumps(redacted, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         ).hexdigest()
         return {
-            "schema_version": "executor_launch_spec.v1",
+            "schema_version": (
+                "validator_launch_spec.v1"
+                if self.process_role == "validator"
+                else "executor_launch_spec.v1"
+            ),
+            "process_role": self.process_role,
             "task_key": binding.task_key,
             "task_id": binding.task_id,
             "attempt_id": binding.attempt_id,
@@ -241,6 +270,7 @@ class ExecutorProcessRecord:
     lease_id: str
     owner_id: str
     executor_name: str
+    process_role: str
     pid: int | None
     pgid: int | None
     session_id: int | None
@@ -280,7 +310,7 @@ class ManagedProcessResult:
 def _validate_process_reason(reason_code: str) -> str:
     normalized = str(reason_code).strip()
     if normalized not in PROCESS_REASON_CODES:
-        raise ValueError(f"Unknown executor process reason_code: {reason_code!r}")
+        raise ValueError(f"Unknown runtime process reason_code: {reason_code!r}")
     return normalized
 
 
@@ -298,6 +328,7 @@ def _row_to_record(row: sqlite3.Row) -> ExecutorProcessRecord:
         lease_id=row["lease_id"],
         owner_id=row["owner_id"],
         executor_name=row["executor_name"],
+        process_role=(row["process_role"] if "process_role" in row.keys() else "executor"),
         pid=row["pid"],
         pgid=row["pgid"],
         session_id=row["session_id"],
@@ -318,7 +349,7 @@ def _row_to_record(row: sqlite3.Row) -> ExecutorProcessRecord:
 
 
 class ExecutorProcessStore:
-    """Persistence and append-only audit operations for one executor process group."""
+    """Persistence and append-only audit for executor or validator process groups."""
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         self.db_path = default_db_path() if db_path is None else require_absolute_path(db_path, "db_path")
@@ -369,6 +400,7 @@ class ExecutorProcessStore:
         process_id: str,
         binding: ExecutorLaunchBinding,
         executor_name: str,
+        process_role: str = "executor",
         state: str,
         launch_spec_path: Path,
         pid_manifest_path: Path,
@@ -384,9 +416,9 @@ class ExecutorProcessStore:
                 """
                 INSERT INTO executor_processes(
                     process_id, attempt_id, task_id, task_key, lease_id, owner_id,
-                    executor_name, state, launch_spec_path, pid_manifest_path,
+                    executor_name, process_role, state, launch_spec_path, pid_manifest_path,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     process_id,
@@ -396,6 +428,7 @@ class ExecutorProcessStore:
                     binding.lease_id,
                     binding.owner_id,
                     executor_name,
+                    _validate_process_role(process_role),
                     state,
                     str(launch_spec_path),
                     str(pid_manifest_path),
@@ -429,10 +462,13 @@ class ExecutorProcessStore:
         actor: str,
     ) -> ExecutorProcessRecord:
         now = utc_now_iso()
+        record = self.get(process_id)
+        if record is None:
+            raise KeyError(f"Runtime process not found: {process_id}")
         return self._transition(
             process_id,
             to_state="running",
-            reason_code="executor_process_started",
+            reason_code=_role_reason(record.process_role, "process_started"),
             actor=actor,
             updates={
                 "pid": pid,
@@ -456,12 +492,19 @@ class ExecutorProcessStore:
         actor: str,
         error: str,
     ) -> ExecutorProcessRecord:
+        record = self.get(process_id)
+        if record is None:
+            raise KeyError(f"Runtime process not found: {process_id}")
         return self._transition(
             process_id,
             to_state="start_failed",
-            reason_code="executor_process_start_failed",
+            reason_code=_role_reason(record.process_role, "process_start_failed"),
             actor=actor,
-            updates={"termination_reason": "executor_process_start_failed"},
+            updates={
+                "termination_reason": _role_reason(
+                    record.process_role, "process_start_failed"
+                )
+            },
             metadata={"error": error},
         )
 
@@ -480,10 +523,11 @@ class ExecutorProcessStore:
         return self._transition(
             process_id,
             to_state="term_sent" if signal_name == "SIGTERM" else "kill_sent",
-            reason_code=(
-                "executor_process_sigterm_sent"
-                if signal_name == "SIGTERM"
-                else "executor_process_sigkill_sent"
+            reason_code=_role_reason(
+                (self.get(process_id) or (_ for _ in ()).throw(
+                    KeyError(f"Runtime process not found: {process_id}")
+                )).process_role,
+                "process_sigterm_sent" if signal_name == "SIGTERM" else "process_sigkill_sent",
             ),
             actor=actor,
             updates={
@@ -506,10 +550,12 @@ class ExecutorProcessStore:
         self.init_db()
         now = utc_now_iso()
         target = "exited" if verified_exit else "exit_unverified"
-        reason = (
-            "executor_process_exit_verified"
-            if verified_exit
-            else "executor_process_exit_unverified"
+        existing = self.get(process_id)
+        if existing is None:
+            raise KeyError(f"Runtime process not found: {process_id}")
+        reason = _role_reason(
+            existing.process_role,
+            "process_exit_verified" if verified_exit else "process_exit_unverified",
         )
         with closing(connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -635,7 +681,12 @@ class ExecutorProcessStore:
                 attempt_id=row["attempt_id"],
                 from_state=row["state"],
                 to_state=row["state"],
-                reason_code="executor_process_identity_mismatch",
+                reason_code=_role_reason(
+                    (self.get(process_id) or (_ for _ in ()).throw(
+                        KeyError(f"Runtime process not found: {process_id}")
+                    )).process_role,
+                    "process_identity_mismatch",
+                ),
                 actor=actor,
                 timestamp=now,
                 metadata=dict(metadata),
@@ -748,10 +799,11 @@ def check_executor_launch_preflight(
     """Validate ownership, exact paths, executable, and Linux process controls."""
     errors: list[str] = []
     warnings: list[str] = []
+    role_label = _role_label(spec.process_role)
     if os.name != "posix" or not hasattr(os, "killpg"):
-        errors.append("managed executor process groups require POSIX os.killpg support")
+        errors.append(f"managed {role_label} process groups require POSIX os.killpg support")
     if not Path("/proc/self/stat").is_file():
-        errors.append("managed executor identity verification requires Linux /proc")
+        errors.append(f"managed {role_label} identity verification requires Linux /proc")
     if spec.cwd.resolve() != binding.worktree_path.resolve():
         errors.append("launch cwd does not match the active Attempt worktree")
     if spec.artifact_dir.resolve() != binding.artifact_root.resolve():
@@ -766,7 +818,7 @@ def check_executor_launch_preflight(
     if Path(executable).is_absolute():
         candidate = Path(executable)
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
-            errors.append(f"executor binary is not an executable file: {candidate}")
+            errors.append(f"{role_label} binary is not an executable file: {candidate}")
             resolved_executable = None
         else:
             resolved_executable = str(candidate.resolve())
@@ -774,7 +826,7 @@ def check_executor_launch_preflight(
         search_path = (run_env or os.environ).get("PATH")
         resolved_executable = shutil.which(executable, path=search_path)
         if resolved_executable is None:
-            errors.append(f"executor binary was not found on PATH: {executable}")
+            errors.append(f"{role_label} binary was not found on PATH: {executable}")
 
     migrate_executor_process_lifecycle(binding.db_path)
     with closing(connect(binding.db_path)) as conn:
@@ -824,14 +876,14 @@ def check_executor_launch_preflight(
         ).fetchone()
         if active is not None:
             errors.append(
-                f"Attempt already has an active executor process: {active['process_id']}"
+                f"Attempt already has an active managed process: {active['process_id']}"
             )
 
     if spec.environment_mode == "inherit_with_overrides":
         warnings.append(
-            "environment inheritance is retained for executor credentials; values are not persisted"
+            f"environment inheritance is retained for {role_label} credentials; values are not persisted"
         )
-    warnings.append("PR-7 does not provide network or container isolation")
+    warnings.append("managed process launch does not provide network or container isolation")
     return ExecutorLaunchPreflightResult(
         ok=not errors,
         blocking_errors=tuple(errors),
@@ -1090,13 +1142,15 @@ def run_managed_process(
             ) from exc
     binding.artifact_root.mkdir(parents=True, exist_ok=True)
     safe_executor = _safe_name(spec.executor_name)
-    launch_spec_path = binding.artifact_root / f"executor-launch-spec-{safe_executor}.json"
-    pid_manifest_path = binding.artifact_root / f"executor-process-{safe_executor}.pid.json"
+    role_label = _role_label(spec.process_role)
+    launch_spec_path = binding.artifact_root / f"{role_label}-launch-spec-{safe_executor}.json"
+    pid_manifest_path = binding.artifact_root / f"{role_label}-process-{safe_executor}.pid.json"
     process_id = f"process-{uuid4().hex}"
     spec_payload = spec.to_artifact(binding)
     atomic_write_json(launch_spec_path, spec_payload, sort_keys=True)
     manifest_base = {
-        "schema_version": "executor_process_pid.v1",
+        "schema_version": f"{role_label}_process_pid.v1",
+        "process_role": spec.process_role,
         "process_id": process_id,
         "attempt_id": binding.attempt_id,
         "task_key": binding.task_key,
@@ -1119,10 +1173,11 @@ def run_managed_process(
             process_id=process_id,
             binding=binding,
             executor_name=spec.executor_name,
+            process_role=spec.process_role,
             state="preflight_failed",
             launch_spec_path=launch_spec_path,
             pid_manifest_path=pid_manifest_path,
-            reason_code="executor_launch_preflight_failed",
+            reason_code=_role_reason(spec.process_role, "launch_preflight_failed"),
             metadata={
                 "blocking_errors": list(preflight.blocking_errors),
                 "warnings": list(preflight.warnings),
@@ -1147,7 +1202,7 @@ def run_managed_process(
             term_sent=False,
             kill_sent=False,
             verified_exit=True,
-            termination_reason="executor_launch_preflight_failed",
+            termination_reason=_role_reason(spec.process_role, "launch_preflight_failed"),
             launch_spec_path=launch_spec_path,
             pid_manifest_path=pid_manifest_path,
             stdout_path=stdout,
@@ -1158,10 +1213,11 @@ def run_managed_process(
         process_id=process_id,
         binding=binding,
         executor_name=spec.executor_name,
+        process_role=spec.process_role,
         state="allocated",
         launch_spec_path=launch_spec_path,
         pid_manifest_path=pid_manifest_path,
-        reason_code="executor_launch_allocated",
+        reason_code=_role_reason(spec.process_role, "launch_allocated"),
         metadata={
             "resolved_executable": preflight.resolved_executable,
             "warnings": list(preflight.warnings),
@@ -1225,7 +1281,7 @@ def run_managed_process(
                 term_sent=False,
                 kill_sent=False,
                 verified_exit=True,
-                termination_reason="executor_process_start_failed",
+                termination_reason=_role_reason(spec.process_role, "process_start_failed"),
                 launch_spec_path=launch_spec_path,
                 pid_manifest_path=pid_manifest_path,
                 stdout_path=stdout,
@@ -1251,7 +1307,7 @@ def run_managed_process(
                 term_sent=False,
                 kill_sent=False,
                 verified_exit=True,
-                termination_reason="executor_process_start_failed",
+                termination_reason=_role_reason(spec.process_role, "process_start_failed"),
                 launch_spec_path=launch_spec_path,
                 pid_manifest_path=pid_manifest_path,
                 stdout_path=stdout,
@@ -1295,7 +1351,8 @@ def run_managed_process(
         atomic_write_json(
             pid_manifest_path,
             {
-                "schema_version": "executor_process_pid.v1",
+                "schema_version": f"{role_label}_process_pid.v1",
+                "process_role": spec.process_role,
                 "process_id": process_id,
                 "attempt_id": binding.attempt_id,
                 "task_key": binding.task_key,
@@ -1344,7 +1401,7 @@ def run_managed_process(
                 break
             if deadline is not None and time.monotonic() >= deadline:
                 timed_out = True
-                termination_reason = "executor_timeout"
+                termination_reason = _role_reason(spec.process_role, "timeout")
                 current = store.get(process_id)
                 assert current is not None
                 terminate_registered_process(
@@ -1363,7 +1420,9 @@ def run_managed_process(
         except subprocess.TimeoutExpired:
             current = store.get(process_id)
             assert current is not None
-            termination_reason = termination_reason or "executor_descendant_cleanup"
+            termination_reason = termination_reason or _role_reason(
+                spec.process_role, "descendant_cleanup"
+            )
             terminate_registered_process(
                 store,
                 current,
@@ -1379,7 +1438,9 @@ def run_managed_process(
         if current.pgid is not None and current.session_id is not None:
             snapshot = inspect_process_group(current.pgid, current.session_id)
             if not snapshot.verified_exited:
-                termination_reason = termination_reason or "executor_descendant_cleanup"
+                termination_reason = termination_reason or _role_reason(
+                    spec.process_role, "descendant_cleanup"
+                )
                 current = terminate_registered_process(
                     store,
                     current,

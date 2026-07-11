@@ -7,11 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
-from agent_taskflow.validators.base import (
-    Validator,
-    ValidatorContext,
-    ValidatorResult,
-)
+from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
+from agent_taskflow.validators.command import run_command
 
 
 def _validate_args(args: Sequence[str] | None, field_name: str) -> list[str]:
@@ -19,19 +16,17 @@ def _validate_args(args: Sequence[str] | None, field_name: str) -> list[str]:
         return []
     if isinstance(args, str):
         raise TypeError(f"{field_name} must be a sequence of strings, not a raw string")
-
     normalized = list(args)
     for part in normalized:
         if not isinstance(part, str):
             raise TypeError(f"{field_name} entries must be strings")
         if not part:
             raise ValueError(f"{field_name} entries must not be empty")
-
     return normalized
 
 
 class OpenSpecValidator(Validator):
-    """Run openspec validate inside the verified task worktree."""
+    """Run OpenSpec through legacy local or canonical managed launch."""
 
     name = "openspec"
 
@@ -50,33 +45,19 @@ class OpenSpecValidator(Validator):
 
     @property
     def command(self) -> list[str]:
-        """Return the command used by this validator."""
         return [self.openspec_bin, *self.args]
 
     def _log_path(self, artifact_dir: Path) -> Path:
         return artifact_dir / "openspec-validate.log"
 
-    def run(self, context: ValidatorContext) -> ValidatorResult:
-        openspec_dir = context.worktree_path / "openspec"
-        if not openspec_dir.exists():
-            return ValidatorResult(
-                validator=self.name,
-                status="skipped",
-                exit_code=None,
-                log_path=None,
-                summary="openspec directory not found",
-                artifacts={},
-            )
-
+    def _run_local(
+        self,
+        context: ValidatorContext,
+        run_env: dict[str, str] | None,
+    ) -> ValidatorResult:
         context.artifact_dir.mkdir(parents=True, exist_ok=True)
         log_path = self._log_path(context.artifact_dir)
         command = self.command
-
-        run_env = None
-        if context.env is not None:
-            run_env = os.environ.copy()
-            run_env.update(context.env)
-
         with log_path.open("w", encoding="utf-8") as log_file:
             log_file.write(f"Validator: {self.name}\n")
             log_file.write(f"Task: {context.task_key}\n")
@@ -85,7 +66,6 @@ class OpenSpecValidator(Validator):
             log_file.write(f"Command: {command!r}\n")
             log_file.write("Environment: not logged\n\n")
             log_file.flush()
-
             try:
                 completed = subprocess.run(
                     command,
@@ -123,14 +103,12 @@ class OpenSpecValidator(Validator):
                     summary=summary,
                     artifacts={"log": log_path},
                 )
-
         status = "passed" if completed.returncode == 0 else "failed"
         summary = (
             "OpenSpec validation passed."
             if status == "passed"
             else f"OpenSpec validation failed with exit code {completed.returncode}."
         )
-
         return ValidatorResult(
             validator=self.name,
             status=status,
@@ -138,6 +116,56 @@ class OpenSpecValidator(Validator):
             log_path=log_path,
             summary=summary,
             artifacts={"log": log_path},
+        )
+
+    def run(self, context: ValidatorContext) -> ValidatorResult:
+        if not (context.worktree_path / "openspec").exists():
+            return ValidatorResult(
+                validator=self.name,
+                status="skipped",
+                exit_code=None,
+                log_path=None,
+                summary="openspec directory not found",
+                artifacts={},
+            )
+        run_env = None
+        if context.env is not None:
+            run_env = os.environ.copy()
+            run_env.update(context.env)
+        if context.launch_binding is None:
+            return self._run_local(context, run_env)
+
+        completed, log_path, error_summary, error_status, process_artifacts = run_command(
+            validator_name="openspec-validate",
+            command=self.command,
+            worktree_path=context.worktree_path,
+            artifact_dir=context.artifact_dir,
+            timeout_seconds=context.timeout_seconds,
+            run_env=run_env,
+            launch_binding=context.launch_binding,
+        )
+        if completed is None:
+            return ValidatorResult(
+                validator=self.name,
+                status=error_status,
+                exit_code=None,
+                log_path=log_path,
+                summary=error_summary,
+                artifacts={"log": log_path, **process_artifacts},
+            )
+        status = "passed" if completed.returncode == 0 else "failed"
+        summary = (
+            "OpenSpec validation passed."
+            if status == "passed"
+            else f"OpenSpec validation failed with exit code {completed.returncode}."
+        )
+        return ValidatorResult(
+            validator=self.name,
+            status=status,
+            exit_code=completed.returncode,
+            log_path=log_path,
+            summary=summary,
+            artifacts={"log": log_path, **process_artifacts},
         )
 
 
