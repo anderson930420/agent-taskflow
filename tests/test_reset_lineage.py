@@ -112,8 +112,11 @@ class ResetLineageTests(unittest.TestCase):
         task = self.task_store.get_task(self.task_key)
         assert task is not None
         self.assertEqual(task.status, "queued")
-        self.assertEqual(task.active_attempt_id, lineage.new_attempt_id)
         with closing(connect(self.db_path)) as conn:
+            active_attempt_id = conn.execute(
+                "SELECT active_attempt_id FROM tasks WHERE task_key = ?",
+                (self.task_key,),
+            ).fetchone()[0]
             attempt = conn.execute(
                 "SELECT * FROM attempts WHERE attempt_id = ?",
                 (lineage.new_attempt_id,),
@@ -126,6 +129,7 @@ class ResetLineageTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM runtime_leases WHERE task_id = ? AND is_active = 1",
                 (lineage.task_id,),
             ).fetchone()[0]
+        self.assertEqual(active_attempt_id, lineage.new_attempt_id)
         self.assertEqual(attempt["status"], "created")
         self.assertEqual(attempt["attempt_number"], 2)
         self.assertTrue(attempt["is_active"])

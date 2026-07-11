@@ -184,6 +184,68 @@ def reset_task_status(
 
     current_store = store or TaskMirrorStore(request.db_path)
     lineage_store = ResetLineageStore(current_store.db_path)
+
+    if request.request_id is not None:
+        existing = lineage_store.get_by_request_id(request.request_id)
+        if existing is not None:
+            if (
+                existing.task_key != request.task_key
+                or existing.reason != request.reason
+                or existing.actor != request.actor
+            ):
+                raise TaskStatusResetError(
+                    "request_id already belongs to a different reset request"
+                )
+            if (
+                request.expected_reset_generation is not None
+                and request.expected_reset_generation != existing.expected_generation
+            ):
+                raise TaskStatusResetError(
+                    "idempotent reset request generation does not match persisted lineage"
+                )
+            if (
+                request.expected_old_attempt_id is not None
+                and request.expected_old_attempt_id != existing.old_attempt_id
+            ):
+                raise TaskStatusResetError(
+                    "idempotent reset request old Attempt does not match persisted lineage"
+                )
+            payload = _audit_payload(request, existing)
+            artifact_path = lineage_store.audit_artifact_path(existing)
+            artifact_error: str | None = None
+            if artifact_path is not None and not artifact_path.exists():
+                try:
+                    atomic_write_json(artifact_path, payload, sort_keys=True)
+                except OSError as exc:
+                    artifact_error = f"{exc.__class__.__name__}: {exc}"
+                    lineage_store.append_artifact_failure(
+                        existing.reset_id,
+                        actor=request.actor,
+                        error=artifact_error,
+                    )
+                    artifact_path = None
+            return TaskStatusResetResult(
+                task_key=request.task_key,
+                from_status=request.from_status,
+                to_status=request.to_status,
+                reason=request.reason,
+                dry_run=False,
+                operator_confirmed=True,
+                mutated=False,
+                audit_artifact_path=artifact_path,
+                artifact_error=artifact_error,
+                reset_id=existing.reset_id,
+                request_id=existing.request_id,
+                old_attempt_id=existing.old_attempt_id,
+                new_attempt_id=existing.new_attempt_id,
+                expected_reset_generation=existing.expected_generation,
+                committed_reset_generation=existing.committed_generation,
+                next_attempt_number=int(
+                    existing.metadata.get("new_attempt_number", 1)
+                ),
+                idempotent_replay=True,
+            )
+
     preview = lineage_store.preview(request.task_key)
     if preview.current_status != request.from_status:
         raise TaskStatusResetError(

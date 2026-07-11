@@ -20,6 +20,7 @@ from agent_taskflow.models import require_absolute_path, utc_now_iso
 from agent_taskflow.reset_lineage import ResetLineageStore
 from agent_taskflow.reset_lineage_schema import migrate_reset_lineage
 from agent_taskflow.runtime_admission import (
+    DEFAULT_LEASE_TTL_SECONDS,
     ActiveAttemptExistsError,
     RuntimeClaim,
 )
@@ -56,18 +57,18 @@ class ResetAwareRuntimeAdmissionStore(canonical_path.CanonicalRuntimeAdmissionSt
         task_key: str,
         *,
         owner_id: str,
-        ttl_seconds: int,
-        executor: str | None,
-        model: str | None,
-        base_commit: str | None,
-        policy_version: str | None,
-        config_snapshot_hash: str | None,
-        prompt_template_version: str | None,
-        permission_profile: str | None,
-        worktree_path: str | Path | None,
-        artifact_root: str | Path | None,
-        reason_code: str,
-        metadata: dict[str, Any] | None,
+        ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+        executor: str | None = None,
+        model: str | None = None,
+        base_commit: str | None = None,
+        policy_version: str | None = None,
+        config_snapshot_hash: str | None = None,
+        prompt_template_version: str | None = None,
+        permission_profile: str | None = None,
+        worktree_path: str | Path | None = None,
+        artifact_root: str | Path | None = None,
+        reason_code: str = "runtime_pickup_claimed",
+        metadata: dict[str, Any] | None = None,
     ) -> RuntimeClaim | None:
         normalized = normalize_task_key(task_key)
         normalized_owner = owner_id.strip()
