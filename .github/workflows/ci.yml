@@ -1,9 +1,7 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - agent/validator-managed-process
+  pull_request:
 
 permissions:
   contents: write
