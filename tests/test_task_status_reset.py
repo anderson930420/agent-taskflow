@@ -192,9 +192,13 @@ class TaskStatusResetTests(unittest.TestCase):
         )
 
         self.assertEqual(exit_code, 0, stderr)
-        artifact_path = self.artifact_dir / "task-status-reset.json"
-        self.assertEqual(json.loads(stdout)["audit_artifact_path"], str(artifact_path))
+        result = json.loads(stdout)
+        artifact_path = Path(result["audit_artifact_path"])
+        self.assertEqual(artifact_path.parent.name, "reset-audit")
+        self.assertTrue(artifact_path.name.startswith("reset-"))
         payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["reset_id"], result["reset_id"])
+        self.assertEqual(payload["new_attempt_id"], result["new_attempt_id"])
         self.assertEqual(payload["kind"], "task_status_reset")
         recorded = [
             artifact
