@@ -88,8 +88,18 @@ def _load_valid_m1a_evidence(prior_dir: Path) -> dict[str, Any]:
     for field in ("migration_dry_run", "integrity_check", "rollback_rehearsal"):
         if payload.get(field) is not True:
             errors.append(f"{field} must be true")
-    if payload.get("production_database_modified") is not False:
-        errors.append("production_database_modified must be false")
+    if payload.get("source_db_mutated_by_runner") is not False:
+        errors.append("source_db_mutated_by_runner must be false")
+    safety = payload.get("safety")
+    if not isinstance(safety, dict):
+        errors.append("safety must be an object")
+    else:
+        if safety.get("production_database_opened_read_only") is not True:
+            errors.append("safety.production_database_opened_read_only must be true")
+        if safety.get("production_migration_executed") is not False:
+            errors.append("safety.production_migration_executed must be false")
+        if safety.get("production_restore_executed") is not False:
+            errors.append("safety.production_restore_executed must be false")
     if errors:
         raise ValueError("M1-A evidence is not passing: " + "; ".join(errors))
     return payload
