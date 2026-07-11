@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely reset a locally mirrored blocked task back to queued."""
+"""Atomically reserve one retry Attempt for a blocked task."""
 
 from __future__ import annotations
 
@@ -23,18 +23,26 @@ from agent_taskflow.task_status_reset import (  # noqa: E402
 )
 
 
-def _non_empty_reason(value: str) -> str:
-    reason = value.strip()
-    if not reason:
+def _non_empty(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
         raise argparse.ArgumentTypeError("must not be empty")
-    return reason
+    return normalized
+
+
+def _non_negative(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Operator-confirmed local mirror reset from blocked to queued. "
-            "This command does not approve, merge, clean up, or run validators."
+            "Operator-confirmed blocked-to-queued reset that atomically binds "
+            "the closed Attempt to one newly reserved retry Attempt. This "
+            "command does not approve, merge, clean up, execute, or validate."
         )
     )
     parser.add_argument("--task-key", required=True)
@@ -53,16 +61,37 @@ def build_parser() -> argparse.ArgumentParser:
         default=RESET_TO_STATUS,
         choices=(RESET_TO_STATUS,),
     )
-    parser.add_argument("--reason", required=True, type=_non_empty_reason)
+    parser.add_argument("--reason", required=True, type=_non_empty)
+    parser.add_argument(
+        "--actor",
+        default="reset_task_status_cli",
+        type=_non_empty,
+        help="Stable operator or automation identity recorded in reset audit",
+    )
+    parser.add_argument(
+        "--request-id",
+        type=_non_empty,
+        help="Optional idempotency key; reusing it replays the same reset result",
+    )
+    parser.add_argument(
+        "--expected-reset-generation",
+        type=_non_negative,
+        help="Optional compare-and-set generation read before issuing reset",
+    )
+    parser.add_argument(
+        "--expected-old-attempt-id",
+        type=_non_empty,
+        help="Optional compare-and-set check for the latest closed Attempt",
+    )
     parser.add_argument(
         "--confirm-reset",
         action="store_true",
-        help="Confirm the local status mutation",
+        help="Confirm the reset transaction and new retry Attempt reservation",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Report the planned reset without mutation or audit writes",
+        help="Report the planned lineage without mutation or audit writes",
     )
     return parser
 
@@ -76,6 +105,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             from_status=args.from_status,
             to_status=args.to_status,
             reason=args.reason,
+            actor=args.actor,
+            request_id=args.request_id,
+            expected_reset_generation=args.expected_reset_generation,
+            expected_old_attempt_id=args.expected_old_attempt_id,
             confirm_reset=args.confirm_reset,
             dry_run=args.dry_run,
         )
