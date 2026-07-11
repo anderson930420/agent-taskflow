@@ -1,7 +1,7 @@
 # Milestone 0 Correctness Baseline Status
 
 > Decision date: 2026-07-11  
-> Scope: atomic permission, Task/Attempt schema, PR-3 through PR-6 runtime foundations
+> Scope: atomic permission, Task/Attempt schema, and PR-3 through PR-7 runtime foundations
 
 ## Decision
 
@@ -18,11 +18,15 @@ PR-5 implements Attempt-scoped branch, worktree, lock, PID, and artifact
 resources plus fresh-worktree retry identity. PR-6 implements a persisted legal
 Attempt transition graph, explicit timeout/abort/validation-failed outcomes,
 admission pause, cooperative kill switches, and stable runtime reason codes.
+PR-7 adds exact Attempt-bound ExecutorLaunchSpec preflight, isolated POSIX
+sessions/process groups, PID/PGID/session/start-tick identity, SIGTERM/SIGKILL
+escalation, descendant cleanup, external hard termination, and verified exit.
 
-The overall Level 2 Milestone 0 exit gate is **not complete** because hard
-process-group termination and verified crash recovery, dual-Attempt reset audit
-binding, and concurrent reset compare-and-set semantics remain open. This
-document must not be used as evidence that Milestone 0 has passed.
+The overall Level 2 Milestone 0 exit gate is **not complete** because
+Dual-Attempt reset audit binding and concurrent reset compare-and-set semantics
+remain open. Validator subprocess hard termination must also be reconciled if it
+is included in the final Milestone 0 process-lifecycle boundary. This document
+must not be used as evidence that Milestone 0 has passed.
 
 ## Atomic-write slice: closed
 
@@ -99,7 +103,7 @@ bootstrap wraps both. `queued_task_handoff` and the GitHub Issue scheduler impor
 and delegate to the same canonical `run_approved_task(...)`; they cannot create
 independent runtime ownership.
 
-## Attempt resources and lifecycle controls: implemented after migration
+## Attempt resources, controls, and executor processes: implemented after migration
 
 PR-5 allocates immutable Attempt-scoped branch, worktree, artifact, lock, and PID
 resources. Each new claim can create a fresh worktree and cannot overwrite a
@@ -117,8 +121,21 @@ PR-6 migration `level2_lifecycle_control_v1` adds:
 - cooperative kill checks at executor and validator boundaries; and
 - stable machine-readable reason codes separate from human explanation.
 
-A cooperative kill is not hard process termination. PR-6 sends no OS signal and
-does not claim process-group or descendant termination authority.
+PR-7 migration `level2_executor_process_lifecycle_v1` adds:
+
+- an exact Attempt/lease/owner launch binding;
+- redacted launch-spec evidence with `shell=false`, `start_new_session=true`,
+  and `close_fds=true`;
+- active ownership, resource-path, executable, and platform preflight;
+- one active managed executor process per Attempt;
+- Linux PID, PGID, session ID, and `/proc` start-tick identity;
+- append-only executor-process events and a legal process-state graph;
+- SIGTERM grace followed by SIGKILL escalation;
+- hard termination through the PR-6 kill switch or external operator CLI;
+- cleanup of live descendants after leader exit; and
+- verified exit only when no live process remains in the stored PGID/session.
+
+PR-7 is process-lifecycle isolation, not a container or network sandbox.
 
 ## Milestone 0 exit-gate reconciliation
 
@@ -132,21 +149,22 @@ does not claim process-group or descendant termination authority.
 | Attempt lifecycle uses a legal forward-only transition graph | **Passed after PR-6 migration** | SQLite rejects backward and terminal-reopen Attempt status edges. |
 | Timeout, abort, and validation failure remain distinguishable | **Passed after PR-6 migration** | Canonical runtime release persists explicit Attempt outcomes and reason codes. |
 | Operator can pause new admission | **Passed after PR-6 migration** | Persisted pause controls deny new matching claims while active Attempts continue. |
-| Operator can request hard process termination | **Blocked** | PR-6 kill is cooperative only; process groups, signals, descendants, and exit verification are not implemented. |
+| Operator can request hard executor termination | **Passed after PR-7 migration** | Managed process groups use identity-checked SIGTERM/SIGKILL escalation and require verified exit. |
+| Executor descendants cannot survive leader completion unnoticed | **Passed after PR-7 migration** | Live members in the stored PGID/session are terminated and reported as executor failure. |
 | Reset can successfully rerun with correct retry identity | **Blocked** | Legacy `blocked -> queued` reset does not yet bind the closed Attempt and new retry Attempt in one audited reset transaction. |
 | Retry uses fresh Attempt worktree semantics | **Passed after PR-5 migration** | Each new claim can create a fresh worktree on a unique Attempt branch; terminal history is retained and a retry cannot reuse the prior Attempt path. |
-| Reset and atomic write have authoritative audit evidence | **Partial** | Atomic behavior, orphan audit, leases, lifecycle storage, resources, and control events exist; reset evidence is not yet bound to old and new Attempts. |
+| Reset and atomic write have authoritative audit evidence | **Partial** | Atomic behavior, orphan audit, leases, lifecycle storage, resources, control events, and process events exist; reset evidence is not yet bound to old and new Attempts. |
 | Existing full test suite is green | **Required per PR** | GitHub Actions on the exact PR head is the authority. |
 
 ## Remaining blockers and ownership
 
 Milestone 0 can be closed only after the following foundations land:
 
-1. Process-group creation, signal escalation, descendant termination, verified
-   process exit, and crash recovery tied to lease/PID evidence.
-2. Reset audit events bound to both the closed Attempt and newly created Attempt.
-3. Concurrent reset compare-and-set coverage proving two simultaneous reset
+1. Reset audit events bound to both the closed Attempt and newly created Attempt.
+2. Concurrent reset compare-and-set coverage proving two simultaneous reset
    requests produce one accepted reset lineage and one fail-closed rejection.
+3. A final scope decision and, when required, implementation for validator
+   process-group hard termination.
 
 Until those items pass their own regression tests, the canonical status is:
 
@@ -168,8 +186,12 @@ fresh_worktree_retry_identity = implemented
 attempt_transition_graph = implemented_after_pr6_migration
 timeout_abort_validation_outcomes = implemented
 runtime_pause = persisted_admission_only
-runtime_kill_switch = persisted_cooperative
-hard_process_group_kill = blocked
+runtime_kill_switch = hard_for_managed_executors_after_pr7
+executor_launch_spec = implemented_after_pr7_migration
+executor_process_group = implemented
+hard_process_group_kill = implemented_for_managed_executors
+verified_executor_exit = implemented
+validator_process_group = scope_open
 milestone_0 = open_blocked
 level_2_eligible = false
 ```
@@ -179,15 +201,16 @@ level_2_eligible = false
 Deployments apply the latest additive migration command from the repository root:
 
 ```bash
-python3 scripts/migrate_lifecycle_control.py \
+python3 scripts/migrate_executor_process_lifecycle.py \
   --db-path /absolute/path/state.db
 ```
 
 The command installs the Task/Attempt, runtime admission, canonical admission,
-Attempt resource, and lifecycle-control prerequisites in order.
+Attempt resource, lifecycle-control, and executor-process prerequisites in
+order.
 
-Reverting application code while canonical ownership and lifecycle triggers
-remain installed causes unsupported legacy transitions to fail closed, which is
-the safe rollback state. Destructive rollback requires a database backup or an
-explicit rebuild; Attempt, lifecycle, lease, resource, and control audit history
-must not be dropped casually.
+Reverting application code while canonical ownership, lifecycle, and process
+triggers remain installed causes unsupported legacy transitions or concurrent
+managed launches to fail closed, which is the safe rollback state. Destructive
+rollback requires a database backup or an explicit rebuild; Attempt, lifecycle,
+lease, resource, control, and process audit history must not be dropped casually.

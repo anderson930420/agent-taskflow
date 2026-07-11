@@ -15,6 +15,7 @@ from agent_taskflow.context_validation import (
     validate_env as _validate_env,
     validate_timeout as _validate_timeout,
 )
+from agent_taskflow.executor_launch import ExecutorLaunchBinding
 from agent_taskflow.models import require_absolute_path
 from agent_taskflow.tasks import normalize_task_key
 
@@ -36,7 +37,13 @@ def validate_executor_result_status(status: str) -> str:
 
 @dataclass(frozen=True)
 class ExecutorContext:
-    """Runtime context supplied to an executor."""
+    """Runtime context supplied to an executor.
+
+    ``launch_binding`` is injected only by the canonical Attempt runtime. A
+    context without this binding preserves the historical direct-subprocess
+    behavior for bounded local tools and unit fixtures. A bound context must use
+    PR-7's managed launch path.
+    """
 
     task_key: str
     project: str
@@ -47,6 +54,7 @@ class ExecutorContext:
     timeout_seconds: int | None = None
     env: dict[str, str] | None = None
     repo_root: Path | None = None
+    launch_binding: ExecutorLaunchBinding | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
@@ -89,6 +97,19 @@ class ExecutorContext:
             _validate_timeout(self.timeout_seconds),
         )
         object.__setattr__(self, "env", _validate_env(self.env))
+
+        if self.launch_binding is not None:
+            binding = self.launch_binding
+            if binding.task_key != self.task_key:
+                raise ValueError("launch_binding task_key does not match ExecutorContext")
+            if binding.worktree_path.resolve() != self.worktree_path.resolve():
+                raise ValueError(
+                    "launch_binding worktree_path does not match ExecutorContext"
+                )
+            if binding.artifact_root.resolve() != self.artifact_dir.resolve():
+                raise ValueError(
+                    "launch_binding artifact_root does not match ExecutorContext"
+                )
 
 
 @dataclass(frozen=True)
