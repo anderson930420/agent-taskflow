@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from agent_taskflow.attempt_store import AttemptStore
-from agent_taskflow.executors.base import ExecutorResult
+from agent_taskflow.executors.base import ExecutorContext, ExecutorResult
 from agent_taskflow.lifecycle_control import (
     LifecycleTransitionError,
     RuntimeControlStore,
@@ -23,7 +23,7 @@ from agent_taskflow.lifecycle_control_schema import (
 from agent_taskflow.lifecycle_runtime_path import LifecycleRuntimeTaskStore
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.store import TaskMirrorStore, connect
-from agent_taskflow.validators.base import ValidatorResult
+from agent_taskflow.validators.base import ValidatorContext, ValidatorResult
 
 
 class _ResultExecutor:
@@ -33,7 +33,7 @@ class _ResultExecutor:
         self.result = result
         self.calls = 0
 
-    def run(self, context):
+    def run(self, context: ExecutorContext) -> ExecutorResult:
         self.calls += 1
         return self.result
 
@@ -45,7 +45,7 @@ class _ResultValidator:
         self.result = result
         self.calls = 0
 
-    def run(self, context):
+    def run(self, context: ValidatorContext) -> ValidatorResult:
         self.calls += 1
         return self.result
 
@@ -107,6 +107,27 @@ class LifecycleControlTests(unittest.TestCase):
         workspace = store.prepare_attempt_workspace("AT-PR6-1")
         self.assertTrue(workspace.ok, workspace.summary)
         return store
+
+    def _executor_context(self, store: LifecycleRuntimeTaskStore) -> ExecutorContext:
+        resource = store.attempt_resource("AT-PR6-1")
+        assert resource is not None
+        return ExecutorContext(
+            task_key="AT-PR6-1",
+            project="agent-taskflow",
+            worktree_path=resource.worktree_path,
+            artifact_dir=resource.artifact_root,
+            repo_root=resource.repo_path,
+        )
+
+    def _validator_context(self, store: LifecycleRuntimeTaskStore) -> ValidatorContext:
+        resource = store.attempt_resource("AT-PR6-1")
+        assert resource is not None
+        return ValidatorContext(
+            task_key="AT-PR6-1",
+            project="agent-taskflow",
+            worktree_path=resource.worktree_path,
+            artifact_dir=resource.artifact_root,
+        )
 
     def test_migration_is_idempotent_and_installs_graph_and_controls(self) -> None:
         migrate_lifecycle_control(self.db_path)
@@ -187,23 +208,17 @@ class LifecycleControlTests(unittest.TestCase):
                 )
             )
         )
-        resource = store.attempt_resource("AT-PR6-1")
-        assert resource is not None
-        context = type(
-            "Context",
-            (),
-            {"task_key": "AT-PR6-1"},
-        )()
-        result = executor.run(context)
+        result = executor.run(self._executor_context(store))
         self.assertEqual(result.status, "failed")
-        attempt_id = store.runtime_claim("AT-PR6-1").attempt_id
+        claim = store.runtime_claim("AT-PR6-1")
+        assert claim is not None
         store.update_task_status(
             "AT-PR6-1",
             "blocked",
             source="test",
             blocked_reason=result.summary,
         )
-        attempt = AttemptStore(self.db_path).get_attempt(attempt_id)
+        attempt = AttemptStore(self.db_path).get_attempt(claim.attempt_id)
         assert attempt is not None
         self.assertEqual(attempt.status, "execution_timeout")
         self.assertEqual(attempt.execution_result, "timed_out")
@@ -221,16 +236,16 @@ class LifecycleControlTests(unittest.TestCase):
                 )
             )
         )
-        context = type("Context", (), {"task_key": "AT-PR6-1"})()
-        result = validator.run(context)
-        attempt_id = store.runtime_claim("AT-PR6-1").attempt_id
+        result = validator.run(self._validator_context(store))
+        claim = store.runtime_claim("AT-PR6-1")
+        assert claim is not None
         store.update_task_status(
             "AT-PR6-1",
             "blocked",
             source="test",
             blocked_reason=result.summary,
         )
-        attempt = AttemptStore(self.db_path).get_attempt(attempt_id)
+        attempt = AttemptStore(self.db_path).get_attempt(claim.attempt_id)
         assert attempt is not None
         self.assertEqual(attempt.status, "validation_failed")
         self.assertEqual(attempt.validation_result, "failed")
@@ -263,8 +278,7 @@ class LifecycleControlTests(unittest.TestCase):
             ExecutorResult(executor="fake", status="completed", summary="done")
         )
         executor = store.wrap_executor(inner)
-        context = type("Context", (), {"task_key": "AT-PR6-1"})()
-        result = executor.run(context)
+        result = executor.run(self._executor_context(store))
         self.assertEqual(result.status, "blocked")
         self.assertEqual(inner.calls, 0)
         store.update_task_status(
