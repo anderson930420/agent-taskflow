@@ -23,9 +23,33 @@ jobs:
         shell: bash
         run: |
           set +e
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/_pr9_apply_validator_process.py")
+          text = path.read_text(encoding="utf-8")
+          old = "for _ in range(4):"
+          if old not in text:
+              raise SystemExit("changed-files replacement loop anchor missing")
+          path.write_text(text.replace(old, "for _ in range(3):", 1), encoding="utf-8")
+          PY
           python scripts/_pr9_apply_validator_process.py 2>&1 | tee patch.log
           patch_status=${PIPESTATUS[0]}
           if [ "$patch_status" -eq 0 ]; then
+            python - <<'PY'
+          from pathlib import Path
+          path = Path("agent_taskflow/validators/changed_files.py")
+          text = path.read_text(encoding="utf-8")
+          old = '            artifacts={"log": log_path, "audit": audit_path},\n'
+          new = '''            artifacts={
+                "log": log_path,
+                "audit": audit_path,
+                **process_artifacts,
+            },
+'''
+          if old not in text:
+              raise SystemExit("final changed-files artifact anchor missing")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
             cat > .github/workflows/ci.yml <<'EOF'
           name: CI
 
