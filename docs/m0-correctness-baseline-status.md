@@ -1,7 +1,7 @@
 # Milestone 0 Correctness Baseline Status
 
 > Decision date: 2026-07-11  
-> Scope: atomic permission, Task/Attempt schema, PR-3 leases, and PR-4 canonical runtime admission
+> Scope: atomic permission, Task/Attempt schema, PR-3/PR-4 runtime admission, and PR-5 Attempt resources
 
 ## Decision
 
@@ -14,10 +14,11 @@ guards. PR-4 installs the canonical runtime admission path and propagates one
 explicit owner/token claim through Dispatcher, `ApprovedTaskRunner`, queued
 runtime handoff, and the scheduler delegation chain.
 
-The overall Level 2 Milestone 0 exit gate is **not complete** because retry/reset
-does not yet create a new Attempt with a fresh worktree, and branch, worktree,
-lock, PID, and artifact resources are not yet Attempt-scoped. This document must
-not be used as evidence that Level 2 Milestone 0 has passed.
+PR-5 implements Attempt-scoped branch, worktree, lock, PID, and artifact
+resources plus fresh-worktree retry identity. The overall Level 2 Milestone 0 exit
+gate is **not complete** because dual-Attempt reset audit binding, concurrent
+reset compare-and-set semantics, and process-group termination/recovery remain
+open. This document must not be used as evidence that Milestone 0 has passed.
 
 ## Atomic-write slice: closed
 
@@ -104,7 +105,7 @@ independent runtime ownership.
 | Executor start requires active ownership | **Passed after migration** | SQLite requires matching canonical claim metadata and a live token lease. |
 | Canonical runtime admission path is used by current executor roots | **Passed after migration** | Dispatcher and ApprovedTaskRunner use the claim-aware store; runtime handoff and scheduler delegate to the wrapped runner. |
 | Reset can successfully rerun with correct retry identity | **Blocked** | Legacy `blocked -> queued` reset does not close the prior Attempt and allocate the next retry identity. |
-| Retry uses destroy-and-recreate worktree semantics | **Blocked** | Retry must create a fresh worktree; current legacy behavior can retain or reuse the prior task worktree. |
+| Retry uses fresh Attempt worktree semantics | **Passed after PR-5 migration** | Each new claim can create a fresh worktree on a unique Attempt branch; terminal history is retained and a retry cannot reuse the prior Attempt path. |
 | Reset and atomic write have authoritative audit evidence | **Partial** | Atomic behavior, orphan audit, leases, and lifecycle storage exist; reset evidence is not yet bound to old and new Attempts. |
 | Existing full test suite is green | **Required per PR** | GitHub Actions on the exact PR head is the authority. |
 
@@ -112,14 +113,11 @@ independent runtime ownership.
 
 Milestone 0 can be closed only after the following foundations land:
 
-1. Attempt-scoped branch, worktree, lock, PID, and artifact resources.
-2. Retry/reset semantics that close the prior Attempt, allocate a new Attempt,
-   and create a fresh worktree without overwriting historical evidence.
-3. Process-group lifecycle and crash recovery tied to lease expiry and PID
+1. Process-group lifecycle and crash recovery tied to lease expiry and PID
    evidence.
-4. Reset audit events bound to both the closed Attempt and newly created Attempt.
-5. Regression coverage proving two simultaneous reset requests produce exactly
-   one new retry Attempt and one fail-closed rejection.
+2. Reset audit events bound to both the closed Attempt and newly created Attempt.
+3. Concurrent reset compare-and-set coverage proving two simultaneous reset
+   requests produce one accepted reset lineage and one fail-closed rejection.
 
 Until those items pass their own regression tests, the canonical status is:
 
@@ -136,6 +134,8 @@ executor_start_without_lease = denied_after_migration
 runtime_attempt_admission = canonical_explicit_token_path
 canonical_explicit_token_wiring = implemented_after_migration
 implicit_status_pickup = disabled_after_migration
+attempt_scoped_resources = implemented_after_pr5_migration
+fresh_worktree_retry_identity = implemented
 milestone_0 = open_blocked
 level_2_eligible = false
 ```

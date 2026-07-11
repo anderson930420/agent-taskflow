@@ -97,10 +97,7 @@ class IssueToWaitingApprovalSmokeTests(unittest.TestCase):
 
     def test_smoke_writes_fake_marker_in_worktree(self) -> None:
         summary = self._run_smoke()
-        worktree_root = Path(str(summary["worktree_root"]))
-        task_key = str(summary["task_key"])
-        # worktree path follows worktree_path_from_base(worktree_root, task_key)
-        marker = worktree_root / task_key / FAKE_MARKER_RELATIVE
+        marker = Path(str(summary["worktree_path"])) / FAKE_MARKER_RELATIVE
         self.assertTrue(
             marker.is_file(),
             f"fake executor marker missing in worktree: {marker}",
