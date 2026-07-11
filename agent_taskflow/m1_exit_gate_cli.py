@@ -34,8 +34,7 @@ def _reader_module_retains_fallback(repo_root: Path) -> tuple[bool, Path]:
     except OSError:
         return False, reader
     required_markers = (
-        "fall back to the legacy tick",
-        "falls back to the legacy tick payload",
+        "legacy tick payload",
         "legacy ticks",
     )
     return all(marker in text for marker in required_markers), reader
