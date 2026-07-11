@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
+from agent_taskflow.executor_launch import ExecutorLaunchSpec, run_managed_process
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
 
 
@@ -57,13 +58,104 @@ class ShellExecutor(Executor):
             run_env = os.environ.copy()
             run_env.update(context.env)
 
+        preamble = (
+            f"Executor: {self.name}\n"
+            f"Task: {context.task_key}\n"
+            f"Project: {context.project}\n"
+            f"Worktree: {context.worktree_path}\n"
+            f"Command: {self.command!r}\n"
+            "Environment: not logged\n\n"
+        )
+
+        if context.launch_binding is not None:
+            managed = run_managed_process(
+                context.launch_binding,
+                ExecutorLaunchSpec(
+                    executor_name=self.name,
+                    argv=tuple(self.command),
+                    cwd=context.worktree_path,
+                    artifact_dir=context.artifact_dir,
+                    timeout_seconds=context.timeout_seconds,
+                    stdin_mode="devnull",
+                    combined_output=True,
+                    environment_keys=tuple((context.env or {}).keys()),
+                ),
+                stdout_path=log_path,
+                run_env=run_env,
+                preamble=preamble,
+            )
+            artifacts = {
+                "log": log_path,
+                "executor_launch_spec": managed.launch_spec_path,
+                "executor_process_pid": managed.pid_manifest_path,
+            }
+            if managed.preflight_errors or managed.start_error is not None:
+                summary = (
+                    "Executor launch preflight failed: "
+                    + "; ".join(managed.preflight_errors)
+                    if managed.preflight_errors
+                    else f"Command failed to start: {managed.start_error}"
+                )
+                return ExecutorResult(
+                    executor=self.name,
+                    status="blocked",
+                    exit_code=None,
+                    log_path=log_path,
+                    summary=summary,
+                    artifacts=artifacts,
+                )
+            if managed.kill_requested:
+                return ExecutorResult(
+                    executor=self.name,
+                    status="blocked",
+                    exit_code=managed.exit_code,
+                    log_path=log_path,
+                    summary="Operator kill requested; executor process group terminated.",
+                    artifacts=artifacts,
+                )
+            if managed.timed_out:
+                return ExecutorResult(
+                    executor=self.name,
+                    status="failed",
+                    exit_code=managed.exit_code,
+                    log_path=log_path,
+                    summary=(
+                        f"Command timed out after {context.timeout_seconds} seconds; "
+                        f"verified_exit={managed.verified_exit}."
+                    ),
+                    artifacts=artifacts,
+                )
+            if not managed.verified_exit:
+                return ExecutorResult(
+                    executor=self.name,
+                    status="blocked",
+                    exit_code=managed.exit_code,
+                    log_path=log_path,
+                    summary="Executor process-group exit could not be verified.",
+                    artifacts=artifacts,
+                )
+            status = "completed" if managed.exit_code == 0 else "failed"
+            summary = (
+                "Command completed successfully."
+                if status == "completed"
+                else f"Command failed with exit code {managed.exit_code}."
+            )
+            if managed.termination_reason == "executor_descendant_cleanup":
+                status = "failed"
+                summary = "Executor leader exited with live descendants; process group was terminated."
+            return ExecutorResult(
+                executor=self.name,
+                status=status,
+                exit_code=managed.exit_code,
+                log_path=log_path,
+                summary=summary,
+                artifacts=artifacts,
+            )
+
+        # Compatibility path for local tools and unit fixtures that are not bound
+        # to a canonical Attempt. Canonical runtime execution never uses this path.
         with log_path.open("w", encoding="utf-8") as log_file:
-            log_file.write(f"Executor: {self.name}\n")
-            log_file.write(f"Task: {context.task_key}\n")
-            log_file.write(f"Project: {context.project}\n")
-            log_file.write(f"Worktree: {context.worktree_path}\n")
-            log_file.write(f"Command: {self.command!r}\n")
-            log_file.write("Environment: not logged\n\n")
+            log_file.write(preamble)
             log_file.flush()
 
             try:
