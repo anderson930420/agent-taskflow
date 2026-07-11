@@ -51,6 +51,15 @@ install_lifecycle_entrypoint_controls(
     approved_task_runner_module=_approved_task_runner_module,
 )
 
+from agent_taskflow.executor_process_runtime_path import (
+    install_executor_process_runtime_path,
+)
+
+install_executor_process_runtime_path(
+    dispatcher_module=_dispatcher_module,
+    approved_task_runner_module=_approved_task_runner_module,
+)
+
 DEFAULT_VALIDATORS = _dispatcher_module.DEFAULT_VALIDATORS
 Dispatcher = _dispatcher_module.Dispatcher
 DispatcherResult = _dispatcher_module.DispatcherResult
