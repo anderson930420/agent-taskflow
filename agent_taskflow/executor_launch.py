@@ -349,7 +349,7 @@ def _row_to_record(row: sqlite3.Row) -> ExecutorProcessRecord:
 
 
 class ExecutorProcessStore:
-    """Persistence and append-only audit operations for one executor process group."""
+    """Persistence and append-only audit for executor or validator process groups."""
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         self.db_path = default_db_path() if db_path is None else require_absolute_path(db_path, "db_path")
@@ -400,7 +400,7 @@ class ExecutorProcessStore:
         process_id: str,
         binding: ExecutorLaunchBinding,
         executor_name: str,
-        process_role: str,
+        process_role: str = "executor",
         state: str,
         launch_spec_path: Path,
         pid_manifest_path: Path,
@@ -500,7 +500,11 @@ class ExecutorProcessStore:
             to_state="start_failed",
             reason_code=_role_reason(record.process_role, "process_start_failed"),
             actor=actor,
-            updates={"termination_reason": "executor_process_start_failed"},
+            updates={
+                "termination_reason": _role_reason(
+                    record.process_role, "process_start_failed"
+                )
+            },
             metadata={"error": error},
         )
 

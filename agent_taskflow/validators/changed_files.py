@@ -400,10 +400,10 @@ class ChangedFilesValidator(Validator):
                 log_path=log_path,
                 summary=summary,
                 artifacts={
-                "log": log_path,
-                "audit": audit_path,
-                **process_artifacts,
-            },
+                    "log": log_path,
+                    "audit": audit_path,
+                    **process_artifacts,
+                },
             )
 
 
