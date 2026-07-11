@@ -17,14 +17,5 @@ jobs:
         with:
           name: pr5-source-snapshot
           path: |
-            tests/test_approved_task_runner.py
-            tests/test_run_approved_task_script.py
-            tests/test_attempt_resources.py
-            tests/test_run_issue_to_waiting_approval_smoke.py
-            tests/test_run_pr_handoff_golden_path_smoke.py
-            tests/test_run_prepared_workspace_golden_path_smoke.py
-            scripts/run_issue_to_prepared_workspace_smoke.py
-            scripts/run_prepared_workspace_golden_path_smoke.py
-            scripts/run_pr_handoff_golden_path_smoke.py
-            docs/m0-correctness-baseline-status.md
+            scripts/run_issue_to_waiting_approval_smoke.py
           if-no-files-found: error
