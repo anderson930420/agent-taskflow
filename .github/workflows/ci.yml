@@ -22,8 +22,11 @@ jobs:
       - name: Apply PR-9 integration patch
         shell: bash
         run: |
-          python scripts/_pr9_apply_validator_process.py
-          cat > .github/workflows/ci.yml <<'EOF'
+          set +e
+          python scripts/_pr9_apply_validator_process.py 2>&1 | tee patch.log
+          patch_status=${PIPESTATUS[0]}
+          if [ "$patch_status" -eq 0 ]; then
+            cat > .github/workflows/ci.yml <<'EOF'
           name: CI
 
           on:
@@ -51,6 +54,16 @@ jobs:
                 - name: Compile sources
                   run: PYTHONPATH=. python -m compileall agent_taskflow scripts tests
           EOF
+          fi
+          exit "$patch_status"
+
+      - name: Upload patch diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validator-process-patch-diagnostics
+          path: patch.log
+          if-no-files-found: error
 
       - name: Commit integrated validator process changes
         shell: bash
