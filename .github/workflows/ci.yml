@@ -19,47 +19,28 @@ jobs:
       - name: Install package and dependencies
         run: python -m pip install -e .
 
-      - name: Run PR-5 handoff diagnostic
+      - name: Run PR handoff diagnostic
         shell: bash
         run: |
           set +e
           rm -rf /tmp/pr5-handoff-diagnostic
-          PYTHONPATH=. python scripts/run_issue_to_waiting_approval_smoke.py \
+          PYTHONPATH=. python scripts/run_pr_handoff_golden_path_smoke.py \
             --workspace-root /tmp/pr5-handoff-diagnostic \
-            --json 2>&1 | tee unittest.log
+            2>&1 | tee unittest.log
           smoke_status=${PIPESTATUS[0]}
           {
             echo
-            echo '=== filesystem ==='
-            find /tmp/pr5-handoff-diagnostic -maxdepth 7 -type f -print 2>/dev/null | sort
+            echo '=== generated handoff files ==='
+            find /tmp/pr5-handoff-diagnostic -path '*pr-handoff*' -type f -print -exec sh -c 'echo --- "$1"; cat "$1"' _ {} \; 2>/dev/null || true
             echo
-            echo '=== git worktrees ==='
+            echo '=== git worktrees and status ==='
             git -C /tmp/pr5-handoff-diagnostic/repo worktree list --porcelain 2>&1 || true
-            echo
-            echo '=== worktree status ==='
             while IFS= read -r gitfile; do
               wt=${gitfile%/.git}
               echo "--- $wt"
               git -C "$wt" status --short 2>&1 || true
-              git -C "$wt" branch --show-current 2>&1 || true
+              git -C "$wt" diff --name-only 2>&1 || true
             done < <(find /tmp/pr5-handoff-diagnostic/repo/.worktrees -name .git -type f 2>/dev/null | sort)
-            echo
-            echo '=== sqlite state ==='
-            python - <<'PY'
-          import json
-          import sqlite3
-          from pathlib import Path
-          db = Path('/tmp/pr5-handoff-diagnostic/issue-to-waiting-approval-smoke.db')
-          if db.is_file():
-              with sqlite3.connect(db) as conn:
-                  conn.row_factory = sqlite3.Row
-                  for table in ('tasks', 'task_worktrees', 'attempts', 'attempt_resources'):
-                      try:
-                          rows = [dict(row) for row in conn.execute(f'SELECT * FROM {table}')]
-                      except sqlite3.Error as exc:
-                          rows = [{'error': str(exc)}]
-                      print(table, json.dumps(rows, indent=2, sort_keys=True))
-          PY
           } 2>&1 | tee -a unittest.log
           exit "$smoke_status"
 
