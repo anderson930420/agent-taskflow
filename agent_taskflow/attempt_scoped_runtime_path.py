@@ -19,14 +19,34 @@ from agent_taskflow.attempt_resources_schema import migrate_attempt_resources
 from agent_taskflow.runtime_admission import RuntimeAdmissionError
 
 
+@dataclass(frozen=True)
+class _AttemptResourceConfig:
+    base_branch: str = "main"
+    worktree_root: Path | None = None
+    artifact_base_root: Path | None = None
+
+
 @dataclass
 class _AttemptResourceState:
     handle: AttemptResourceHandle
-    selection_status_override: str | None = None
 
 
 class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
-    """Canonical token store with immutable resources for each Attempt."""
+    """Canonical token store with immutable resources for each Attempt.
+
+    Resource configuration is staged before the wrapped runtime starts, but the
+    claim is intentionally delayed until the runtime's canonical transition to
+    ``preparing``. This preserves selection, effective-task persistence, preflight,
+    and legacy governance ordering while ensuring no executor boundary can run
+    before Attempt resources exist.
+
+    Existing runners retain local ``TaskRecord`` and ``TaskWorktreeRecord``
+    instances across the preparing transition. Those dataclasses are frozen, so
+    this adapter deliberately updates the already-returned instances with
+    ``object.__setattr__`` when the Attempt is activated. This keeps the old public
+    runner API while making all later mission-contract, executor, validator, and
+    artifact operations use the Attempt-scoped paths.
+    """
 
     def __init__(
         self,
@@ -42,30 +62,89 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
         )
         self._attempt_resources = AttemptResourceManager(self.db_path)
         self._attempt_resource_states: dict[str, _AttemptResourceState] = {}
+        self._attempt_resource_configs: dict[str, _AttemptResourceConfig] = {}
+        self._task_objects: dict[str, Any] = {}
+        self._worktree_objects: dict[str, Any] = {}
 
     def init_db(self) -> None:
         migrate_attempt_resources(self.db_path)
 
     def get_task(self, task_key: str):
         task = super().get_task(task_key)
-        if task is None:
-            return None
-        state = self._attempt_resource_states.get(task.task_key)
-        if (
-            state is not None
-            and state.selection_status_override is not None
-            and task.status == "preparing"
-        ):
-            return replace(task, status=state.selection_status_override)
+        if task is not None:
+            self._task_objects[task.task_key] = task
         return task
+
+    def upsert_task(self, record: Any, *, preserve_existing_status: bool = True) -> None:
+        super().upsert_task(record, preserve_existing_status=preserve_existing_status)
+        self._task_objects[record.task_key] = record
+
+    def get_task_worktree(self, task_key: str):
+        worktree = super().get_task_worktree(task_key)
+        if worktree is not None:
+            self._worktree_objects[worktree.task_key] = worktree
+        return worktree
+
+    def upsert_task_worktree(self, record: Any) -> None:
+        cached = self._worktree_objects.get(record.task_key)
+        if cached is not None and cached is not record:
+            for field_name in (
+                "repo_path",
+                "worktree_path",
+                "branch",
+                "base_branch",
+                "base_sha",
+                "status",
+            ):
+                object.__setattr__(cached, field_name, getattr(record, field_name))
+            record = cached
+        super().upsert_task_worktree(record)
+        self._worktree_objects[record.task_key] = record
+
+    def configure_attempt_resources(
+        self,
+        task_key: str,
+        *,
+        base_branch: str = "main",
+        worktree_root: str | Path | None = None,
+        artifact_base_root: str | Path | None = None,
+    ) -> None:
+        """Stage immutable resource inputs without claiming the task yet."""
+        normalized = canonical_path.normalize_task_key(task_key)
+        branch = base_branch.strip()
+        if not branch:
+            raise ValueError("base_branch must not be empty")
+        self._attempt_resource_configs[normalized] = _AttemptResourceConfig(
+            base_branch=branch,
+            worktree_root=(Path(worktree_root) if worktree_root is not None else None),
+            artifact_base_root=(
+                Path(artifact_base_root) if artifact_base_root is not None else None
+            ),
+        )
 
     def attempt_resource(self, task_key: str) -> AttemptResourceRecord | None:
         normalized = canonical_path.normalize_task_key(task_key)
         state = self._attempt_resource_states.get(normalized)
         if state is not None:
-            return self._attempt_resources.get(state.handle.record.attempt_id)
+            return self._attempt_resources.get(state.handle.record.attempt_id) or state.handle.record
         claim = self.runtime_claim(normalized)
         return self._attempt_resources.get(claim.attempt_id) if claim is not None else None
+
+    def _bind_task_artifact_root(self, record: AttemptResourceRecord) -> None:
+        cached = self._task_objects.get(record.task_key)
+        if cached is not None:
+            object.__setattr__(cached, "artifact_dir", record.artifact_root)
+
+    def _bind_workspace_result(self, result: Any) -> None:
+        cached = self._worktree_objects.get(result.task_key)
+        if cached is None:
+            return
+        object.__setattr__(cached, "repo_path", result.repo_path)
+        object.__setattr__(cached, "worktree_path", result.worktree_path)
+        object.__setattr__(cached, "branch", result.branch)
+        object.__setattr__(cached, "base_branch", result.base_branch)
+        object.__setattr__(cached, "base_sha", result.base_sha)
+        object.__setattr__(cached, "status", "active")
 
     def preclaim_runtime(
         self,
@@ -76,12 +155,13 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
         base_branch: str = "main",
         worktree_root: str | Path | None = None,
         artifact_base_root: str | Path | None = None,
-        selection_status_override: str | None = None,
     ) -> AttemptResourceRecord:
+        """Claim once and allocate paths, lock, PID, manifest, and input snapshot."""
         normalized = canonical_path.normalize_task_key(task_key)
         existing = self._attempt_resource_states.get(normalized)
         if existing is not None:
             return self._attempt_resources.get(existing.handle.record.attempt_id) or existing.handle.record
+
         task = super().get_task(normalized)
         if task is None:
             raise KeyError(f"Task not found: {normalized}")
@@ -119,10 +199,9 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
                 with self._runtime_claims_lock:
                     self._runtime_claims.pop(normalized, None)
             raise
-        self._attempt_resource_states[normalized] = _AttemptResourceState(
-            handle=handle,
-            selection_status_override=selection_status_override,
-        )
+
+        self._attempt_resource_states[normalized] = _AttemptResourceState(handle=handle)
+        self._bind_task_artifact_root(handle.record)
         return handle.record
 
     def prepare_attempt_workspace(self, task_key: str):
@@ -132,12 +211,30 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
             raise RuntimeAdmissionError(
                 f"Task {normalized} has no Attempt-scoped resource allocation"
             )
-        return self._attempt_resources.provision_workspace(state.handle, store=self)
+        result = self._attempt_resources.provision_workspace(state.handle, store=self)
+        if result.ok:
+            self._bind_task_artifact_root(state.handle.record)
+            self._bind_workspace_result(result)
+        return result
 
     def _heartbeat(self, task_key: str):
         state = super()._heartbeat(task_key)
         self._attempt_resources.heartbeat(state.claim.attempt_id)
         return state
+
+    def _configuration_for_preparing(self, task_key: str) -> _AttemptResourceConfig:
+        configured = self._attempt_resource_configs.pop(task_key, None)
+        if configured is not None:
+            return configured
+        task = super().get_task(task_key)
+        if task is None:
+            raise KeyError(f"Task not found: {task_key}")
+        previous = super().get_task_worktree(task_key)
+        return _AttemptResourceConfig(
+            base_branch=previous.base_branch if previous is not None else "main",
+            worktree_root=(previous.worktree_path.parent if previous is not None else None),
+            artifact_base_root=task.artifact_dir,
+        )
 
     def update_task_status(
         self,
@@ -151,16 +248,22 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
     ) -> None:
         normalized = canonical_path.normalize_task_key(task_key)
         resource_state = self._attempt_resource_states.get(normalized)
+
         if status == "preparing":
             if resource_state is None:
+                config = self._configuration_for_preparing(normalized)
                 self.preclaim_runtime(
                     normalized,
                     source=source,
                     message=message,
-                    selection_status_override=None,
+                    base_branch=config.base_branch,
+                    worktree_root=config.worktree_root,
+                    artifact_base_root=config.artifact_base_root,
                 )
                 resource_state = self._attempt_resource_states[normalized]
-            resource_state.selection_status_override = None
+                workspace = self.prepare_attempt_workspace(normalized)
+                if not workspace.ok:
+                    raise AttemptResourceError(workspace.summary)
             self._heartbeat(normalized)
             return
 
@@ -176,10 +279,15 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
                 expected_current_status=expected_current_status,
             )
             self._attempt_resource_states.pop(normalized, None)
-            self._attempt_resources.release(
-                handle,
-                reason=f"task_status:{status}",
-            )
+            self._attempt_resources.release(handle, reason=f"task_status:{status}")
+
+            latest = super().get_task(normalized)
+            if latest is not None and latest.artifact_dir != handle.record.artifact_base_root:
+                restored = replace(latest, artifact_dir=handle.record.artifact_base_root)
+                super().upsert_task(restored, preserve_existing_status=True)
+                cached = self._task_objects.get(normalized)
+                if cached is not None:
+                    object.__setattr__(cached, "artifact_dir", handle.record.artifact_base_root)
             return
 
         super().update_task_status(
@@ -236,37 +344,20 @@ def install_attempt_scoped_runtime_path(
         preflight_runner: Any = approved_task_runner_module.run_preflight,
     ) -> Any:
         attempt_store = _attempt_store_for_request(store, request)
-        should_preclaim = (
-            not request.dry_run
-            and request.confirm_approved_task
-            and approved_task_runner_module._validate_selection(
-                request,
-                executor_registry=dict(executor_registry or {}),
-                validator_registry=dict(validator_registry or {}),
-            )
-            is None
-        )
-        if should_preclaim:
-            task = approved_task_runner_module._load_task(attempt_store, request)
+        if not request.dry_run and request.confirm_approved_task:
+            try:
+                task = approved_task_runner_module._load_task(attempt_store, request)
+            except (OSError, ValueError):
+                task = None
             if task is not None and task.status == approved_task_runner_module.TASK_QUEUE_STATUS:
                 artifact_base = approved_task_runner_module._effective_artifact_dir(task, request)
                 if artifact_base is not None:
-                    try:
-                        attempt_store.preclaim_runtime(
-                            task.task_key,
-                            source="approved_task_runner",
-                            message="Approved task runner allocated Attempt resources",
-                            base_branch=request.base_branch,
-                            worktree_root=request.worktree_root,
-                            artifact_base_root=artifact_base,
-                            selection_status_override=approved_task_runner_module.TASK_QUEUE_STATUS,
-                        )
-                    except (AttemptResourceError, RuntimeAdmissionError, OSError, ValueError) as exc:
-                        return approved_task_runner_module._blocked_preview(
-                            request,
-                            phase="runtime_admission",
-                            error=f"Attempt resource allocation failed: {exc}",
-                        )
+                    attempt_store.configure_attempt_resources(
+                        task.task_key,
+                        base_branch=request.base_branch,
+                        worktree_root=request.worktree_root,
+                        artifact_base_root=artifact_base,
+                    )
         return canonical_run(
             request,
             store=attempt_store,
@@ -281,7 +372,7 @@ def install_attempt_scoped_runtime_path(
     canonical_dispatcher = dispatcher_module.Dispatcher
 
     class AttemptScopedDispatcher(canonical_dispatcher):
-        """Dispatcher that provisions unique Attempt resources before governance."""
+        """Dispatcher that stages Attempt resources before canonical preparing."""
 
         __attempt_scoped_runtime__ = True
 
@@ -293,74 +384,65 @@ def install_attempt_scoped_runtime_path(
             model: str | None = None,
             dry_run: bool = False,
         ):
-            if dry_run:
-                return super().dispatch_task(
-                    task_key,
-                    executor_name=executor_name,
-                    model=model,
-                    dry_run=True,
-                )
-            task = self.store.get_task(task_key)
-            if task is not None and task.status in {"queued", "blocked"}:
-                previous = self.store.get_task_worktree(task.task_key)
-                base_branch = previous.base_branch if previous is not None else "main"
+            if not dry_run:
                 try:
-                    self.store.preclaim_runtime(
+                    task = self.store.get_task(task_key)
+                    previous = (
+                        self.store.get_task_worktree(task.task_key)
+                        if task is not None
+                        else None
+                    )
+                except (OSError, ValueError):
+                    task = None
+                    previous = None
+                if task is not None and task.status in {"queued", "blocked"}:
+                    self.store.configure_attempt_resources(
                         task.task_key,
-                        source="dispatcher",
-                        message="Dispatcher allocated Attempt resources",
-                        base_branch=base_branch,
+                        base_branch=previous.base_branch if previous is not None else "main",
+                        worktree_root=(
+                            previous.worktree_path.parent if previous is not None else None
+                        ),
                         artifact_base_root=task.artifact_dir,
                     )
-                    workspace = self.store.prepare_attempt_workspace(task.task_key)
-                except (AttemptResourceError, RuntimeAdmissionError, OSError, ValueError) as exc:
-                    reason = f"Attempt resource preparation failed: {exc}"
-                    if self.store.runtime_claim(task.task_key) is not None:
-                        self.store.update_task_status(
-                            task.task_key,
-                            "blocked",
-                            source="dispatcher",
-                            message=reason,
-                            blocked_reason=reason,
-                        )
+                elif (
+                    task is not None
+                    and task.status == "preparing"
+                    and self.store.runtime_claim(task.task_key) is None
+                ):
+                    reason = (
+                        "Preparing task cannot be resumed without its in-memory owner token; "
+                        "run the stale lease/resource reaper before retry"
+                    )
                     return dispatcher_module.DispatcherResult(
                         task_key=task.task_key,
                         status="blocked",
                         summary=reason,
                         blocked_reason=reason,
                     )
-                if not workspace.ok:
-                    reason = workspace.summary
+            try:
+                return super().dispatch_task(
+                    task_key,
+                    executor_name=executor_name,
+                    model=model,
+                    dry_run=dry_run,
+                )
+            except (AttemptResourceError, RuntimeAdmissionError, OSError) as exc:
+                normalized = canonical_path.normalize_task_key(task_key)
+                reason = f"Attempt resource preparation failed: {exc}"
+                if self.store.runtime_claim(normalized) is not None:
                     self.store.update_task_status(
-                        task.task_key,
+                        normalized,
                         "blocked",
                         source="dispatcher",
                         message=reason,
                         blocked_reason=reason,
                     )
-                    return dispatcher_module.DispatcherResult(
-                        task_key=task.task_key,
-                        status="blocked",
-                        summary=reason,
-                        blocked_reason=reason,
-                    )
-            elif task is not None and task.status == "preparing" and self.store.runtime_claim(task.task_key) is None:
-                reason = (
-                    "Preparing task cannot be resumed without its in-memory owner token; "
-                    "run the stale lease/resource reaper before retry"
-                )
                 return dispatcher_module.DispatcherResult(
-                    task_key=task.task_key,
+                    task_key=normalized,
                     status="blocked",
                     summary=reason,
                     blocked_reason=reason,
                 )
-            return super().dispatch_task(
-                task_key,
-                executor_name=executor_name,
-                model=model,
-                dry_run=False,
-            )
 
     AttemptScopedDispatcher.__name__ = "Dispatcher"
     AttemptScopedDispatcher.__qualname__ = "Dispatcher"
