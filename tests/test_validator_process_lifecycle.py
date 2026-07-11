@@ -150,9 +150,9 @@ class ValidatorProcessLifecycleTests(unittest.TestCase):
     def test_validator_timeout_kills_sigterm_ignoring_descendant(self) -> None:
         script = (
             "import signal,subprocess,sys,time;"
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+            "signal.signal(15, signal.SIG_IGN);"
             "subprocess.Popen([sys.executable,'-c',"
-            "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)']);"
+            "'import signal,time; signal.signal(15, signal.SIG_IGN); time.sleep(60)']);"
             "print('ready', flush=True);time.sleep(60)"
         )
         context = ValidatorContext(
