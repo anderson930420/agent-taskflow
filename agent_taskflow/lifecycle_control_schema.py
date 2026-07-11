@@ -114,6 +114,24 @@ def migrate_lifecycle_control(db_path: str | Path | None = None) -> None:
             ON runtime_control_events(scope_kind, scope_id, event_id)
             """
         )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS runtime_control_events_no_update
+            BEFORE UPDATE ON runtime_control_events
+            BEGIN
+                SELECT RAISE(ABORT, 'runtime control events are append-only');
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS runtime_control_events_no_delete
+            BEFORE DELETE ON runtime_control_events
+            BEGIN
+                SELECT RAISE(ABORT, 'runtime control events are append-only');
+            END
+            """
+        )
         conn.execute("DROP TRIGGER IF EXISTS lifecycle_attempt_transition_guard")
         conn.execute(
             """
