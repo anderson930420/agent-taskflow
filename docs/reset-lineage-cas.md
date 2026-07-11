@@ -10,6 +10,7 @@ reset_generation = implemented
 reset_old_attempt_binding = implemented
 reset_new_attempt_reservation = implemented
 reset_lineage_events = append_only
+canonical_blocked_to_queued_guard = implemented
 concurrent_reset_compare_and_set = implemented
 reset_request_idempotency = implemented
 reserved_attempt_runtime_adoption = implemented
@@ -36,11 +37,20 @@ A confirmed reset now executes in one SQLite `BEGIN IMMEDIATE` transaction. It:
 4. compares the current `reset_generation` with the caller's expected value;
 5. optionally compares the latest closed Attempt with `expected_old_attempt_id`;
 6. creates exactly one new active Attempt in `created` state;
-7. compare-and-sets the task to `queued`, binds the new Attempt, clears the blocked reason, and increments `reset_generation`;
-8. inserts the old/new lineage and immutable reset event; and
-9. records the task status event in the same transaction.
+7. inserts a transaction-local suppression bound to that Task and new Attempt;
+8. compare-and-sets the task to `queued`, binds the new Attempt, clears the blocked reason, and increments `reset_generation`;
+9. inserts the old/new lineage and immutable reset event;
+10. records the task status event; and
+11. removes the suppression before committing.
 
-Any failure rolls back the new Attempt and task update together.
+Any failure rolls back the new Attempt, suppression, lineage, and task update
+together.
+
+The `reset_lineage_required_for_retry` SQLite trigger rejects every raw
+`blocked -> queued` task update unless the same transaction contains the exact
+suppression for `task_id + new_attempt_id`. This makes the reset service the
+canonical mutation path; direct `TaskMirrorStore` or SQL updates cannot bypass
+old/new Attempt lineage or generation CAS.
 
 ## Reset lineage
 
