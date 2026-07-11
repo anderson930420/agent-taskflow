@@ -662,6 +662,9 @@ def run_smoke(
     )
 
     runner_result = handoff_dict.get("runner_result") or {}
+    final_worktree = store.get_task_worktree(task_key)
+    _require(final_worktree is not None, "final Attempt worktree record is missing")
+    assert final_worktree is not None
 
     return {
         "ok": True,
@@ -672,6 +675,8 @@ def run_smoke(
         "artifact_root": str(paths.artifact_root),
         "artifact_dir": str(artifact_dir),
         "worktree_root": str(paths.worktree_root),
+        "worktree_path": str(final_worktree.worktree_path),
+        "branch": final_worktree.branch,
         "issue_number": issue_number,
         "base_branch": base_branch,
         "base_sha": base_sha,

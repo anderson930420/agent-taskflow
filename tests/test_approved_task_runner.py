@@ -455,7 +455,8 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertFalse(result.safety["approved"])
         self.assertFalse(result.safety["cleanup_performed"])
         # Execution artifact recorded with no authority granted.
-        artifact_dir = self.artifact_root / "AT-GH-727"
+        artifact_dir = self.store.get_task("AT-GH-727").artifact_dir
+        assert artifact_dir is not None
         execution = json.loads(
             (artifact_dir / "claude-code-execution.json").read_text(encoding="utf-8")
         )
@@ -511,7 +512,8 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertEqual(result.validators[0]["name"], "policy")
         self.assertTrue(result.validators[0]["ok"])
 
-        artifact_dir = self.artifact_root / "AT-GH-820"
+        artifact_dir = self.store.get_task("AT-GH-820").artifact_dir
+        assert artifact_dir is not None
         execution = json.loads(
             (artifact_dir / "claude-code-execution.json").read_text(encoding="utf-8")
         )
@@ -655,7 +657,8 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertTrue(result.validators[0]["ok"])
 
         # Execution artifact records the full bounded-implementer contract.
-        artifact_dir = self.artifact_root / "AT-GH-901"
+        artifact_dir = self.store.get_task("AT-GH-901").artifact_dir
+        assert artifact_dir is not None
         execution = json.loads(
             (artifact_dir / "claude-code-execution.json").read_text(encoding="utf-8")
         )
@@ -723,8 +726,10 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         )
         # The bounded invocation itself still ran (its exit was successful); only
         # the deterministic evidence gate withheld the waiting_approval transition.
+        blocked_artifact_dir = self.store.get_task("AT-GH-902").artifact_dir
+        assert blocked_artifact_dir is not None
         blocked_execution = json.loads(
-            (self.artifact_root / "AT-GH-902" / "claude-code-execution.json").read_text(
+            (blocked_artifact_dir / "claude-code-execution.json").read_text(
                 encoding="utf-8"
             )
         )
@@ -789,7 +794,9 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertTrue(result.ok, msg=result.error)
         self.assertEqual(result.status, APPROVED_TASK_STATUS)
 
-        prompt_path = artifact_dir / "implementation_prompt.md"
+        attempt_artifact_dir = self.store.get_task("AT-GH-67").artifact_dir
+        assert attempt_artifact_dir is not None
+        prompt_path = attempt_artifact_dir / "implementation_prompt.md"
         self.assertTrue(prompt_path.exists())
         prompt_text = prompt_path.read_text(encoding="utf-8")
         self.assertIn("AT-GH-67", prompt_text)
@@ -856,9 +863,14 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         )
 
         self.assertTrue(result.ok, msg=result.error)
-        # A pre-supplied prompt is left untouched (not regenerated from the spec).
+        # A pre-supplied prompt is snapshotted into the Attempt artifact root and
+        # the task-level input remains untouched.
+        attempt_artifact_dir = self.store.get_task("AT-GH-69").artifact_dir
+        assert attempt_artifact_dir is not None
+        attempt_prompt_path = attempt_artifact_dir / "implementation_prompt.md"
         self.assertEqual(prompt_path.read_text(encoding="utf-8"), "# Pre-supplied prompt\n")
-        self.assertEqual(opencode.calls[0].prompt_path, prompt_path)
+        self.assertEqual(attempt_prompt_path.read_text(encoding="utf-8"), "# Pre-supplied prompt\n")
+        self.assertEqual(opencode.calls[0].prompt_path, attempt_prompt_path)
 
     def test_noop_does_not_generate_implementation_prompt(self) -> None:
         artifact_dir = self._add_task("AT-GH-70", title="Noop task")

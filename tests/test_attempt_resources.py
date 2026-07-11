@@ -101,7 +101,10 @@ class AttemptResourceTests(unittest.TestCase):
         assert claim is not None
         self.assertIn(claim.attempt_id, str(resource.worktree_path))
         self.assertIn(claim.attempt_id, str(resource.artifact_root))
-        self.assertIn(claim.attempt_id, resource.branch_name)
+        self.assertTrue(
+            resource.branch_name.endswith(claim.attempt_id.removeprefix("attempt-")[:12])
+        )
+        self.assertEqual(resource.attempt_id, claim.attempt_id)
         self.assertEqual(workspace.worktree_path, resource.worktree_path)
         self.assertTrue(resource.lock_path.is_file())
         self.assertTrue(resource.pid_path.is_file())

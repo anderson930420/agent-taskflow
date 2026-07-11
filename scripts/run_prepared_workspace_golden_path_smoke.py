@@ -405,15 +405,19 @@ def run_smoke(
     )
     _require(review_evidence_available, "review evidence was incomplete")
 
+    final_worktree = store.get_task_worktree(normalized_task_key)
+    _require(final_worktree is not None, "final Attempt worktree record is missing")
+    assert final_worktree is not None
+
     return {
         "ok": True,
         "db_path": str(db_path),
         "repo_path": str(repo_path),
         "task_key": normalized_task_key,
-        "worktree_path": str(prepared_record.worktree_path),
-        "branch": prepared_record.branch,
-        "base_branch": prepared_record.base_branch,
-        "base_sha": prepared_record.base_sha,
+        "worktree_path": str(final_worktree.worktree_path),
+        "branch": final_worktree.branch,
+        "base_branch": final_worktree.base_branch,
+        "base_sha": final_worktree.base_sha,
         "artifact_dir": str(artifact_dir),
         "final_status": task_item.get("status"),
         "prepare_status": prepare_status,

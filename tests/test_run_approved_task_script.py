@@ -308,10 +308,10 @@ class RunApprovedTaskScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "waiting_approval")
+        artifact_dir = self.store.get_task("AT-GH-513").artifact_dir
+        assert artifact_dir is not None
         execution = json.loads(
-            (self.artifact_root / "AT-GH-513" / "claude-code-execution.json").read_text(
-                encoding="utf-8"
-            )
+            (artifact_dir / "claude-code-execution.json").read_text(encoding="utf-8")
         )
         self.assertEqual(execution["status"], "completed")
         self.assertIs(execution["invocation_enabled"], True)
@@ -395,7 +395,8 @@ class RunApprovedTaskScriptTests(unittest.TestCase):
         self.assertFalse(payload["safety"]["merged"])
         self.assertFalse(payload["safety"]["cleanup_performed"])
 
-        artifact_dir = self.artifact_root / "AT-GH-910"
+        artifact_dir = self.store.get_task("AT-GH-910").artifact_dir
+        assert artifact_dir is not None
         execution = json.loads(
             (artifact_dir / "claude-code-execution.json").read_text(encoding="utf-8")
         )
