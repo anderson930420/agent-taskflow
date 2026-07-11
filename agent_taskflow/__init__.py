@@ -25,6 +25,12 @@ install_attempt_scoped_runtime_path(
     approved_task_runner_module=_approved_task_runner_module,
 )
 
+from agent_taskflow.attempt_scoped_runtime_compat import (
+    install_attempt_scoped_runtime_compat,
+)
+
+install_attempt_scoped_runtime_compat()
+
 DEFAULT_VALIDATORS = _dispatcher_module.DEFAULT_VALIDATORS
 Dispatcher = _dispatcher_module.Dispatcher
 DispatcherResult = _dispatcher_module.DispatcherResult
