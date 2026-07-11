@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Sequence
 
 from agent_taskflow.atomic_write import atomic_write_json, atomic_write_text
+from agent_taskflow.executor_launch import ExecutorLaunchSpec, run_managed_process
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
 from agent_taskflow.models import utc_now_iso
 
@@ -333,11 +334,8 @@ class ClaudeCodeExecutor(Executor):
         prompt_text: str,
     ) -> ExecutorResult:
         assert self.command  # guaranteed by preflight + constructor
-        # The implementer prompt is delivered over stdin, never as an argv
-        # element: argv would leak prompt content through process listings and
-        # can exceed the OS argument-size limit for large task summaries.
+        # Prompt content stays on stdin and is never persisted in argv evidence.
         command = list(self.command)
-
         stdout_path = context.artifact_dir / "claude-code-stdout.log"
         stderr_path = context.artifact_dir / "claude-code-stderr.log"
 
@@ -348,37 +346,67 @@ class ClaudeCodeExecutor(Executor):
 
         started_at = utc_now_iso()
         completed: subprocess.CompletedProcess[str] | None = None
+        managed = None
         timed_out = False
         tool_error: str | None = None
+        blocked_by_kill = False
 
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=context.worktree_path,
-                input=prompt_text,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=context.timeout_seconds,
-                env=run_env,
-                text=True,
-                shell=False,
-                check=False,
+        if context.launch_binding is not None:
+            managed = run_managed_process(
+                context.launch_binding,
+                ExecutorLaunchSpec(
+                    executor_name=self.name,
+                    argv=tuple(command),
+                    cwd=context.worktree_path,
+                    artifact_dir=context.artifact_dir,
+                    timeout_seconds=context.timeout_seconds,
+                    stdin_mode="text",
+                    combined_output=False,
+                    environment_keys=tuple((context.env or {}).keys()),
+                ),
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                stdin_text=prompt_text,
+                run_env=run_env,
             )
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            atomic_write_text(stdout_path, _decode_stream(exc.stdout))
-            atomic_write_text(stderr_path, _decode_stream(exc.stderr))
-        except OSError as exc:
-            # Covers FileNotFoundError, PermissionError (command exists but is
-            # not executable), NotADirectoryError, E2BIG, and other startup
-            # failures. These must be recorded as a blocked result with an
-            # execution artifact rather than escaping the executor.
-            tool_error = f"Claude Code command failed to start: {exc}"
-            atomic_write_text(stdout_path, "")
-            atomic_write_text(stderr_path, f"{tool_error}\n")
+            timed_out = managed.timed_out
+            blocked_by_kill = managed.kill_requested
+            if managed.preflight_errors:
+                tool_error = "Claude Code launch preflight failed: " + "; ".join(
+                    managed.preflight_errors
+                )
+            elif managed.start_error is not None:
+                tool_error = f"Claude Code command failed to start: {managed.start_error}"
+            elif blocked_by_kill:
+                tool_error = (
+                    "Operator kill requested; Claude Code process group terminated."
+                )
+            elif not managed.verified_exit:
+                tool_error = "Claude Code process-group exit could not be verified."
+        else:
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=context.worktree_path,
+                    input=prompt_text,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=context.timeout_seconds,
+                    env=run_env,
+                    text=True,
+                    shell=False,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                timed_out = True
+                atomic_write_text(stdout_path, _decode_stream(exc.stdout))
+                atomic_write_text(stderr_path, _decode_stream(exc.stderr))
+            except OSError as exc:
+                tool_error = f"Claude Code command failed to start: {exc}"
+                atomic_write_text(stdout_path, "")
+                atomic_write_text(stderr_path, f"{tool_error}\n")
 
         finished_at = utc_now_iso()
-
         if completed is not None:
             atomic_write_text(stdout_path, completed.stdout or "")
             atomic_write_text(stderr_path, completed.stderr or "")
@@ -388,6 +416,9 @@ class ClaudeCodeExecutor(Executor):
             "claude_code_stdout": stdout_path,
             "claude_code_stderr": stderr_path,
         }
+        if managed is not None:
+            artifacts["executor_launch_spec"] = managed.launch_spec_path
+            artifacts["executor_process_pid"] = managed.pid_manifest_path
 
         if timed_out:
             artifact_path = self._write_execution_artifact(
@@ -395,12 +426,14 @@ class ClaudeCodeExecutor(Executor):
                 status="timed_out",
                 started_at=started_at,
                 finished_at=finished_at,
-                exit_code=None,
+                exit_code=managed.exit_code if managed is not None else None,
                 timed_out=True,
                 blocking_errors=[
                     f"Claude Code timed out after {context.timeout_seconds} seconds"
                 ],
-                warnings=[],
+                warnings=[
+                    f"process_group_verified_exit={managed.verified_exit}"
+                ] if managed is not None else [],
                 prompt_path=prompt_path,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
@@ -409,7 +442,7 @@ class ClaudeCodeExecutor(Executor):
             return ExecutorResult(
                 executor=self.name,
                 status="failed",
-                exit_code=None,
+                exit_code=managed.exit_code if managed is not None else None,
                 log_path=stdout_path,
                 summary=(
                     f"Claude Code timed out after {context.timeout_seconds} seconds."
@@ -420,13 +453,15 @@ class ClaudeCodeExecutor(Executor):
         if tool_error is not None:
             artifact_path = self._write_execution_artifact(
                 context,
-                status="tool_error",
+                status="blocked" if blocked_by_kill else "tool_error",
                 started_at=started_at,
                 finished_at=finished_at,
-                exit_code=None,
+                exit_code=managed.exit_code if managed is not None else None,
                 timed_out=False,
                 blocking_errors=[tool_error],
-                warnings=[],
+                warnings=[
+                    f"process_group_verified_exit={managed.verified_exit}"
+                ] if managed is not None else [],
                 prompt_path=prompt_path,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
@@ -435,24 +470,28 @@ class ClaudeCodeExecutor(Executor):
             return ExecutorResult(
                 executor=self.name,
                 status="blocked",
-                exit_code=None,
+                exit_code=managed.exit_code if managed is not None else None,
                 log_path=stderr_path,
                 summary=tool_error,
                 artifacts=artifacts,
             )
 
-        assert completed is not None
-        ok = completed.returncode == 0
+        returncode = managed.exit_code if managed is not None else completed.returncode
+        ok = returncode == 0
         artifact_status = "completed" if ok else "failed"
         artifact_path = self._write_execution_artifact(
             context,
             status=artifact_status,
             started_at=started_at,
             finished_at=finished_at,
-            exit_code=completed.returncode,
+            exit_code=returncode,
             timed_out=False,
             blocking_errors=[],
-            warnings=[],
+            warnings=(
+                [f"process_group_verified_exit={managed.verified_exit}"]
+                if managed is not None
+                else []
+            ),
             prompt_path=prompt_path,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
@@ -461,12 +500,18 @@ class ClaudeCodeExecutor(Executor):
         summary = (
             "Claude Code completed successfully."
             if ok
-            else f"Claude Code failed with exit code {completed.returncode}."
+            else f"Claude Code failed with exit code {returncode}."
         )
+        if managed is not None and managed.termination_reason == "executor_descendant_cleanup":
+            ok = False
+            summary = (
+                "Claude Code leader exited with live descendants; "
+                "process group was terminated."
+            )
         return ExecutorResult(
             executor=self.name,
             status="completed" if ok else "failed",
-            exit_code=completed.returncode,
+            exit_code=returncode,
             log_path=stdout_path,
             summary=summary,
             artifacts=artifacts,
