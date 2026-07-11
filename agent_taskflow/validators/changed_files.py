@@ -7,12 +7,14 @@ executor.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from agent_taskflow.atomic_write import atomic_write_json
+from agent_taskflow.executor_launch import ExecutorLaunchSpec, run_managed_process
 from agent_taskflow.mission_contract import read_mission_contract
 from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
 
@@ -119,6 +121,65 @@ def collect_changed_files(worktree_path: Path) -> list[ChangedFile]:
     return _parse_porcelain_z(completed.stdout)
 
 
+def _collect_changed_files_managed(
+    context: ValidatorContext,
+) -> tuple[list[ChangedFile], dict[str, Path]]:
+    assert context.launch_binding is not None
+    command = [
+        "git", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+    ]
+    stdout_path = context.artifact_dir / "changed-files-git-status.out"
+    stderr_path = context.artifact_dir / "changed-files-git-status.err"
+    run_env = None
+    if context.env is not None:
+        run_env = os.environ.copy()
+        run_env.update(context.env)
+    managed = run_managed_process(
+        context.launch_binding,
+        ExecutorLaunchSpec(
+            executor_name="changed-files-git-status",
+            process_role="validator",
+            argv=tuple(command),
+            cwd=context.worktree_path,
+            artifact_dir=context.artifact_dir,
+            timeout_seconds=context.timeout_seconds,
+            stdin_mode="devnull",
+            combined_output=False,
+            environment_keys=tuple((run_env or {}).keys()),
+        ),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        run_env=run_env,
+    )
+    artifacts = {
+        "git_status_stdout": stdout_path,
+        "git_status_stderr": stderr_path,
+        "launch_spec": managed.launch_spec_path,
+        "pid_manifest": managed.pid_manifest_path,
+    }
+    if managed.start_error:
+        raise RuntimeError(f"git status failed to start: {managed.start_error}")
+    if managed.timed_out:
+        raise RuntimeError("git status validator timed out")
+    if managed.kill_requested:
+        raise RuntimeError("git status validator aborted by operator kill request")
+    if not managed.verified_exit:
+        raise RuntimeError(
+            "git status validator process-group exit could not be verified; "
+            "verified_exit=false"
+        )
+    if managed.termination_reason == "validator_descendant_cleanup":
+        raise RuntimeError(
+            "git status validator leader exited with live descendants"
+        )
+    if managed.exit_code != 0:
+        error = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+        raise RuntimeError(error or "git status failed")
+    return _parse_porcelain_z(
+        stdout_path.read_text(encoding="utf-8", errors="replace")
+    ), artifacts
+
+
 class ChangedFilesValidator(Validator):
     """Validate changed files against mission contract path policy.
 
@@ -223,6 +284,7 @@ class ChangedFilesValidator(Validator):
         changed_files: list[ChangedFile] = []
         allowed_paths: list[str] = []
         forbidden_paths: list[str] = []
+        process_artifacts: dict[str, Path] = {}
 
         with log_path.open("w", encoding="utf-8") as log_file:
             log_file.write(f"Validator: {self.name}\n")
@@ -248,7 +310,12 @@ class ChangedFilesValidator(Validator):
                     log_file.write(f"forbidden_paths: {forbidden_paths}\n")
 
                     try:
-                        changed_files = collect_changed_files(context.worktree_path)
+                        if context.launch_binding is None:
+                            changed_files = collect_changed_files(context.worktree_path)
+                        else:
+                            changed_files, process_artifacts = _collect_changed_files_managed(
+                                context
+                            )
                     except RuntimeError as exc:
                         collection_error = f"Cannot collect changed files: {exc}"
                         log_file.write(f"BLOCKED: {collection_error}\n")
@@ -275,7 +342,11 @@ class ChangedFilesValidator(Validator):
                     exit_code=None,
                     log_path=log_path,
                     summary=collection_error,
-                    artifacts={"log": log_path, "audit": audit_path},
+                    artifacts={
+                        "log": log_path,
+                        "audit": audit_path,
+                        **process_artifacts,
+                    },
                 )
 
             violations = audit["violations"]
@@ -293,7 +364,11 @@ class ChangedFilesValidator(Validator):
                     exit_code=1,
                     log_path=log_path,
                     summary=summary,
-                    artifacts={"log": log_path, "audit": audit_path},
+                    artifacts={
+                        "log": log_path,
+                        "audit": audit_path,
+                        **process_artifacts,
+                    },
                 )
 
             if audit["no_op"] and not self.allow_no_changes:
@@ -309,7 +384,11 @@ class ChangedFilesValidator(Validator):
                     exit_code=1,
                     log_path=log_path,
                     summary=summary,
-                    artifacts={"log": log_path, "audit": audit_path},
+                    artifacts={
+                        "log": log_path,
+                        "audit": audit_path,
+                        **process_artifacts,
+                    },
                 )
 
             summary = "Changed-files validation passed."
@@ -320,7 +399,11 @@ class ChangedFilesValidator(Validator):
                 exit_code=0,
                 log_path=log_path,
                 summary=summary,
-                artifacts={"log": log_path, "audit": audit_path},
+                artifacts={
+                "log": log_path,
+                "audit": audit_path,
+                **process_artifacts,
+            },
             )
 
 

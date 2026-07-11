@@ -73,6 +73,21 @@ install_reset_runtime_path(
     approved_task_runner_module=_approved_task_runner_module,
 )
 
+from agent_taskflow.validator_process_reason_compat import (
+    install_validator_process_reason_compat,
+)
+
+install_validator_process_reason_compat()
+
+from agent_taskflow.validator_process_runtime_path import (
+    install_validator_process_runtime_path,
+)
+
+install_validator_process_runtime_path(
+    dispatcher_module=_dispatcher_module,
+    approved_task_runner_module=_approved_task_runner_module,
+)
+
 DEFAULT_VALIDATORS = _dispatcher_module.DEFAULT_VALIDATORS
 Dispatcher = _dispatcher_module.Dispatcher
 DispatcherResult = _dispatcher_module.DispatcherResult

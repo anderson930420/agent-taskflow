@@ -83,13 +83,14 @@ class TypecheckValidator(Validator):
             run_env = os.environ.copy()
             run_env.update(context.env)
 
-        completed, log_path, error_summary, error_status = run_command(
+        completed, log_path, error_summary, error_status, process_artifacts = run_command(
             validator_name=self.name,
             command=self._command,
             worktree_path=worktree_path,
             artifact_dir=artifact_dir,
             timeout_seconds=context.timeout_seconds,
             run_env=run_env,
+            launch_binding=context.launch_binding,
         )
 
         if completed is None:
@@ -99,7 +100,7 @@ class TypecheckValidator(Validator):
                 exit_code=None,
                 log_path=log_path,
                 summary=error_summary,
-                artifacts={"log": log_path},
+                artifacts={"log": log_path, **process_artifacts},
             )
 
         status = "passed" if completed.returncode == 0 else "failed"
@@ -115,7 +116,7 @@ class TypecheckValidator(Validator):
             exit_code=completed.returncode,
             log_path=log_path,
             summary=summary,
-            artifacts={"log": log_path},
+            artifacts={"log": log_path, **process_artifacts},
         )
 
 

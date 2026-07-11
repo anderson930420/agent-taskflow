@@ -1,4 +1,4 @@
-"""Additive PR-7 schema for managed executor process groups."""
+"""Additive schema for managed executor and validator process groups."""
 
 from __future__ import annotations
 
@@ -33,6 +33,8 @@ def migrate_executor_process_lifecycle(db_path: str | Path | None = None) -> Non
                 lease_id TEXT NOT NULL,
                 owner_id TEXT NOT NULL,
                 executor_name TEXT NOT NULL,
+                process_role TEXT NOT NULL DEFAULT 'executor'
+                    CHECK(process_role IN ('executor', 'validator')),
                 pid INTEGER,
                 pgid INTEGER,
                 session_id INTEGER,
@@ -55,6 +57,18 @@ def migrate_executor_process_lifecycle(db_path: str | Path | None = None) -> Non
             )
             """
         )
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(executor_processes)")
+        }
+        if "process_role" not in columns:
+            conn.execute(
+                """
+                ALTER TABLE executor_processes
+                ADD COLUMN process_role TEXT NOT NULL DEFAULT 'executor'
+                CHECK(process_role IN ('executor', 'validator'))
+                """
+            )
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS ux_executor_process_one_active_per_attempt
