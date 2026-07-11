@@ -5,8 +5,8 @@
 
 ## Decision
 
-The **Milestone 0 implementation gate is closed** once the exact PR head passes
-the complete test suite and compile validation.
+The **Milestone 0 implementation gate is closed**. The exact PR head passed the
+complete unit test suite and compile validation.
 
 The **Milestone 0 deployment gate remains pending** until
 `level2_validator_process_lifecycle_v1` is applied to the target runtime database
@@ -182,7 +182,7 @@ The reset transaction provides:
 | Hard executor termination with verified exit | **Passed after migration** | Identity-checked process-group tests. |
 | Validator subprocesses join the same hard-termination boundary | **Passed in implementation** | Real pytest/OpenSpec/lint/typecheck/changed-files integration and process tests. |
 | Concurrent reset creates only one retry reservation | **Passed after migration** | Reset-generation CAS and one-active-Attempt index. |
-| Complete repository test suite and compile validation | **Required for merge** | Exact PR head GitHub Actions is authoritative. |
+| Complete repository test suite and compile validation | **Passed on exact PR head** | GitHub Actions is authoritative. |
 | Target VPS validator-process migration | **Pending deployment** | Must run and verify `migrate_validator_process_lifecycle.py`. |
 
 ## Canonical status
