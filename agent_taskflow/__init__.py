@@ -51,6 +51,12 @@ install_lifecycle_entrypoint_controls(
     approved_task_runner_module=_approved_task_runner_module,
 )
 
+from agent_taskflow.executor_process_reason_compat import (
+    install_executor_process_reason_compat,
+)
+
+install_executor_process_reason_compat()
+
 from agent_taskflow.executor_process_runtime_path import (
     install_executor_process_runtime_path,
 )
