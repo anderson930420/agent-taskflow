@@ -2,20 +2,32 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches:
-      - main
+
+permissions:
+  contents: write
 
 jobs:
-  test:
+  finalize-pr5-contracts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Export PR-5 source files
-        uses: actions/upload-artifact@v4
         with:
-          name: pr5-source-snapshot
-          path: |
-            scripts/run_issue_to_waiting_approval_smoke.py
-          if-no-files-found: error
+          ref: agent/attempt-scoped-resources
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Apply exact-head PR-5 contract updates
+        run: python scripts/_pr5_finalize_contracts.py
+
+      - name: Commit finalized contracts and restore CI
+        shell: bash
+        run: |
+          git config user.name "agent-taskflow-ci"
+          git config user.email "agent-taskflow-ci@example.invalid"
+          git add -A
+          git diff --cached --check
+          git commit -m "Finalize Attempt-scoped runtime contracts"
+          git push origin HEAD:agent/attempt-scoped-resources
