@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
@@ -19,6 +20,12 @@ from agent_taskflow.attempt_resources_schema import migrate_attempt_resources
 from agent_taskflow.runtime_admission import RuntimeAdmissionError
 
 
+_CURRENT_APPROVED_STORE: ContextVar["AttemptScopedRuntimeTaskStore | None"] = ContextVar(
+    "agent_taskflow_current_approved_attempt_store",
+    default=None,
+)
+
+
 @dataclass(frozen=True)
 class _AttemptResourceConfig:
     base_branch: str = "main"
@@ -31,21 +38,43 @@ class _AttemptResourceState:
     handle: AttemptResourceHandle
 
 
+class _AttemptExecutorProxy:
+    """Rewrite executor context to the active Attempt before invocation."""
+
+    def __init__(self, executor: Any, store: "AttemptScopedRuntimeTaskStore") -> None:
+        self._executor = executor
+        self._store = store
+        self.name = getattr(executor, "name", executor.__class__.__name__)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._executor, name)
+
+    def run(self, context: Any) -> Any:
+        return self._executor.run(self._store.bind_executor_context(context))
+
+
+class _AttemptValidatorProxy:
+    """Rewrite validator context to the active Attempt before invocation."""
+
+    def __init__(self, validator: Any, store: "AttemptScopedRuntimeTaskStore") -> None:
+        self._validator = validator
+        self._store = store
+        self.name = getattr(validator, "name", validator.__class__.__name__)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._validator, name)
+
+    def run(self, context: Any) -> Any:
+        return self._validator.run(self._store.bind_validator_context(context))
+
+
 class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
     """Canonical token store with immutable resources for each Attempt.
 
-    Resource configuration is staged before the wrapped runtime starts, but the
-    claim is intentionally delayed until the runtime's canonical transition to
-    ``preparing``. This preserves selection, effective-task persistence, preflight,
-    and legacy governance ordering while ensuring no executor boundary can run
-    before Attempt resources exist.
-
-    Existing runners retain local ``TaskRecord`` and ``TaskWorktreeRecord``
-    instances across the preparing transition. Those dataclasses are frozen, so
-    this adapter deliberately updates the already-returned instances with
-    ``object.__setattr__`` when the Attempt is activated. This keeps the old public
-    runner API while making all later mission-contract, executor, validator, and
-    artifact operations use the Attempt-scoped paths.
+    Configuration is staged before runtime execution, while claim/allocation is
+    delayed until the canonical ``preparing`` transition. Every persisted runtime
+    boundary and every executor/validator context is then resolved from the same
+    active Attempt resource record.
     """
 
     def __init__(
@@ -146,6 +175,64 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
         object.__setattr__(cached, "base_sha", result.base_sha)
         object.__setattr__(cached, "status", "active")
 
+    def bind_task(self, task: Any) -> Any:
+        resource = self.attempt_resource(task.task_key)
+        if resource is None:
+            return task
+        return replace(task, artifact_dir=resource.artifact_root)
+
+    def bind_worktree(self, task_key: str, worktree: Any) -> Any:
+        resource = self.attempt_resource(task_key)
+        if resource is None:
+            return worktree
+        persisted = self._attempt_resources.get(resource.attempt_id) or resource
+        return replace(
+            worktree,
+            repo_path=persisted.repo_path,
+            worktree_path=persisted.worktree_path,
+            branch=persisted.branch_name,
+            base_branch=persisted.base_branch,
+            base_sha=persisted.base_sha,
+            status="active",
+        )
+
+    def bind_executor_context(self, context: Any) -> Any:
+        resource = self.attempt_resource(context.task_key)
+        if resource is None:
+            return context
+        prompt_path = context.prompt_path
+        if prompt_path is not None:
+            candidate = resource.artifact_root / Path(prompt_path).name
+            if candidate.exists():
+                prompt_path = candidate
+        return replace(
+            context,
+            worktree_path=resource.worktree_path,
+            artifact_dir=resource.artifact_root,
+            prompt_path=prompt_path,
+            repo_root=resource.repo_path,
+        )
+
+    def bind_validator_context(self, context: Any) -> Any:
+        resource = self.attempt_resource(context.task_key)
+        if resource is None:
+            return context
+        return replace(
+            context,
+            worktree_path=resource.worktree_path,
+            artifact_dir=resource.artifact_root,
+        )
+
+    def wrap_executor(self, executor: Any) -> Any:
+        if isinstance(executor, _AttemptExecutorProxy):
+            return executor
+        return _AttemptExecutorProxy(executor, self)
+
+    def wrap_validator(self, validator: Any) -> Any:
+        if isinstance(validator, _AttemptValidatorProxy):
+            return validator
+        return _AttemptValidatorProxy(validator, self)
+
     def preclaim_runtime(
         self,
         task_key: str,
@@ -230,10 +317,21 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
         if task is None:
             raise KeyError(f"Task not found: {task_key}")
         previous = super().get_task_worktree(task_key)
+        latest = self._attempt_resources.latest_for_task(task_key)
         return _AttemptResourceConfig(
-            base_branch=previous.base_branch if previous is not None else "main",
-            worktree_root=(previous.worktree_path.parent if previous is not None else None),
-            artifact_base_root=task.artifact_dir,
+            base_branch=(
+                latest.base_branch
+                if latest is not None
+                else (previous.base_branch if previous is not None else "main")
+            ),
+            worktree_root=(
+                latest.worktree_root
+                if latest is not None
+                else (previous.worktree_path.parent if previous is not None else None)
+            ),
+            artifact_base_root=(
+                latest.artifact_base_root if latest is not None else task.artifact_dir
+            ),
         )
 
     def update_task_status(
@@ -280,14 +378,6 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
             )
             self._attempt_resource_states.pop(normalized, None)
             self._attempt_resources.release(handle, reason=f"task_status:{status}")
-
-            latest = super().get_task(normalized)
-            if latest is not None and latest.artifact_dir != handle.record.artifact_base_root:
-                restored = replace(latest, artifact_dir=handle.record.artifact_base_root)
-                super().upsert_task(restored, preserve_existing_status=True)
-                cached = self._task_objects.get(normalized)
-                if cached is not None:
-                    object.__setattr__(cached, "artifact_dir", handle.record.artifact_base_root)
             return
 
         super().update_task_status(
@@ -312,6 +402,10 @@ def _attempt_store_for_request(store: Any | None, request: Any) -> AttemptScoped
     return AttemptScopedRuntimeTaskStore(resolved_path)
 
 
+def _approved_store() -> AttemptScopedRuntimeTaskStore | None:
+    return _CURRENT_APPROVED_STORE.get()
+
+
 def install_attempt_scoped_runtime_path(
     *,
     dispatcher_module: ModuleType,
@@ -324,13 +418,67 @@ def install_attempt_scoped_runtime_path(
     canonical_path.CanonicalRuntimeTaskStore = AttemptScopedRuntimeTaskStore
 
     original_prepare = approved_task_runner_module.prepare_task_workspace
+    original_write_contract = approved_task_runner_module._write_mission_contract
+    original_build_context = approved_task_runner_module._build_executor_context
+    original_ensure_prompt = approved_task_runner_module._ensure_implementation_prompt
+    original_check_codex = approved_task_runner_module._check_codex_advisory_evidence
+    original_resolve_executor = approved_task_runner_module._resolve_executor
+    original_resolve_validator = approved_task_runner_module._resolve_validator
 
     def attempt_prepare_task_workspace(request: Any, *, store: Any | None = None):
         if isinstance(store, AttemptScopedRuntimeTaskStore) and store.runtime_claim(request.task_key):
             return store.prepare_attempt_workspace(request.task_key)
         return original_prepare(request, store=store)
 
+    def attempt_write_mission_contract(task: Any, workspace_result: Any, *, validators: Any):
+        store = _approved_store()
+        bound = store.bind_task(task) if store is not None else task
+        return original_write_contract(bound, workspace_result, validators=validators)
+
+    def attempt_build_executor_context(task: Any, workspace_result: Any, *, timeout_seconds: Any = None):
+        store = _approved_store()
+        bound = store.bind_task(task) if store is not None else task
+        context = original_build_context(
+            bound,
+            workspace_result,
+            timeout_seconds=timeout_seconds,
+        )
+        return store.bind_executor_context(context) if store is not None else context
+
+    def attempt_ensure_prompt(task: Any):
+        store = _approved_store()
+        bound = store.bind_task(task) if store is not None else task
+        return original_ensure_prompt(bound)
+
+    def attempt_check_codex(request: Any, task: Any):
+        store = _approved_store()
+        bound = store.bind_task(task) if store is not None else task
+        return original_check_codex(request, bound)
+
+    def attempt_resolve_executor(request: Any, task: Any, *, executor_registry: Any):
+        executor = original_resolve_executor(
+            request,
+            task,
+            executor_registry=executor_registry,
+        )
+        store = _approved_store()
+        return store.wrap_executor(executor) if store is not None else executor
+
+    def attempt_resolve_validator(validator_name: str, *, validator_registry: Any):
+        validator = original_resolve_validator(
+            validator_name,
+            validator_registry=validator_registry,
+        )
+        store = _approved_store()
+        return store.wrap_validator(validator) if store is not None else validator
+
     approved_task_runner_module.prepare_task_workspace = attempt_prepare_task_workspace
+    approved_task_runner_module._write_mission_contract = attempt_write_mission_contract
+    approved_task_runner_module._build_executor_context = attempt_build_executor_context
+    approved_task_runner_module._ensure_implementation_prompt = attempt_ensure_prompt
+    approved_task_runner_module._check_codex_advisory_evidence = attempt_check_codex
+    approved_task_runner_module._resolve_executor = attempt_resolve_executor
+    approved_task_runner_module._resolve_validator = attempt_resolve_validator
 
     canonical_run = approved_task_runner_module.run_approved_task
 
@@ -358,13 +506,17 @@ def install_attempt_scoped_runtime_path(
                         worktree_root=request.worktree_root,
                         artifact_base_root=artifact_base,
                     )
-        return canonical_run(
-            request,
-            store=attempt_store,
-            executor_registry=executor_registry,
-            validator_registry=validator_registry,
-            preflight_runner=preflight_runner,
-        )
+        token = _CURRENT_APPROVED_STORE.set(attempt_store)
+        try:
+            return canonical_run(
+                request,
+                store=attempt_store,
+                executor_registry=executor_registry,
+                validator_registry=validator_registry,
+                preflight_runner=preflight_runner,
+            )
+        finally:
+            _CURRENT_APPROVED_STORE.reset(token)
 
     attempt_run_approved_task.__attempt_scoped_runtime__ = True
     approved_task_runner_module.run_approved_task = attempt_run_approved_task
@@ -372,9 +524,33 @@ def install_attempt_scoped_runtime_path(
     canonical_dispatcher = dispatcher_module.Dispatcher
 
     class AttemptScopedDispatcher(canonical_dispatcher):
-        """Dispatcher that stages Attempt resources before canonical preparing."""
+        """Dispatcher that stages and binds Attempt resources at runtime boundaries."""
 
         __attempt_scoped_runtime__ = True
+
+        def _get_executor(self, *args: Any, **kwargs: Any):
+            executor = super()._get_executor(*args, **kwargs)
+            return self.store.wrap_executor(executor)
+
+        def _get_validator(self, *args: Any, **kwargs: Any):
+            validator = super()._get_validator(*args, **kwargs)
+            return self.store.wrap_validator(validator)
+
+        def _write_mission_contract(
+            self,
+            task: Any,
+            worktree: Any,
+            executor_name: str,
+            model: str | None,
+        ) -> None:
+            bound_task = self.store.bind_task(task)
+            bound_worktree = self.store.bind_worktree(task.task_key, worktree)
+            return super()._write_mission_contract(
+                bound_task,
+                bound_worktree,
+                executor_name,
+                model,
+            )
 
         def dispatch_task(
             self,
@@ -396,13 +572,22 @@ def install_attempt_scoped_runtime_path(
                     task = None
                     previous = None
                 if task is not None and task.status in {"queued", "blocked"}:
+                    latest = self.store._attempt_resources.latest_for_task(task.task_key)
                     self.store.configure_attempt_resources(
                         task.task_key,
-                        base_branch=previous.base_branch if previous is not None else "main",
-                        worktree_root=(
-                            previous.worktree_path.parent if previous is not None else None
+                        base_branch=(
+                            latest.base_branch
+                            if latest is not None
+                            else (previous.base_branch if previous is not None else "main")
                         ),
-                        artifact_base_root=task.artifact_dir,
+                        worktree_root=(
+                            latest.worktree_root
+                            if latest is not None
+                            else (previous.worktree_path.parent if previous is not None else None)
+                        ),
+                        artifact_base_root=(
+                            latest.artifact_base_root if latest is not None else task.artifact_dir
+                        ),
                     )
                 elif (
                     task is not None
