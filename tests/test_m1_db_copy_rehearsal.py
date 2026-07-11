@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -29,9 +30,14 @@ class M1DatabaseCopyRehearsalTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.source = self.root / "state.db"
         migrate_validator_process_lifecycle(self.source)
-        with sqlite3.connect(self.source) as conn:
-            conn.execute("CREATE TABLE rehearsal_sentinel(id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
-            conn.execute("INSERT INTO rehearsal_sentinel(value) VALUES ('preserve-me')")
+        with closing(sqlite3.connect(self.source)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE rehearsal_sentinel("
+                "id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO rehearsal_sentinel(value) VALUES ('preserve-me')"
+            )
         self.output = self.root / "rehearsal"
 
     def test_rehearsal_uses_copy_only_and_writes_accepted_evidence(self) -> None:
@@ -60,7 +66,9 @@ class M1DatabaseCopyRehearsalTests(unittest.TestCase):
             evidence["restore_target"]["logical_dump_sha256"],
         )
         self.assertEqual(
-            evidence["source_snapshot"]["inventory"]["row_counts"]["rehearsal_sentinel"],
+            evidence["source_snapshot"]["inventory"]["row_counts"][
+                "rehearsal_sentinel"
+            ],
             1,
         )
 
@@ -85,7 +93,9 @@ class M1DatabaseCopyRehearsalTests(unittest.TestCase):
 
     def test_rehearsal_refuses_nonempty_output_directory(self) -> None:
         self.output.mkdir()
-        (self.output / "existing.txt").write_text("do not overwrite", encoding="utf-8")
+        (self.output / "existing.txt").write_text(
+            "do not overwrite", encoding="utf-8"
+        )
 
         with self.assertRaisesRegex(FileExistsError, "must be empty"):
             run_m1_db_copy_rehearsal(
@@ -102,7 +112,7 @@ class M1DatabaseCopyRehearsalTests(unittest.TestCase):
 
     def test_active_runtime_counts_cover_all_authority_tables(self) -> None:
         db = self.root / "active.db"
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn, conn:
             conn.executescript(
                 """
                 CREATE TABLE tasks(active_attempt_id TEXT);
