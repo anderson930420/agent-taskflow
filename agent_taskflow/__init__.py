@@ -31,6 +31,26 @@ from agent_taskflow.attempt_scoped_runtime_compat import (
 
 install_attempt_scoped_runtime_compat()
 
+from agent_taskflow.lifecycle_reason_compat import install_lifecycle_reason_compat
+
+install_lifecycle_reason_compat()
+
+from agent_taskflow.lifecycle_runtime_path import install_lifecycle_runtime_path
+
+install_lifecycle_runtime_path(
+    dispatcher_module=_dispatcher_module,
+    approved_task_runner_module=_approved_task_runner_module,
+)
+
+from agent_taskflow.lifecycle_entrypoint_controls import (
+    install_lifecycle_entrypoint_controls,
+)
+
+install_lifecycle_entrypoint_controls(
+    dispatcher_module=_dispatcher_module,
+    approved_task_runner_module=_approved_task_runner_module,
+)
+
 DEFAULT_VALIDATORS = _dispatcher_module.DEFAULT_VALIDATORS
 Dispatcher = _dispatcher_module.Dispatcher
 DispatcherResult = _dispatcher_module.DispatcherResult
