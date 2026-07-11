@@ -2,32 +2,25 @@ name: CI
 
 on:
   pull_request:
-
-permissions:
-  contents: write
+  push:
+    branches:
+      - main
 
 jobs:
-  finalize-pr8-regressions:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: agent/reset-lineage-cas
-          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Apply final PR-8 regression fixes
-        run: python scripts/_pr8_fix_final_regressions.py
+      - name: Install package and dependencies
+        run: python -m pip install -e .
 
-      - name: Commit fixes and restore standard CI
-        shell: bash
-        run: |
-          git config user.name "agent-taskflow-ci"
-          git config user.email "agent-taskflow-ci@example.invalid"
-          git add -A
-          git diff --cached --check
-          git commit -m "Fix reset lineage compatibility regressions"
-          git push origin HEAD:agent/reset-lineage-cas
+      - name: Run unit tests
+        run: PYTHONPATH=. python -m unittest discover -s tests
+
+      - name: Compile sources
+        run: PYTHONPATH=. python -m compileall agent_taskflow scripts tests

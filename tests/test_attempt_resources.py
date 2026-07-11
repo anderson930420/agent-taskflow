@@ -17,6 +17,10 @@ from agent_taskflow.attempt_scoped_runtime_path import AttemptScopedRuntimeTaskS
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.runtime_admission import RuntimeAdmissionStore
 from agent_taskflow.store import TaskMirrorStore, connect
+from agent_taskflow.task_status_reset import (
+    TaskStatusResetRequest,
+    reset_task_status,
+)
 
 
 class AttemptResourceTests(unittest.TestCase):
@@ -143,13 +147,21 @@ class AttemptResourceTests(unittest.TestCase):
     def test_retry_gets_new_branch_worktree_and_artifact_root(self) -> None:
         first_store, first, _ = self._claim_and_prepare()
         first_store.update_task_status("AT-PR5-1", "blocked", source="test-runtime")
-        self.base_store.update_task_status(
-            "AT-PR5-1",
-            "queued",
-            source="test-reset",
-            expected_current_status="blocked",
+        reset = reset_task_status(
+            TaskStatusResetRequest(
+                task_key="AT-PR5-1",
+                db_path=self.db_path,
+                from_status="blocked",
+                reason="retry resource isolation test",
+                actor="test-reset",
+                request_id="pr5-fresh-retry",
+                expected_reset_generation=0,
+                expected_old_attempt_id=first.attempt_id,
+                confirm_reset=True,
+            )
         )
         second_store, second, _ = self._claim_and_prepare()
+        self.assertEqual(second.attempt_id, reset.new_attempt_id)
         self.assertNotEqual(first.attempt_id, second.attempt_id)
         self.assertNotEqual(first.branch_name, second.branch_name)
         self.assertNotEqual(first.worktree_path, second.worktree_path)

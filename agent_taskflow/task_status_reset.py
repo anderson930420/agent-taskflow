@@ -246,7 +246,10 @@ def reset_task_status(
                 idempotent_replay=True,
             )
 
-    preview = lineage_store.preview(request.task_key)
+    try:
+        preview = lineage_store.preview(request.task_key)
+    except (ResetLineageError, KeyError, ValueError) as exc:
+        raise TaskStatusResetError(str(exc)) from exc
     if preview.current_status != request.from_status:
         raise TaskStatusResetError(
             f"Task {request.task_key} status is {preview.current_status!r}; "
