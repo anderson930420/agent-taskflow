@@ -38,6 +38,41 @@ class ExecutorProcessRuntimeTaskStore(LifecycleRuntimeTaskStore):
         )
         return replace(bound, launch_binding=launch_binding)
 
+    def classify_executor_result(self, task_key: str, result: Any) -> None:
+        summary = (result.summary or "").lower()
+        if (
+            "process-group exit could not be verified" in summary
+            or "verified_exit=false" in summary
+        ):
+            self._set_outcome(
+                task_key,
+                attempt_status="execution_aborted",
+                reason_code="executor_process_exit_unverified",
+                execution_result="aborted",
+                validation_result=None,
+                metadata={
+                    "executor": result.executor,
+                    "exit_code": result.exit_code,
+                    "summary": result.summary,
+                },
+            )
+            return
+        if "leader exited with live descendants" in summary:
+            self._set_outcome(
+                task_key,
+                attempt_status="execution_aborted",
+                reason_code="executor_descendant_cleanup",
+                execution_result="aborted",
+                validation_result=None,
+                metadata={
+                    "executor": result.executor,
+                    "exit_code": result.exit_code,
+                    "summary": result.summary,
+                },
+            )
+            return
+        super().classify_executor_result(task_key, result)
+
 
 def install_executor_process_runtime_path(
     *,
