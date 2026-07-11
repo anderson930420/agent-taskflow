@@ -8,11 +8,33 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
+import types
 from typing import Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+PACKAGE_ROOT = REPO_ROOT / "agent_taskflow"
+
+
+def _bootstrap_source_package_without_runtime_imports() -> None:
+    """Expose package submodules without executing runtime-heavy ``__init__``.
+
+    The reset command is a SQLite/operator utility and must remain runnable from
+    a source checkout that has no application dependencies installed. Importing
+    ``agent_taskflow`` normally executes package runtime wiring, which imports
+    the API schemas and therefore Pydantic. A synthetic package module preserves
+    normal submodule resolution while deliberately skipping that bootstrap.
+    """
+
+    if "agent_taskflow" in sys.modules:
+        return
+    package = types.ModuleType("agent_taskflow")
+    package.__file__ = str(PACKAGE_ROOT / "__init__.py")
+    package.__package__ = "agent_taskflow"
+    package.__path__ = [str(PACKAGE_ROOT)]
+    sys.modules["agent_taskflow"] = package
+
+
+_bootstrap_source_package_without_runtime_imports()
 
 from agent_taskflow.task_status_reset import (  # noqa: E402
     RESET_FROM_STATUS,

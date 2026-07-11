@@ -77,10 +77,11 @@ class ResetLineageCliTests(unittest.TestCase):
         self.assertTrue(payload["runtime_claim"]["reserved_attempt_adoption"])
         self.assertFalse(payload["runtime_claim"]["second_retry_identity_created"])
 
-    def test_reset_cli_reports_old_and_new_attempt_binding(self) -> None:
+    def test_reset_cli_runs_without_site_packages_and_reports_binding(self) -> None:
         completed = subprocess.run(
             [
                 sys.executable,
+                "-S",
                 "scripts/reset_task_status.py",
                 "--task-key",
                 self.task_key,
