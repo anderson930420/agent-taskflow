@@ -51,7 +51,7 @@ PROCESS_REASON_CODES = frozenset(
     }
 )
 
-_LIVE_STATES = frozenset({"R", "S", "D", "T", "t", "W", "I", "P"})
+_DEAD_PROCESS_STATES = frozenset({"Z", "X", "x"})
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
@@ -212,7 +212,9 @@ class ProcStat:
 
     @property
     def live(self) -> bool:
-        return self.state in _LIVE_STATES
+        # Linux may add or expose less-common live states (for example K).
+        # Fail closed: only documented dead/zombie states count as exited.
+        return self.state not in _DEAD_PROCESS_STATES
 
 
 @dataclass(frozen=True)
@@ -518,26 +520,63 @@ class ExecutorProcessStore:
             if row is None:
                 raise KeyError(f"Executor process not found: {process_id}")
             current = row["state"]
-            if current in {"exited", "exit_unverified"}:
+            event_metadata = {
+                "exit_code": exit_code,
+                "verified_exit": verified_exit,
+                "termination_reason": termination_reason,
+                **dict(metadata or {}),
+            }
+            if current == "exited":
                 conn.execute(
                     """
                     UPDATE executor_processes
                     SET exit_code = COALESCE(?, exit_code),
                         termination_reason = COALESCE(?, termination_reason),
-                        verified_exit = CASE WHEN ? THEN 1 ELSE verified_exit END,
+                        verified_exit = 1, updated_at = ?
+                    WHERE process_id = ?
+                    """,
+                    (exit_code, termination_reason, now, process_id),
+                )
+            elif current == "exit_unverified" and verified_exit:
+                cursor = conn.execute(
+                    """
+                    UPDATE executor_processes
+                    SET state = 'exited', exited_at = COALESCE(exited_at, ?),
+                        exit_code = COALESCE(?, exit_code),
+                        termination_reason = COALESCE(?, termination_reason),
+                        verified_exit = 1, updated_at = ?
+                    WHERE process_id = ? AND state = 'exit_unverified'
+                    """,
+                    (now, exit_code, termination_reason, now, process_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ExecutorLaunchError(
+                        f"Executor process state changed concurrently: {process_id}"
+                    )
+                self._insert_event(
+                    conn,
+                    process_id=process_id,
+                    attempt_id=row["attempt_id"],
+                    from_state="exit_unverified",
+                    to_state="exited",
+                    reason_code=reason,
+                    actor=actor,
+                    timestamp=now,
+                    metadata=event_metadata,
+                )
+            elif current == "exit_unverified":
+                conn.execute(
+                    """
+                    UPDATE executor_processes
+                    SET exit_code = COALESCE(?, exit_code),
+                        termination_reason = COALESCE(?, termination_reason),
                         updated_at = ?
                     WHERE process_id = ?
                     """,
-                    (
-                        exit_code,
-                        termination_reason,
-                        int(verified_exit),
-                        now,
-                        process_id,
-                    ),
+                    (exit_code, termination_reason, now, process_id),
                 )
             else:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE executor_processes
                     SET state = ?, exited_at = ?, exit_code = ?,
@@ -555,6 +594,10 @@ class ExecutorProcessStore:
                         current,
                     ),
                 )
+                if cursor.rowcount != 1:
+                    raise ExecutorLaunchError(
+                        f"Executor process state changed concurrently: {process_id}"
+                    )
                 self._insert_event(
                     conn,
                     process_id=process_id,
@@ -564,12 +607,7 @@ class ExecutorProcessStore:
                     reason_code=reason,
                     actor=actor,
                     timestamp=now,
-                    metadata={
-                        "exit_code": exit_code,
-                        "verified_exit": verified_exit,
-                        "termination_reason": termination_reason,
-                        **dict(metadata or {}),
-                    },
+                    metadata=event_metadata,
                 )
         record = self.get(process_id)
         assert record is not None
@@ -897,65 +935,117 @@ def terminate_registered_process(
     terminate_grace_seconds: float = 2.0,
     kill_wait_seconds: float = 3.0,
 ) -> ExecutorProcessRecord:
-    """Signal one proven process group, escalate, and persist verified exit."""
-    if record.state not in ACTIVE_PROCESS_STATES:
-        return record
-    snapshot = _verify_record_identity(store, record, actor=actor)
+    """Signal one proven process group, escalate, and persist verified exit.
+
+    The operation is intentionally idempotent. The in-process launcher and an
+    external operator may observe the same kill request; each transition reloads
+    the current state and tolerates the other actor winning the compare-and-set.
+    """
+    current = store.get(record.process_id)
+    if current is None:
+        raise KeyError(f"Executor process not found: {record.process_id}")
+    if current.state == "exited":
+        return current
+    if current.state == "exit_unverified":
+        if current.pgid is None or current.session_id is None:
+            return current
+        verified = inspect_process_group(
+            current.pgid, current.session_id
+        ).verified_exited
+        return store.finalize(
+            current.process_id,
+            actor=actor,
+            exit_code=current.exit_code,
+            verified_exit=verified,
+            termination_reason=termination_reason,
+            metadata={"reconciled_after_unverified_exit": True},
+        )
+    if current.state not in ACTIVE_PROCESS_STATES:
+        return current
+
+    snapshot = _verify_record_identity(store, current, actor=actor)
     if snapshot.verified_exited:
         return store.finalize(
-            record.process_id,
+            current.process_id,
             actor=actor,
-            exit_code=record.exit_code,
+            exit_code=current.exit_code,
             verified_exit=True,
             termination_reason=termination_reason,
             metadata={"already_exited": True},
         )
-    assert record.pgid is not None and record.session_id is not None
-    current = store.get(record.process_id) or record
-    if current.state in {"allocated", "running"}:
+    assert current.pgid is not None and current.session_id is not None
+    pgid = current.pgid
+    session_id = current.session_id
+
+    if current.state == "allocated":
+        raise ProcessIdentityError(
+            "executor process is allocated but has no proven running identity"
+        )
+    if current.state == "running":
         try:
-            os.killpg(record.pgid, signal.SIGTERM)
+            os.killpg(pgid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        current = store.mark_signal(
-            record.process_id,
-            signal_name="SIGTERM",
-            actor=actor,
-            termination_reason=termination_reason,
-            metadata={"live_member_pids": [item.pid for item in snapshot.live_members]},
-        )
-    if _wait_group_exit(record.pgid, record.session_id, terminate_grace_seconds):
+        try:
+            current = store.mark_signal(
+                current.process_id,
+                signal_name="SIGTERM",
+                actor=actor,
+                termination_reason=termination_reason,
+                metadata={
+                    "live_member_pids": [item.pid for item in snapshot.live_members]
+                },
+            )
+        except ExecutorLaunchError:
+            current = store.get(current.process_id) or current
+
+    if _wait_group_exit(pgid, session_id, terminate_grace_seconds):
         return store.finalize(
-            record.process_id,
+            current.process_id,
             actor=actor,
             exit_code=current.exit_code,
             verified_exit=True,
             termination_reason=termination_reason,
             metadata={"escalated_to_sigkill": False},
         )
-    current = store.get(record.process_id) or current
+
+    current = store.get(current.process_id) or current
+    if current.state == "exited":
+        return current
+    if current.state == "exit_unverified":
+        return store.finalize(
+            current.process_id,
+            actor=actor,
+            exit_code=current.exit_code,
+            verified_exit=inspect_process_group(pgid, session_id).verified_exited,
+            termination_reason=termination_reason,
+            metadata={"reconciled_during_escalation": True},
+        )
     if current.state == "term_sent":
         try:
-            os.killpg(record.pgid, signal.SIGKILL)
+            os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        current = store.mark_signal(
-            record.process_id,
-            signal_name="SIGKILL",
-            actor=actor,
-            termination_reason=termination_reason,
-            metadata={
-                "live_member_pids": [
-                    item.pid
-                    for item in inspect_process_group(
-                        record.pgid, record.session_id
-                    ).live_members
-                ]
-            },
-        )
-    verified = _wait_group_exit(record.pgid, record.session_id, kill_wait_seconds)
+        try:
+            current = store.mark_signal(
+                current.process_id,
+                signal_name="SIGKILL",
+                actor=actor,
+                termination_reason=termination_reason,
+                metadata={
+                    "live_member_pids": [
+                        item.pid
+                        for item in inspect_process_group(pgid, session_id).live_members
+                    ]
+                },
+            )
+        except ExecutorLaunchError:
+            current = store.get(current.process_id) or current
+
+    verified = _wait_group_exit(pgid, session_id, kill_wait_seconds)
+    current = store.get(current.process_id) or current
     return store.finalize(
-        record.process_id,
+        current.process_id,
         actor=actor,
         exit_code=current.exit_code,
         verified_exit=verified,
@@ -1005,6 +1095,22 @@ def run_managed_process(
     process_id = f"process-{uuid4().hex}"
     spec_payload = spec.to_artifact(binding)
     atomic_write_json(launch_spec_path, spec_payload, sort_keys=True)
+    manifest_base = {
+        "schema_version": "executor_process_pid.v1",
+        "process_id": process_id,
+        "attempt_id": binding.attempt_id,
+        "task_key": binding.task_key,
+        "lease_id": binding.lease_id,
+        "owner_id": binding.owner_id,
+        "executor_name": spec.executor_name,
+        "pid": None,
+        "pgid": None,
+        "session_id": None,
+        "leader_start_ticks": None,
+        "state": "pending_preflight",
+        "created_at": utc_now_iso(),
+    }
+    atomic_write_json(pid_manifest_path, manifest_base, sort_keys=True)
 
     store = ExecutorProcessStore(binding.db_path)
     preflight = check_executor_launch_preflight(binding, spec, run_env=run_env)
@@ -1021,6 +1127,15 @@ def run_managed_process(
                 "blocking_errors": list(preflight.blocking_errors),
                 "warnings": list(preflight.warnings),
             },
+        )
+        atomic_write_json(
+            pid_manifest_path,
+            {
+                **manifest_base,
+                "state": "preflight_failed",
+                "blocking_errors": list(preflight.blocking_errors),
+            },
+            sort_keys=True,
         )
         return ManagedProcessResult(
             process_id=process_id,
@@ -1090,6 +1205,15 @@ def run_managed_process(
                 process_id,
                 actor=binding.owner_id,
                 error=f"{exc.__class__.__name__}: {exc}",
+            )
+            atomic_write_json(
+                pid_manifest_path,
+                {
+                    **manifest_base,
+                    "state": "start_failed",
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                },
+                sort_keys=True,
             )
             return ManagedProcessResult(
                 process_id=process_id,
