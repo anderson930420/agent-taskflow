@@ -236,13 +236,10 @@ termination.verified_exit_required = true
 termination.shared_registry = executor_processes
 ```
 
-After this output is confirmed on the target VPS, the operational status becomes:
-
-```text
-milestone_0_implementation_gate = closed
-milestone_0_deployment_gate = closed
-level_2_eligible = true
-```
+After this output is confirmed on the target VPS, the operator may close the
+deployment gate and enable Level 2 eligibility in the operational rollout
+record. This repository document intentionally does not claim that deployment
+has already occurred.
 
 Reverting application code while ownership, lifecycle, process, and reset
 triggers remain installed causes unsupported legacy actions to fail closed. A
