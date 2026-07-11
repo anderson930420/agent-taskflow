@@ -414,6 +414,14 @@ class ResetLineageStore:
                         now,
                     ),
                 )
+                conn.execute(
+                    """
+                    INSERT INTO reset_lineage_suppressions(
+                        task_id, reset_id, new_attempt_id, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (task["task_id"], reset_id, new_attempt_id, now),
+                )
                 cursor = conn.execute(
                     """
                     UPDATE tasks
@@ -535,6 +543,10 @@ class ResetLineageStore:
                         ),
                         now,
                     ),
+                )
+                conn.execute(
+                    "DELETE FROM reset_lineage_suppressions WHERE task_id = ?",
+                    (task["task_id"],),
                 )
 
             record = self.get(reset_id)

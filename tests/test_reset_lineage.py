@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -18,7 +19,10 @@ from agent_taskflow.reset_lineage_schema import (
     RESET_LINEAGE_MIGRATION,
     migrate_reset_lineage,
 )
-from agent_taskflow.reset_runtime_path import ResetAwareRuntimeAdmissionStore
+from agent_taskflow.reset_runtime_path import (
+    ResetAwareRuntimeAdmissionStore,
+    ResetLineageRuntimeTaskStore,
+)
 from agent_taskflow.store import TaskMirrorStore, connect
 
 
@@ -30,6 +34,32 @@ class ResetLineageTests(unittest.TestCase):
         self.db_path = self.root / "state.db"
         self.repo = self.root / "repo"
         self.repo.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=self.repo,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=self.repo,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test User"],
+            cwd=self.repo,
+            check=True,
+        )
+        (self.repo / "README.md").write_text("test\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "initial"],
+            cwd=self.repo,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         self.artifact_base = self.root / "artifacts" / "AT-PR8-1"
         self.artifact_base.mkdir(parents=True)
         self.task_key = "AT-PR8-1"
@@ -239,6 +269,51 @@ class ResetLineageTests(unittest.TestCase):
         self.assertEqual(second.reset_id, first.reset_id)
         self.assertEqual(second.new_attempt_id, first.new_attempt_id)
         self.assertEqual(len(AttemptStore(self.db_path).list_attempts(self.task_key)), 2)
+
+    def test_raw_blocked_to_queued_update_requires_reset_lineage(self) -> None:
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError,
+            "reset lineage reservation required",
+        ):
+            self.task_store.update_task_status(
+                self.task_key,
+                "queued",
+                expected_current_status="blocked",
+            )
+        self.assertEqual(self.task_store.get_task(self.task_key).status, "blocked")
+
+    def test_reserved_attempt_receives_fresh_attempt_resources(self) -> None:
+        lineage, _ = ResetLineageStore(self.db_path).reserve_retry(
+            self.task_key,
+            reason="fresh resource retry",
+            actor="operator",
+            request_id="fresh-resource-request",
+            expected_generation=0,
+            expected_old_attempt_id=self.old_attempt_id,
+        )
+        runtime = ResetLineageRuntimeTaskStore(
+            self.db_path,
+            heartbeat_interval_seconds=60,
+        )
+        resource = runtime.preclaim_runtime(
+            self.task_key,
+            source="test-runtime",
+            base_branch="main",
+            worktree_root=self.repo / ".worktrees",
+            artifact_base_root=self.artifact_base,
+        )
+        workspace = runtime.prepare_attempt_workspace(self.task_key)
+        self.assertTrue(workspace.ok, workspace.summary)
+        self.assertEqual(resource.attempt_id, lineage.new_attempt_id)
+        self.assertIn(lineage.new_attempt_id, str(resource.worktree_path))
+        self.assertIn(lineage.new_attempt_id, str(resource.artifact_root))
+        self.assertEqual(len(AttemptStore(self.db_path).list_attempts(self.task_key)), 2)
+        runtime.update_task_status(
+            self.task_key,
+            "blocked",
+            source="test-runtime",
+            blocked_reason="test complete",
+        )
 
     def test_reset_lineage_events_are_append_only(self) -> None:
         lineage, _ = ResetLineageStore(self.db_path).reserve_retry(
