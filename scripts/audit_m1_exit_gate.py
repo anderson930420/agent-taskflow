@@ -25,7 +25,7 @@ def _bootstrap_source_package_without_runtime_imports() -> None:
 
 _bootstrap_source_package_without_runtime_imports()
 
-from agent_taskflow.m1_exit_gate import audit_m1_exit_gate  # noqa: E402
+from agent_taskflow.m1_exit_gate_cli import audit_m1_exit_gate  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
