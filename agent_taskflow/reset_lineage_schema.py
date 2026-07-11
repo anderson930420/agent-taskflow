@@ -101,6 +101,16 @@ def migrate_reset_lineage(db_path: str | Path | None = None) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS reset_lineage_suppressions (
+                task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),
+                reset_id TEXT NOT NULL,
+                new_attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TRIGGER IF NOT EXISTS reset_lineage_events_no_update
             BEFORE UPDATE ON reset_lineage_events
             BEGIN
@@ -150,6 +160,24 @@ def migrate_reset_lineage(db_path: str | Path | None = None) -> None:
               )
             BEGIN
                 SELECT RAISE(ABORT, 'reset lineage attempts must belong to task');
+            END
+            """
+        )
+        conn.execute("DROP TRIGGER IF EXISTS reset_lineage_required_for_retry")
+        conn.execute(
+            """
+            CREATE TRIGGER reset_lineage_required_for_retry
+            BEFORE UPDATE OF status ON tasks
+            WHEN OLD.status = 'blocked'
+             AND NEW.status = 'queued'
+             AND NOT EXISTS (
+                SELECT 1
+                FROM reset_lineage_suppressions
+                WHERE task_id = NEW.task_id
+                  AND new_attempt_id = NEW.active_attempt_id
+             )
+            BEGIN
+                SELECT RAISE(ABORT, 'reset lineage reservation required');
             END
             """
         )
