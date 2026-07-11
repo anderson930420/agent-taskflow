@@ -16,7 +16,7 @@ runtime handoff, and the scheduler delegation chain.
 
 PR-5 implements Attempt-scoped branch, worktree, lock, PID, and artifact
 resources plus fresh-worktree retry identity. The overall Level 2 Milestone 0 exit
-gate is still **not complete** because dual-Attempt reset audit binding, concurrent
+gate is **not complete** because dual-Attempt reset audit binding, concurrent
 reset compare-and-set semantics, and process-group termination/recovery remain
 open. This document must not be used as evidence that Milestone 0 has passed.
 
@@ -105,7 +105,7 @@ independent runtime ownership.
 | Executor start requires active ownership | **Passed after migration** | SQLite requires matching canonical claim metadata and a live token lease. |
 | Canonical runtime admission path is used by current executor roots | **Passed after migration** | Dispatcher and ApprovedTaskRunner use the claim-aware store; runtime handoff and scheduler delegate to the wrapped runner. |
 | Reset can successfully rerun with correct retry identity | **Blocked** | Legacy `blocked -> queued` reset does not close the prior Attempt and allocate the next retry identity. |
-| Retry uses fresh Attempt worktree semantics | **Passed after PR-5 migration** | Each claim allocates a unique Attempt branch/worktree; terminal history is retained and a retry cannot reuse the prior Attempt path. |
+| Retry uses fresh Attempt worktree semantics | **Passed after PR-5 migration** | Each new claim can create a fresh worktree on a unique Attempt branch; terminal history is retained and a retry cannot reuse the prior Attempt path. |
 | Reset and atomic write have authoritative audit evidence | **Partial** | Atomic behavior, orphan audit, leases, and lifecycle storage exist; reset evidence is not yet bound to old and new Attempts. |
 | Existing full test suite is green | **Required per PR** | GitHub Actions on the exact PR head is the authority. |
 
