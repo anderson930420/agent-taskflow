@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import types
 
@@ -82,7 +83,7 @@ def main() -> int:
             actor=args.actor,
             repo_root=repo,
         )
-    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:  # type: ignore[name-defined]
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         print(
             json.dumps(
                 {
@@ -124,6 +125,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    import sqlite3
-
     raise SystemExit(main())
