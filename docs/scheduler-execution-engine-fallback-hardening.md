@@ -1,5 +1,10 @@
 # Scheduler ExecutionEngine Fallback Hardening (P5-e)
 
+> Historical diagnostic contract: M1-C forbids legacy fallback for confirmed
+> Level 2 execution. This pure classifier remains for reading old P5 evidence;
+> the canonical scheduler does not use it to select authority. See
+> `docs/canonical-execution-engine-authority.md`.
+
 P5-e is the **legacy-vs-engine fallback hardening** stage of the staged
 scheduler-to-ExecutionEngine migration plan defined by the P5-a boundary
 document (`docs/scheduler-execution-engine-migration-boundary.md`). It hardens

@@ -299,6 +299,8 @@ class AdapterRuntimeIsolationTests(unittest.TestCase):
             f"{adapter_stem}.py",
             "execution_engine_manual_runtime.py",
             "scheduler_execution_engine_opt_in.py",
+            "scheduler_execution_engine_authority.py",
+            "m1_canonical_execution_path_rehearsal.py",
         }
         offenders: list[str] = []
         for base in (repo_root / "agent_taskflow", repo_root / "scripts"):
@@ -311,7 +313,7 @@ class AdapterRuntimeIsolationTests(unittest.TestCase):
         self.assertEqual(
             offenders,
             [],
-            "only the P4-d manual runtime helper may import the P4-c adapter: "
+            "only explicit engine authority/facade modules may import the adapter: "
             f"{offenders}",
         )
 

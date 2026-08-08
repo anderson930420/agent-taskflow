@@ -1,5 +1,9 @@
 # Scheduler ExecutionEngine Request Builder (P5-b)
 
+> Current use: M1-C now calls this pure builder from the authoritative
+> scheduler runtime-handoff bridge. The historical P5-b phase description below
+> is retained to document why the builder itself remains side-effect free.
+
 P5-b is the **request-builder contract only** stage of the staged
 scheduler-to-ExecutionEngine migration plan defined by the P5-a boundary
 document (`docs/scheduler-execution-engine-migration-boundary.md`). It adds a

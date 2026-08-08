@@ -1,4 +1,4 @@
-"""P5-b: scheduler ExecutionEngine request-builder contract only.
+"""Pure scheduler-to-ExecutionEngine request builder.
 
 This module maps scheduler-selected confirmed one-task work onto the P4-b
 ``ExecutionEngineRequest`` contract. It is pure and behavior-free: it builds a
@@ -12,7 +12,8 @@ mutates scheduler state or files, and never runs subprocesses. Path inputs are
 validated for shape only; they are not required to exist and the filesystem is
 never touched.
 
-A future P5-c stage may use this builder for shadow/compare summaries only.
+M1-C uses this builder at the authoritative runtime-handoff boundary. The
+builder itself remains behavior-free.
 """
 
 from __future__ import annotations
@@ -93,9 +94,12 @@ class SchedulerExecutionEngineRequestBuildInput:
     provider: str | None = None
     tools: tuple[str, ...] = ()
     pi_bin: str | None = None
+    command: tuple[str, ...] | None = None
     validators: tuple[str, ...] = ()
+    lifecycle_db_path: Path | None = None
     worktree_root: Path | None = None
     task_worktree_path: Path | None = None
+    base_branch: str = "main"
     dry_run: bool = True
     confirmed: bool = False
     preflight: bool = True
@@ -132,6 +136,12 @@ class SchedulerExecutionEngineRequestBuildInput:
             _require_non_empty(self.executor, "executor"),
         )
         object.__setattr__(self, "tools", _normalize_string_tuple(self.tools))
+        if self.command is not None:
+            object.__setattr__(
+                self,
+                "command",
+                _normalize_string_tuple(self.command),
+            )
         object.__setattr__(
             self,
             "validators",
@@ -140,6 +150,7 @@ class SchedulerExecutionEngineRequestBuildInput:
         for name in (
             "worktree_root",
             "task_worktree_path",
+            "lifecycle_db_path",
             "runtime_handoff_path",
             "verifier_report_path",
         ):
@@ -148,6 +159,11 @@ class SchedulerExecutionEngineRequestBuildInput:
                 object.__setattr__(self, name, Path(value))
         for name in ("operator", "operator_note", "selected_candidate_key"):
             object.__setattr__(self, name, _strip_to_none(getattr(self, name)))
+        object.__setattr__(
+            self,
+            "base_branch",
+            _require_non_empty(self.base_branch, "base_branch"),
+        )
         if self.publish_after_execution:
             raise ValueError(
                 "publish_after_execution must be False: the scheduler request"
@@ -186,6 +202,9 @@ def build_scheduler_execution_engine_request(
         "execution_only": True,
         "one_task_only": True,
         "scheduler_tick": True,
+        "level2_execution": True,
+        "execution_authority": "execution_engine",
+        "legacy_fallback_allowed": False,
     }
     if input.selected_issue_number is not None:
         metadata["selected_issue_number"] = input.selected_issue_number
@@ -211,6 +230,7 @@ def build_scheduler_execution_engine_request(
             provider=input.provider,
             tools=input.tools,
             pi_bin=input.pi_bin,
+            command=input.command,
         ),
         validator_profile=ExecutionEngineValidatorProfile(
             validators=input.validators,
@@ -220,7 +240,9 @@ def build_scheduler_execution_engine_request(
             artifact_dir=input.artifact_dir,
             worktree_root=input.worktree_root,
             task_worktree_path=input.task_worktree_path,
+            base_branch=input.base_branch,
         ),
+        lifecycle_db_path=input.lifecycle_db_path,
         runtime_handoff_path=input.runtime_handoff_path,
         verifier_report_path=input.verifier_report_path,
         metadata=metadata,

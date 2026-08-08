@@ -11,11 +11,13 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import shlex
+import sqlite3
 import subprocess
 from typing import Any
 
 from agent_taskflow.api.review import build_review_evidence
 from agent_taskflow.atomic_write import atomic_write_json, atomic_write_text
+from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -156,6 +158,10 @@ def create_pr_handoff(
     validation_results = current_store.list_validation_results(task.task_key)
     executor_runs = current_store.list_executor_runs(task.task_key)
     artifacts = current_store.list_task_artifacts(task.task_key)
+    canonical_attempt = _canonical_attempt_binding(
+        current_store.db_path,
+        task.task_key,
+    )
 
     output_root = request.output_dir or _default_output_root(task.artifact_dir)
     package_dir = output_root / task.task_key
@@ -177,6 +183,7 @@ def create_pr_handoff(
         executor_runs=executor_runs,
         artifacts=artifacts,
         review_evidence=review_evidence,
+        canonical_attempt=canonical_attempt,
         generated_at=generated_at,
     )
     markdown = _build_markdown(package_data)
@@ -299,6 +306,7 @@ def _build_package_data(
     executor_runs: list[dict[str, Any]],
     artifacts: list[Any],
     review_evidence: dict[str, Any],
+    canonical_attempt: dict[str, Any] | None,
     generated_at: str,
 ) -> dict[str, Any]:
     title = f"{task.task_key}: {task.title or 'Task handoff'}"
@@ -324,6 +332,7 @@ def _build_package_data(
         "executor_summary": _executor_summary(executor_runs),
         "artifact_summary": _artifact_summary(artifacts, review_evidence),
         "review_evidence_summary": _review_evidence_summary(review_evidence),
+        "canonical_attempt": canonical_attempt,
         "proposed_pr": {
             "title": title,
             "body": body,
@@ -346,6 +355,39 @@ def _build_package_data(
             "human_review_required": True,
         },
         "generated_at": generated_at,
+    }
+
+
+def _canonical_attempt_binding(
+    db_path: Path,
+    task_key: str,
+) -> dict[str, Any] | None:
+    """Return the latest closed non-legacy Attempt for downstream traceability."""
+
+    try:
+        attempts = AttemptStore(db_path).list_attempts(task_key)
+    except (KeyError, sqlite3.DatabaseError):
+        return None
+    canonical = [
+        attempt
+        for attempt in attempts
+        if not attempt.is_legacy
+        and not attempt.is_active
+        and attempt.status in {"waiting_approval", "completed"}
+        and attempt.execution_result == "completed"
+        and attempt.validation_result == "passed"
+    ]
+    if not canonical:
+        return None
+    attempt = canonical[-1]
+    return {
+        "attempt_id": attempt.attempt_id,
+        "attempt_number": attempt.attempt_number,
+        "status": attempt.status,
+        "is_active": attempt.is_active,
+        "execution_result": attempt.execution_result,
+        "validation_result": attempt.validation_result,
+        "is_legacy": attempt.is_legacy,
     }
 
 

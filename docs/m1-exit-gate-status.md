@@ -63,7 +63,7 @@ for any incomplete gate.
 | Illegal lifecycle transition is rejected | **Passed after migration** | `lifecycle_attempt_transition_guard` | Trigger and allowlist table remain installed |
 | Pause prevents new pickup | **Partial pending deployed rehearsal** | Global/task/Attempt pause controls exist | `pause-admission-rehearsal.json` |
 | `(project, task_class)` auto-merge eligibility can be disabled immediately | **Blocked** | Existing controls only support global/task/Attempt scopes | Add project and task-class scopes plus a disable rehearsal |
-| ExecutionEngine parity passes, or legacy path is forbidden for Level 2 | **Blocked** | Live scheduler still retains a legacy authority path | `canonical-execution-path.json` proving parity or explicit rejection and merger binding |
+| ExecutionEngine parity passes, or legacy path is forbidden for Level 2 | **Passed when M1-C evidence is supplied** | Confirmed scheduler runtime handoff uses ExecutionEngine authority, fails closed without legacy fallback, and binds downstream handoff to the canonical Attempt | `canonical-execution-path.json` produced by `scripts/run_m1_canonical_execution_path_rehearsal.py` |
 | Legacy schema and reader remain available until M1 closes | **Passed** | `tasks.is_legacy` and legacy observability fallback reader | Keep both until final M1 closeout |
 
 ## External evidence contracts

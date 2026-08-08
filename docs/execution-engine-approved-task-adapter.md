@@ -1,5 +1,10 @@
 # ExecutionEngine Approved Task Adapter (P4-c)
 
+> Current status: M1-C uses this adapter as the default implementation behind
+> ExecutionEngine authority. The approved runner remains an internal runtime
+> implementation; successful Level 2 adapter results require a newly closed
+> canonical Attempt binding. The P4-c text below is historical context.
+
 P4-c is **adapter-only** and includes **no runtime migration**. It adds
 `ApprovedTaskRunnerExecutionEngineAdapter`, which implements the P4-b
 `ExecutionEngine` protocol by delegating to the existing

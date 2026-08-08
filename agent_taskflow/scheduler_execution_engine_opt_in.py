@@ -1,4 +1,10 @@
-"""P5-d: scheduler ExecutionEngine opt-in execution path (off by default).
+"""Historical P5-d scheduler ExecutionEngine opt-in evidence helper.
+
+M1-C superseded this helper as a scheduler authority path.  The confirmed
+scheduler now invokes :class:`SchedulerExecutionEngineAuthority` at runtime
+handoff regardless of the compatibility flag.  This module remains importable
+only for historical evidence readers and tests; the canonical scheduler does
+not call it.
 
 This module is the first *runtime wiring* stage of the staged
 scheduler-to-ExecutionEngine migration plan defined by the P5-a boundary
@@ -126,7 +132,9 @@ def build_scheduler_tick_execution_engine_request(
         provider=request.provider,
         tools=tuple(request.tools or ()),
         pi_bin=request.pi_bin,
+        command=getattr(request, "command", None),
         validators=tuple(request.validators or ()),
+        lifecycle_db_path=getattr(request, "db_path", None),
         worktree_root=(
             Path(request.worktree_root)
             if request.worktree_root is not None
@@ -135,6 +143,7 @@ def build_scheduler_tick_execution_engine_request(
         dry_run=False,
         confirmed=True,
         preflight=bool(request.approved_task_preflight),
+        base_branch=getattr(request, "base_branch", None) or "main",
         # The scheduler opt-in path is execution-only by construction; the
         # builder rejects any attempt to publish.
         publish_after_execution=False,

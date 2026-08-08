@@ -16,6 +16,7 @@ automation, or background scheduler behavior.
 | `agent_taskflow/scheduler_proposal_review.py` | Load and verify recorded scheduler proposal artifacts for human review. | None. | Review output is read-only and is not confirmation, execution permission, or action evidence. |
 | `agent_taskflow/scheduler_confirmations.py` | Record operator-attested selection of hash-bound proposal items. | Only confirmation artifacts/DB metadata when explicitly confirmed by caller. | A confirmation is not runtime consumption. It is audit/pre-approval only and does not execute or permit execution by itself. |
 | `agent_taskflow/scheduler_confirmation_verifier.py` | Dry-run binding, revalidation, and expiration checks for one confirmation item. | None. | The verifier is not a consumer. It emits no consumption event or artifact and is not action evidence. |
+| `agent_taskflow/scheduler_execution_engine_authority.py` | Bind one confirmed runtime handoff to one authoritative ExecutionEngine invocation. | Execution occurs only through the engine's canonical runtime adapter. | Engine errors fail closed; no legacy scheduler fallback; successful results require canonical Attempt identity. |
 
 ## Related Scripts
 

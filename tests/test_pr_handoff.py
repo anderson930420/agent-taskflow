@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from agent_taskflow.mission_contract import build_mission_contract, write_mission_contract
+from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.pr_handoff import (
     PrHandoffError,
@@ -243,6 +244,28 @@ class PrHandoffTests(unittest.TestCase):
         self.assertEqual(package["executor_summary"]["count"], 1)
         self.assertGreaterEqual(package["artifact_summary"]["db_artifact_count"], 1)
         self.assertTrue(package["review_evidence_summary"]["available"])
+
+    def test_handoff_includes_canonical_attempt_when_available(self) -> None:
+        attempts = AttemptStore(self.db_path)
+        attempts.init_db()
+        attempt = attempts.create_attempt("AT-HANDOFF-001")
+        attempts.close_attempt(
+            attempt.attempt_id,
+            status="waiting_approval",
+            reason_code="handoff_test_complete",
+            actor="handoff_test",
+            execution_result="completed",
+            validation_result="passed",
+        )
+
+        result = create_pr_handoff(self._request())
+
+        assert result.package is not None
+        binding = result.package.data["canonical_attempt"]
+        self.assertEqual(binding["attempt_id"], attempt.attempt_id)
+        self.assertFalse(binding["is_active"])
+        self.assertFalse(binding["is_legacy"])
+        self.assertEqual(binding["validation_result"], "passed")
 
     def test_handoff_writes_json_and_markdown(self) -> None:
         result = create_pr_handoff(self._request())

@@ -1,5 +1,11 @@
 # Scheduler-to-ExecutionEngine Migration Boundary (P5-a)
 
+> Historical staging note: M1-C completed the authority migration described by
+> this inventory. Confirmed Level 2 scheduler work now uses ExecutionEngine at
+> the runtime handoff and cannot fall back to legacy scheduler authority. See
+> `docs/canonical-execution-engine-authority.md`. The remaining text documents
+> the earlier P5-a rollout constraints and is retained for historical context.
+
 This is the **scheduler-execution-engine migration boundary** inventory
 (`docs/scheduler-execution-engine-migration-boundary.md`). It is a
 **documentation only** phase: it defines the boundary for a possible future

@@ -1,4 +1,4 @@
-"""P4-c adapter: implement the ExecutionEngine protocol over the approved runner.
+"""ExecutionEngine implementation adapter over the canonical approved runner.
 
 This module adapts the existing one-shot ``approved_task_runner.run_approved_task``
 to the P4-b ``ExecutionEngine`` protocol. It only translates between the
@@ -8,15 +8,17 @@ to the P4-b ``ExecutionEngine`` protocol. It only translates between the
 The adapter performs no orchestration of its own. It does not approve, merge,
 clean up, archive, close out, publish a PR, delete a branch or worktree, start a
 daemon/webhook/background worker, run a scheduler loop, or batch multiple tasks.
-Whatever ``run_approved_task`` does when called is the only behavior; the adapter
-adds none. P4-c also does not wire this adapter into any scheduler or automation
-runtime path: it is imported by tests and docs only.
+Whatever ``run_approved_task`` does when called is the only execution behavior;
+the adapter adds request validation and canonical Attempt result binding. M1-C
+wires this adapter behind the scheduler's authoritative ExecutionEngine facade.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 from agent_taskflow.approved_task_runner import (
@@ -36,6 +38,7 @@ from agent_taskflow.execution_engine_contract import (
     ExecutionEngineSafety,
     ExecutionEngineStepResult,
 )
+from agent_taskflow.attempt_store import AttemptStore
 
 
 _MISSING = object()
@@ -68,15 +71,67 @@ def _bool(value: Any) -> bool:
 
 
 class ApprovedTaskRunnerExecutionEngineAdapter:
-    """Implement ``ExecutionEngine`` by delegating to ``run_approved_task``."""
+    """Implement ``ExecutionEngine`` over the canonical approved-runner core.
+
+    The approved runner remains an internal implementation adapter.  Scheduler
+    authority belongs to this facade, and successful Level 2 results are only
+    returned after a newly-created canonical Attempt is identified.
+    """
+
+    def __init__(
+        self,
+        *,
+        approved_task_runner: Callable[[ApprovedTaskRunRequest], Any] | None = None,
+    ) -> None:
+        self._approved_task_runner = approved_task_runner or run_approved_task
 
     def execute(self, request: ExecutionEngineRequest) -> ExecutionEngineResult:
+        contract_error = self._level2_contract_error(request)
+        if contract_error is not None:
+            return self._level2_failure_result(request, contract_error)
+
+        before_attempt_ids = self._attempt_ids(request)
         approved_request = self._build_approved_request(request)
         try:
-            result = run_approved_task(approved_request)
+            result = self._approved_task_runner(approved_request)
         except Exception as exc:  # noqa: BLE001 - surfaced as a blocked result.
             return self._adapter_failure_result(request, exc)
-        return self._map_result(request, result)
+        mapped = self._map_result(request, result)
+        if request.metadata.get("level2_execution") is not True:
+            return mapped
+        if not mapped.ok:
+            return replace(
+                mapped,
+                metadata={
+                    **dict(mapped.metadata),
+                    "execution_authority": "execution_engine",
+                    "legacy_fallback_allowed": False,
+                    "canonical_attempt_bound": False,
+                },
+            )
+
+        attempt = self._new_canonical_attempt(request, before_attempt_ids)
+        if attempt is None:
+            return self._level2_failure_result(
+                request,
+                "successful Level 2 execution did not produce exactly one new "
+                "closed canonical Attempt",
+                prior=mapped,
+            )
+        return replace(
+            mapped,
+            metadata={
+                **dict(mapped.metadata),
+                "execution_authority": "execution_engine",
+                "legacy_fallback_allowed": False,
+                "canonical_attempt_bound": True,
+                "canonical_attempt_id": attempt.attempt_id,
+                "canonical_attempt_status": attempt.status,
+                "canonical_attempt_number": attempt.attempt_number,
+                "canonical_execution_result": attempt.execution_result,
+                "canonical_validation_result": attempt.validation_result,
+            },
+        )
 
     # -- request mapping ---------------------------------------------------
 
@@ -91,16 +146,79 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
             task_key=request.task_key,
             executor=executor_profile.executor,
             repo_path=workspace.repo_path,
+            db_path=request.lifecycle_db_path,
             artifact_root=workspace.artifact_dir,
             worktree_root=workspace.worktree_root,
+            base_branch=workspace.base_branch,
             validators=validator_profile.validators,
+            confirm_approved_task=(
+                request.metadata.get("confirmed") is True
+            ),
             dry_run=request.dry_run,
             preflight=request.preflight,
+            command=executor_profile.command,
             model=executor_profile.model,
             provider=executor_profile.provider,
             tools=executor_profile.tools,
             pi_bin=executor_profile.pi_bin,
         )
+
+    @staticmethod
+    def _level2_contract_error(request: ExecutionEngineRequest) -> str | None:
+        if request.metadata.get("level2_execution") is not True:
+            return None
+        if request.metadata.get("execution_authority") != "execution_engine":
+            return "Level 2 request is missing ExecutionEngine authority binding"
+        if request.metadata.get("legacy_fallback_allowed") is not False:
+            return "Level 2 request must forbid legacy fallback"
+        if request.dry_run:
+            return None
+        if request.metadata.get("confirmed") is not True:
+            return "Level 2 execution requires confirmed canonical authorization"
+        if request.lifecycle_db_path is None:
+            return "Level 2 execution requires lifecycle_db_path"
+        if request.runtime_handoff_path is None:
+            return "Level 2 execution requires a canonical runtime handoff binding"
+        return None
+
+    @staticmethod
+    def _attempt_ids(request: ExecutionEngineRequest) -> set[str]:
+        if request.lifecycle_db_path is None or not request.lifecycle_db_path.exists():
+            return set()
+        try:
+            return {
+                attempt.attempt_id
+                for attempt in AttemptStore(request.lifecycle_db_path).list_attempts(
+                    request.task_key
+                )
+            }
+        except (KeyError, sqlite3.DatabaseError):
+            return set()
+
+    @staticmethod
+    def _new_canonical_attempt(
+        request: ExecutionEngineRequest,
+        before_attempt_ids: set[str],
+    ) -> Any | None:
+        if request.lifecycle_db_path is None:
+            return None
+        try:
+            attempts = AttemptStore(request.lifecycle_db_path).list_attempts(
+                request.task_key
+            )
+        except (KeyError, sqlite3.DatabaseError):
+            return None
+        created = [
+            attempt
+            for attempt in attempts
+            if attempt.attempt_id not in before_attempt_ids
+            and not attempt.is_legacy
+            and not attempt.is_active
+            and attempt.status in {"waiting_approval", "completed"}
+            and attempt.execution_result == "completed"
+            and attempt.validation_result == "passed"
+        ]
+        return created[0] if len(created) == 1 else None
 
     # -- result mapping ----------------------------------------------------
 
@@ -399,6 +517,41 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
                 "error_type": exc.__class__.__name__,
                 "error_message": str(exc),
             },
+        )
+
+    @staticmethod
+    def _level2_failure_result(
+        request: ExecutionEngineRequest,
+        message: str,
+        *,
+        prior: ExecutionEngineResult | None = None,
+    ) -> ExecutionEngineResult:
+        metadata = dict(prior.metadata) if prior is not None else {}
+        metadata.update(
+            {
+                "adapter": "approved_task_runner",
+                "execution_authority": "execution_engine",
+                "legacy_fallback_allowed": False,
+                "canonical_attempt_bound": False,
+                "contract_error": message,
+            }
+        )
+        return ExecutionEngineResult(
+            ok=False,
+            task_key=request.task_key,
+            status=EXECUTION_STATUS_BLOCKED,
+            summary=f"ExecutionEngine blocked Level 2 execution: {message}",
+            safety=prior.safety if prior is not None else ExecutionEngineSafety(),
+            steps=(
+                *(() if prior is None else prior.steps),
+                ExecutionEngineStepResult(
+                    name="canonical_attempt_binding",
+                    status=STEP_STATUS_BLOCKED,
+                    summary=message,
+                ),
+            ),
+            artifacts=prior.artifacts if prior is not None else (),
+            metadata=metadata,
         )
 
 

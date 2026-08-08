@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from agent_taskflow.approved_task_runner import ApprovedTaskRunRequest, run_approved_task
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS
 from agent_taskflow.execution_engine_contract import ExecutionEngine
 from agent_taskflow.github_issue_discovery import IssueListFetcher
@@ -28,8 +27,8 @@ from agent_taskflow.github_issue_one_task_lock import (
     default_github_issue_one_task_lock_path,
 )
 from agent_taskflow.models import require_absolute_path
-from agent_taskflow.scheduler_execution_engine_opt_in import (
-    route_scheduler_tick_through_execution_engine,
+from agent_taskflow.scheduler_execution_engine_authority import (
+    SchedulerExecutionEngineAuthority,
 )
 
 
@@ -82,11 +81,9 @@ class GitHubIssueOneTaskSchedulerTickRequest:
     tools: tuple[str, ...] | None = None
     pi_bin: str | None = None
 
-    # P5-d opt-in: route the one selected confirmed task through the
-    # ExecutionEngine facade for runtime evidence. Off by default. The legacy
-    # scheduler tick path is unchanged unless this is explicitly enabled, and it
-    # is only valid in confirmed mode (see __post_init__). The active cron path
-    # never sets this flag.
+    # Deprecated P5-d compatibility flag. Confirmed Level 2 execution now uses
+    # ExecutionEngine authority regardless of this value. It remains readable
+    # so old command lines and serialized request fixtures do not break.
     use_execution_engine: bool = False
 
     def __post_init__(self) -> None:
@@ -212,22 +209,32 @@ def run_github_issue_one_task_scheduler_tick(
 ) -> dict[str, Any]:
     """Run one locked scheduler tick and stop.
 
-    The legacy path is the default. When ``request.use_execution_engine`` is set
-    (confirmed mode only), the one selected task is additionally routed through
-    the ExecutionEngine facade for runtime evidence, and an ``execution_engine``
-    opt-in evidence block is attached to the returned payload. The
-    ``execution_engine`` argument injects the engine facade for tests; it is
-    unused unless the opt-in is enabled, and the default facade is supplied by
-    the dedicated opt-in helper module.
+    Dry-run discovery remains non-executing. Every confirmed runtime handoff is
+    bound to exactly one ExecutionEngine invocation; its result is the only
+    Level 2 execution decision and engine failures never fall back to the
+    historical scheduler runner authority.
     """
 
-    runner_fn = approved_task_runner_fn or _configured_approved_task_runner_fn(request)
+    authority = (
+        SchedulerExecutionEngineAuthority(
+            request,
+            engine=execution_engine,
+            approved_task_runner_fn=approved_task_runner_fn,
+        )
+        if request.confirmed
+        else None
+    )
+    runner_fn = (
+        authority.execute_from_runtime_handoff
+        if authority is not None
+        else approved_task_runner_fn
+    )
 
     lock = NonOverlapLock(request.lock_path)
     try:
         acquired = lock.acquire(blocking=not request.fail_if_locked)
     except OSError as exc:
-        return _maybe_attach_execution_engine(
+        return _attach_execution_authority(
             request,
             _failure_response(
                 request,
@@ -237,14 +244,14 @@ def run_github_issue_one_task_scheduler_tick(
                 lock_contended=False,
                 automation=None,
             ),
-            execution_engine=execution_engine,
+            authority=authority,
         )
 
     if not acquired:
-        return _maybe_attach_execution_engine(
+        return _attach_execution_authority(
             request,
             _locked_response(request),
-            execution_engine=execution_engine,
+            authority=authority,
         )
 
     automation: dict[str, Any] | None = None
@@ -265,7 +272,7 @@ def run_github_issue_one_task_scheduler_tick(
         lock.release()
 
     if automation_error is not None:
-        return _maybe_attach_execution_engine(
+        return _attach_execution_authority(
             request,
             _failure_response(
                 request,
@@ -277,11 +284,11 @@ def run_github_issue_one_task_scheduler_tick(
                 automation_called=True,
                 automation=automation,
             ),
-            execution_engine=execution_engine,
+            authority=authority,
         )
 
     if automation is None:
-        return _maybe_attach_execution_engine(
+        return _attach_execution_authority(
             request,
             _failure_response(
                 request,
@@ -293,38 +300,61 @@ def run_github_issue_one_task_scheduler_tick(
                 automation_called=True,
                 automation=None,
             ),
-            execution_engine=execution_engine,
+            authority=authority,
         )
 
-    return _maybe_attach_execution_engine(
+    return _attach_execution_authority(
         request,
         _automation_response(
             request,
             automation=automation,
             lock_released=True,
         ),
-        execution_engine=execution_engine,
+        authority=authority,
     )
 
 
-def _maybe_attach_execution_engine(
+def _attach_execution_authority(
     request: GitHubIssueOneTaskSchedulerTickRequest,
+    response: dict[str, Any],
+    *,
+    authority: SchedulerExecutionEngineAuthority | None,
+) -> dict[str, Any]:
+    """Attach evidence for the already-authoritative in-handoff engine call."""
+
+    if authority is None:
+        return response
+    selected_task_key = response.get("selected_task_key")
+    if selected_task_key and authority.invocation_count != 1:
+        response["ok"] = False
+        response["status"] = "execution_engine_not_invoked"
+        response["reasons"] = [
+            "confirmed Level 2 task did not cross ExecutionEngine authority"
+        ]
+    elif authority.result is not None and not authority.result.ok:
+        response["ok"] = False
+        response["status"] = "execution_engine_blocked"
+        response["reasons"] = [
+            authority.result.summary or "ExecutionEngine returned a blocked result"
+        ]
+    response["execution_engine"] = authority.evidence(response)
+    return response
+
+
+def _maybe_attach_execution_engine(
+    request: Any,
     response: dict[str, Any],
     *,
     execution_engine: ExecutionEngine | None,
 ) -> dict[str, Any]:
-    """Attach the P5-d ``execution_engine`` opt-in evidence block, if enabled.
+    """Retained P5-d readback/test compatibility; not used by the scheduler."""
 
-    Off by default: when ``use_execution_engine`` is not set, the legacy
-    response is returned unchanged. When enabled, the one selected confirmed
-    task is routed through the ExecutionEngine facade for runtime evidence only;
-    the engine result never changes the legacy ``ok`` / ``status`` / publication
-    / safety decision and never publishes, merges, approves, cleans up, or
-    deletes a branch or worktree.
-    """
-
-    if not request.use_execution_engine:
+    if not getattr(request, "use_execution_engine", False):
         return response
+    from agent_taskflow.scheduler_execution_engine_opt_in import (
+        route_scheduler_tick_through_execution_engine,
+    )
+
     response["execution_engine"] = route_scheduler_tick_through_execution_engine(
         request,
         response,
@@ -393,53 +423,6 @@ def _automation_request(
         tools=request.tools,
         pi_bin=request.pi_bin,
     )
-
-
-def _configured_approved_task_runner_fn(
-    request: GitHubIssueOneTaskSchedulerTickRequest,
-) -> Callable[..., dict[str, Any]] | None:
-    """Return an injected runner wrapper when scheduler runner config exists."""
-
-    if request.executor is None:
-        return None
-
-    def _runner(**kwargs: Any) -> dict[str, Any]:
-        task_key = str(kwargs.get("task_key") or "").strip()
-        if not task_key:
-            return {
-                "ok": False,
-                "status": "blocked",
-                "phase": "scheduler_runner_config",
-                "error": "approved runner wrapper requires task_key",
-                "safety": {
-                    "executor_started": False,
-                    "validators_started": False,
-                    "github_mutated": False,
-                },
-            }
-        result = run_approved_task(
-            ApprovedTaskRunRequest(
-                task_key=task_key,
-                executor=request.executor or "",
-                repo_path=request.local_repo_path,
-                db_path=request.db_path,
-                artifact_root=request.artifact_root,
-                worktree_root=request.worktree_root,
-                base_branch=request.base_branch or "main",
-                validators=request.validators,
-                confirm_approved_task=True,
-                dry_run=False,
-                preflight=request.approved_task_preflight,
-                command=request.command,
-                model=request.model,
-                provider=request.provider,
-                tools=request.tools,
-                pi_bin=request.pi_bin,
-            )
-        )
-        return result.to_dict()
-
-    return _runner
 
 
 def _automation_response(

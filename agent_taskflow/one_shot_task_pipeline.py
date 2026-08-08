@@ -629,6 +629,12 @@ def _run_runtime_execution_stage(
         )
 
     runtime_execution = result.get("runtime_execution") or {}
+    runner_result_summary = runtime_execution.get("runner_result_summary") or {}
+    authority_summary = (
+        runner_result_summary.get("summary")
+        if isinstance(runner_result_summary.get("summary"), dict)
+        else runner_result_summary
+    )
     stage_summary = {
         "id": runtime_execution.get("runtime_execution_id"),
         "created": True,
@@ -642,6 +648,11 @@ def _run_runtime_execution_stage(
         "runner_ok": runtime_execution.get("runner_ok"),
         "runner_status": runtime_execution.get("runner_status"),
         "runner_phase": runtime_execution.get("runner_phase"),
+        "execution_authority": authority_summary.get("execution_authority"),
+        "canonical_attempt_bound": authority_summary.get(
+            "canonical_attempt_bound"
+        ),
+        "canonical_attempt_id": authority_summary.get("canonical_attempt_id"),
     }
     return {
         "ok": True,

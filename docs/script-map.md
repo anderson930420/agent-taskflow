@@ -71,6 +71,7 @@ loop, webhook worker, or implicit scheduler.
 | Path | Purpose | Effects and external tools | Explicit confirmation | Background scheduler behavior |
 | --- | --- | --- | --- | --- |
 | `scripts/run_local_validation.py` | Run local validation commands selected by policy. | May call local validation subprocesses such as tests or compile checks. | No `--confirm-*`; validation command only. | No - no background scheduler behavior. |
+| `scripts/run_m1_canonical_execution_path_rehearsal.py` | Produce deterministic M1-C ExecutionEngine authority evidence. | Uses a disposable DB and deterministic local fixture; writes only the requested evidence file. | Explicit output path; no real executor or production DB mutation. | No - no background scheduler behavior. |
 | `scripts/validate_workflow_contract.py` | Validate workflow contract content. | Read-only file validation. | No `--confirm-*`; validator only. | No - no background scheduler behavior. |
 | `scripts/validate_workflow_policy.py` | Validate workflow policy JSON. | Read-only file validation. | No `--confirm-*`; validator only. | No - no background scheduler behavior. |
 | `scripts/summarize_workflow_policy.py` | Summarize workflow policy without runtime integration. | Read-only policy parsing and stdout output. | No `--confirm-*`; summary only. | No - no background scheduler behavior. |

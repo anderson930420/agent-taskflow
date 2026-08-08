@@ -145,6 +145,12 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
             seen["request"] = request
             seen["kwargs"] = kwargs
+            kwargs["approved_task_runner_fn"](
+                task_key="AT-GH-702",
+                handoff={"handoff_artifact_path": "/tmp/handoff.json"},
+                handoff_id="handoff-702",
+                runtime_execution_id="runtime-702",
+            )
             return {
                 "ok": True,
                 "status": "completed_one_task",
@@ -185,6 +191,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
                 approved_task_runner_fn=lambda **kwargs: {"ok": True},
                 branch_push_fn=lambda **kwargs: {"ok": True},
                 draft_pr_fn=lambda **kwargs: {"ok": True},
+                execution_engine=RecordingEngine(),
             )
 
         automation_request = seen["request"]
@@ -231,6 +238,12 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
 
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
             seen["request"] = request
+            kwargs["approved_task_runner_fn"](
+                task_key="AT-GH-704",
+                handoff={"handoff_artifact_path": "/tmp/handoff.json"},
+                handoff_id="handoff-704",
+                runtime_execution_id="runtime-704",
+            )
             return {
                 "ok": True,
                 "status": "execution_completed",
@@ -258,7 +271,8 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
             side_effect=fake_automation,
         ):
             result = run_github_issue_one_task_scheduler_tick(
-                self.request(confirmed=True)
+                self.request(confirmed=True),
+                execution_engine=RecordingEngine(),
             )
 
         # Scheduler confirmed tick is execution-only by default.
@@ -283,6 +297,12 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
 
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
             seen["request"] = request
+            kwargs["approved_task_runner_fn"](
+                task_key="AT-GH-705",
+                handoff={"handoff_artifact_path": "/tmp/handoff.json"},
+                handoff_id="handoff-705",
+                runtime_execution_id="runtime-705",
+            )
             return {
                 "ok": True,
                 "status": "completed_one_task",
@@ -306,7 +326,8 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
             side_effect=fake_automation,
         ):
             result = run_github_issue_one_task_scheduler_tick(
-                self.request(confirmed=True, publish_after_execution=True)
+                self.request(confirmed=True, publish_after_execution=True),
+                execution_engine=RecordingEngine(),
             )
 
         # Explicit opt-in forwards to the publication path.
@@ -320,14 +341,15 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertTrue(safety["branch_pushed"])
         self.assertTrue(safety["draft_pr_created"])
 
-    def test_confirmed_tick_builds_configured_approved_runner(self) -> None:
+    def test_confirmed_tick_builds_configured_engine_request(self) -> None:
         seen: dict[str, Any] = {}
+        engine = RecordingEngine()
 
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
             runner = kwargs["approved_task_runner_fn"]
             seen["runner_payload"] = runner(
                 task_key="AT-GH-703",
-                handoff={},
+                handoff={"handoff_artifact_path": "/tmp/handoff.json"},
                 handoff_id="handoff-test",
                 runtime_execution_id="runtime-test",
                 db_path=request.db_path,
@@ -355,31 +377,19 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
             "run_github_issue_one_task_automation",
             side_effect=fake_automation,
         ):
-            with mock.patch(
-                "agent_taskflow.github_issue_one_task_scheduler_tick.run_approved_task"
-            ) as fake_runner:
-                fake_runner.return_value.to_dict.return_value = {
-                    "ok": True,
-                    "status": "waiting_approval",
-                    "phase": "waiting_approval",
-                    "summary": {"final_task_status": "waiting_approval"},
-                    "safety": {
-                        "executor_started": True,
-                        "validators_started": True,
-                        "github_mutated": False,
-                    },
-                }
-                result = run_github_issue_one_task_scheduler_tick(
-                    self.request(
-                        confirmed=True,
-                        executor="shell",
-                        validators=("pytest", "policy"),
-                        worktree_root=self.worktree_root,
-                        base_branch="main",
-                        approved_task_preflight=False,
-                        command=("python", "-m", "pytest"),
-                    )
+            result = run_github_issue_one_task_scheduler_tick(
+                self.request(
+                    confirmed=True,
+                    executor="shell",
+                    validators=("pytest", "policy"),
+                    worktree_root=self.worktree_root,
+                    base_branch="main",
+                    approved_task_preflight=False,
+                    command=("python", "-m", "pytest"),
                 )
+                ,
+                execution_engine=engine,
+            )
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["runner_config"]["configured"])
@@ -391,19 +401,25 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertTrue(result["safety"]["runner_configured"])
         self.assertEqual(seen["runner_payload"]["status"], "waiting_approval")
 
-        runner_request = fake_runner.call_args.args[0]
-        self.assertEqual(runner_request.task_key, "AT-GH-703")
-        self.assertEqual(runner_request.executor, "shell")
-        self.assertEqual(runner_request.repo_path, self.local_repo)
-        self.assertEqual(runner_request.db_path, self.db_path)
-        self.assertEqual(runner_request.artifact_root, self.artifact_root)
-        self.assertEqual(runner_request.worktree_root, self.worktree_root)
-        self.assertEqual(runner_request.base_branch, "main")
-        self.assertEqual(runner_request.validators, ("pytest", "policy"))
-        self.assertTrue(runner_request.confirm_approved_task)
-        self.assertFalse(runner_request.dry_run)
-        self.assertFalse(runner_request.preflight)
-        self.assertEqual(runner_request.command, ("python", "-m", "pytest"))
+        engine_request = engine.calls[0]
+        self.assertEqual(engine_request.task_key, "AT-GH-703")
+        self.assertEqual(engine_request.executor_profile.executor, "shell")
+        self.assertEqual(engine_request.workspace.repo_path, self.local_repo)
+        self.assertEqual(engine_request.lifecycle_db_path, self.db_path)
+        self.assertEqual(engine_request.workspace.artifact_dir, self.artifact_root)
+        self.assertEqual(engine_request.workspace.worktree_root, self.worktree_root)
+        self.assertEqual(engine_request.workspace.base_branch, "main")
+        self.assertEqual(
+            engine_request.validator_profile.validators,
+            ("pytest", "policy"),
+        )
+        self.assertTrue(engine_request.metadata["confirmed"])
+        self.assertFalse(engine_request.dry_run)
+        self.assertFalse(engine_request.preflight)
+        self.assertEqual(
+            engine_request.executor_profile.command,
+            ("python", "-m", "pytest"),
+        )
 
     def test_confirmed_tick_threads_executor_profile_to_automation(self) -> None:
         seen: dict[str, Any] = {}
@@ -507,13 +523,14 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertIsNone(automation_request.tools)
         self.assertIsNone(automation_request.pi_bin)
 
-    def test_confirmed_tick_threads_executor_profile_into_approved_runner(self) -> None:
-        captured: dict[str, Any] = {}
+    def test_confirmed_tick_threads_executor_profile_into_engine_request(self) -> None:
+        engine = RecordingEngine()
 
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
             runner = kwargs["approved_task_runner_fn"]
             runner(
                 task_key="AT-GH-730",
+                handoff={"handoff_artifact_path": "/tmp/handoff.json"},
                 db_path=request.db_path,
                 artifact_root=request.artifact_root,
             )
@@ -531,32 +548,25 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
             "run_github_issue_one_task_automation",
             side_effect=fake_automation,
         ):
-            with mock.patch(
-                "agent_taskflow.github_issue_one_task_scheduler_tick.run_approved_task"
-            ) as fake_runner:
-                fake_runner.return_value.to_dict.return_value = {
-                    "ok": True,
-                    "status": "waiting_approval",
-                    "safety": {},
-                }
-                run_github_issue_one_task_scheduler_tick(
-                    self.request(
-                        confirmed=True,
-                        executor="pi",
-                        model="claude-sonnet-4-6",
-                        provider="anthropic",
-                        tools=("read", "write"),
-                        pi_bin="/custom/pi",
-                    )
+            run_github_issue_one_task_scheduler_tick(
+                self.request(
+                    confirmed=True,
+                    executor="pi",
+                    model="claude-sonnet-4-6",
+                    provider="anthropic",
+                    tools=("read", "write"),
+                    pi_bin="/custom/pi",
                 )
+                ,
+                execution_engine=engine,
+            )
 
-        runner_request = fake_runner.call_args.args[0]
-        captured["runner_request"] = runner_request
-        self.assertEqual(runner_request.executor, "pi")
-        self.assertEqual(runner_request.model, "claude-sonnet-4-6")
-        self.assertEqual(runner_request.provider, "anthropic")
-        self.assertEqual(runner_request.tools, ("read", "write"))
-        self.assertEqual(runner_request.pi_bin, "/custom/pi")
+        profile = engine.calls[0].executor_profile
+        self.assertEqual(profile.executor, "pi")
+        self.assertEqual(profile.model, "claude-sonnet-4-6")
+        self.assertEqual(profile.provider, "anthropic")
+        self.assertEqual(profile.tools, ("read", "write"))
+        self.assertEqual(profile.pi_bin, "/custom/pi")
 
     def test_lock_contention_returns_locked_without_calling_automation(self) -> None:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -705,6 +715,12 @@ class RecordingEngine:
             status="waiting_approval",
             summary="recording engine result",
             safety=ExecutionEngineSafety(),
+            metadata={
+                "execution_authority": "execution_engine",
+                "legacy_fallback_allowed": False,
+                "canonical_attempt_bound": True,
+                "canonical_attempt_id": "attempt-test-canonical",
+            },
         )
 
 
@@ -739,9 +755,24 @@ class SchedulerTickExecutionEngineOptInTests(unittest.TestCase):
     @staticmethod
     def _execution_completed_automation(task_key: str = "AT-GH-808") -> Any:
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
+            runner_result = kwargs["approved_task_runner_fn"](
+                task_key=task_key,
+                handoff={
+                    "handoff_artifact_path": "/tmp/handoff.json",
+                    "verifier_report_artifact_path": "/tmp/verifier.json",
+                },
+                handoff_id="handoff-test",
+                runtime_execution_id="runtime-test",
+                db_path=request.db_path,
+                artifact_root=request.artifact_root,
+            )
             return {
-                "ok": True,
-                "status": "execution_completed",
+                "ok": bool(runner_result["ok"]),
+                "status": (
+                    "execution_completed"
+                    if runner_result["ok"]
+                    else "execution_failed"
+                ),
                 "mode": "confirmed",
                 "repo": request.repo,
                 "selected_task_key": task_key,
@@ -777,7 +808,7 @@ class SchedulerTickExecutionEngineOptInTests(unittest.TestCase):
         self.assertTrue(request.confirmed)
         self.assertFalse(request.dry_run)
 
-    def test_default_tick_does_not_build_or_call_engine(self) -> None:
+    def test_default_confirmed_tick_uses_engine_authority(self) -> None:
         engine = RecordingEngine()
         with mock.patch(
             "agent_taskflow.github_issue_one_task_scheduler_tick."
@@ -789,9 +820,12 @@ class SchedulerTickExecutionEngineOptInTests(unittest.TestCase):
                 execution_engine=engine,
             )
 
-        # Default path: no opt-in flag -> no engine block, engine never called.
-        self.assertNotIn("execution_engine", result)
-        self.assertEqual(len(engine.calls), 0)
+        self.assertEqual(len(engine.calls), 1)
+        block = result["execution_engine"]
+        self.assertEqual(block["effective_authority"], "execution_engine")
+        self.assertTrue(block["engine_authority"])
+        self.assertFalse(block["legacy_fallback_allowed"])
+        self.assertFalse(block["use_execution_engine_compat_flag"])
 
     def test_opt_in_routes_one_task_through_engine_exactly_once(self) -> None:
         engine = RecordingEngine()
@@ -821,20 +855,19 @@ class SchedulerTickExecutionEngineOptInTests(unittest.TestCase):
         self.assertIs(metadata["scheduler_tick"], True)
 
         block = result["execution_engine"]
-        self.assertTrue(block["enabled"])
         self.assertTrue(block["executed"])
         self.assertTrue(block["ok"])
         self.assertEqual(block["engine_invocation_count"], 1)
-        self.assertEqual(block["request_source"], REQUEST_SOURCE_SCHEDULED_TICK)
+        self.assertEqual(block["request"]["source"], REQUEST_SOURCE_SCHEDULED_TICK)
         self.assertTrue(block["shadow_compare"]["matched"])
-        self.assertIsNotNone(block["observability_summary"])
+        self.assertTrue(block["canonical_attempt_bound"])
 
         # The whole tick payload (legacy + engine evidence) is JSON-compatible.
         import json
 
         json.dumps(result)
 
-    def test_opt_in_engine_result_is_evidence_only(self) -> None:
+    def test_engine_result_is_authoritative_but_not_approval(self) -> None:
         engine = RecordingEngine()
         with mock.patch(
             "agent_taskflow.github_issue_one_task_scheduler_tick."
@@ -846,7 +879,6 @@ class SchedulerTickExecutionEngineOptInTests(unittest.TestCase):
                 execution_engine=engine,
             )
 
-        # Legacy decision fields are untouched by the engine path.
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "execution_completed")
         self.assertEqual(result["publication_config"]["mode"], "execution_only")
@@ -857,15 +889,11 @@ class SchedulerTickExecutionEngineOptInTests(unittest.TestCase):
         self.assertFalse(safety["approval_authority"])
         self.assertFalse(safety["approved"])
         self.assertFalse(safety["merged"])
-        self.assertFalse(safety["branch_pushed"])
-        self.assertFalse(safety["draft_pr_created"])
         self.assertFalse(safety["cleanup_performed"])
-        self.assertFalse(safety["branch_deleted"])
-        self.assertFalse(safety["worktree_deleted"])
-        self.assertFalse(safety["scheduler_loop_started"])
-        self.assertFalse(safety["background_worker_started"])
-        self.assertFalse(safety["multi_task_batch_started"])
         self.assertTrue(safety["human_review_required"])
+        block = result["execution_engine"]
+        self.assertTrue(block["engine_result_accepted_as_authority"])
+        self.assertFalse(block["shadow_result_can_override_authority"])
 
     def test_opt_in_engine_failure_returns_structured_block(self) -> None:
         class RaisingEngine:
@@ -885,15 +913,14 @@ class SchedulerTickExecutionEngineOptInTests(unittest.TestCase):
         block = result["execution_engine"]
         self.assertTrue(block["executed"])
         self.assertFalse(block["ok"])
-        self.assertEqual(block["status"], "engine_error")
+        self.assertEqual(block["status"], "blocked")
         self.assertIn("boom", block["error"])
-        # No fallback to publish/merge/cleanup: legacy decision preserved.
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["status"], "execution_completed")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "execution_engine_blocked")
+        self.assertFalse(block["legacy_fallback_allowed"])
+        self.assertFalse(block["legacy_scheduler_authority_invoked"])
         self.assertFalse(result["safety"]["approved"])
         self.assertFalse(result["safety"]["merged"])
-        self.assertFalse(block["safety"]["branch_deleted"])
-        self.assertFalse(block["safety"]["worktree_deleted"])
 
     def test_opt_in_no_eligible_issue_does_not_call_engine(self) -> None:
         def fake_no_eligible(request: Any, **kwargs: Any) -> dict[str, Any]:

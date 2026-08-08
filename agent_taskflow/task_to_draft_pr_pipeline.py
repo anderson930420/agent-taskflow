@@ -206,6 +206,21 @@ def run_task_to_draft_pr_pipeline(
             ),
         )
 
+    canonical_binding_error = canonical_attempt_binding_error(one_shot_result)
+    if canonical_binding_error is not None:
+        return _failure_response(
+            request,
+            failed_stage=_STAGE_ONE_SHOT,
+            reasons=[canonical_binding_error],
+            stage_result=one_shot_result,
+            safety=_safety(
+                dry_run=False,
+                approved_task_runner_called=_one_shot_runner_called(
+                    one_shot_result
+                ),
+            ),
+        )
+
     final_task_status = _current_task_status(request)
     if final_task_status != "waiting_approval":
         return _failure_response(
@@ -413,10 +428,31 @@ def _one_shot_summary(result: dict[str, Any]) -> dict[str, Any]:
         "runtime_reused": bool(runtime_stage.get("reused")),
         "runtime_execution_id": runtime_stage.get("runtime_execution_id"),
         "runner_status": runtime_stage.get("runner_status"),
+        "execution_authority": runtime_stage.get("execution_authority"),
+        "canonical_attempt_bound": runtime_stage.get(
+            "canonical_attempt_bound"
+        ),
+        "canonical_attempt_id": runtime_stage.get("canonical_attempt_id"),
         "approved_task_runner_called": bool(
             runtime_stage.get("approved_task_runner_called")
         ),
     }
+
+
+def canonical_attempt_binding_error(result: dict[str, Any]) -> str | None:
+    """Require canonical Attempt identity before engine-backed handoff."""
+
+    runtime_stage = (result.get("stages") or {}).get("runtime_execution") or {}
+    if runtime_stage.get("execution_authority") != "execution_engine":
+        return None
+    attempt_id = runtime_stage.get("canonical_attempt_id")
+    if (
+        runtime_stage.get("canonical_attempt_bound") is not True
+        or not isinstance(attempt_id, str)
+        or not attempt_id.strip()
+    ):
+        return "canonical_attempt_binding_required_for_downstream_handoff"
+    return None
 
 
 def _one_shot_runner_called(result: dict[str, Any]) -> bool:
