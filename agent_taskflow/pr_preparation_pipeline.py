@@ -40,6 +40,11 @@ from agent_taskflow.runtime_handoff_execution_from_handoff import (
     RUNTIME_FINISHED_EVENT_TYPE,
 )
 from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    is_level2_task,
+    verify_canonical_attempt,
+)
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.waiting_approval_summary import (
     WaitingApprovalSummaryRequest,
@@ -102,6 +107,7 @@ class PRPreparationPipelineRequest:
     remote: str = "origin"
     base_branch: str | None = None
     draft: bool = True
+    canonical_attempt_id: str | None = None
 
     def __post_init__(self) -> None:
         db_path = Path(self.db_path).expanduser()
@@ -127,6 +133,11 @@ class PRPreparationPipelineRequest:
         if not remote:
             raise ValueError("remote must not be empty")
         object.__setattr__(self, "remote", remote)
+        if self.canonical_attempt_id is not None:
+            attempt_id = self.canonical_attempt_id.strip()
+            if not attempt_id:
+                raise ValueError("canonical_attempt_id must not be empty")
+            object.__setattr__(self, "canonical_attempt_id", attempt_id)
 
 
 def run_pr_preparation_pipeline(
@@ -320,6 +331,21 @@ def _run_preflight(request: PRPreparationPipelineRequest) -> dict[str, Any]:
     if task.status != "waiting_approval":
         reasons.append(f"task_status_not_waiting_approval: {task.status}")
 
+    canonical_attempt_verified = False
+    try:
+        if is_level2_task(request.db_path, request.task_key):
+            if request.canonical_attempt_id is None:
+                reasons.append("canonical_attempt_id_required_for_level2")
+            else:
+                verify_canonical_attempt(
+                    db_path=request.db_path,
+                    task_key=request.task_key,
+                    attempt_id=request.canonical_attempt_id,
+                )
+                canonical_attempt_verified = True
+    except Level2ExecutionAuthorityError as exc:
+        reasons.append(f"canonical_attempt_invalid: {exc}")
+
     worktree = store.get_task_worktree(request.task_key)
     if worktree is None:
         reasons.append("task_worktree_missing")
@@ -336,7 +362,13 @@ def _run_preflight(request: PRPreparationPipelineRequest) -> dict[str, Any]:
                 f"{request.base_branch} != {worktree.base_branch}"
             )
 
-    runtime = _runtime_evidence(store, request.task_key)
+    runtime = _runtime_evidence(
+        store,
+        request.task_key,
+        canonical_attempt_id=(
+            request.canonical_attempt_id if canonical_attempt_verified else None
+        ),
+    )
     reasons.extend(runtime["reasons"])
 
     repo = _source_repo(request)
@@ -350,6 +382,7 @@ def _run_preflight(request: PRPreparationPipelineRequest) -> dict[str, Any]:
         worktree=worktree,
         runtime=runtime,
         repo=repo,
+        canonical_attempt_verified=canonical_attempt_verified,
     )
 
 
@@ -361,6 +394,7 @@ def _preflight_result(
     worktree: Any,
     runtime: dict[str, Any] | None,
     repo: str | None,
+    canonical_attempt_verified: bool = False,
 ) -> dict[str, Any]:
     passed = not reasons
     runtime = runtime or {
@@ -381,6 +415,8 @@ def _preflight_result(
         "branch": worktree.branch if worktree is not None else None,
         "base_branch": worktree.base_branch if worktree is not None else request.base_branch,
         "repo": repo,
+        "canonical_attempt_id": request.canonical_attempt_id,
+        "canonical_attempt_verified": canonical_attempt_verified,
     }
     return {
         "ok": passed,
@@ -398,7 +434,12 @@ def _preflight_result(
     }
 
 
-def _runtime_evidence(store: TaskMirrorStore, task_key: str) -> dict[str, Any]:
+def _runtime_evidence(
+    store: TaskMirrorStore,
+    task_key: str,
+    *,
+    canonical_attempt_id: str | None = None,
+) -> dict[str, Any]:
     reasons: list[str] = []
     artifacts = [
         artifact
@@ -434,6 +475,18 @@ def _runtime_evidence(store: TaskMirrorStore, task_key: str) -> dict[str, Any]:
     ]
     if any(value is False for value in runner_ok_values):
         reasons.append("runtime_runner_not_ok")
+    if canonical_attempt_id is not None:
+        if not payloads:
+            reasons.append("runtime_exact_canonical_attempt_evidence_missing")
+        for payload in payloads:
+            if payload.get("execution_authority") != "execution_engine":
+                reasons.append("runtime_execution_authority_invalid")
+            if payload.get("canonical_attempt_id") != canonical_attempt_id:
+                reasons.append("runtime_canonical_attempt_id_mismatch")
+            if payload.get("canonical_attempt_bound") is not True:
+                reasons.append("runtime_canonical_attempt_not_bound")
+            if payload.get("canonical_attempt_store_verified") is not True:
+                reasons.append("runtime_canonical_attempt_not_store_verified")
 
     return {
         "runtime_evidence_found": bool(artifacts and events and not reasons),
@@ -510,6 +563,7 @@ def _run_pr_handoff_stage(
         output_dir=request.artifact_root / "pr_handoff",
         repo=_source_repo(request),
         base_branch=request.base_branch,
+        canonical_attempt_id=request.canonical_attempt_id,
         dry_run=dry_run,
     )
     try:
@@ -533,6 +587,11 @@ def _run_pr_handoff_stage(
         "branch": (payload.get("package") or {}).get("branch"),
         "base_branch": (payload.get("package") or {}).get("base_branch"),
         "head_sha": (payload.get("package") or {}).get("head_sha"),
+        "canonical_attempt_id": (
+            ((payload.get("package") or {}).get("canonical_attempt") or {}).get(
+                "attempt_id"
+            )
+        ),
     }
     return {
         "ok": bool(result.ok),
@@ -1095,6 +1154,16 @@ def _validate_pr_handoff_payload(
         reasons.append("base_branch_mismatch")
     if expected_repo and payload.get("repo") != expected_repo:
         reasons.append("repo_mismatch")
+    if request.canonical_attempt_id is not None:
+        binding = (
+            payload.get("canonical_attempt")
+            if isinstance(payload.get("canonical_attempt"), dict)
+            else {}
+        )
+        if binding.get("attempt_id") != request.canonical_attempt_id:
+            reasons.append("canonical_attempt_id_mismatch")
+        if binding.get("store_verified") is not True:
+            reasons.append("canonical_attempt_not_store_verified")
     safety = payload.get("safety") if isinstance(payload.get("safety"), dict) else {}
     for key in ("pr_created", "pushed", "merged", "cleanup_performed", "github_mutated"):
         if safety.get(key) is not False:

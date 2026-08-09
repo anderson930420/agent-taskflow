@@ -24,6 +24,10 @@ from agent_taskflow.governance import (
     assert_worktree_inside_repo_worktrees,
 )
 from agent_taskflow.mission_contract import build_from_task_fields, write_mission_contract
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    level2_direct_execution_error,
+)
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord, require_absolute_path
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -129,6 +133,23 @@ class Dispatcher:
                 status="blocked",
                 summary=f"Task not found: {normalized_task_key}",
                 blocked_reason=f"Task not found: {normalized_task_key}",
+            )
+
+        try:
+            authority_error = level2_direct_execution_error(
+                task_key=task.task_key,
+                db_path=self.store.db_path,
+                entrypoint="dispatcher",
+                allow_engine_internal=False,
+            )
+        except Level2ExecutionAuthorityError as exc:
+            authority_error = str(exc)
+        if authority_error is not None and not dry_run:
+            return DispatcherResult(
+                task_key=task.task_key,
+                status="blocked",
+                summary=authority_error,
+                blocked_reason=authority_error,
             )
 
         if task.status in SKIPPED_STATUSES:

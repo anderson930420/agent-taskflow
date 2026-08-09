@@ -71,6 +71,10 @@ from agent_taskflow.execution_observability import (
     summarize_execution_engine_result,
     to_observability_dict,
 )
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    is_level2_task,
+)
 from agent_taskflow.scheduler_execution_engine_fallback import (
     EFFECTIVE_AUTHORITY_LEGACY_SCHEDULER,
     SchedulerExecutionEngineFallbackAssessmentInput,
@@ -195,6 +199,24 @@ def route_scheduler_tick_through_execution_engine(
         return _attach_fallback_assessment(
             _not_executed_block(
                 reason="no_selected_task_for_engine_path",
+            ),
+            tick_payload,
+        )
+
+    try:
+        level2_task = is_level2_task(
+            getattr(request, "db_path", None),
+            selected_task_key,
+        )
+    except Level2ExecutionAuthorityError:
+        level2_task = True
+    if level2_task:
+        return _attach_fallback_assessment(
+            _not_executed_block(
+                reason=(
+                    "historical_post_legacy_engine_path_forbidden_for_level2; "
+                    "use SchedulerExecutionEngineAuthority"
+                ),
             ),
             tick_payload,
         )

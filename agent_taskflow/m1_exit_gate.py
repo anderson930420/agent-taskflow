@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 from typing import Any
 
 M1_EXIT_GATE_SCHEMA_VERSION = "m1_exit_gate_audit.v1"
@@ -359,7 +360,42 @@ def _audit_project_class_controls(conn: sqlite3.Connection) -> GateResult:
     )
 
 
-def _audit_canonical_path(evidence_dir: Path | None) -> GateResult:
+_CANONICAL_PATH_REQUIRED_SEMANTICS = (
+    "scheduler_level2_engine_authoritative",
+    "direct_legacy_level2_entry_blocked",
+    "alternate_level2_entrypoints_engine_or_fail_closed",
+    "injected_runner_level2_bypass_blocked",
+    "engine_canonical_attempt_verified_in_store",
+    "downstream_exact_attempt_binding_verified",
+    "pr_handoff_exact_attempt_binding_verified",
+    "engine_failure_legacy_fallback_blocked",
+    "legacy_reader_compatibility_retained",
+)
+
+_CANONICAL_PATH_REQUIRED_ADVERSARIAL_CHECKS = (
+    "nonexistent_attempt_rejected",
+    "wrong_task_attempt_rejected",
+    "nonterminal_attempt_rejected",
+)
+
+
+def _git_head(repo_root: Path) -> str | None:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        shell=False,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+def _audit_canonical_path(
+    evidence_dir: Path | None,
+    repo_root: Path,
+) -> GateResult:
     payload, source = _load_evidence(evidence_dir, "canonical-execution-path.json")
     if payload is None:
         return GateResult(
@@ -368,27 +404,41 @@ def _audit_canonical_path(evidence_dir: Path | None) -> GateResult:
             source,
             next_action="Provide a passing ExecutionEngine parity report or proof that legacy execution is rejected for every Level 2-eligible class.",
         )
+    checks = payload.get("checks")
+    adversarial = payload.get("adversarial_attempt_checks")
+    canonical_attempt_id = payload.get("canonical_attempt_id")
     valid = (
-        payload.get("schema_version") == "m1_canonical_execution_path.v1"
+        payload.get("schema_version") == "m1_canonical_execution_path.v2"
         and payload.get("canonical_path") == "ExecutionEngine"
-        and (
-            payload.get("parity_test_passed") is True
-            or payload.get("legacy_level2_rejected") is True
+        and payload.get("repo_sha") == _git_head(repo_root)
+        and payload.get("deterministic_fixture") is True
+        and payload.get("production_db_mutated") is False
+        and payload.get("real_executor_invoked") is False
+        and isinstance(canonical_attempt_id, str)
+        and bool(canonical_attempt_id.strip())
+        and isinstance(checks, dict)
+        and isinstance(adversarial, dict)
+        and all(
+            payload.get(name) is True and checks.get(name) is True
+            for name in _CANONICAL_PATH_REQUIRED_SEMANTICS
         )
-        and payload.get("merger_requires_canonical_attempt") is True
+        and all(
+            adversarial.get(name) is True
+            for name in _CANONICAL_PATH_REQUIRED_ADVERSARIAL_CHECKS
+        )
     )
     if not valid:
         return GateResult(
             "canonical_execution_path",
             "blocked",
-            "Canonical-path evidence does not prove parity or legacy rejection plus merger binding.",
+            "Canonical-path evidence does not prove the repository-wide Level 2 authority and exact-Attempt contract for this repository SHA.",
             evidence=(source,),
             next_action="Complete ExecutionEngine parity/enforcement and regenerate the evidence.",
         )
     return GateResult(
         "canonical_execution_path",
         "passed",
-        "ExecutionEngine is recorded as the only trusted Level 2 path, with parity or legacy rejection and merger binding.",
+        "ExecutionEngine is proven as the repository-wide Level 2 authority with exact store-verified Attempt propagation and no legacy fallback.",
         evidence=(source,),
     )
 
@@ -442,7 +492,7 @@ def audit_m1_exit_gate(
             _audit_illegal_transition(conn),
             _audit_pause(evidence, conn),
             _audit_project_class_controls(conn),
-            _audit_canonical_path(evidence),
+            _audit_canonical_path(evidence, repo),
             _audit_legacy_retention(conn, repo),
         ]
 

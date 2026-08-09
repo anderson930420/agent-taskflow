@@ -29,6 +29,12 @@ from agent_taskflow.execution_engine_contract import (
     ExecutionEngineSafety,
     to_json_dict,
 )
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    ensure_level2_task_identity,
+    list_canonical_attempt_ids,
+    verify_canonical_attempt,
+)
 from agent_taskflow.scheduler_execution_engine_opt_in import (
     build_scheduler_tick_execution_engine_request,
 )
@@ -64,6 +70,7 @@ class SchedulerExecutionEngineAuthority:
         self.error: str | None = None
         self.invocation_count = 0
         self.legacy_scheduler_authority_invoked = False
+        self._attempt_ids_before: set[str] | None = None
 
         if engine is not None:
             self.engine = engine
@@ -129,6 +136,23 @@ class SchedulerExecutionEngineAuthority:
             metadata=metadata,
         )
         self.request = request
+        try:
+            if request.lifecycle_db_path is None:
+                raise Level2ExecutionAuthorityError(
+                    "Level 2 authority requires lifecycle_db_path"
+                )
+            ensure_level2_task_identity(
+                request.lifecycle_db_path,
+                task_key,
+            )
+            self._attempt_ids_before = list_canonical_attempt_ids(
+                request.lifecycle_db_path,
+                task_key,
+            )
+        except Level2ExecutionAuthorityError as exc:
+            self.error = str(exc)
+            self.result = self._blocked_result(task_key, self.error)
+            return self._result_to_runner_payload(self.result)
         self.invocation_count += 1
 
         try:
@@ -159,6 +183,45 @@ class SchedulerExecutionEngineAuthority:
             )
             self.result = self._blocked_result(task_key, self.error)
             return self._result_to_runner_payload(self.result)
+
+        if result.ok:
+            try:
+                attempt_id = str(result.metadata["canonical_attempt_id"])
+                assert request.lifecycle_db_path is not None
+                verification = verify_canonical_attempt(
+                    db_path=request.lifecycle_db_path,
+                    task_key=task_key,
+                    attempt_id=attempt_id,
+                    preexisting_attempt_ids=self._attempt_ids_before,
+                )
+                after_ids = list_canonical_attempt_ids(
+                    request.lifecycle_db_path,
+                    task_key,
+                )
+                new_ids = after_ids - (self._attempt_ids_before or set())
+                if new_ids != {attempt_id}:
+                    raise Level2ExecutionAuthorityError(
+                        "authoritative execution must create exactly the canonical "
+                        f"Attempt it returns; created={sorted(new_ids)!r}, "
+                        f"returned={attempt_id!r}"
+                    )
+            except (KeyError, Level2ExecutionAuthorityError) as exc:
+                self.error = f"canonical Attempt store verification failed: {exc}"
+                self.result = self._blocked_result(task_key, self.error)
+                return self._result_to_runner_payload(self.result)
+            result = replace(
+                result,
+                metadata={
+                    **dict(result.metadata),
+                    "canonical_attempt_bound": True,
+                    "canonical_attempt_id": verification.attempt.attempt_id,
+                    "canonical_attempt_store_verified": True,
+                    "canonical_attempt_task_verified": True,
+                    "canonical_attempt_terminal_verified": True,
+                    "canonical_attempt_execution_association_verified": True,
+                    "canonical_attempt_downstream_valid": True,
+                },
+            )
 
         self.result = result
         return self._result_to_runner_payload(result)
@@ -208,6 +271,17 @@ class SchedulerExecutionEngineAuthority:
                 result and self._canonical_attempt_bound(result)
             ),
             "canonical_attempt_id": canonical_attempt_id,
+            "canonical_attempt_store_verified": bool(
+                result
+                and result.metadata.get("canonical_attempt_store_verified") is True
+            ),
+            "canonical_attempt_execution_association_verified": bool(
+                result
+                and result.metadata.get(
+                    "canonical_attempt_execution_association_verified"
+                )
+                is True
+            ),
             "request": request_json,
             "result": result_json,
             "shadow_compare": compare_json,
@@ -281,6 +355,16 @@ class SchedulerExecutionEngineAuthority:
                 is True,
                 "canonical_attempt_id": result.metadata.get(
                     "canonical_attempt_id"
+                ),
+                "canonical_attempt_store_verified": result.metadata.get(
+                    "canonical_attempt_store_verified"
+                )
+                is True,
+                "canonical_attempt_execution_association_verified": (
+                    result.metadata.get(
+                        "canonical_attempt_execution_association_verified"
+                    )
+                    is True
                 ),
                 "engine_status": result.status,
                 "engine_summary": result.summary,

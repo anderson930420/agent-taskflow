@@ -19,6 +19,7 @@ from agent_taskflow.pr_preparation_pipeline import (
     run_pr_preparation_pipeline,
 )
 import agent_taskflow.pr_preparation_pipeline as pr_preparation_pipeline_module
+from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.runtime_handoff_execution_from_handoff import (
     RUNTIME_EXECUTION_ARTIFACT_TYPE,
     RUNTIME_EXECUTION_SCHEMA_VERSION,
@@ -301,7 +302,10 @@ class PRPreparationPipelineTests(unittest.TestCase):
         if runtime:
             self._seed_runtime_evidence()
 
-    def _seed_runtime_evidence(self) -> None:
+    def _seed_runtime_evidence(
+        self,
+        canonical_attempt_id: str | None = None,
+    ) -> None:
         runtime_id = "runtime-test"
         runtime_path = (
             self.artifact_root
@@ -326,6 +330,15 @@ class PRPreparationPipelineTests(unittest.TestCase):
             "not_merge": True,
             "not_cleanup": True,
         }
+        if canonical_attempt_id is not None:
+            payload.update(
+                {
+                    "execution_authority": "execution_engine",
+                    "canonical_attempt_bound": True,
+                    "canonical_attempt_id": canonical_attempt_id,
+                    "canonical_attempt_store_verified": True,
+                }
+            )
         runtime_path.parent.mkdir(parents=True, exist_ok=True)
         runtime_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         self.store.record_task_artifact(self.task_key, RUNTIME_EXECUTION_ARTIFACT_TYPE, runtime_path)
@@ -344,6 +357,16 @@ class PRPreparationPipelineTests(unittest.TestCase):
                 "approved": False,
                 "merged": False,
                 "cleanup_performed": False,
+                **(
+                    {
+                        "execution_authority": "execution_engine",
+                        "canonical_attempt_bound": True,
+                        "canonical_attempt_id": canonical_attempt_id,
+                        "canonical_attempt_store_verified": True,
+                    }
+                    if canonical_attempt_id is not None
+                    else {}
+                ),
             },
         )
 
@@ -434,6 +457,66 @@ class PRPreparationPipelineTests(unittest.TestCase):
         self.assertTrue(any(e.event_type == "pr_handoff_created" for e in events))
         self.assertTrue(any(e.event_type == "branch_push_completed" for e in events))
         self.assertTrue(any(e.event_type == "draft_pr_created" for e in events))
+
+    def test_level2_pipeline_preserves_exact_attempt_a_when_newer_b_exists(self) -> None:
+        attempts = AttemptStore(self.db_path)
+        attempts.init_db()
+        attempts.register_task_identity(
+            self.task_key,
+            task_class="canonical",
+            is_legacy=False,
+        )
+        attempt_a = attempts.create_attempt(self.task_key)
+        attempts.close_attempt(
+            attempt_a.attempt_id,
+            status="waiting_approval",
+            reason_code="engine_attempt_a_complete",
+            actor="pr_pipeline_test",
+            execution_result="completed",
+            validation_result="passed",
+        )
+        attempt_b = attempts.create_attempt(self.task_key)
+        attempts.close_attempt(
+            attempt_b.attempt_id,
+            status="waiting_approval",
+            reason_code="newer_attempt_b_complete",
+            actor="pr_pipeline_test",
+            execution_result="completed",
+            validation_result="passed",
+        )
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM task_artifacts WHERE task_key = ? AND artifact_type = ?",
+                (self.task_key, RUNTIME_EXECUTION_ARTIFACT_TYPE),
+            )
+            conn.execute(
+                "DELETE FROM task_events WHERE task_key = ? AND event_type = ?",
+                (self.task_key, RUNTIME_FINISHED_EVENT_TYPE),
+            )
+        self._seed_runtime_evidence(attempt_a.attempt_id)
+
+        result = run_pr_preparation_pipeline(
+            self._request(
+                dry_run=False,
+                confirm_prepare_pr=True,
+                confirm_github_mutations=True,
+                confirm_branch_push=True,
+                confirm_draft_pr=True,
+                canonical_attempt_id=attempt_a.attempt_id,
+            ),
+            branch_push_fn=_FakeBranchPush(),
+            draft_pr_fn=_FakeDraftPR(),
+        )
+
+        self.assertTrue(result["ok"], result)
+        handoff_path = Path(result["stages"]["pr_handoff"]["artifact_path"])
+        handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            handoff["canonical_attempt"]["attempt_id"], attempt_a.attempt_id
+        )
+        self.assertNotEqual(
+            handoff["canonical_attempt"]["attempt_id"], attempt_b.attempt_id
+        )
 
     def test_resume_existing_reuses_pr_handoff_branch_push_and_draft_pr(self) -> None:
         branch = _FakeBranchPush()

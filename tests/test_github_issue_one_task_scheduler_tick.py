@@ -19,6 +19,9 @@ from agent_taskflow.github_issue_one_task_scheduler_tick import (
     GitHubIssueOneTaskSchedulerTickRequest,
     run_github_issue_one_task_scheduler_tick,
 )
+from agent_taskflow.attempt_store import AttemptStore
+from agent_taskflow.models import TaskRecord
+from agent_taskflow.store import TaskMirrorStore
 
 
 def discovery_issue(
@@ -51,6 +54,25 @@ def issue_snapshot(number: int) -> GitHubIssueSnapshot:
         created_at="2026-05-01T00:00:00Z",
         updated_at="2026-05-02T00:00:00Z",
     )
+
+
+def seed_selected_task(request: Any, task_key: str) -> None:
+    """Mirror the ingestion step before a mocked runtime callback."""
+
+    store = TaskMirrorStore(request.db_path)
+    store.init_db()
+    if store.get_task(task_key) is None:
+        store.upsert_task(
+            TaskRecord(
+                task_key=task_key,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                title="Scheduler engine fixture",
+                status="queued",
+                repo_path=request.local_repo_path,
+                artifact_dir=request.artifact_root / task_key,
+            )
+        )
 
 
 class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
@@ -145,6 +167,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
             seen["request"] = request
             seen["kwargs"] = kwargs
+            seed_selected_task(request, "AT-GH-702")
             kwargs["approved_task_runner_fn"](
                 task_key="AT-GH-702",
                 handoff={"handoff_artifact_path": "/tmp/handoff.json"},
@@ -238,6 +261,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
 
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
             seen["request"] = request
+            seed_selected_task(request, "AT-GH-704")
             kwargs["approved_task_runner_fn"](
                 task_key="AT-GH-704",
                 handoff={"handoff_artifact_path": "/tmp/handoff.json"},
@@ -297,6 +321,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
 
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
             seen["request"] = request
+            seed_selected_task(request, "AT-GH-705")
             kwargs["approved_task_runner_fn"](
                 task_key="AT-GH-705",
                 handoff={"handoff_artifact_path": "/tmp/handoff.json"},
@@ -347,6 +372,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
 
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
             runner = kwargs["approved_task_runner_fn"]
+            seed_selected_task(request, "AT-GH-703")
             seen["runner_payload"] = runner(
                 task_key="AT-GH-703",
                 handoff={"handoff_artifact_path": "/tmp/handoff.json"},
@@ -528,6 +554,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
 
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
             runner = kwargs["approved_task_runner_fn"]
+            seed_selected_task(request, "AT-GH-730")
             runner(
                 task_key="AT-GH-730",
                 handoff={"handoff_artifact_path": "/tmp/handoff.json"},
@@ -709,6 +736,31 @@ class RecordingEngine:
         self.calls.append(request)
         if self._result is not None:
             return self._result
+        store = TaskMirrorStore(request.lifecycle_db_path)
+        store.init_db()
+        if store.get_task(request.task_key) is None:
+            store.upsert_task(
+                TaskRecord(
+                    task_key=request.task_key,
+                    project="agent-taskflow",
+                    board="agent-taskflow",
+                    title="Scheduler engine fixture",
+                    status="queued",
+                    repo_path=request.workspace.repo_path,
+                    artifact_dir=request.workspace.artifact_dir,
+                )
+            )
+        attempts = AttemptStore(request.lifecycle_db_path)
+        attempts.init_db()
+        attempt = attempts.create_attempt(request.task_key)
+        attempts.close_attempt(
+            attempt.attempt_id,
+            status="waiting_approval",
+            reason_code="scheduler_tick_test_complete",
+            actor="scheduler_tick_test",
+            execution_result="completed",
+            validation_result="passed",
+        )
         return ExecutionEngineResult(
             ok=True,
             task_key=request.task_key,
@@ -719,7 +771,7 @@ class RecordingEngine:
                 "execution_authority": "execution_engine",
                 "legacy_fallback_allowed": False,
                 "canonical_attempt_bound": True,
-                "canonical_attempt_id": "attempt-test-canonical",
+                "canonical_attempt_id": attempt.attempt_id,
             },
         )
 
@@ -755,6 +807,7 @@ class SchedulerTickExecutionEngineOptInTests(unittest.TestCase):
     @staticmethod
     def _execution_completed_automation(task_key: str = "AT-GH-808") -> Any:
         def fake_automation(request: Any, **kwargs: Any) -> dict[str, Any]:
+            seed_selected_task(request, task_key)
             runner_result = kwargs["approved_task_runner_fn"](
                 task_key=task_key,
                 handoff={

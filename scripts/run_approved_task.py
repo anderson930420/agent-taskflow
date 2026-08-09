@@ -18,6 +18,10 @@ from agent_taskflow.approved_task_runner import (  # noqa: E402
     run_approved_task,
 )
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS  # noqa: E402
+from agent_taskflow.level2_execution_authority import (  # noqa: E402
+    Level2ExecutionAuthorityError,
+    level2_direct_execution_error,
+)
 
 
 def _parse_validators(values: list[str] | None) -> tuple[str, ...]:
@@ -200,12 +204,28 @@ def main(argv: list[str] | None = None) -> int:
             claude_code_command=_parse_claude_code_command(args.claude_code_command_json),
             claude_code_timeout_seconds=args.claude_code_timeout_seconds,
         )
+        authority_error = level2_direct_execution_error(
+            task_key=request.task_key,
+            db_path=request.db_path,
+            entrypoint="scripts/run_approved_task.py",
+            allow_engine_internal=False,
+        )
+        if authority_error is not None:
+            raise Level2ExecutionAuthorityError(authority_error)
         result = run_approved_task(request)
-    except (ValueError, ApprovedTaskRunnerError) as exc:
+    except (
+        ValueError,
+        ApprovedTaskRunnerError,
+        Level2ExecutionAuthorityError,
+    ) as exc:
         payload = {
             "ok": False,
             "status": "blocked",
-            "phase": "cli",
+            "phase": (
+                "execution_authority"
+                if isinstance(exc, Level2ExecutionAuthorityError)
+                else "cli"
+            ),
             "summary": str(exc),
             "safety": {
                 "read_only": True,

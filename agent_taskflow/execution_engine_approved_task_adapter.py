@@ -39,6 +39,13 @@ from agent_taskflow.execution_engine_contract import (
     ExecutionEngineStepResult,
 )
 from agent_taskflow.attempt_store import AttemptStore
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    ensure_level2_task_identity,
+    execution_engine_primitive_authority,
+    is_level2_task,
+    verify_canonical_attempt,
+)
 
 
 _MISSING = object()
@@ -86,14 +93,39 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
         self._approved_task_runner = approved_task_runner or run_approved_task
 
     def execute(self, request: ExecutionEngineRequest) -> ExecutionEngineResult:
+        try:
+            if (
+                is_level2_task(request.lifecycle_db_path, request.task_key)
+                and request.metadata.get("level2_execution") is not True
+            ):
+                return self._level2_failure_result(
+                    request,
+                    "canonical Level 2 Task requires the Level 2 ExecutionEngine contract",
+                )
+        except Level2ExecutionAuthorityError as exc:
+            return self._level2_failure_result(request, str(exc))
         contract_error = self._level2_contract_error(request)
         if contract_error is not None:
             return self._level2_failure_result(request, contract_error)
 
+        if request.metadata.get("level2_execution") is True and not request.dry_run:
+            assert request.lifecycle_db_path is not None
+            try:
+                ensure_level2_task_identity(
+                    request.lifecycle_db_path,
+                    request.task_key,
+                )
+            except Level2ExecutionAuthorityError as exc:
+                return self._level2_failure_result(request, str(exc))
+
         before_attempt_ids = self._attempt_ids(request)
         approved_request = self._build_approved_request(request)
         try:
-            result = self._approved_task_runner(approved_request)
+            with execution_engine_primitive_authority(
+                task_key=request.task_key,
+                db_path=request.lifecycle_db_path,
+            ):
+                result = self._approved_task_runner(approved_request)
         except Exception as exc:  # noqa: BLE001 - surfaced as a blocked result.
             return self._adapter_failure_result(request, exc)
         mapped = self._map_result(request, result)
@@ -130,6 +162,11 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
                 "canonical_attempt_number": attempt.attempt_number,
                 "canonical_execution_result": attempt.execution_result,
                 "canonical_validation_result": attempt.validation_result,
+                "canonical_attempt_store_verified": True,
+                "canonical_attempt_task_verified": True,
+                "canonical_attempt_terminal_verified": True,
+                "canonical_attempt_execution_association_verified": True,
+                "canonical_attempt_downstream_valid": True,
             },
         )
 
@@ -218,7 +255,18 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
             and attempt.execution_result == "completed"
             and attempt.validation_result == "passed"
         ]
-        return created[0] if len(created) == 1 else None
+        if len(created) != 1:
+            return None
+        try:
+            verification = verify_canonical_attempt(
+                db_path=request.lifecycle_db_path,
+                task_key=request.task_key,
+                attempt_id=created[0].attempt_id,
+                preexisting_attempt_ids=before_attempt_ids,
+            )
+        except Level2ExecutionAuthorityError:
+            return None
+        return verification.attempt
 
     # -- result mapping ----------------------------------------------------
 

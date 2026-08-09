@@ -34,14 +34,27 @@ class M1CanonicalExecutionPathRehearsalTests(unittest.TestCase):
             )
             self.assertEqual(
                 payload["schema_version"],
-                "m1_canonical_execution_path.v1",
+                "m1_canonical_execution_path.v2",
             )
             self.assertEqual(payload["canonical_path"], "ExecutionEngine")
-            self.assertTrue(payload["parity_test_passed"])
-            self.assertTrue(payload["legacy_level2_rejected"])
-            self.assertTrue(payload["merger_requires_canonical_attempt"])
+            for name in (
+                "scheduler_level2_engine_authoritative",
+                "direct_legacy_level2_entry_blocked",
+                "alternate_level2_entrypoints_engine_or_fail_closed",
+                "injected_runner_level2_bypass_blocked",
+                "engine_canonical_attempt_verified_in_store",
+                "downstream_exact_attempt_binding_verified",
+                "pr_handoff_exact_attempt_binding_verified",
+                "engine_failure_legacy_fallback_blocked",
+                "legacy_reader_compatibility_retained",
+            ):
+                self.assertTrue(payload[name], name)
             self.assertFalse(payload["production_db_mutated"])
             self.assertFalse(payload["real_executor_invoked"])
+            self.assertTrue(payload["canonical_attempt_id"])
+            self.assertTrue(
+                all(payload["adversarial_attempt_checks"].values())
+            )
             self.assertTrue(all(payload["checks"].values()))
 
     def test_output_path_must_be_absolute_after_resolution(self) -> None:

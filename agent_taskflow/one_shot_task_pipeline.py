@@ -71,6 +71,12 @@ from agent_taskflow.scheduler_proposals import (
     verify_proposal_hashes,
 )
 from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    is_execution_engine_authority_callback,
+    is_level2_task,
+    verify_canonical_attempt,
+)
 from agent_taskflow.tasks import normalize_task_key
 
 
@@ -189,6 +195,24 @@ def run_one_shot_task_pipeline(
             request,
             failed_stage=_STAGE_PROPOSAL,
             reasons=["task_missing"],
+            stage_result=None,
+        )
+    try:
+        level2_execution = is_level2_task(request.db_path, request.task_key)
+    except Level2ExecutionAuthorityError as exc:
+        return _failure_response(
+            request,
+            failed_stage=_STAGE_RUNTIME_EXECUTION,
+            reasons=[str(exc)],
+            stage_result=None,
+        )
+    if level2_execution and not is_execution_engine_authority_callback(
+        approved_task_runner_fn
+    ):
+        return _failure_response(
+            request,
+            failed_stage=_STAGE_RUNTIME_EXECUTION,
+            reasons=["level2_execution_engine_authority_required"],
             stage_result=None,
         )
 
@@ -635,6 +659,15 @@ def _run_runtime_execution_stage(
         if isinstance(runner_result_summary.get("summary"), dict)
         else runner_result_summary
     )
+    execution_authority = runtime_execution.get(
+        "execution_authority", authority_summary.get("execution_authority")
+    )
+    canonical_attempt_bound = runtime_execution.get(
+        "canonical_attempt_bound", authority_summary.get("canonical_attempt_bound")
+    )
+    canonical_attempt_id = runtime_execution.get(
+        "canonical_attempt_id", authority_summary.get("canonical_attempt_id")
+    )
     stage_summary = {
         "id": runtime_execution.get("runtime_execution_id"),
         "created": True,
@@ -648,11 +681,12 @@ def _run_runtime_execution_stage(
         "runner_ok": runtime_execution.get("runner_ok"),
         "runner_status": runtime_execution.get("runner_status"),
         "runner_phase": runtime_execution.get("runner_phase"),
-        "execution_authority": authority_summary.get("execution_authority"),
-        "canonical_attempt_bound": authority_summary.get(
-            "canonical_attempt_bound"
+        "execution_authority": execution_authority,
+        "canonical_attempt_bound": canonical_attempt_bound,
+        "canonical_attempt_id": canonical_attempt_id,
+        "canonical_attempt_store_verified": runtime_execution.get(
+            "canonical_attempt_store_verified"
         ),
-        "canonical_attempt_id": authority_summary.get("canonical_attempt_id"),
     }
     return {
         "ok": True,
@@ -1067,6 +1101,14 @@ def _find_existing_runtime_execution(
         "runner_ok": runtime_execution.get("runner_ok"),
         "runner_status": runtime_execution.get("runner_status"),
         "runner_phase": runtime_execution.get("runner_phase"),
+        "execution_authority": runtime_execution.get("execution_authority"),
+        "canonical_attempt_bound": runtime_execution.get(
+            "canonical_attempt_bound"
+        ),
+        "canonical_attempt_id": runtime_execution.get("canonical_attempt_id"),
+        "canonical_attempt_store_verified": runtime_execution.get(
+            "canonical_attempt_store_verified"
+        ),
     }
     return {
         "found": True,
@@ -1553,6 +1595,25 @@ def _runtime_reuse_reasons(
         )
     )
     reasons.extend(_runtime_audit_event_reasons(store, task_key, runtime_execution))
+    try:
+        if is_level2_task(store.db_path, task_key):
+            attempt_id = runtime_execution.get("canonical_attempt_id")
+            if runtime_execution.get("execution_authority") != "execution_engine":
+                reasons.append("runtime_execution_authority_invalid")
+            if runtime_execution.get("canonical_attempt_bound") is not True:
+                reasons.append("runtime_canonical_attempt_unbound")
+            if runtime_execution.get("canonical_attempt_store_verified") is not True:
+                reasons.append("runtime_canonical_attempt_not_store_verified")
+            if not isinstance(attempt_id, str) or not attempt_id.strip():
+                reasons.append("runtime_canonical_attempt_id_missing")
+            else:
+                verify_canonical_attempt(
+                    db_path=store.db_path,
+                    task_key=task_key,
+                    attempt_id=attempt_id,
+                )
+    except Level2ExecutionAuthorityError as exc:
+        reasons.append(f"runtime_canonical_attempt_invalid: {exc}")
     return _unique_strings(reasons)
 
 

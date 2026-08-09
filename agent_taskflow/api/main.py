@@ -69,6 +69,10 @@ from agent_taskflow.governance import (
     assert_worktree_inside_repo_worktrees,
 )
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord, require_absolute_path
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    level2_direct_execution_error,
+)
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.workspace_manager import (
@@ -304,6 +308,29 @@ def create_app(
 
         request = request or StartTaskRequest()
         validators = tuple(request.validators) if request.validators is not None else DEFAULT_VALIDATORS
+        try:
+            authority_error = level2_direct_execution_error(
+                task_key=task.task_key,
+                db_path=current_store.db_path,
+                entrypoint="Mission Control dispatcher API",
+                allow_engine_internal=False,
+            )
+        except Level2ExecutionAuthorityError as exc:
+            authority_error = str(exc)
+        if authority_error is not None and not request.dry_run:
+            return action_response(
+                ok=False,
+                action="start",
+                task_key=task.task_key,
+                status="blocked",
+                message=authority_error,
+                item={
+                    "task_key": task.task_key,
+                    "status": "blocked",
+                    "summary": authority_error,
+                    "blocked_reason": authority_error,
+                },
+            )
         dispatcher = make_dispatcher(current_store, validators)
         result = dispatcher.dispatch_task(
             task.task_key,

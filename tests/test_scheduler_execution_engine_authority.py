@@ -54,7 +54,10 @@ def scheduler_request(root: Path, **overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
-def bound_result(task_key: str = TASK_KEY) -> ExecutionEngineResult:
+def bound_result(
+    task_key: str = TASK_KEY,
+    attempt_id: str = "attempt-m1c-test",
+) -> ExecutionEngineResult:
     return ExecutionEngineResult(
         ok=True,
         task_key=task_key,
@@ -65,21 +68,38 @@ def bound_result(task_key: str = TASK_KEY) -> ExecutionEngineResult:
             "execution_authority": "execution_engine",
             "legacy_fallback_allowed": False,
             "canonical_attempt_bound": True,
-            "canonical_attempt_id": "attempt-m1c-test",
+            "canonical_attempt_id": attempt_id,
         },
     )
 
 
 class RecordingEngine:
-    def __init__(self, result: Any = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        result: Any = None,
+        error: Exception | None = None,
+        attempts: AttemptStore | None = None,
+    ) -> None:
         self.calls: list[Any] = []
         self.result = result
         self.error = error
+        self.attempts = attempts
 
     def execute(self, request: Any) -> Any:
         self.calls.append(request)
         if self.error is not None:
             raise self.error
+        if self.attempts is not None:
+            attempt = self.attempts.create_attempt(request.task_key)
+            self.attempts.close_attempt(
+                attempt.attempt_id,
+                status="waiting_approval",
+                reason_code="scheduler_authority_test_complete",
+                actor="scheduler_authority_test",
+                execution_result="completed",
+                validation_result="passed",
+            )
+            return bound_result(request.task_key, attempt.attempt_id)
         return self.result if self.result is not None else bound_result(request.task_key)
 
 
@@ -89,6 +109,21 @@ class SchedulerAuthorityTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         (self.root / "repo").mkdir()
         (self.root / "artifacts").mkdir()
+        self.store = TaskMirrorStore(self.root / "state.db")
+        self.store.init_db()
+        self.store.upsert_task(
+            TaskRecord(
+                task_key=TASK_KEY,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                title="M1-C authority test",
+                status="queued",
+                repo_path=self.root / "repo",
+                artifact_dir=self.root / "artifacts",
+            )
+        )
+        self.attempts = AttemptStore(self.root / "state.db")
+        self.attempts.init_db()
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -113,7 +148,7 @@ class SchedulerAuthorityTests(unittest.TestCase):
             legacy_calls.append(kwargs)
             raise AssertionError("legacy authority must not run")
 
-        engine = RecordingEngine()
+        engine = RecordingEngine(attempts=self.attempts)
         authority = SchedulerExecutionEngineAuthority(
             scheduler_request(self.root),
             engine=engine,
@@ -129,6 +164,8 @@ class SchedulerAuthorityTests(unittest.TestCase):
         self.assertIs(request.metadata["legacy_fallback_allowed"], False)
         self.assertEqual(request.lifecycle_db_path, self.root / "state.db")
         self.assertEqual(request.runtime_handoff_path, self.root / "handoff.json")
+        self.assertTrue(payload["summary"]["canonical_attempt_store_verified"])
+        self.assertFalse(self.attempts.get_task_identity(TASK_KEY).is_legacy)
 
     def test_engine_failure_fails_closed_without_legacy_fallback(self) -> None:
         legacy_calls: list[Any] = []
@@ -153,6 +190,7 @@ class SchedulerAuthorityTests(unittest.TestCase):
         self.assertFalse(evidence["legacy_fallback_allowed"])
         self.assertFalse(evidence["legacy_scheduler_authority_invoked"])
         self.assertTrue(evidence["engine_authority"])
+        self.assertFalse(self.attempts.get_task_identity(TASK_KEY).is_legacy)
 
     def test_success_without_canonical_attempt_binding_is_blocked(self) -> None:
         authority = SchedulerExecutionEngineAuthority(
@@ -170,10 +208,75 @@ class SchedulerAuthorityTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("canonical Attempt", payload["error"])
 
+    def test_fake_nonexistent_canonical_attempt_fails_closed(self) -> None:
+        authority = SchedulerExecutionEngineAuthority(
+            scheduler_request(self.root),
+            engine=RecordingEngine(
+                result=bound_result(attempt_id="missing-attempt")
+            ),
+        )
+
+        payload = authority.execute_from_runtime_handoff(**self.runtime())
+
+        self.assertFalse(payload["ok"])
+        self.assertIn("not found", payload["error"])
+
+    def test_attempt_for_another_task_fails_closed(self) -> None:
+        other_key = "AT-M1C-OTHER"
+        self.store.upsert_task(
+            TaskRecord(
+                task_key=other_key,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                title="Other task",
+                status="queued",
+                repo_path=self.root / "repo",
+                artifact_dir=self.root / "artifacts",
+            )
+        )
+        other = self.attempts.create_attempt(other_key)
+        self.attempts.close_attempt(
+            other.attempt_id,
+            status="waiting_approval",
+            reason_code="other_complete",
+            actor="scheduler_authority_test",
+            execution_result="completed",
+            validation_result="passed",
+        )
+        authority = SchedulerExecutionEngineAuthority(
+            scheduler_request(self.root),
+            engine=RecordingEngine(
+                result=bound_result(attempt_id=other.attempt_id)
+            ),
+        )
+
+        payload = authority.execute_from_runtime_handoff(**self.runtime())
+
+        self.assertFalse(payload["ok"])
+        self.assertIn("another Task", payload["error"])
+
+    def test_nonterminal_canonical_attempt_fails_closed(self) -> None:
+        outer = self
+
+        class ActiveAttemptEngine:
+            def execute(self, request: Any) -> ExecutionEngineResult:
+                attempt = outer.attempts.create_attempt(request.task_key)
+                return bound_result(request.task_key, attempt.attempt_id)
+
+        authority = SchedulerExecutionEngineAuthority(
+            scheduler_request(self.root),
+            engine=ActiveAttemptEngine(),
+        )
+
+        payload = authority.execute_from_runtime_handoff(**self.runtime())
+
+        self.assertFalse(payload["ok"])
+        self.assertIn("not closed", payload["error"])
+
     def test_shadow_compare_cannot_override_engine_authority(self) -> None:
         authority = SchedulerExecutionEngineAuthority(
             scheduler_request(self.root),
-            engine=RecordingEngine(),
+            engine=RecordingEngine(attempts=self.attempts),
         )
         authority.execute_from_runtime_handoff(**self.runtime())
         evidence = authority.evidence(

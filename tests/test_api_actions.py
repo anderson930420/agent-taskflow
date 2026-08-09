@@ -9,6 +9,7 @@ from typing import Any, Sequence
 from fastapi.testclient import TestClient
 
 from agent_taskflow.api.main import create_app
+from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.dispatcher import DispatcherResult
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
@@ -342,6 +343,25 @@ class ApiActionTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_start_level2_fails_closed_before_injected_dispatcher(self) -> None:
+        self.add_task("AT-L2-API")
+        attempts = AttemptStore(self.db_path)
+        attempts.init_db()
+        attempts.register_task_identity(
+            "AT-L2-API",
+            task_class="canonical",
+            is_legacy=False,
+        )
+
+        response = self.client.post("/api/tasks/AT-L2-API/start", json={})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("canonical ExecutionEngine", payload["message"])
+        self.assertEqual(self.dispatchers, [])
 
     def test_start_terminal_statuses_are_rejected_without_dispatcher(self) -> None:
         for status in ("accepted", "rejected", "cleaned"):

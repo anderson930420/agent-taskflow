@@ -63,7 +63,7 @@ for any incomplete gate.
 | Illegal lifecycle transition is rejected | **Passed after migration** | `lifecycle_attempt_transition_guard` | Trigger and allowlist table remain installed |
 | Pause prevents new pickup | **Partial pending deployed rehearsal** | Global/task/Attempt pause controls exist | `pause-admission-rehearsal.json` |
 | `(project, task_class)` auto-merge eligibility can be disabled immediately | **Blocked** | Existing controls only support global/task/Attempt scopes | Add project and task-class scopes plus a disable rehearsal |
-| ExecutionEngine parity passes, or legacy path is forbidden for Level 2 | **Passed when M1-C evidence is supplied** | Confirmed scheduler runtime handoff uses ExecutionEngine authority, fails closed without legacy fallback, and binds downstream handoff to the canonical Attempt | `canonical-execution-path.json` produced by `scripts/run_m1_canonical_execution_path_rehearsal.py` |
+| ExecutionEngine parity passes and it is the repository-wide Level 2 authority | **Passed only with v2 M1-C evidence for the audited SHA** | Scheduler, direct scripts, dispatcher/API, queued/runtime/one-shot callbacks, downstream pipelines, and PR handoff share the Level 2 guard and exact-Attempt verifier | `canonical-execution-path.json` produced by `scripts/run_m1_canonical_execution_path_rehearsal.py` |
 | Legacy schema and reader remain available until M1 closes | **Passed** | `tasks.is_legacy` and legacy observability fallback reader | Keep both until final M1 closeout |
 
 ## External evidence contracts
@@ -134,16 +134,30 @@ evidence.
 
 ```json
 {
-  "schema_version": "m1_canonical_execution_path.v1",
+  "schema_version": "m1_canonical_execution_path.v2",
   "canonical_path": "ExecutionEngine",
-  "parity_test_passed": false,
-  "legacy_level2_rejected": true,
-  "merger_requires_canonical_attempt": true
+  "repo_sha": "<audited git HEAD>",
+  "deterministic_fixture": true,
+  "production_db_mutated": false,
+  "real_executor_invoked": false,
+  "canonical_attempt_id": "<verified Attempt>",
+  "scheduler_level2_engine_authoritative": true,
+  "direct_legacy_level2_entry_blocked": true,
+  "alternate_level2_entrypoints_engine_or_fail_closed": true,
+  "injected_runner_level2_bypass_blocked": true,
+  "engine_canonical_attempt_verified_in_store": true,
+  "downstream_exact_attempt_binding_verified": true,
+  "pr_handoff_exact_attempt_binding_verified": true,
+  "engine_failure_legacy_fallback_blocked": true,
+  "legacy_reader_compatibility_retained": true
 }
 ```
 
-At least one of `parity_test_passed` or `legacy_level2_rejected` must be true.
-The merger-binding assertion is required independently.
+All semantic booleans must also be present and true in the artifact's
+`checks` object. The artifact must also prove rejection of nonexistent,
+wrong-Task, and nonterminal Attempt claims in `adversarial_attempt_checks`.
+The audit rejects the old v1 scheduler-only contract and any artifact whose
+`repo_sha` does not equal the audited checkout's HEAD.
 
 ## What this PR closes
 
