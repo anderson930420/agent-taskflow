@@ -123,6 +123,11 @@ class ResetAwareRuntimeAdmissionStore(canonical_path.CanonicalRuntimeAdmissionSt
             if row is None:
                 return None
 
+            RuntimeControlStore(self.db_path).assert_admission_allowed(
+                normalized,
+                connection=conn,
+            )
+
             active_lease = conn.execute(
                 """
                 SELECT lease_id FROM runtime_leases

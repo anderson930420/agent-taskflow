@@ -62,7 +62,7 @@ for any incomplete gate.
 | Lifecycle timeline can be reconstructed from events | **Partial or passed from DB** | `lifecycle_events` are append-only | Every Attempt has a continuous event chain ending at persisted status |
 | Illegal lifecycle transition is rejected | **Passed after migration** | `lifecycle_attempt_transition_guard` | Trigger and allowlist table remain installed |
 | Pause prevents new pickup | **Partial pending deployed rehearsal** | Global/task/Attempt pause controls exist | `pause-admission-rehearsal.json` |
-| `(project, task_class)` auto-merge eligibility can be disabled immediately | **Blocked** | Existing controls only support global/task/Attempt scopes | Add project and task-class scopes plus a disable rehearsal |
+| Project admission pause and task-class auto-merge eligibility can be disabled immediately | **Blocked in production; code/rehearsal implementation pending deployment review** | M1-D adds independent project and class-global scopes without enabling auto-merge | Deploy `level2_project_class_controls_v1`, then provide DB-/SHA-bound `project-class-control-rehearsal.json` |
 | ExecutionEngine parity passes and it is the repository-wide Level 2 authority | **Passed only with v2 M1-C evidence for the audited SHA** | Scheduler, direct scripts, dispatcher/API, queued/runtime/one-shot callbacks, downstream pipelines, and PR handoff share the Level 2 guard and exact-Attempt verifier | `canonical-execution-path.json` produced by `scripts/run_m1_canonical_execution_path_rehearsal.py` |
 | Legacy schema and reader remain available until M1 closes | **Passed** | `tasks.is_legacy` and legacy observability fallback reader | Keep both until final M1 closeout |
 
@@ -158,6 +158,18 @@ All semantic booleans must also be present and true in the artifact's
 wrong-Task, and nonterminal Attempt claims in `adversarial_attempt_checks`.
 The audit rejects the old v1 scheduler-only contract and any artifact whose
 `repo_sha` does not equal the audited checkout's HEAD.
+
+### `project-class-control-rehearsal.json`
+
+This artifact uses `m1_project_class_controls.v1` and binds the rehearsal to the
+audited repository SHA and its disposable database path. It must prove project-pause denial,
+active-Attempt non-abort, project/class isolation, immediate class-global
+disable, clear behavior, operator attribution, append-only events, and an
+alternate-entry denial. The audit separately requires the target database and
+the disposable evidence database to contain the deployed migration. Schema
+presence without evidence is only partial, while evidence cannot substitute
+for production schema deployment.
+Automatic merge remains disabled regardless of this control-plane result.
 
 ## What this PR closes
 

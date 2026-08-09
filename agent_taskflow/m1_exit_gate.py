@@ -14,6 +14,10 @@ import sqlite3
 import subprocess
 from typing import Any
 
+from agent_taskflow.project_class_control_schema import (
+    PROJECT_CLASS_CONTROLS_MIGRATION,
+)
+
 M1_EXIT_GATE_SCHEMA_VERSION = "m1_exit_gate_audit.v1"
 VALID_GATE_STATUSES = frozenset({"passed", "partial", "blocked", "not_applicable"})
 
@@ -340,23 +344,160 @@ def _audit_pause(evidence_dir: Path | None, conn: sqlite3.Connection) -> GateRes
     )
 
 
-def _audit_project_class_controls(conn: sqlite3.Connection) -> GateResult:
+_PROJECT_CLASS_CONTROL_REQUIRED_SEMANTICS = (
+    "project_pause_denied_new_pickup",
+    "project_pause_did_not_abort_existing_attempt",
+    "project_pause_cleared",
+    "task_class_initially_control_permitted",
+    "task_class_disable_applied",
+    "task_class_eligibility_denied_immediately",
+    "task_class_disable_cleared",
+    "task_class_disable_did_not_abort_existing_attempt",
+    "unrelated_project_unaffected",
+    "unrelated_task_class_unaffected",
+    "append_only_control_evidence_verified",
+    "operator_attribution_verified",
+    "alternate_level2_entrypoint_denied",
+)
+
+
+def _audit_project_class_controls(
+    evidence_dir: Path | None,
+    conn: sqlite3.Connection,
+    *,
+    repo_root: Path,
+) -> GateResult:
     sql = _schema_sql(conn, "runtime_controls").lower()
     has_project = "'project'" in sql or '"project"' in sql
     has_class = any(token in sql for token in ("'task_class'", "'class'", '"task_class"'))
-    if has_project and has_class:
+    tables_ready = _table_exists(conn, "runtime_controls") and _table_exists(
+        conn, "runtime_control_events"
+    )
+    migration_ready = _table_exists(conn, "schema_migrations") and conn.execute(
+        "SELECT 1 FROM schema_migrations WHERE name = ?",
+        (PROJECT_CLASS_CONTROLS_MIGRATION,),
+    ).fetchone() is not None
+    if not tables_ready or not has_project or not has_class or not migration_ready:
+        missing: list[str] = []
+        if not tables_ready:
+            missing.append("control tables")
+        if not has_project:
+            missing.append("project scope")
+        if not has_class:
+            missing.append("task_class scope")
+        if not migration_ready:
+            missing.append(PROJECT_CLASS_CONTROLS_MIGRATION)
+        return GateResult(
+            "project_class_kill_switch",
+            "blocked",
+            f"Project/class control implementation is not deployed: {', '.join(missing)}",
+            next_action=(
+                "Apply the project/class control migration, preserving existing "
+                "runtime control history."
+            ),
+        )
+
+    payload, source = _load_evidence(
+        evidence_dir, "project-class-control-rehearsal.json"
+    )
+    if payload is None:
         return GateResult(
             "project_class_kill_switch",
             "partial",
-            "Project and class scopes exist in the schema, but a deployed immediate-disable rehearsal is still required.",
-            next_action="Run a disposable (project, class) eligibility-disable rehearsal and retain audit evidence.",
+            "Project/class scopes are deployed, but authoritative disable rehearsal evidence is missing.",
+            next_action=(
+                "Run the project/class control rehearsal against this deployed "
+                "database and retain its evidence."
+            ),
         )
-    missing = [name for name, present in (("project", has_project), ("task_class", has_class)) if not present]
+
+    errors: list[str] = []
+    if payload.get("schema_version") != "m1_project_class_controls.v1":
+        errors.append("schema_version must be m1_project_class_controls.v1")
+    if payload.get("migration") != PROJECT_CLASS_CONTROLS_MIGRATION:
+        errors.append(f"migration must be {PROJECT_CLASS_CONTROLS_MIGRATION}")
+    if payload.get("repo_sha") != _git_head(repo_root):
+        errors.append("repo_sha must match the audited repository HEAD")
+    raw_evidence_db = payload.get("database_path")
+    evidence_db: Path | None = None
+    if not isinstance(raw_evidence_db, str) or not raw_evidence_db.strip():
+        errors.append("database_path must identify the disposable rehearsal database")
+    else:
+        try:
+            evidence_db = Path(raw_evidence_db).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            errors.append("database_path must identify the disposable rehearsal database")
+    if evidence_db is not None:
+        if not evidence_db.is_file():
+            errors.append("disposable rehearsal database does not exist")
+        else:
+            try:
+                with closing(_connect_read_only(evidence_db)) as evidence_conn:
+                    evidence_sql = _schema_sql(
+                        evidence_conn, "runtime_controls"
+                    ).lower()
+                    evidence_schema_ready = (
+                        _table_exists(evidence_conn, "runtime_control_events")
+                        and "'project'" in evidence_sql
+                        and "'task_class'" in evidence_sql
+                        and _table_exists(evidence_conn, "schema_migrations")
+                        and evidence_conn.execute(
+                            "SELECT 1 FROM schema_migrations WHERE name = ?",
+                            (PROJECT_CLASS_CONTROLS_MIGRATION,),
+                        ).fetchone()
+                        is not None
+                    )
+            except sqlite3.DatabaseError:
+                evidence_schema_ready = False
+            if not evidence_schema_ready:
+                errors.append(
+                    "disposable rehearsal database must contain the deployed "
+                    "project/class control schema"
+                )
+    if payload.get("production_database_modified") is not False:
+        errors.append("production_database_modified must be false")
+    if payload.get("real_executor_invoked") is not False:
+        errors.append("real_executor_invoked must be false")
+    if payload.get("actual_auto_merge_enabled") is not False:
+        errors.append("actual_auto_merge_enabled must be false")
+    if payload.get("task_class_control_scope") != "class_global":
+        errors.append("task_class_control_scope must be class_global")
+    fixture = payload.get("fixture_identifiers")
+    if not isinstance(fixture, dict):
+        errors.append("fixture_identifiers must be an object")
+    else:
+        projects = fixture.get("projects")
+        task_classes = fixture.get("task_classes")
+        if (
+            not isinstance(projects, list)
+            or not all(isinstance(item, str) and item.strip() for item in projects)
+            or len(set(projects)) < 2
+        ):
+            errors.append("fixture must contain at least two projects")
+        if (
+            not isinstance(task_classes, list)
+            or not all(
+                isinstance(item, str) and item.strip() for item in task_classes
+            )
+            or len(set(task_classes)) < 2
+        ):
+            errors.append("fixture must contain at least two task classes")
+    for field in _PROJECT_CLASS_CONTROL_REQUIRED_SEMANTICS:
+        if payload.get(field) is not True:
+            errors.append(f"{field} must be true")
+    if errors:
+        return GateResult(
+            "project_class_kill_switch",
+            "blocked",
+            "; ".join(errors),
+            evidence=(source,),
+            next_action="Repeat the project/class control rehearsal with valid DB- and SHA-bound evidence.",
+        )
     return GateResult(
         "project_class_kill_switch",
-        "blocked",
-        f"runtime_controls does not support required scope(s): {', '.join(missing)}",
-        next_action="Add project pause and task-class auto-merge kill-switch scopes with append-only control evidence.",
+        "passed",
+        "Project admission pause and class-global governance disable are deployed, immediate, isolated, and append-only audited.",
+        evidence=(source,),
     )
 
 
@@ -491,7 +632,11 @@ def audit_m1_exit_gate(
             _audit_lifecycle_replay(conn),
             _audit_illegal_transition(conn),
             _audit_pause(evidence, conn),
-            _audit_project_class_controls(conn),
+            _audit_project_class_controls(
+                evidence,
+                conn,
+                repo_root=repo,
+            ),
             _audit_canonical_path(evidence, repo),
             _audit_legacy_retention(conn, repo),
         ]

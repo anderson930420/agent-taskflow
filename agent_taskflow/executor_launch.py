@@ -731,13 +731,20 @@ class ExecutorProcessStore:
                 assignments.append(f"{key} = ?")
                 values.append(value)
             values.extend([process_id, current])
-            cursor = conn.execute(
-                f"""
-                UPDATE executor_processes SET {', '.join(assignments)}
-                WHERE process_id = ? AND state = ?
-                """,
-                values,
-            )
+            try:
+                cursor = conn.execute(
+                    f"""
+                    UPDATE executor_processes SET {', '.join(assignments)}
+                    WHERE process_id = ? AND state = ?
+                    """,
+                    values,
+                )
+            except sqlite3.IntegrityError as exc:
+                if "illegal executor process state transition" not in str(exc):
+                    raise
+                raise ExecutorLaunchError(
+                    f"Executor process state changed concurrently: {process_id}"
+                ) from exc
             if cursor.rowcount != 1:
                 raise ExecutorLaunchError(
                     f"Executor process state changed concurrently: {process_id}"
@@ -1035,10 +1042,6 @@ def terminate_registered_process(
         )
     if current.state == "running":
         try:
-            os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
             current = store.mark_signal(
                 current.process_id,
                 signal_name="SIGTERM",
@@ -1050,6 +1053,11 @@ def terminate_registered_process(
             )
         except ExecutorLaunchError:
             current = store.get(current.process_id) or current
+        if current.state == "term_sent":
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
     if _wait_group_exit(pgid, session_id, terminate_grace_seconds):
         return store.finalize(
@@ -1075,10 +1083,6 @@ def terminate_registered_process(
         )
     if current.state == "term_sent":
         try:
-            os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
             current = store.mark_signal(
                 current.process_id,
                 signal_name="SIGKILL",
@@ -1093,6 +1097,11 @@ def terminate_registered_process(
             )
         except ExecutorLaunchError:
             current = store.get(current.process_id) or current
+        if current.state == "kill_sent":
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     verified = _wait_group_exit(pgid, session_id, kill_wait_seconds)
     current = store.get(current.process_id) or current

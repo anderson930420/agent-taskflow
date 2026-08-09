@@ -254,6 +254,7 @@ class ExecutorProcessLifecycleTests(unittest.TestCase):
 
     def test_external_hard_termination_escalates_and_verifies_exit(self) -> None:
         holder: dict[str, object] = {}
+        output_path = self.resource.artifact_root / "external-kill.log"
         script = (
             "import signal,time;"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
@@ -264,7 +265,7 @@ class ExecutorProcessLifecycleTests(unittest.TestCase):
             holder["result"] = run_managed_process(
                 self.binding,
                 self._spec((sys.executable, "-c", script)),
-                stdout_path=self.resource.artifact_root / "external-kill.log",
+                stdout_path=output_path,
             )
 
         thread = threading.Thread(target=run, daemon=True)
@@ -274,7 +275,11 @@ class ExecutorProcessLifecycleTests(unittest.TestCase):
         active = None
         while time.monotonic() < deadline:
             active = process_store.active_for_attempt(self.claim.attempt_id)
-            if active is not None and active.state == "running":
+            child_ready = (
+                output_path.is_file()
+                and "ready" in output_path.read_text(encoding="utf-8")
+            )
+            if active is not None and active.state == "running" and child_ready:
                 break
             time.sleep(0.05)
         assert active is not None
@@ -291,11 +296,13 @@ class ExecutorProcessLifecycleTests(unittest.TestCase):
             terminate_grace_seconds=0.15,
             kill_wait_seconds=1.0,
         )
+        thread.join(timeout=6)
+        self.assertFalse(thread.is_alive())
+        terminated = process_store.get(terminated.process_id)
+        assert terminated is not None
         self.assertTrue(terminated.verified_exit)
         self.assertIsNotNone(terminated.term_sent_at)
         self.assertIsNotNone(terminated.kill_sent_at)
-        thread.join(timeout=6)
-        self.assertFalse(thread.is_alive())
 
     def test_process_events_are_append_only(self) -> None:
         result = run_managed_process(

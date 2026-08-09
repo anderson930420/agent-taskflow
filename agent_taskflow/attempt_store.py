@@ -146,18 +146,26 @@ class AttemptStore:
         return identity
 
     def get_task_identity(self, task_key: str) -> TaskIdentityRecord | None:
-        normalized_key = normalize_task_key(task_key)
         with closing(connect(self.db_path)) as conn, conn:
-            row = conn.execute(
-                """
-                SELECT task_id, task_key, project, task_class, status,
-                       active_attempt_id, final_outcome, created_at, closed_at,
-                       is_legacy
-                FROM tasks
-                WHERE task_key = ? AND task_id IS NOT NULL
-                """,
-                (normalized_key,),
-            ).fetchone()
+            return self.get_task_identity_in_connection(conn, task_key)
+
+    @staticmethod
+    def get_task_identity_in_connection(
+        conn: sqlite3.Connection,
+        task_key: str,
+    ) -> TaskIdentityRecord | None:
+        """Resolve canonical Task metadata inside an existing transaction."""
+        normalized_key = normalize_task_key(task_key)
+        row = conn.execute(
+            """
+            SELECT task_id, task_key, project, task_class, status,
+                   active_attempt_id, final_outcome, created_at, closed_at,
+                   is_legacy
+            FROM tasks
+            WHERE task_key = ? AND task_id IS NOT NULL
+            """,
+            (normalized_key,),
+        ).fetchone()
         return row_to_task_identity(row) if row is not None else None
 
     @staticmethod

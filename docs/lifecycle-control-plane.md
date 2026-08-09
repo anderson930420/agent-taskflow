@@ -117,6 +117,8 @@ operator_pause_requested
 operator_pause_cleared
 operator_kill_requested
 operator_kill_cleared
+operator_task_class_governance_disabled
+operator_task_class_governance_cleared
 runtime_lease_expired
 runtime_internal_error
 runtime_governance_blocked
@@ -133,13 +135,21 @@ Controls may target:
 
 ```text
 global  -> *
+project -> <persisted tasks.project>
+task_class -> <persisted tasks.task_class>
 task    -> <task-key>
 attempt -> <attempt-id>
 ```
 
 Effective precedence is severity-based rather than last-writer-wins:
-`kill_requested` overrides `paused`, which overrides `running`. Global, task,
-and Attempt controls are all evaluated.
+`kill_requested` overrides `paused`, which overrides `running`. Execution
+admission evaluates global, persisted project, task, and (when available)
+Attempt controls in that deterministic order. A narrower `running` row does not
+override a broader pause or kill.
+
+Task-class controls are a separate governance plane. Their persisted
+`kill_requested` mode means “class governance disabled”; it is not included in
+execution admission or cooperative process-kill evaluation.
 
 ## Pause semantics
 
@@ -152,6 +162,10 @@ Pause is admission-only:
 
 This deliberately avoids claiming that arbitrary subprocess execution can be
 safely frozen and resumed.
+
+Project pause extends exactly these admission-only semantics. Project identity
+is resolved from `tasks.project` for the task key inside the atomic claim
+transaction; an arbitrary caller-supplied project value is not authoritative.
 
 ## Kill semantics
 
@@ -169,6 +183,18 @@ processes, or prove that a process has exited. CLI output and lifecycle metadata
 explicitly state `os_signals_sent=false`. Hard termination belongs to the later
 process-lifecycle change.
 
+## Task-class governance semantics
+
+The class-global task-class switch answers one narrow question: whether the
+persisted class control permits participation in a future automatic
+merge/promotion path. Disable is visible on the next database-backed evaluation
+without a restart or cache delay. It does not terminate active Attempts, enable
+automatic merge, promote a class, or satisfy any future promotion policy.
+
+Future `(project, task_class)` selective promotion remains a separate policy
+layer. M1-D persists independent project and class scopes so that later policy
+can combine them without introducing a composite control identity today.
+
 ## Deployment
 
 Run from the repository root:
@@ -180,6 +206,17 @@ python3 scripts/migrate_lifecycle_control.py \
 
 The command applies the PR-2 through PR-5 prerequisites before installing
 `level2_lifecycle_control_v1`.
+
+After M1-D has been reviewed and merged, the separate additive migration is:
+
+```bash
+python3 scripts/migrate_project_class_controls.py \
+  --db-path "$HOME/.agent-taskflow/state.db"
+```
+
+It rebuilds only `runtime_controls` to widen its SQLite scope check, preserves
+all current rows and append-only events, and records
+`level2_project_class_controls_v1`.
 
 Inspect the effective global control:
 
@@ -213,6 +250,26 @@ python3 scripts/runtime_control.py clear \
   --db-path "$HOME/.agent-taskflow/state.db" \
   --scope-kind task \
   --scope-id AT-EXAMPLE-1 \
+  --actor operator
+```
+
+Pause one project's future admission:
+
+```bash
+python3 scripts/runtime_control.py pause \
+  --db-path "$HOME/.agent-taskflow/state.db" \
+  --scope-kind project \
+  --scope-id agent-taskflow \
+  --actor operator
+```
+
+Disable one class's governance permission without killing active execution:
+
+```bash
+python3 scripts/runtime_control.py disable-governance \
+  --db-path "$HOME/.agent-taskflow/state.db" \
+  --scope-kind task_class \
+  --scope-id docs-only \
   --actor operator
 ```
 
