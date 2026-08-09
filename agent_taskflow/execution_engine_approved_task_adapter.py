@@ -39,6 +39,7 @@ from agent_taskflow.execution_engine_contract import (
     ExecutionEngineStepResult,
 )
 from agent_taskflow.attempt_store import AttemptStore
+from agent_taskflow.lifecycle_control import RuntimeControlError, RuntimeControlStore
 from agent_taskflow.level2_execution_authority import (
     Level2ExecutionAuthorityError,
     ensure_level2_task_identity,
@@ -115,7 +116,10 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
                     request.lifecycle_db_path,
                     request.task_key,
                 )
-            except Level2ExecutionAuthorityError as exc:
+                RuntimeControlStore(
+                    request.lifecycle_db_path
+                ).assert_admission_allowed(request.task_key)
+            except (Level2ExecutionAuthorityError, RuntimeControlError) as exc:
                 return self._level2_failure_result(request, str(exc))
 
         before_attempt_ids = self._attempt_ids(request)

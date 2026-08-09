@@ -9,6 +9,9 @@ import tempfile
 import unittest
 
 from agent_taskflow.m1_exit_gate import audit_m1_exit_gate
+from agent_taskflow.project_class_control_schema import (
+    PROJECT_CLASS_CONTROLS_MIGRATION,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +120,72 @@ class M1ExitGateAuditTests(unittest.TestCase):
             evidence_dir=self.evidence if with_evidence else None,
         )
 
+    def _deploy_project_class_scope_schema(self) -> None:
+        with sqlite3.connect(self.db) as conn:
+            conn.executescript(
+                """
+                DROP TABLE runtime_controls;
+                CREATE TABLE runtime_controls (
+                    scope_kind TEXT NOT NULL CHECK(scope_kind IN (
+                        'global', 'project', 'task_class', 'task', 'attempt'
+                    )),
+                    scope_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    reason_code TEXT,
+                    requested_by TEXT,
+                    requested_at TEXT,
+                    generation INTEGER,
+                    metadata_json TEXT
+                );
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations(name, applied_at) VALUES (?, ?)",
+                (PROJECT_CLASS_CONTROLS_MIGRATION, "2026-08-09T00:00:00Z"),
+            )
+
+    def _write_project_class_evidence(self, **overrides: object) -> None:
+        payload: dict[str, object] = {
+            "schema_version": "m1_project_class_controls.v1",
+            "migration": PROJECT_CLASS_CONTROLS_MIGRATION,
+            "repo_sha": self.repo_sha,
+            "database_path": str(self.db.resolve()),
+            "production_database_modified": False,
+            "real_executor_invoked": False,
+            "actual_auto_merge_enabled": False,
+            "task_class_control_scope": "class_global",
+            "fixture_identifiers": {
+                "projects": ["project-a", "project-b"],
+                "task_classes": ["docs-only", "test-hardening"],
+            },
+            **{
+                name: True
+                for name in (
+                    "project_pause_denied_new_pickup",
+                    "project_pause_did_not_abort_existing_attempt",
+                    "project_pause_cleared",
+                    "task_class_initially_control_permitted",
+                    "task_class_disable_applied",
+                    "task_class_eligibility_denied_immediately",
+                    "task_class_disable_cleared",
+                    "task_class_disable_did_not_abort_existing_attempt",
+                    "unrelated_project_unaffected",
+                    "unrelated_task_class_unaffected",
+                    "append_only_control_evidence_verified",
+                    "operator_attribution_verified",
+                    "alternate_level2_entrypoint_denied",
+                )
+            },
+        }
+        payload.update(overrides)
+        (self.evidence / "project-class-control-rehearsal.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
     @staticmethod
     def _gate(report: dict[str, object], name: str) -> dict[str, object]:
         gates = report["gates"]
@@ -151,6 +220,41 @@ class M1ExitGateAuditTests(unittest.TestCase):
             self._gate(report, "canonical_execution_path")["status"],
             "blocked",
         )
+
+    def test_project_class_scope_schema_without_evidence_is_partial(self) -> None:
+        self._deploy_project_class_scope_schema()
+
+        report = self._report()
+
+        self.assertEqual(
+            self._gate(report, "project_class_kill_switch")["status"],
+            "partial",
+        )
+
+    def test_project_class_scope_and_bound_evidence_pass_the_gate(self) -> None:
+        self._deploy_project_class_scope_schema()
+        self._write_project_class_evidence()
+
+        report = self._report(with_evidence=True)
+
+        self.assertEqual(
+            self._gate(report, "project_class_kill_switch")["status"],
+            "passed",
+        )
+        self.assertFalse(report["auto_merge_eligible"])
+
+    def test_project_class_evidence_database_without_schema_fails_closed(self) -> None:
+        self._deploy_project_class_scope_schema()
+        other = self.root / "other.db"
+        with sqlite3.connect(other):
+            pass
+        self._write_project_class_evidence(database_path=str(other))
+
+        report = self._report(with_evidence=True)
+        gate = self._gate(report, "project_class_kill_switch")
+
+        self.assertEqual(gate["status"], "blocked")
+        self.assertIn("disposable rehearsal database", gate["summary"])
 
     def test_three_distinct_attempt_resources_and_replay_can_pass(self) -> None:
         with sqlite3.connect(self.db) as conn:

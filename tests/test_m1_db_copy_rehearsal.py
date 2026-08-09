@@ -38,6 +38,12 @@ class M1DatabaseCopyRehearsalTests(unittest.TestCase):
             conn.execute(
                 "INSERT INTO rehearsal_sentinel(value) VALUES ('preserve-me')"
             )
+        # Stabilize the physical database image before the byte-for-byte
+        # source-mutation assertion.  Otherwise a later close may move
+        # already-committed WAL pages into the main file and look like a
+        # rehearsal write even though the source was opened read-only.
+        with closing(sqlite3.connect(self.source)) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self.output = self.root / "rehearsal"
 
     def test_rehearsal_uses_copy_only_and_writes_accepted_evidence(self) -> None:

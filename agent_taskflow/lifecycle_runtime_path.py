@@ -18,7 +18,7 @@ from agent_taskflow.lifecycle_control import (
     validate_attempt_transition,
     validate_reason_code,
 )
-from agent_taskflow.lifecycle_control_schema import migrate_lifecycle_control
+from agent_taskflow.project_class_control_schema import migrate_project_class_controls
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import connect
 from agent_taskflow.tasks import normalize_task_key
@@ -38,7 +38,7 @@ class LifecycleRuntimeAdmissionStore(canonical_path.CanonicalRuntimeAdmissionSto
     """Token admission with graph validation and admission control checks."""
 
     def init_db(self) -> None:
-        migrate_lifecycle_control(self.db_path)
+        migrate_project_class_controls(self.db_path)
 
     def claim(self, task_key: str, **kwargs: Any):
         RuntimeControlStore(self.db_path).assert_admission_allowed(task_key)
@@ -215,7 +215,7 @@ class LifecycleRuntimeTaskStore(AttemptScopedRuntimeTaskStore):
         self._terminal_outcomes: dict[str, _TerminalOutcome] = {}
 
     def init_db(self) -> None:
-        migrate_lifecycle_control(self.db_path)
+        migrate_project_class_controls(self.db_path)
 
     def preclaim_runtime(self, task_key: str, **kwargs: Any):
         self.controls.assert_admission_allowed(task_key)

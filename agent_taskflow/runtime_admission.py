@@ -284,6 +284,15 @@ class RuntimeAdmissionStore:
         with closing(connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             task = self._ensure_task_identity(conn, normalized_key)
+            # Resolve project from the persisted Task row and evaluate controls
+            # inside the same write transaction as the claim. Caller-supplied
+            # project/class values cannot influence this decision.
+            from agent_taskflow.lifecycle_control import RuntimeControlStore
+
+            RuntimeControlStore(self.db_path).assert_admission_allowed(
+                normalized_key,
+                connection=conn,
+            )
             if task["status"] not in {"queued", "blocked"}:
                 raise RuntimeAdmissionError(
                     f"Task {normalized_key} is not claimable from status {task['status']}"
