@@ -23,6 +23,7 @@ from agent_taskflow.lifecycle_control import (
 )
 from agent_taskflow.lifecycle_runtime_path import LifecycleRuntimeAdmissionStore
 from agent_taskflow.models import TaskRecord
+from agent_taskflow.project_class_control_schema import migrate_project_class_controls
 from agent_taskflow.runtime_admission import RuntimeAdmissionStore
 from agent_taskflow.store import TaskMirrorStore, connect
 
@@ -66,6 +67,7 @@ class ProjectClassControlTests(unittest.TestCase):
         self.attempts = attempts
         self.controls = RuntimeControlStore(self.db_path)
         self.controls.init_db()
+        migrate_project_class_controls(self.db_path)
         self.admission = LifecycleRuntimeAdmissionStore(self.db_path)
 
     def test_scope_normalizers_keep_project_class_and_task_identities_distinct(self) -> None:
@@ -94,8 +96,20 @@ class ProjectClassControlTests(unittest.TestCase):
             self.controls.request_kill(
                 scope_kind="project", scope_id="foo", actor="operator"
             )
+        with self.assertRaisesRegex(ValueError, "not process kills"):
+            self.controls.set_control(
+                "kill_requested",
+                scope_kind="project",
+                scope_id="foo",
+                actor="operator",
+                reason_code="operator_kill_requested",
+            )
         with self.assertRaisesRegex(ValueError, "governance"):
             self.controls.pause(
+                scope_kind="task_class", scope_id="foo", actor="operator"
+            )
+        with self.assertRaisesRegex(ValueError, "not process kill"):
+            self.controls.request_kill(
                 scope_kind="task_class", scope_id="foo", actor="operator"
             )
         with self.assertRaisesRegex(ValueError, "actor"):
@@ -248,6 +262,23 @@ class ProjectClassControlTests(unittest.TestCase):
         )
         self.assertTrue(restored.class_control_allows_auto_merge)
         self.assertFalse(restored.actual_auto_merge_enabled)
+
+    def test_task_bound_governance_uses_persisted_class_not_caller_input(self) -> None:
+        self.controls.disable_task_class_governance(
+            "docs-only", actor="governance-operator"
+        )
+
+        # The Task-bound governance API deliberately accepts no caller class.
+        # AT-A1 remains denied because its persisted tasks.task_class is
+        # docs-only; querying another class cannot alter that decision.
+        self.assertFalse(
+            self.controls.class_control_allows_auto_merge(
+                "AT-A1"
+            ).class_control_allows_auto_merge
+        )
+        self.assertTrue(
+            self.controls.task_class_governance_permitted("test-hardening")
+        )
 
     def test_legacy_class_disable_does_not_remove_human_gated_level1_execution(self) -> None:
         mirror = TaskMirrorStore(self.db_path)

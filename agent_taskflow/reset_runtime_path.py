@@ -17,7 +17,6 @@ import agent_taskflow.canonical_runtime_path as canonical_path
 from agent_taskflow.executor_process_runtime_path import ExecutorProcessRuntimeTaskStore
 from agent_taskflow.lifecycle_control import RuntimeControlStore
 from agent_taskflow.models import require_absolute_path, utc_now_iso
-from agent_taskflow.project_class_control_schema import migrate_project_class_controls
 from agent_taskflow.reset_lineage import ResetLineageStore
 from agent_taskflow.reset_lineage_schema import migrate_reset_lineage
 from agent_taskflow.runtime_admission import (
@@ -52,7 +51,6 @@ class ResetAwareRuntimeAdmissionStore(canonical_path.CanonicalRuntimeAdmissionSt
 
     def init_db(self) -> None:
         migrate_reset_lineage(self.db_path)
-        migrate_project_class_controls(self.db_path)
 
     def _try_claim_reserved_retry(
         self,
@@ -318,7 +316,6 @@ class ResetLineageRuntimeTaskStore(ExecutorProcessRuntimeTaskStore):
 
     def init_db(self) -> None:
         migrate_reset_lineage(self.db_path)
-        migrate_project_class_controls(self.db_path)
 
 
 def install_reset_runtime_path(

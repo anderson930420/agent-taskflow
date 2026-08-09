@@ -19,6 +19,7 @@ from agent_taskflow.lifecycle_control_schema import (
 from agent_taskflow.models import require_absolute_path, utc_now_iso, validate_task_status
 from agent_taskflow.project_class_control_schema import (
     PROJECT_CLASS_CONTROLS_MIGRATION,
+    PROJECT_CLASS_CONTROL_SCOPES,
     migrate_project_class_controls,
 )
 from agent_taskflow.store import connect, default_db_path
@@ -101,6 +102,10 @@ class RuntimePausedError(RuntimeControlError):
 
 class RuntimeKillRequested(RuntimeControlError):
     """Raised internally when a cooperative runtime boundary observes kill."""
+
+
+class RuntimeControlMigrationRequired(RuntimeControlError):
+    """Raised when a project/class action needs the explicit M1-D migration."""
 
 
 @dataclass(frozen=True)
@@ -274,6 +279,33 @@ def _task_identity_for_controls(
     return identity
 
 
+def _project_class_controls_deployed_in_connection(conn: sqlite3.Connection) -> bool:
+    """Check the explicit M1-D deployment marker without changing the schema."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runtime_controls'"
+    ).fetchone()
+    sql = "" if row is None or row["sql"] is None else str(row["sql"]).lower()
+    scopes_supported = all(
+        f"'{scope}'" in sql for scope in PROJECT_CLASS_CONTROL_SCOPES
+    )
+    migrations_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+    ).fetchone()
+    migration_recorded = migrations_table is not None and conn.execute(
+        "SELECT 1 FROM schema_migrations WHERE name = ?",
+        (PROJECT_CLASS_CONTROLS_MIGRATION,),
+    ).fetchone() is not None
+    return scopes_supported and migration_recorded
+
+
+def _require_project_class_controls_deployed(conn: sqlite3.Connection) -> None:
+    if not _project_class_controls_deployed_in_connection(conn):
+        raise RuntimeControlMigrationRequired(
+            "Project/task-class controls require the explicit "
+            "level2_project_class_controls_v1 migration"
+        )
+
+
 def _effective_runtime_control_in_connection(
     conn: sqlite3.Connection,
     *,
@@ -340,7 +372,13 @@ class RuntimeControlStore:
         )
 
     def init_db(self) -> None:
-        migrate_project_class_controls(self.db_path)
+        """Initialize the pre-existing lifecycle-control base schema only.
+
+        M1-D widens a SQLite CHECK constraint and therefore requires an
+        explicit, operator-reviewed migration. Ordinary reads and runtime
+        startup must never apply that production change implicitly.
+        """
+        migrate_lifecycle_control(self.db_path)
 
     def set_control(
         self,
@@ -373,6 +411,8 @@ class RuntimeControlStore:
         self.init_db()
         with closing(connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
+            if kind in {"project", "task_class"}:
+                _require_project_class_controls_deployed(conn)
             previous = conn.execute(
                 """
                 SELECT * FROM runtime_controls
@@ -577,10 +617,17 @@ class RuntimeControlStore:
 
     def task_class_governance_permitted(self, task_class: str) -> bool:
         """Return the current class-global governance permission."""
-        control = self.get_control(
-            scope_kind="task_class",
-            scope_id=normalize_task_class_control_id(task_class),
-        )
+        self.init_db()
+        with closing(connect(self.db_path)) as conn:
+            _require_project_class_controls_deployed(conn)
+            row = conn.execute(
+                """
+                SELECT * FROM runtime_controls
+                WHERE scope_kind = 'task_class' AND scope_id = ?
+                """,
+                (normalize_task_class_control_id(task_class),),
+            ).fetchone()
+        control = _row_to_control(row) if row is not None else None
         return control is None or control.mode == "running"
 
     def class_control_allows_auto_merge(
@@ -590,6 +637,7 @@ class RuntimeControlStore:
         """Evaluate only the class-governance term of future eligibility."""
         self.init_db()
         with closing(connect(self.db_path)) as conn:
+            _require_project_class_controls_deployed(conn)
             identity = _task_identity_for_controls(conn, task_key)
             row = conn.execute(
                 """
@@ -639,6 +687,7 @@ __all__ = [
     "LifecycleTransitionError",
     "RUNTIME_REASON_CODES",
     "RuntimeControlError",
+    "RuntimeControlMigrationRequired",
     "RuntimeControlRecord",
     "RuntimeControlEventRecord",
     "RuntimeControlStore",

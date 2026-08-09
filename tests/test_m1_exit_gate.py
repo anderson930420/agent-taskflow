@@ -231,6 +231,15 @@ class M1ExitGateAuditTests(unittest.TestCase):
             "partial",
         )
 
+    def test_project_class_evidence_cannot_override_undeployed_target_schema(self) -> None:
+        self._write_project_class_evidence()
+
+        report = self._report(with_evidence=True)
+        gate = self._gate(report, "project_class_kill_switch")
+
+        self.assertEqual(gate["status"], "blocked")
+        self.assertIn("not deployed", gate["summary"])
+
     def test_project_class_scope_and_bound_evidence_pass_the_gate(self) -> None:
         self._deploy_project_class_scope_schema()
         self._write_project_class_evidence()
@@ -255,6 +264,16 @@ class M1ExitGateAuditTests(unittest.TestCase):
 
         self.assertEqual(gate["status"], "blocked")
         self.assertIn("disposable rehearsal database", gate["summary"])
+
+    def test_project_class_evidence_for_another_repository_sha_fails_closed(self) -> None:
+        self._deploy_project_class_scope_schema()
+        self._write_project_class_evidence(repo_sha="not-the-audited-repository")
+
+        report = self._report(with_evidence=True)
+        gate = self._gate(report, "project_class_kill_switch")
+
+        self.assertEqual(gate["status"], "blocked")
+        self.assertIn("repo_sha", gate["summary"])
 
     def test_three_distinct_attempt_resources_and_replay_can_pass(self) -> None:
         with sqlite3.connect(self.db) as conn:

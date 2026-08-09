@@ -15,6 +15,7 @@ from agent_taskflow.lifecycle_runtime_path import LifecycleRuntimeAdmissionStore
 from agent_taskflow.models import TaskRecord, utc_now_iso
 from agent_taskflow.project_class_control_schema import (
     PROJECT_CLASS_CONTROLS_MIGRATION,
+    migrate_project_class_controls,
 )
 from agent_taskflow.runtime_admission import RuntimeAdmissionStore
 from agent_taskflow.store import TaskMirrorStore, connect, default_db_path
@@ -133,6 +134,7 @@ def run_m1_project_class_control_rehearsal(
 
     controls = RuntimeControlStore(db)
     controls.init_db()
+    migrate_project_class_controls(db)
     admission = LifecycleRuntimeAdmissionStore(db)
     initial_a1 = controls.class_control_allows_auto_merge("AT-M1D-A1")
     initial_b1 = controls.class_control_allows_auto_merge("AT-M1D-B1")

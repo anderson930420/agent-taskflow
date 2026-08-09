@@ -13,6 +13,10 @@ from agent_taskflow.project_class_control_schema import (
     migrate_project_class_controls,
 )
 from agent_taskflow.store import connect
+from agent_taskflow.lifecycle_control import (
+    RuntimeControlMigrationRequired,
+    RuntimeControlStore,
+)
 
 
 class ProjectClassControlSchemaTests(unittest.TestCase):
@@ -75,6 +79,33 @@ class ProjectClassControlSchemaTests(unittest.TestCase):
         self.assertIn("'task_class'", after)
         self.assertIn("project", task_columns)
         self.assertIn("task_class", task_columns)
+
+    def test_normal_control_reads_do_not_activate_m1d_migration(self) -> None:
+        migrate_lifecycle_control(self.db_path)
+        controls = RuntimeControlStore(self.db_path)
+
+        self.assertIsNone(controls.get_control())
+        self.assertEqual(controls.effective_control().mode, "running")
+        with self.assertRaises(RuntimeControlMigrationRequired):
+            controls.pause(
+                scope_kind="project",
+                scope_id="project-a",
+                actor="operator",
+            )
+        with self.assertRaises(RuntimeControlMigrationRequired):
+            controls.task_class_governance_permitted("docs-only")
+
+        with closing(connect(self.db_path)) as conn:
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runtime_controls'"
+            ).fetchone()[0].lower()
+            marker = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE name = ?",
+                (PROJECT_CLASS_CONTROLS_MIGRATION,),
+            ).fetchone()
+        self.assertNotIn("'project'", sql)
+        self.assertNotIn("'task_class'", sql)
+        self.assertIsNone(marker)
 
     def test_existing_controls_events_and_immutability_are_preserved_row_for_row(self) -> None:
         migrate_lifecycle_control(self.db_path)

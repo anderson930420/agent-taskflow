@@ -58,6 +58,14 @@ The task-class scope is intentionally global by class for M1-D. A later
 `(project, task_class)` promotion policy can combine the independent identities
 without requiring a composite runtime-control scope.
 
+## Explicit activation boundary
+
+Normal `RuntimeControlStore` reads and runtime/API/scheduler initialization
+continue to install only the pre-existing lifecycle-control base schema. They
+never apply `level2_project_class_controls_v1`. Project pause mutation and
+task-class governance evaluation fail closed until an operator explicitly runs
+`scripts/migrate_project_class_controls.py` against the selected database.
+
 ## Migration and evidence
 
 `level2_project_class_controls_v1` transactionally rebuilds

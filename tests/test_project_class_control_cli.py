@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -55,6 +56,11 @@ class ProjectClassControlCliTests(unittest.TestCase):
         )
 
     def test_migration_cli_reports_new_scope_contract(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            before = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE name = 'level2_project_class_controls_v1'"
+            ).fetchone()
+        self.assertIsNone(before)
         completed = self._run(
             MIGRATION_SCRIPT, "--db-path", str(self.db_path)
         )
@@ -69,6 +75,7 @@ class ProjectClassControlCliTests(unittest.TestCase):
         self.assertFalse(payload["actual_auto_merge_enabled"])
 
     def test_project_pause_and_task_class_governance_commands_are_distinct(self) -> None:
+        self._run(MIGRATION_SCRIPT, "--db-path", str(self.db_path))
         paused = json.loads(
             self._run(
                 CONTROL_SCRIPT,
