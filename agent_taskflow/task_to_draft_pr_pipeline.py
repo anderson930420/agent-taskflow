@@ -15,6 +15,11 @@ from agent_taskflow.pr_preparation_pipeline import (
     run_pr_preparation_pipeline,
 )
 from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    is_level2_task,
+    verify_canonical_attempt,
+)
 from agent_taskflow.tasks import normalize_task_key
 
 
@@ -206,6 +211,25 @@ def run_task_to_draft_pr_pipeline(
             ),
         )
 
+    canonical_binding_error = canonical_attempt_binding_error(
+        one_shot_result,
+        db_path=request.db_path,
+        task_key=request.task_key,
+    )
+    if canonical_binding_error is not None:
+        return _failure_response(
+            request,
+            failed_stage=_STAGE_ONE_SHOT,
+            reasons=[canonical_binding_error],
+            stage_result=one_shot_result,
+            safety=_safety(
+                dry_run=False,
+                approved_task_runner_called=_one_shot_runner_called(
+                    one_shot_result
+                ),
+            ),
+        )
+
     final_task_status = _current_task_status(request)
     if final_task_status != "waiting_approval":
         return _failure_response(
@@ -222,6 +246,7 @@ def run_task_to_draft_pr_pipeline(
             ),
         )
 
+    canonical_attempt_id = _one_shot_canonical_attempt_id(one_shot_result)
     pr_preparation_result = run_pr_preparation_pipeline(
         PRPreparationPipelineRequest(
             db_path=request.db_path,
@@ -238,6 +263,7 @@ def run_task_to_draft_pr_pipeline(
             base_branch=request.base_branch,
             draft=True,
             resume_existing=request.resume_pr_preparation,
+            canonical_attempt_id=canonical_attempt_id,
         ),
         branch_push_fn=branch_push_fn,
         draft_pr_fn=draft_pr_fn,
@@ -413,10 +439,59 @@ def _one_shot_summary(result: dict[str, Any]) -> dict[str, Any]:
         "runtime_reused": bool(runtime_stage.get("reused")),
         "runtime_execution_id": runtime_stage.get("runtime_execution_id"),
         "runner_status": runtime_stage.get("runner_status"),
+        "execution_authority": runtime_stage.get("execution_authority"),
+        "canonical_attempt_bound": runtime_stage.get(
+            "canonical_attempt_bound"
+        ),
+        "canonical_attempt_id": runtime_stage.get("canonical_attempt_id"),
         "approved_task_runner_called": bool(
             runtime_stage.get("approved_task_runner_called")
         ),
     }
+
+
+def canonical_attempt_binding_error(
+    result: dict[str, Any],
+    *,
+    db_path: Path | None = None,
+    task_key: str | None = None,
+) -> str | None:
+    """Require engine authority and exact store binding for Level 2."""
+
+    runtime_stage = (result.get("stages") or {}).get("runtime_execution") or {}
+    level2 = False
+    if db_path is not None and task_key is not None:
+        try:
+            level2 = is_level2_task(db_path, task_key)
+        except Level2ExecutionAuthorityError as exc:
+            return f"canonical_attempt_store_verification_failed: {exc}"
+    if level2 and runtime_stage.get("execution_authority") != "execution_engine":
+        return "execution_engine_authority_required_for_level2"
+    if not level2 and runtime_stage.get("execution_authority") != "execution_engine":
+        return None
+    attempt_id = runtime_stage.get("canonical_attempt_id")
+    if (
+        runtime_stage.get("canonical_attempt_bound") is not True
+        or not isinstance(attempt_id, str)
+        or not attempt_id.strip()
+    ):
+        return "canonical_attempt_binding_required_for_downstream_handoff"
+    if db_path is not None and task_key is not None:
+        try:
+            verify_canonical_attempt(
+                db_path=db_path,
+                task_key=task_key,
+                attempt_id=attempt_id,
+            )
+        except Level2ExecutionAuthorityError as exc:
+            return f"canonical_attempt_store_verification_failed: {exc}"
+    return None
+
+
+def _one_shot_canonical_attempt_id(result: dict[str, Any]) -> str | None:
+    runtime_stage = (result.get("stages") or {}).get("runtime_execution") or {}
+    value = runtime_stage.get("canonical_attempt_id")
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _one_shot_runner_called(result: dict[str, Any]) -> bool:

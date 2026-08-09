@@ -94,14 +94,15 @@ class ReadmeCurrentArchitectureTests(unittest.TestCase):
         ):
             self.assertIn(phrase, self.readme)
 
-    def test_execution_engine_migration_is_evidence_only(self) -> None:
+    def test_execution_engine_is_canonical_authority(self) -> None:
         self.assertIn(
-            "ExecutionEngine migration is in progress and evidence-only",
+            "ExecutionEngine is the authoritative confirmed Level 2 execution boundary",
             self.readme,
         )
         self.assertIn("--use-execution-engine", self.readme)
-        self.assertIn("off by default", self.readme)
-        self.assertIn("evidence only, not approval authority", self.readme)
+        self.assertIn("closed without legacy scheduler fallback", self.readme)
+        self.assertIn("compatibility no-op", self.readme)
+        self.assertIn("not approval", self.readme)
 
     def test_deferred_automation_is_explicit(self) -> None:
         for phrase in (

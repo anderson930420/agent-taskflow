@@ -52,6 +52,7 @@ def scheduler_request(**overrides: Any) -> SimpleNamespace:
         "repo": "anderson930420/agent-taskflow",
         "local_repo_path": Path("/tmp/agent-taskflow-p5d-post-legacy/repo"),
         "artifact_root": Path("/tmp/agent-taskflow-p5d-post-legacy/artifacts"),
+        "db_path": Path("/tmp/agent-taskflow-p5d-post-legacy/state.db"),
         # ``None`` mirrors a tick without explicit runner config; the opt-in
         # request builder falls back to the safe ``noop`` executor.
         "executor": None,
@@ -171,8 +172,8 @@ class DefaultAdapterPostLegacyTests(unittest.TestCase):
 
         assert_non_clean_evidence_only(self, block, payload)
         metadata = block["result"]["metadata"]
-        self.assertEqual(metadata["runner_phase"], "confirmation")
-        self.assertIn("--confirm-approved-task", metadata["runner_error"])
+        self.assertFalse(metadata["canonical_attempt_bound"])
+        self.assertIn("runtime handoff", metadata["contract_error"])
 
 
 class StatusGatePostLegacyTests(unittest.TestCase):
@@ -224,7 +225,7 @@ class StatusGatePostLegacyTests(unittest.TestCase):
 
         with mock.patch.object(
             adapter_module, "run_approved_task", side_effect=run_with_store
-        ):
+        ) as mocked_runner:
             block = route_scheduler_tick_through_execution_engine(
                 scheduler_request(),
                 payload,
@@ -233,9 +234,9 @@ class StatusGatePostLegacyTests(unittest.TestCase):
 
         assert_non_clean_evidence_only(self, block, payload)
         metadata = block["result"]["metadata"]
-        self.assertEqual(metadata["runner_phase"], "selection")
-        self.assertIn("must be queued", metadata["runner_error"])
-        self.assertIn("waiting_approval", metadata["runner_error"])
+        self.assertFalse(metadata["canonical_attempt_bound"])
+        self.assertIn("runtime handoff", metadata["contract_error"])
+        self.assertEqual(mocked_runner.call_count, 0)
 
         # The status gate never mutates the task: it stays waiting_approval.
         self.assertEqual(self.store.get_task(TASK_KEY).status, "waiting_approval")

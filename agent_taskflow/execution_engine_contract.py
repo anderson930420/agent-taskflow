@@ -1,4 +1,4 @@
-"""Typed, behavior-free contracts for a future ExecutionEngine.
+"""Typed contracts for the authoritative bounded ExecutionEngine boundary.
 
 This module defines values exchanged at the execution boundary. It does not
 instantiate an engine, call runtime code, touch the filesystem, or perform any
@@ -114,6 +114,7 @@ class ExecutionEngineExecutorProfile:
     provider: str | None = None
     tools: tuple[str, ...] = ()
     pi_bin: str | None = None
+    command: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -122,6 +123,11 @@ class ExecutionEngineExecutorProfile:
             _require_non_empty(self.executor, "executor"),
         )
         object.__setattr__(self, "tools", _normalize_string_tuple(self.tools))
+        if self.command is not None:
+            command = _normalize_string_tuple(self.command)
+            if not command or any(not str(part).strip() for part in command):
+                raise ValueError("command must not be empty when provided")
+            object.__setattr__(self, "command", command)
 
 
 @dataclass(frozen=True)
@@ -146,6 +152,7 @@ class ExecutionEngineWorkspaceProfile:
     artifact_dir: Path
     worktree_root: Path | None = None
     task_worktree_path: Path | None = None
+    base_branch: str = "main"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -166,6 +173,11 @@ class ExecutionEngineWorkspaceProfile:
                 "task_worktree_path",
                 Path(self.task_worktree_path),
             )
+        object.__setattr__(
+            self,
+            "base_branch",
+            _require_non_empty(self.base_branch, "base_branch"),
+        )
 
 
 @dataclass(frozen=True)
@@ -232,6 +244,7 @@ class ExecutionEngineRequest:
     executor_profile: ExecutionEngineExecutorProfile
     validator_profile: ExecutionEngineValidatorProfile
     workspace: ExecutionEngineWorkspaceProfile
+    lifecycle_db_path: Path | None = None
     runtime_handoff_path: Path | None = None
     verifier_report_path: Path | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -247,6 +260,15 @@ class ExecutionEngineRequest:
                 self,
                 "runtime_handoff_path",
                 Path(self.runtime_handoff_path),
+            )
+        if self.lifecycle_db_path is not None:
+            object.__setattr__(
+                self,
+                "lifecycle_db_path",
+                _require_absolute_path(
+                    self.lifecycle_db_path,
+                    "lifecycle_db_path",
+                ),
             )
         if self.verifier_report_path is not None:
             object.__setattr__(

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import agent_taskflow.approved_task_runner as approved_task_runner_module
 import agent_taskflow.dispatcher as dispatcher_module
+import agent_taskflow.execution_engine_approved_task_adapter as engine_adapter_module
 import agent_taskflow.runtime_admission as runtime_admission_module
 from agent_taskflow.canonical_runtime_path import (
     CANONICAL_RUNTIME_ADMISSION_MIGRATION,
@@ -65,14 +66,13 @@ class CanonicalRuntimeAdmissionTests(unittest.TestCase):
             CanonicalRuntimeAdmissionStore,
         )
 
-        import agent_taskflow.github_issue_one_task_scheduler_tick as scheduler_tick
         import agent_taskflow.queued_task_handoff as queued_task_handoff
 
         self.assertTrue(
             getattr(queued_task_handoff.run_approved_task, "__canonical_runtime__", False)
         )
         self.assertTrue(
-            getattr(scheduler_tick.run_approved_task, "__canonical_runtime__", False)
+            getattr(engine_adapter_module.run_approved_task, "__canonical_runtime__", False)
         )
 
     def test_migration_removes_implicit_pickup_and_records_version(self) -> None:

@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from agent_taskflow.mission_contract import build_mission_contract, write_mission_contract
+from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.pr_handoff import (
     PrHandoffError,
@@ -243,6 +244,82 @@ class PrHandoffTests(unittest.TestCase):
         self.assertEqual(package["executor_summary"]["count"], 1)
         self.assertGreaterEqual(package["artifact_summary"]["db_artifact_count"], 1)
         self.assertTrue(package["review_evidence_summary"]["available"])
+
+    def test_handoff_includes_canonical_attempt_when_available(self) -> None:
+        attempts = AttemptStore(self.db_path)
+        attempts.init_db()
+        attempt = attempts.create_attempt("AT-HANDOFF-001")
+        attempts.close_attempt(
+            attempt.attempt_id,
+            status="waiting_approval",
+            reason_code="handoff_test_complete",
+            actor="handoff_test",
+            execution_result="completed",
+            validation_result="passed",
+        )
+
+        result = create_pr_handoff(self._request())
+
+        assert result.package is not None
+        binding = result.package.data["canonical_attempt"]
+        self.assertEqual(binding["attempt_id"], attempt.attempt_id)
+        self.assertFalse(binding["is_active"])
+        self.assertFalse(binding["is_legacy"])
+        self.assertEqual(binding["validation_result"], "passed")
+
+    def test_level2_handoff_uses_exact_engine_attempt_not_newer_attempt(self) -> None:
+        attempts = AttemptStore(self.db_path)
+        attempts.init_db()
+        attempts.register_task_identity(
+            "AT-HANDOFF-001",
+            task_class="canonical",
+            is_legacy=False,
+        )
+        attempt_a = attempts.create_attempt("AT-HANDOFF-001")
+        attempts.close_attempt(
+            attempt_a.attempt_id,
+            status="waiting_approval",
+            reason_code="engine_attempt_a_complete",
+            actor="handoff_test",
+            execution_result="completed",
+            validation_result="passed",
+        )
+        attempt_b = attempts.create_attempt("AT-HANDOFF-001")
+        attempts.close_attempt(
+            attempt_b.attempt_id,
+            status="waiting_approval",
+            reason_code="newer_attempt_b_complete",
+            actor="handoff_test",
+            execution_result="completed",
+            validation_result="passed",
+        )
+
+        result = create_pr_handoff(
+            PrHandoffRequest(
+                **{
+                    **self._request().__dict__,
+                    "canonical_attempt_id": attempt_a.attempt_id,
+                }
+            )
+        )
+
+        assert result.package is not None
+        binding = result.package.data["canonical_attempt"]
+        self.assertEqual(binding["attempt_id"], attempt_a.attempt_id)
+        self.assertNotEqual(binding["attempt_id"], attempt_b.attempt_id)
+        self.assertTrue(binding["store_verified"])
+
+    def test_level2_handoff_requires_exact_attempt_id(self) -> None:
+        attempts = AttemptStore(self.db_path)
+        attempts.init_db()
+        attempts.register_task_identity(
+            "AT-HANDOFF-001",
+            task_class="canonical",
+            is_legacy=False,
+        )
+
+        with self.assertRaisesRegex(PrHandoffError, "exact canonical_attempt_id"):
+            create_pr_handoff(self._request())
 
     def test_handoff_writes_json_and_markdown(self) -> None:
         result = create_pr_handoff(self._request())

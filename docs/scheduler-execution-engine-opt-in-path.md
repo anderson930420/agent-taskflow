@@ -1,5 +1,11 @@
 # Scheduler ExecutionEngine Opt-In Path (P5-d)
 
+> Historical compatibility path: M1-C superseded this post-legacy opt-in as a
+> scheduler authority mechanism. Confirmed Level 2 scheduler execution now
+> always uses ExecutionEngine at the runtime handoff; `--use-execution-engine`
+> is retained only as a compatibility no-op. See
+> `docs/canonical-execution-engine-authority.md`.
+
 P5-d is the first **runtime wiring** stage of the staged
 scheduler-to-ExecutionEngine migration plan defined by the P5-a boundary
 document (`docs/scheduler-execution-engine-migration-boundary.md`). It adds an

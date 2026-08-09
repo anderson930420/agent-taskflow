@@ -41,6 +41,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional PR base branch. Defaults to TaskWorktreeRecord.base_branch or main.",
     )
     parser.add_argument(
+        "--canonical-attempt-id",
+        help=(
+            "Exact canonical Attempt returned by ExecutionEngine. Required for "
+            "Level 2 handoff; historical tasks retain legacy readback."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Build the package in memory and print the summary without writing files/events.",
@@ -63,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=Path(args.output_dir).expanduser() if args.output_dir else None,
             repo=args.repo,
             base_branch=args.base_branch,
+            canonical_attempt_id=args.canonical_attempt_id,
             dry_run=args.dry_run,
         )
         result = create_pr_handoff(request)

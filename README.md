@@ -302,12 +302,17 @@ Beyond the operator-driven loop, a bounded scheduled path exists:
 * Publication, merge, and cleanup remain human-gated. Validation success never
   implies publication; explicit human confirmation is required for every
   outward-facing or destructive step.
-* ExecutionEngine migration is in progress and evidence-only. An explicit
-  `--use-execution-engine` opt-in (off by default, never part of active cron)
-  can route the one selected task through the ExecutionEngine facade for
-  runtime evidence. Engine results are evidence only, not approval authority:
-  deterministic validators and human review remain the validation and approval
-  gates.
+* ExecutionEngine is the authoritative confirmed Level 2 execution boundary
+  and the repository-wide authority for Level 2 work. The scheduler invokes it
+  at the existing runtime handoff, accepts successful results only after exact
+  canonical-store verification, and fails closed without legacy scheduler fallback.
+  Direct approved-runner, dispatcher,
+  queued-handoff, and injected-callback paths reject explicit non-legacy Level
+  2 tasks; PR handoff requires the exact Attempt returned by the engine. The
+  historical `--use-execution-engine` option remains accepted as a compatibility no-op;
+  it no longer selects authority. Engine results are still not approval
+  authority: deterministic validators and human review remain the validation
+  and approval gates.
 
 ---
 

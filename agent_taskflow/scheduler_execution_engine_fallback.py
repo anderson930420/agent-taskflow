@@ -1,4 +1,8 @@
-"""P5-e: legacy-vs-engine fallback hardening for the scheduler opt-in path.
+"""Historical P5-e legacy-vs-engine evidence classifier.
+
+M1-C forbids this fallback model for confirmed Level 2 execution.  The module
+remains a pure compatibility reader for earlier P5 evidence and is not part of
+the canonical scheduler authority decision.
 
 This module provides a **pure, behavior-free** fallback / readiness
 classification layer for the staged scheduler-to-ExecutionEngine migration plan

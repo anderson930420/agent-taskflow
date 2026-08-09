@@ -59,6 +59,10 @@ from agent_taskflow.intake_runner_handoff import (
     VERIFIER_REPORT_ARTIFACT_SCHEMA_VERSION,
 )
 from agent_taskflow.models import TaskRecord, require_absolute_path, utc_now_iso
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    level2_direct_execution_error,
+)
 from agent_taskflow.store import TaskMirrorStore, default_db_path
 from agent_taskflow.task_execution_package import (
     IMPLEMENTATION_PROMPT_FILENAME,
@@ -1166,6 +1170,22 @@ def run_queued_task_handoff(
             request,
             phase="selection",
             error=f"Task not found: {request.task_key}",
+        )
+
+    try:
+        authority_error = level2_direct_execution_error(
+            task_key=task.task_key,
+            db_path=current_store.db_path,
+            entrypoint="queued_task_handoff",
+            allow_engine_internal=False,
+        )
+    except Level2ExecutionAuthorityError as exc:
+        authority_error = str(exc)
+    if authority_error is not None and not request.dry_run:
+        return _blocked(
+            request,
+            phase="execution_authority",
+            error=authority_error,
         )
 
     if task.status != TASK_QUEUE_STATUS:

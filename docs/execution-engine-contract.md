@@ -1,5 +1,9 @@
 # ExecutionEngine Contract (P4-b)
 
+> Current status: M1-C uses this contract as the authoritative confirmed Level
+> 2 scheduler execution boundary. The P4-b text below is retained as the
+> historical contract-introduction record.
+
 P4-b is **contract-only** and includes **no runtime migration**. It adds typed
 values and an `ExecutionEngine` protocol, but no scheduler, automation,
 `approved_task_runner`, executor, validator, cron, store, API, or Mission

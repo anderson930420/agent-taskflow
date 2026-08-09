@@ -4,6 +4,8 @@
 This command reads an existing JSONL scheduler tick log (Level 10H cron output)
 and the local task mirror, then summarizes the latest tick, recent tick counts,
 the backlog, and the ingestion failure registry. It is read-only observability:
+the imported reader retains its legacy scheduler-payload fallback for historical
+JSONL lines that predate unified observability summaries.
 it never modifies crontab, writes the database, calls GitHub, runs an executor
 or validator, ingests an issue, pushes, creates a PR, merges, approves, cleans
 up, deletes a branch/worktree, or starts a daemon, scheduler loop, webhook, or

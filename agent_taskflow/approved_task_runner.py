@@ -24,6 +24,10 @@ from agent_taskflow.executors.implementation_prompt import (
 from agent_taskflow.executors.registry import build_shell_executor, get_executor, list_executor_names
 from agent_taskflow.github_issue_ingestion import ISSUE_SPEC_FILENAME
 from agent_taskflow.mission_contract import build_from_task_fields, write_mission_contract
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    level2_direct_execution_error,
+)
 from agent_taskflow.models import TaskRecord, require_absolute_path
 from agent_taskflow.preflight import PreflightResult, run_preflight
 from agent_taskflow.store import TaskMirrorStore
@@ -206,6 +210,20 @@ def run_approved_task(
     task = _load_task(current_store, request)
     if task is None:
         return _blocked_preview(request, phase="selection", error=f"Task not found: {request.task_key}")
+    try:
+        authority_error = level2_direct_execution_error(
+            task_key=task.task_key,
+            db_path=current_store.db_path,
+            entrypoint="run_approved_task",
+        )
+    except Level2ExecutionAuthorityError as exc:
+        authority_error = str(exc)
+    if authority_error is not None and not request.dry_run:
+        return _blocked_preview(
+            request,
+            phase="execution_authority",
+            error=authority_error,
+        )
     if task.status != TASK_QUEUE_STATUS:
         return _blocked_preview(
             request,

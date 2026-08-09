@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--operator-note", default=None)
     parser.add_argument("--remote", default="origin")
     parser.add_argument("--base-branch", default=None)
+    parser.add_argument(
+        "--canonical-attempt-id",
+        default=None,
+        help="Exact ExecutionEngine Attempt; required for confirmed Level 2 preparation.",
+    )
     parser.add_argument("--confirm-prepare-pr", action="store_true")
     parser.add_argument("--confirm-github-mutations", action="store_true")
     parser.add_argument("--confirm-branch-push", action="store_true")
@@ -82,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             operator_note=args.operator_note,
             remote=args.remote,
             base_branch=args.base_branch,
+            canonical_attempt_id=args.canonical_attempt_id,
             draft=True,
         )
         payload = run_pr_preparation_pipeline(request)

@@ -11,11 +11,18 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import shlex
+import sqlite3
 import subprocess
 from typing import Any
 
 from agent_taskflow.api.review import build_review_evidence
 from agent_taskflow.atomic_write import atomic_write_json, atomic_write_text
+from agent_taskflow.attempt_store import AttemptStore
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    is_level2_task,
+    verify_canonical_attempt,
+)
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -43,6 +50,7 @@ class PrHandoffRequest:
     base_branch: str | None = None
     dry_run: bool = False
     require_waiting_approval: bool = True
+    canonical_attempt_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
@@ -58,6 +66,11 @@ class PrHandoffRequest:
                 "output_dir",
                 ensure_absolute_path(self.output_dir, name="output_dir"),
             )
+        if self.canonical_attempt_id is not None:
+            attempt_id = self.canonical_attempt_id.strip()
+            if not attempt_id:
+                raise ValueError("canonical_attempt_id must not be empty")
+            object.__setattr__(self, "canonical_attempt_id", attempt_id)
 
 
 @dataclass(frozen=True)
@@ -108,6 +121,7 @@ class PrHandoffResult:
                 "base_sha": self.package.data.get("base_sha"),
                 "head_sha": self.package.data.get("head_sha"),
                 "changed_files": self.package.data.get("changed_files", []),
+                "canonical_attempt": self.package.data.get("canonical_attempt"),
                 "proposed_pr": self.package.data.get("proposed_pr"),
                 "safety": self.package.data.get("safety"),
             }
@@ -156,6 +170,20 @@ def create_pr_handoff(
     validation_results = current_store.list_validation_results(task.task_key)
     executor_runs = current_store.list_executor_runs(task.task_key)
     artifacts = current_store.list_task_artifacts(task.task_key)
+    try:
+        level2_task = is_level2_task(current_store.db_path, task.task_key)
+        if level2_task and request.canonical_attempt_id is None:
+            raise PrHandoffError(
+                "Level 2 PR handoff requires the exact canonical_attempt_id "
+                "returned by ExecutionEngine"
+            )
+        canonical_attempt = _canonical_attempt_binding(
+            current_store.db_path,
+            task.task_key,
+            canonical_attempt_id=request.canonical_attempt_id,
+        )
+    except Level2ExecutionAuthorityError as exc:
+        raise PrHandoffError(f"Canonical Attempt verification failed: {exc}") from exc
 
     output_root = request.output_dir or _default_output_root(task.artifact_dir)
     package_dir = output_root / task.task_key
@@ -177,6 +205,7 @@ def create_pr_handoff(
         executor_runs=executor_runs,
         artifacts=artifacts,
         review_evidence=review_evidence,
+        canonical_attempt=canonical_attempt,
         generated_at=generated_at,
     )
     markdown = _build_markdown(package_data)
@@ -299,6 +328,7 @@ def _build_package_data(
     executor_runs: list[dict[str, Any]],
     artifacts: list[Any],
     review_evidence: dict[str, Any],
+    canonical_attempt: dict[str, Any] | None,
     generated_at: str,
 ) -> dict[str, Any]:
     title = f"{task.task_key}: {task.title or 'Task handoff'}"
@@ -324,6 +354,7 @@ def _build_package_data(
         "executor_summary": _executor_summary(executor_runs),
         "artifact_summary": _artifact_summary(artifacts, review_evidence),
         "review_evidence_summary": _review_evidence_summary(review_evidence),
+        "canonical_attempt": canonical_attempt,
         "proposed_pr": {
             "title": title,
             "body": body,
@@ -347,6 +378,44 @@ def _build_package_data(
         },
         "generated_at": generated_at,
     }
+
+
+def _canonical_attempt_binding(
+    db_path: Path,
+    task_key: str,
+    *,
+    canonical_attempt_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Bind an exact Attempt, retaining latest-selection only for history."""
+
+    if canonical_attempt_id is not None:
+        return verify_canonical_attempt(
+            db_path=db_path,
+            task_key=task_key,
+            attempt_id=canonical_attempt_id,
+        ).to_binding()
+
+    try:
+        attempts = AttemptStore(db_path).list_attempts(task_key)
+    except (KeyError, sqlite3.DatabaseError):
+        return None
+    canonical = [
+        attempt
+        for attempt in attempts
+        if not attempt.is_legacy
+        and not attempt.is_active
+        and attempt.status in {"waiting_approval", "completed"}
+        and attempt.execution_result == "completed"
+        and attempt.validation_result == "passed"
+    ]
+    if not canonical:
+        return None
+    attempt = canonical[-1]
+    return verify_canonical_attempt(
+        db_path=db_path,
+        task_key=task_key,
+        attempt_id=attempt.attempt_id,
+    ).to_binding()
 
 
 def _validation_summary(results: list[dict[str, Any]]) -> dict[str, Any]:

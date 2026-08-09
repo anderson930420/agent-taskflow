@@ -26,6 +26,13 @@ from agent_taskflow.intake_runner_handoff_from_verifier_report import (
     HANDOFF_EVENT_TYPE,
 )
 from agent_taskflow.models import utc_now_iso
+from agent_taskflow.level2_execution_authority import (
+    EXECUTION_ENGINE_AUTHORITY,
+    Level2ExecutionAuthorityError,
+    is_execution_engine_authority_callback,
+    is_level2_task,
+    verify_canonical_attempt,
+)
 from agent_taskflow.scheduler_proposals import verify_proposal_hashes
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -92,6 +99,12 @@ REASON_TASK_STATUS_MISMATCH = "task_status_mismatch"
 REASON_RECOMMENDED_COMMAND_KIND_MISMATCH = "recommended_command_kind_mismatch"
 REASON_DUPLICATE_RUNTIME_EXECUTION = "duplicate_runtime_execution"
 REASON_HANDOFF_ALREADY_CONSUMED = "intake_runner_handoff_already_consumed"
+REASON_LEVEL2_ENGINE_AUTHORITY_REQUIRED = (
+    "level2_execution_engine_authority_required"
+)
+REASON_LEVEL2_CANONICAL_ATTEMPT_INVALID = (
+    "level2_canonical_attempt_binding_invalid"
+)
 
 
 _REQUIRED_CHECKS: tuple[str, ...] = (
@@ -434,6 +447,20 @@ def run_runtime_handoff_execution_from_handoff(
             "confirm_run_approved_task_runner=True"
         )
 
+    try:
+        level2_execution = is_level2_task(request.db_path, request.task_key)
+    except Level2ExecutionAuthorityError as exc:
+        return _authority_blocked_response(request, str(exc))
+    if (
+        not request.dry_run
+        and level2_execution
+        and not is_execution_engine_authority_callback(approved_task_runner_fn)
+    ):
+        return _authority_blocked_response(
+            request,
+            REASON_LEVEL2_ENGINE_AUTHORITY_REQUIRED,
+        )
+
     preflight = check_runtime_handoff_preflight(request)
 
     if not preflight.get("preflight_passed"):
@@ -512,6 +539,9 @@ def run_runtime_handoff_execution_from_handoff(
     runner_error: str | None = None
     runner_summary: dict[str, Any] | None = None
     runner_safety: dict[str, Any] = {}
+    execution_authority: str | None = None
+    canonical_attempt_id: str | None = None
+    canonical_attempt_store_verified = False
     try:
         runner_result = runner_fn(
             task_key=request.task_key,
@@ -535,6 +565,39 @@ def run_runtime_handoff_execution_from_handoff(
             runner_error = str(runner_view.get("error"))
         runner_summary = runner_view.get("summary_payload")
         runner_safety = runner_view.get("safety") or {}
+        if level2_execution:
+            authority_summary = _runner_authority_summary(runner_view)
+            execution_authority = authority_summary.get("execution_authority")
+            claimed_attempt_id = authority_summary.get("canonical_attempt_id")
+            canonical_attempt_id = (
+                claimed_attempt_id.strip()
+                if isinstance(claimed_attempt_id, str)
+                else None
+            )
+            try:
+                if execution_authority != EXECUTION_ENGINE_AUTHORITY:
+                    raise Level2ExecutionAuthorityError(
+                        "Level 2 runtime result did not come from ExecutionEngine"
+                    )
+                if authority_summary.get("canonical_attempt_bound") is not True:
+                    raise Level2ExecutionAuthorityError(
+                        "Level 2 runtime result is missing canonical Attempt binding"
+                    )
+                if not canonical_attempt_id:
+                    raise Level2ExecutionAuthorityError(
+                        "Level 2 runtime result is missing canonical_attempt_id"
+                    )
+                verify_canonical_attempt(
+                    db_path=request.db_path,
+                    task_key=request.task_key,
+                    attempt_id=canonical_attempt_id,
+                )
+                canonical_attempt_store_verified = True
+            except Level2ExecutionAuthorityError as exc:
+                runner_ok = False
+                runner_error = (
+                    f"{REASON_LEVEL2_CANONICAL_ATTEMPT_INVALID}: {exc}"
+                )
 
     artifact_payload = _build_runtime_artifact_payload(
         request=request,
@@ -549,6 +612,9 @@ def run_runtime_handoff_execution_from_handoff(
         runner_error=runner_error,
         runner_summary=runner_summary,
         runner_safety=runner_safety,
+        execution_authority=execution_authority,
+        canonical_attempt_id=canonical_attempt_id,
+        canonical_attempt_store_verified=canonical_attempt_store_verified,
     )
     artifact_path = Path(artifact_payload["artifact_path"])
     atomic_write_json(
@@ -573,6 +639,9 @@ def run_runtime_handoff_execution_from_handoff(
         runner_phase=runner_phase,
         runner_error=runner_error,
         runtime_execution_artifact_path=artifact_path,
+        execution_authority=execution_authority,
+        canonical_attempt_id=canonical_attempt_id,
+        canonical_attempt_store_verified=canonical_attempt_store_verified,
     )
     store.record_task_event(
         request.task_key,
@@ -677,6 +746,33 @@ def _coerce_runner_result(runner_result: Any) -> dict[str, Any]:
             "summary_payload": _summary_from_payload(runner_result),
         }
     return {"ok": False, "status": None, "phase": None, "summary_payload": None}
+
+
+def _runner_authority_summary(runner_view: dict[str, Any]) -> dict[str, Any]:
+    summary = runner_view.get("summary_payload")
+    if not isinstance(summary, dict):
+        return {}
+    nested = summary.get("summary")
+    return nested if isinstance(nested, dict) else summary
+
+
+def _authority_blocked_response(
+    request: RuntimeHandoffExecutionRequest,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "schema_version": RUNTIME_EXECUTION_SCHEMA_VERSION,
+        "source": RUNTIME_EXECUTION_SOURCE,
+        "status": "execution_authority_blocked",
+        "mode": _mode(request),
+        "task_key": request.task_key,
+        "preflight_passed": False,
+        "execution_allowed": False,
+        "reasons": [reason],
+        "runtime_execution": None,
+        "safety": _safety(runtime_started=False),
+    }
 
 
 def _summary_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1219,6 +1315,9 @@ def _build_runtime_artifact_payload(
     runner_error: str | None,
     runner_summary: dict[str, Any] | None,
     runner_safety: dict[str, Any],
+    execution_authority: str | None,
+    canonical_attempt_id: str | None,
+    canonical_attempt_store_verified: bool,
 ) -> dict[str, Any]:
     artifact_path = (
         request.artifact_root
@@ -1272,6 +1371,12 @@ def _build_runtime_artifact_payload(
         "runner_phase": runner_phase,
         "runner_error": runner_error,
         "runner_result_summary": runner_summary,
+        "execution_authority": execution_authority,
+        "canonical_attempt_bound": bool(
+            canonical_attempt_id and canonical_attempt_store_verified
+        ),
+        "canonical_attempt_id": canonical_attempt_id,
+        "canonical_attempt_store_verified": canonical_attempt_store_verified,
         "checks": dict(preflight.get("checks") or {}),
         "reasons": list(preflight.get("reasons") or []),
         "warnings": list(preflight.get("warnings") or []),
@@ -1355,6 +1460,9 @@ def _finished_event_payload(
     runner_phase: str | None,
     runner_error: str | None,
     runtime_execution_artifact_path: Path,
+    execution_authority: str | None,
+    canonical_attempt_id: str | None,
+    canonical_attempt_store_verified: bool,
 ) -> dict[str, Any]:
     return {
         "kind": RUNTIME_FINISHED_EVENT_TYPE,
@@ -1381,6 +1489,12 @@ def _finished_event_payload(
         "runner_error": runner_error,
         "final_status": runner_status,
         "runtime_execution_artifact_path": str(runtime_execution_artifact_path),
+        "execution_authority": execution_authority,
+        "canonical_attempt_bound": bool(
+            canonical_attempt_id and canonical_attempt_store_verified
+        ),
+        "canonical_attempt_id": canonical_attempt_id,
+        "canonical_attempt_store_verified": canonical_attempt_store_verified,
         "not_action_evidence": True,
         "approved": False,
         "merged": False,

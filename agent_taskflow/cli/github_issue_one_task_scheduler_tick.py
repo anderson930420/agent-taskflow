@@ -46,8 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Run one scheduled GitHub Issue one-task tick under a non-overlap "
             "lock. Dry-run is the default. --confirmed applies the controlled "
             "lower-level confirmation preset, processes at most one issue/task, "
-            "and stops. In confirmed mode, --executor wires the approved task "
-            "runner configuration into runtime execution."
+            "and stops. In confirmed mode, --executor configures the "
+            "authoritative ExecutionEngine request."
         )
     )
     parser.add_argument("--repo", required=True)
@@ -77,9 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--executor",
         default=None,
         help=(
-            "Approved-task executor to use in confirmed mode, for example "
+            "ExecutionEngine executor profile to use in confirmed mode, for example "
             "noop, shell, pi, or opencode. Omit for dry-run or for a safe "
-            "confirmed preflight that stops before approved_task_runner."
+            "confirmed preflight that stops before managed execution."
         ),
     )
     parser.add_argument(
@@ -87,14 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
         dest="use_execution_engine",
         action="store_true",
         help=(
-            "P5-d opt-in (OFF BY DEFAULT): route the one selected confirmed "
-            "task through the ExecutionEngine facade for runtime evidence only. "
-            "Requires --confirmed; rejected in dry-run. Execution-only: no "
-            "publish, PR, branch push, merge, approval, or cleanup. The engine "
-            "result is evidence only, not approval authority; deterministic "
-            "validators and human review gates remain the validation authority. "
-            "The default scheduler path stays legacy and the active cron never "
-            "sets this flag."
+            "Deprecated compatibility flag. Confirmed Level 2 tasks always "
+            "use authoritative ExecutionEngine execution, with no legacy "
+            "fallback, whether or not this flag is present. Requires "
+            "--confirmed; rejected in dry-run. Human review remains required."
         ),
     )
     parser.add_argument(

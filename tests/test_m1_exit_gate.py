@@ -27,6 +27,32 @@ class M1ExitGateAuditTests(unittest.TestCase):
             "# legacy payload fallback\n",
             encoding="utf-8",
         )
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "m1@example.invalid"],
+            cwd=self.repo,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "M1 Test"],
+            cwd=self.repo,
+            check=True,
+        )
+        subprocess.run(["git", "add", "scripts"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "fixture"],
+            cwd=self.repo,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.repo_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
         self.db = self.root / "state.db"
         self.evidence = self.root / "evidence"
         self.evidence.mkdir()
@@ -196,11 +222,46 @@ class M1ExitGateAuditTests(unittest.TestCase):
                 "pause_cleared": True,
             },
             "canonical-execution-path.json": {
-                "schema_version": "m1_canonical_execution_path.v1",
+                "schema_version": "m1_canonical_execution_path.v2",
                 "canonical_path": "ExecutionEngine",
-                "parity_test_passed": False,
-                "legacy_level2_rejected": True,
-                "merger_requires_canonical_attempt": True,
+                "repo_sha": self.repo_sha,
+                "deterministic_fixture": True,
+                "production_db_mutated": False,
+                "real_executor_invoked": False,
+                "canonical_attempt_id": "attempt-m1c-test",
+                "adversarial_attempt_checks": {
+                    "nonexistent_attempt_rejected": True,
+                    "wrong_task_attempt_rejected": True,
+                    "nonterminal_attempt_rejected": True,
+                },
+                **{
+                    name: True
+                    for name in (
+                        "scheduler_level2_engine_authoritative",
+                        "direct_legacy_level2_entry_blocked",
+                        "alternate_level2_entrypoints_engine_or_fail_closed",
+                        "injected_runner_level2_bypass_blocked",
+                        "engine_canonical_attempt_verified_in_store",
+                        "downstream_exact_attempt_binding_verified",
+                        "pr_handoff_exact_attempt_binding_verified",
+                        "engine_failure_legacy_fallback_blocked",
+                        "legacy_reader_compatibility_retained",
+                    )
+                },
+                "checks": {
+                    name: True
+                    for name in (
+                        "scheduler_level2_engine_authoritative",
+                        "direct_legacy_level2_entry_blocked",
+                        "alternate_level2_entrypoints_engine_or_fail_closed",
+                        "injected_runner_level2_bypass_blocked",
+                        "engine_canonical_attempt_verified_in_store",
+                        "downstream_exact_attempt_binding_verified",
+                        "pr_handoff_exact_attempt_binding_verified",
+                        "engine_failure_legacy_fallback_blocked",
+                        "legacy_reader_compatibility_retained",
+                    )
+                },
             },
         }
         for filename, payload in evidence_files.items():
@@ -226,6 +287,27 @@ class M1ExitGateAuditTests(unittest.TestCase):
             "blocked",
         )
         self.assertEqual(report["m1_exit_gate"], "blocked")
+
+    def test_old_scheduler_only_canonical_evidence_is_rejected(self) -> None:
+        (self.evidence / "canonical-execution-path.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "m1_canonical_execution_path.v1",
+                    "canonical_path": "ExecutionEngine",
+                    "parity_test_passed": True,
+                    "legacy_level2_rejected": True,
+                    "merger_requires_canonical_attempt": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = self._report(with_evidence=True)
+
+        self.assertEqual(
+            self._gate(report, "canonical_execution_path")["status"],
+            "blocked",
+        )
 
     def test_invalid_dual_write_evidence_fails_closed(self) -> None:
         (self.evidence / "dual-write-consistency.json").write_text(

@@ -188,6 +188,8 @@ class ManualRuntimeIsolationTests(unittest.TestCase):
             "execution_engine_approved_task_adapter.py",
             "run_execution_engine_approved_task.py",
             "scheduler_execution_engine_opt_in.py",
+            "scheduler_execution_engine_authority.py",
+            "m1_canonical_execution_path_rehearsal.py",
         }
         tokens = (
             "execution_engine_manual_runtime",

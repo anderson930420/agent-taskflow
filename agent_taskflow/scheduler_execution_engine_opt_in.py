@@ -1,4 +1,10 @@
-"""P5-d: scheduler ExecutionEngine opt-in execution path (off by default).
+"""Historical P5-d scheduler ExecutionEngine opt-in evidence helper.
+
+M1-C superseded this helper as a scheduler authority path.  The confirmed
+scheduler now invokes :class:`SchedulerExecutionEngineAuthority` at runtime
+handoff regardless of the compatibility flag.  This module remains importable
+only for historical evidence readers and tests; the canonical scheduler does
+not call it.
 
 This module is the first *runtime wiring* stage of the staged
 scheduler-to-ExecutionEngine migration plan defined by the P5-a boundary
@@ -65,6 +71,10 @@ from agent_taskflow.execution_observability import (
     summarize_execution_engine_result,
     to_observability_dict,
 )
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    is_level2_task,
+)
 from agent_taskflow.scheduler_execution_engine_fallback import (
     EFFECTIVE_AUTHORITY_LEGACY_SCHEDULER,
     SchedulerExecutionEngineFallbackAssessmentInput,
@@ -126,7 +136,9 @@ def build_scheduler_tick_execution_engine_request(
         provider=request.provider,
         tools=tuple(request.tools or ()),
         pi_bin=request.pi_bin,
+        command=getattr(request, "command", None),
         validators=tuple(request.validators or ()),
+        lifecycle_db_path=getattr(request, "db_path", None),
         worktree_root=(
             Path(request.worktree_root)
             if request.worktree_root is not None
@@ -135,6 +147,7 @@ def build_scheduler_tick_execution_engine_request(
         dry_run=False,
         confirmed=True,
         preflight=bool(request.approved_task_preflight),
+        base_branch=getattr(request, "base_branch", None) or "main",
         # The scheduler opt-in path is execution-only by construction; the
         # builder rejects any attempt to publish.
         publish_after_execution=False,
@@ -186,6 +199,24 @@ def route_scheduler_tick_through_execution_engine(
         return _attach_fallback_assessment(
             _not_executed_block(
                 reason="no_selected_task_for_engine_path",
+            ),
+            tick_payload,
+        )
+
+    try:
+        level2_task = is_level2_task(
+            getattr(request, "db_path", None),
+            selected_task_key,
+        )
+    except Level2ExecutionAuthorityError:
+        level2_task = True
+    if level2_task:
+        return _attach_fallback_assessment(
+            _not_executed_block(
+                reason=(
+                    "historical_post_legacy_engine_path_forbidden_for_level2; "
+                    "use SchedulerExecutionEngineAuthority"
+                ),
             ),
             tick_payload,
         )
