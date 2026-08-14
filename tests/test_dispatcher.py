@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -1019,7 +1020,7 @@ class DispatcherPiIntegrationTests(unittest.TestCase):
 class DispatcherCliTests(unittest.TestCase):
     def test_run_dispatcher_help_executes(self) -> None:
         result = subprocess.run(
-            ["python3", "scripts/run_dispatcher.py", "--help"],
+            [sys.executable, "scripts/run_dispatcher.py", "--help"],
             cwd=Path(__file__).resolve().parents[1],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1033,7 +1034,7 @@ class DispatcherCliTests(unittest.TestCase):
 
     def test_run_dispatcher_missing_task_key_fails_with_usage(self) -> None:
         result = subprocess.run(
-            ["python3", "scripts/run_dispatcher.py"],
+            [sys.executable, "scripts/run_dispatcher.py"],
             cwd=Path(__file__).resolve().parents[1],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
