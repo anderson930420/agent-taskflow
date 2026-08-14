@@ -623,3 +623,140 @@ branch deletion, or worktree deletion, and it does not change the v0.2.5 require
 evidence gate semantics except through stricter contract validation. Human final
 approval remains required and deterministic validators remain pytest /
 compileall / policy / changed-files.
+
+## Operator recovery for codex_advisory_evidence blocking
+
+The `v0.2.5` gate is correct — but on its own it has no recovery path. This
+section documents the loop it can create and the audited operator entry point
+that resolves it.
+
+### The loop
+
+The gate is checked at the `waiting_approval` boundary, *after* the executor and
+the deterministic validators have run:
+
+```text
+executor runs -> validators run -> codex_advisory_evidence gate -> waiting_approval
+```
+
+The Codex advisory artifact is generated *from* Attempt evidence, so it can only
+exist after the runner has produced that evidence. On a first run the artifact
+is therefore always missing, the gate blocks at the `codex_advisory_evidence`
+phase, and the task lands in `blocked`.
+
+Recovering from `blocked` with `scripts/reset_task_status.py` does not help:
+that command only supports `blocked -> queued`, and it *atomically reserves a
+new Attempt with a new artifact directory*. The advisory evidence generated for
+the previous Attempt lives in the previous Attempt's artifact directory, so the
+next run's gate never sees it and blocks again:
+
+```text
+run   -> blocked at codex_advisory_evidence (no advisory artifact yet)
+review-> advisory artifact written into attempt-N artifact dir
+reset -> blocked -> queued, new attempt-N+1 artifact dir reserved
+run   -> blocked at codex_advisory_evidence (attempt-N+1 has no advisory artifact)
+```
+
+Observed in production dogfooding on 2026-08-14: `AT-GH-159`, attempt
+`3e1b6593416b4a40a8e53c15d107a8d4` — executor passed, the pytest validator
+passed, and the advisory review was generated afterwards with
+`review_status=looks_good`, but no path existed to move the task to
+`waiting_approval`.
+
+### The recovery entry point
+
+`agent_taskflow/advisory_evidence_retry.py` plus
+`scripts/retry_advisory_evidence_transition.py` re-check the **existing**
+Attempt artifact directory and, when every precondition holds, perform the same
+`blocked -> waiting_approval` transition the runner would have performed.
+
+The core semantic is:
+
+```text
+Re-check the same evidence, do not weaken the gate.
+```
+
+```bash
+# Read-only precondition report (default).
+python3 scripts/retry_advisory_evidence_transition.py \
+  --task-key AT-GH-159 \
+  --db-path ~/.agent-taskflow/state/github_issue_scheduler.sqlite3 \
+  --artifact-dir artifacts/github-issue-scheduler/AT-GH-159/attempt-3e1b6593416b4a40a8e53c15d107a8d4 \
+  --operator you@example.com
+
+# Operator-confirmed transition.
+python3 scripts/retry_advisory_evidence_transition.py \
+  --task-key AT-GH-159 \
+  --db-path ~/.agent-taskflow/state/github_issue_scheduler.sqlite3 \
+  --artifact-dir artifacts/github-issue-scheduler/AT-GH-159/attempt-3e1b6593416b4a40a8e53c15d107a8d4 \
+  --operator you@example.com \
+  --confirm-transition
+```
+
+`--artifact-dir` must be the **existing** Attempt artifact directory that holds
+the evidence — the recovery path never reserves a new Attempt and never creates
+a new artifact directory.
+
+### Preconditions
+
+All four are evaluated deterministically from disk and the local SQLite mirror,
+with no subprocess and no AI call, and all are reported (satisfied or not) in
+both modes:
+
+```text
+task_blocked                      task exists and its current status is blocked
+executor_evidence                 the artifact dir carries executor evidence
+                                  (executor launch spec, executor log, or
+                                  execution package artifact)
+pytest_validator_evidence         pytest.log is present with a passing terminal
+                                  summary line, and
+                                  validator-launch-spec-pytest.json is present
+                                  and is a JSON object
+codex_advisory_artifact_evidence  check_required_codex_advisory_evidence(...)
+                                  passes against this artifact dir
+```
+
+The advisory precondition delegates to the existing `v0.2.5` gate helper, so the
+artifact must satisfy exactly the same contract the runner requires. Contract
+validation is never reimplemented, and no gate is relaxed: an artifact the
+runner would reject is rejected here too.
+
+Because the gate helper is reused verbatim, the `v0.2.5` evidence-not-approval
+semantics carry over unchanged — `looks_good`, `needs_attention`, `high_risk`,
+and a structurally valid `tool_error` are all valid advisory evidence for this
+recovery path.
+
+### What it does on success
+
+With `--confirm-transition` and every precondition satisfied, the command:
+
+- applies `blocked -> waiting_approval` under a compare-and-set on the `blocked`
+  status (a task that left `blocked` concurrently is an error, not a silent
+  overwrite);
+- records a `task_events` audit payload with `kind=advisory_evidence_retry`
+  carrying the operator identity, `reason=advisory_evidence_retry`, the artifact
+  directory, the advisory `review_status` / `risk_level`, and the observed
+  pytest summary line;
+- prints the full JSON result, including every precondition check.
+
+Without `--confirm-transition` the command is a read-only report: it mutates
+nothing, records no event, and exits 0. With `--confirm-transition` and a failed
+precondition it mutates nothing, prints the blocking errors, and exits 1.
+
+### What it does not do
+
+The recovery path:
+
+- does **not** approve, merge, push, create PRs, clean up, delete branches, or
+  delete worktrees;
+- does **not** invoke Codex, pytest, `git`, `gh`, or any other subprocess;
+- does **not** weaken, bypass, or reimplement the `v0.2.5` gate or the `v0.2.4`
+  contract validator;
+- does **not** re-run the executor or the deterministic validators, and does
+  **not** reserve a new Attempt or change `reset_task_status.py` semantics;
+- does **not** auto-invoke the advisory review from inside the runner, and does
+  **not** change the scheduler tick or any executor.
+
+Reaching `waiting_approval` through this command is **not** approval. Human
+final approval remains required, exactly as it is when the runner performs the
+same transition.
