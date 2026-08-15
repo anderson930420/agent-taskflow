@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,6 +83,44 @@ class GitHubIssueDiscoveryTests(unittest.TestCase):
             },
         )
 
+    def add_stale_ingestion_residue(self, *, issue_number: int) -> None:
+        store = TaskMirrorStore(self.db_path)
+        store.init_db()
+        task_key = f"AT-GH-{issue_number}"
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO task_events (
+                    task_key, event_type, source, message, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_key,
+                    "github_issue_ingested",
+                    "github",
+                    "stale ingestion residue",
+                    json.dumps(
+                        {
+                            "repo": "anderson930420/agent-taskflow",
+                            "issue_number": issue_number,
+                        }
+                    ),
+                    "2026-08-14T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO task_artifacts (task_key, artifact_type, path, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    task_key,
+                    "issue_spec",
+                    f"/stale/{task_key}/issue_spec.md",
+                    "2026-08-14T00:00:00Z",
+                ),
+            )
+
     def test_open_issue_not_in_local_mirror_is_new_and_recommended(self) -> None:
         payload = self.discover([issue(123, title="New operator issue")])
 
@@ -106,6 +145,51 @@ class GitHubIssueDiscoveryTests(unittest.TestCase):
         self.assertEqual(payload["recommended_candidates"], [])
         self.assertEqual(payload["already_ingested"][0]["number"], 100)
         self.assertEqual(payload["already_ingested"][0]["task_key"], "CUSTOM-100")
+
+    def test_force_reingest_bypasses_stale_residue_without_task_row(self) -> None:
+        self.add_stale_ingestion_residue(issue_number=120)
+
+        default_payload = self.discover([issue(120, title="Stale residue issue")])
+        explicit_empty_payload = self.discover(
+            [issue(120, title="Stale residue issue")],
+            force_reingest_issue_numbers=(),
+        )
+        forced_payload = self.discover(
+            [issue(120, title="Stale residue issue")],
+            force_reingest_issue_numbers=(120, 120),
+        )
+
+        self.assertEqual(default_payload, explicit_empty_payload)
+        self.assertNotIn("force_reingest_issue_numbers", default_payload)
+        self.assertEqual(default_payload["recommended_candidates"], [])
+        self.assertEqual(default_payload["already_ingested"][0]["task_key"], "AT-GH-120")
+
+        self.assertEqual(forced_payload["force_reingest_issue_numbers"], [120])
+        self.assertEqual(forced_payload["already_ingested"], [])
+        self.assertEqual(
+            [item["number"] for item in forced_payload["recommended_candidates"]],
+            [120],
+        )
+        candidate = forced_payload["recommended_candidates"][0]
+        self.assertTrue(candidate["force_reingest_issue"])
+        self.assertEqual(
+            candidate["reason"],
+            "open issue explicitly selected for force re-ingestion",
+        )
+
+    def test_force_reingest_still_enforces_label_filters(self) -> None:
+        self.add_stale_ingestion_residue(issue_number=121)
+
+        payload = self.discover(
+            [issue(121, labels=("needs-triage",))],
+            force_reingest_issue_numbers=(121,),
+            include_labels=("ready",),
+        )
+
+        self.assertEqual(payload["recommended_candidates"], [])
+        self.assertEqual(payload["already_ingested"], [])
+        self.assertEqual(payload["not_eligible"][0]["number"], 121)
+        self.assertEqual(payload["not_eligible"][0]["missing_labels"], ["ready"])
 
     def test_closed_issue_is_closed_or_blocked_not_recommended(self) -> None:
         payload = self.discover([issue(124, state="closed")])

@@ -147,6 +147,7 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
             "--issue-limit",
             "--include-label",
             "--exclude-label",
+            "--force-reingest-issue",
             "--lock-path",
             "--operator",
             "--operator-note",
@@ -224,6 +225,30 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
         self.assertEqual(request.operator, "codex")
         self.assertEqual(request.operator_note, "dry run check")
         self.assertIsNone(request.executor)
+
+    def test_force_reingest_issue_flag_is_repeatable_and_threads_to_request(self) -> None:
+        payload = {
+            "ok": True,
+            "status": "dry_run",
+            "mode": "dry_run",
+            "safety": {"dry_run": True, "confirmed": False},
+        }
+
+        rc, _emitted, request = self.invoke_with_fake_run(
+            [
+                "--force-reingest-issue",
+                "20",
+                "--force-reingest-issue",
+                "20",
+                "--force-reingest-issue",
+                "21",
+                "--json",
+            ],
+            payload,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(request.force_reingest_issue_numbers, (20, 21))
 
     def test_help_lists_executor_profile_flags(self) -> None:
         result = subprocess.run(

@@ -81,6 +81,7 @@ class GitHubIssueIngestionRequest:
     provider: str | None = None
     tools: tuple[str, ...] | None = None
     pi_bin: str | None = None
+    force_reingest_issue: bool = False
 
     def __post_init__(self) -> None:
         repo = self.repo.strip()
@@ -137,6 +138,7 @@ class GitHubIssueIngestionResult:
     wrote_artifact: bool
     recorded_event: bool
     summary: str
+    force_reingest_issue: bool = False
 
 
 IssueFetcher = Callable[[str, int], GitHubIssueSnapshot]
@@ -226,10 +228,16 @@ def ingest_github_issue(
             wrote_artifact=False,
             recorded_event=False,
             summary="Dry run completed; no local state was written.",
+            force_reingest_issue=request.force_reingest_issue,
         )
 
     store.init_db()
     existing = store.get_task(task_key)
+    if request.force_reingest_issue and existing is not None:
+        raise GitHubIssueIngestionError(
+            "forced re-ingest refused: "
+            f"task {task_key} already exists with status {existing.status}"
+        )
     would_write_task = existing is None
     summary_status = "ingested" if existing is None else "reused"
 
@@ -261,21 +269,24 @@ def ingest_github_issue(
         ),
     )
     _record_artifact_once(store, task_key, issue_spec_path)
+    event_payload: dict[str, Any] = {
+        "kind": INGESTION_EVENT_TYPE,
+        "repo": request.repo,
+        "issue_number": issue.number,
+        "issue_url": issue.url,
+        "issue_state": issue.state,
+        "labels": list(issue.labels),
+        "author": issue.author,
+        "dry_run": False,
+    }
+    if request.force_reingest_issue:
+        event_payload["force_reingest_issue"] = True
     store.record_task_event(
         task_key,
         INGESTION_EVENT_TYPE,
         INGESTION_SOURCE,
         message="GitHub issue ingested",
-        payload={
-            "kind": INGESTION_EVENT_TYPE,
-            "repo": request.repo,
-            "issue_number": issue.number,
-            "issue_url": issue.url,
-            "issue_state": issue.state,
-            "labels": list(issue.labels),
-            "author": issue.author,
-            "dry_run": False,
-        },
+        payload=event_payload,
     )
 
     return GitHubIssueIngestionResult(
@@ -299,6 +310,7 @@ def ingest_github_issue(
             if would_write_task
             else "Existing task reused; issue artifact and event refreshed."
         ),
+        force_reingest_issue=request.force_reingest_issue,
     )
 
 
@@ -342,7 +354,7 @@ def render_issue_spec(
 
 
 def ingestion_result_to_dict(result: GitHubIssueIngestionResult) -> dict[str, Any]:
-    return {
+    payload = {
         "ok": result.ok,
         "status": result.status,
         "task_key": result.task_key,
@@ -360,6 +372,9 @@ def ingestion_result_to_dict(result: GitHubIssueIngestionResult) -> dict[str, An
         "recorded_event": result.recorded_event,
         "summary": result.summary,
     }
+    if result.force_reingest_issue:
+        payload["force_reingest_issue"] = True
+    return payload
 
 
 def _normalize_executor_tools(tools: tuple[str, ...]) -> tuple[str, ...] | None:
