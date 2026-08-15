@@ -193,7 +193,7 @@ def intake_selected_github_issues(
             initialized_db = True
 
         artifact_dir = request.artifact_root / task_key
-        current_store.upsert_task(
+        current_store.upsert_task_with_level2_identity(
             TaskRecord(
                 task_key=task_key,
                 project=request.project or "",

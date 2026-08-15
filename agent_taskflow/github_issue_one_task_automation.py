@@ -39,11 +39,20 @@ from agent_taskflow.github_issue_one_task_lock import (
     NonOverlapLock,
     default_github_issue_one_task_lock_path,
 )
+from agent_taskflow.level2_execution_authority import (
+    Level2ExecutionAuthorityError,
+    is_execution_engine_authority_callback,
+    is_level2_task,
+)
 from agent_taskflow.models import require_absolute_path
 from agent_taskflow.one_shot_task_pipeline import (
     OneShotTaskPipelineError,
     OneShotTaskPipelineRequest,
     run_one_shot_task_pipeline,
+)
+from agent_taskflow.scheduler_execution_engine_authority import (
+    DirectRuntimeHandoffAuthorityRequest,
+    SchedulerExecutionEngineAuthority,
 )
 from agent_taskflow.scheduler_watcher_one_task import (
     SchedulerWatcherOneTaskError,
@@ -477,6 +486,26 @@ def run_github_issue_one_task_automation(
 
     failure_registry.clear_failure(repo=request.repo, issue_number=selected_issue_number)
 
+    runtime_runner, authority_error = _canonical_runtime_runner(
+        request,
+        task_key=selected_task_key,
+        approved_task_runner_fn=approved_task_runner_fn,
+    )
+    if authority_error is not None:
+        return _failure_response(
+            request,
+            status="execution_failed",
+            failed_stage=_FAILED_STAGE_EXECUTION,
+            reasons=[authority_error],
+            discovery=discovery,
+            selected_issue=selected_issue,
+            ingestion=ingestion,
+            watcher=None,
+            issue_ingested=_ingestion_wrote(ingestion),
+            selected_task_key=selected_task_key,
+            publication=dict(_PUBLICATION_SKIPPED),
+        )
+
     if not request.publish_after_execution:
         return _run_execution_only(
             request,
@@ -486,7 +515,7 @@ def run_github_issue_one_task_automation(
             selected_task_key=selected_task_key,
             selection=selection,
             recommended_candidates=recommended_candidates,
-            approved_task_runner_fn=approved_task_runner_fn,
+            approved_task_runner_fn=runtime_runner,
         )
 
     try:
@@ -513,7 +542,7 @@ def run_github_issue_one_task_automation(
                 base_branch=request.base_branch,
                 draft=True,
             ),
-            approved_task_runner_fn=approved_task_runner_fn,
+            approved_task_runner_fn=runtime_runner,
             branch_push_fn=branch_push_fn,
             draft_pr_fn=draft_pr_fn,
         )
@@ -578,6 +607,64 @@ def run_github_issue_one_task_automation(
             "candidate_count": len(recommended_candidates),
         },
     )
+
+
+def _canonical_runtime_runner(
+    request: GitHubIssueOneTaskAutomationRequest,
+    *,
+    task_key: str,
+    approved_task_runner_fn: Callable[..., dict[str, Any]] | None,
+) -> tuple[Callable[..., dict[str, Any]] | None, str | None]:
+    """Bind a Level 2 task's execution to the canonical engine authority.
+
+    A freshly ingested task is Level 2 from the moment it is persisted, so this
+    path reaches the same runtime handoff as a confirmed scheduler tick and must
+    cross the same authority. Returns ``(runner, None)`` on success and
+    ``(None, reason)`` when classification itself fails.
+
+    Classification failure is **not** recoverable here: the automation refuses
+    to execute rather than handing the work to a callback that would not carry
+    engine authority. There is no fallback to the caller's runner on an
+    authority error.
+    """
+
+    if is_execution_engine_authority_callback(approved_task_runner_fn):
+        return approved_task_runner_fn, None
+    try:
+        level2_execution = is_level2_task(request.db_path, task_key)
+    except Level2ExecutionAuthorityError as exc:
+        return None, f"level2_classification_failed: {exc}"
+    if not level2_execution:
+        # A historical legacy task keeps its historical execution path.
+        return approved_task_runner_fn, None
+    if approved_task_runner_fn is None:
+        # No runtime runner is configured, so nothing may execute. The
+        # downstream Level 2 guard reports this as a non-executing refusal.
+        return None, None
+
+    task = TaskMirrorStore(request.db_path).get_task(task_key)
+    authority = SchedulerExecutionEngineAuthority(
+        DirectRuntimeHandoffAuthorityRequest(
+            repo=request.repo,
+            db_path=request.db_path,
+            local_repo_path=request.local_repo_path,
+            artifact_root=request.artifact_root,
+            executor=task.executor if task is not None else None,
+            model=(task.model if task is not None else None) or request.model,
+            provider=(
+                (task.provider if task is not None else None) or request.provider
+            ),
+            tools=tuple(
+                (task.tools if task is not None else None) or request.tools or ()
+            ),
+            pi_bin=(task.pi_bin if task is not None else None) or request.pi_bin,
+            base_branch=request.base_branch or "main",
+            operator=request.operator,
+            operator_note=request.operator_note,
+        ),
+        approved_task_runner_fn=approved_task_runner_fn,
+    )
+    return authority.execute_from_runtime_handoff, None
 
 
 def _run_execution_only(

@@ -21,6 +21,7 @@ from typing import Any, Iterator
 
 from agent_taskflow.attempt_models import AttemptRecord
 from agent_taskflow.attempt_store import AttemptStore
+from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import default_db_path
 from agent_taskflow.tasks import normalize_task_key
 
@@ -112,24 +113,40 @@ def is_level2_task(db_path: str | Path | None, task_key: str) -> bool:
 def ensure_level2_task_identity(
     db_path: str | Path,
     task_key: str,
+    *,
+    connection: sqlite3.Connection | None = None,
 ) -> None:
-    """Persist the existing canonical Task classification for Level 2 work."""
+    """Persist the existing canonical Task classification for Level 2 work.
+
+    Task admission passes ``connection`` so the task insert and this promotion
+    commit as one transaction. Runtime callers omit it and keep the historical
+    self-contained transaction behaviour; the classification outcome is
+    identical either way, and both remain idempotent for an already-promoted
+    task.
+    """
 
     path = _resolved_db_path(db_path)
     store = AttemptStore(path)
     try:
-        store.init_db()
-        identity = store.get_task_identity(task_key)
-        if identity is None:
-            raise Level2ExecutionAuthorityError(
-                f"Canonical Task identity not found for {normalize_task_key(task_key)}"
-            )
-        if identity.is_legacy:
-            identity = store.register_task_identity(
+        if connection is None:
+            store.init_db()
+            identity = store.get_task_identity(task_key)
+            if identity is None:
+                raise Level2ExecutionAuthorityError(
+                    f"Canonical Task identity not found for {normalize_task_key(task_key)}"
+                )
+            if identity.is_legacy:
+                identity = store.register_task_identity(
+                    task_key,
+                    task_class="canonical",
+                    task_id=identity.task_id,
+                    is_legacy=False,
+                )
+        else:
+            identity = _promote_task_identity_in_connection(
+                connection,
                 task_key,
-                task_class="canonical",
-                task_id=identity.task_id,
-                is_legacy=False,
+                store=store,
             )
     except Level2ExecutionAuthorityError:
         raise
@@ -141,6 +158,42 @@ def ensure_level2_task_identity(
         raise Level2ExecutionAuthorityError(
             f"Task {normalize_task_key(task_key)} remained legacy after Level 2 binding"
         )
+
+
+def _promote_task_identity_in_connection(
+    connection: sqlite3.Connection,
+    task_key: str,
+    *,
+    store: AttemptStore,
+) -> Any:
+    """Promote one persisted task inside the caller's open transaction."""
+
+    normalized = normalize_task_key(task_key)
+    identity = AttemptStore.get_task_identity_in_connection(connection, normalized)
+    if identity is None:
+        # The row exists but predates stable identity columns; seed the legacy
+        # identity first so promotion below has a stable task_id to keep.
+        store._ensure_task_identity(connection, normalized)
+        identity = AttemptStore.get_task_identity_in_connection(connection, normalized)
+        if identity is None:
+            raise Level2ExecutionAuthorityError(
+                f"Canonical Task identity not found for {normalized}"
+            )
+    if identity.is_legacy:
+        connection.execute(
+            """
+            UPDATE tasks
+            SET task_class = 'canonical', is_legacy = 0, updated_at = ?
+            WHERE task_key = ?
+            """,
+            (utc_now_iso(), normalized),
+        )
+        identity = AttemptStore.get_task_identity_in_connection(connection, normalized)
+        if identity is None:
+            raise Level2ExecutionAuthorityError(
+                f"Canonical Task identity disappeared while promoting {normalized}"
+            )
+    return identity
 
 
 @contextmanager

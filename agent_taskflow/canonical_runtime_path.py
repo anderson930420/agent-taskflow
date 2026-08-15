@@ -78,6 +78,7 @@ class CanonicalRuntimeTaskStore(_LegacyTaskMirrorStore):
         self.lease_ttl_seconds = ttl
         self.heartbeat_interval_seconds = interval
         self._runtime_claims: dict[str, _ClaimState] = {}
+        self._reserved_claims: dict[str, RuntimeClaim] = {}
         self._runtime_claims_lock = threading.RLock()
 
     def init_db(self) -> None:
@@ -192,6 +193,11 @@ class CanonicalRuntimeTaskStore(_LegacyTaskMirrorStore):
         state = _ClaimState(claim=claim, admission=admission)
         with self._runtime_claims_lock:
             self._runtime_claims[normalized] = state
+            # The claim is the point at which the canonical Attempt exists and
+            # the executor becomes startable. Recording it separately keeps the
+            # reserved Attempt identity readable by the ExecutionEngine adapter
+            # after the lease is released, whatever the terminal status was.
+            self._reserved_claims[normalized] = claim
         self._start_supervisor(normalized, state)
 
     @staticmethod
@@ -400,6 +406,18 @@ class CanonicalRuntimeTaskStore(_LegacyTaskMirrorStore):
         state = self._state_for(task_key)
         return state.claim if state is not None else None
 
+    def reserved_runtime_claim(self, task_key: str) -> RuntimeClaim | None:
+        """Return the claim this store took for ``task_key``, released or not.
+
+        ``runtime_claim`` only answers while the lease is live. Attempt
+        *identification* has to outlive the lease, because a blocked run still
+        belongs to the Attempt that was reserved for it.
+        """
+
+        normalized = normalize_task_key(task_key)
+        with self._runtime_claims_lock:
+            return self._reserved_claims.get(normalized)
+
     def shutdown_runtime_supervisors(self) -> None:
         with self._runtime_claims_lock:
             states = list(self._runtime_claims.values())
@@ -415,6 +433,24 @@ def _canonicalize_store(
         return store
     resolved_path = getattr(store, "db_path", None) if store is not None else db_path
     return CanonicalRuntimeTaskStore(resolved_path)
+
+
+def canonical_runtime_task_store(
+    db_path: str | Path | None = None,
+    *,
+    store: Any | None = None,
+) -> CanonicalRuntimeTaskStore:
+    """Return the runtime store the installed canonical runtime path uses.
+
+    The public ``CanonicalRuntimeTaskStore`` symbol stays the token-admission
+    class; runtime entrypoints are upgraded through ``_canonicalize_store``,
+    which later installers rebind. Callers that need the *runtime* store — the
+    one whose claim reserves the Attempt — must go through this accessor rather
+    than instantiating the class, or they get an un-layered store that the
+    runtime path will silently replace.
+    """
+
+    return _canonicalize_store(store, db_path)
 
 
 def install_canonical_runtime_path(
@@ -485,6 +521,7 @@ __all__ = [
     "CANONICAL_RUNTIME_ADMISSION_MIGRATION",
     "CanonicalRuntimeAdmissionStore",
     "CanonicalRuntimeTaskStore",
+    "canonical_runtime_task_store",
     "install_canonical_runtime_path",
     "migrate_canonical_runtime_admission",
 ]

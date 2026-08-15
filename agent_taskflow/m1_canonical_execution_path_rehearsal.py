@@ -110,21 +110,19 @@ def run_m1_canonical_execution_path_rehearsal(
         attempts.init_db()
         _add_task(store, attempts, TASK_KEY, repo_path, artifact_root, level2=True)
 
-        def deterministic_runner(approved_request: Any) -> dict[str, Any]:
-            attempt = attempts.create_attempt(
+        def deterministic_runner(
+            approved_request: Any,
+            *,
+            store: Any = None,
+        ) -> dict[str, Any]:
+            # The engine supplies the canonical runtime store. Claiming through
+            # it reserves the Attempt before execution and closes it on release,
+            # which is the binding the authority then verifies.
+            store.update_task_status(
                 approved_request.task_key,
-                executor=approved_request.executor,
-                artifact_root=approved_request.artifact_root,
-                reason_code="m1c_rehearsal_attempt_created",
-                actor="m1c_rehearsal",
-            )
-            attempts.close_attempt(
-                attempt.attempt_id,
-                status="waiting_approval",
-                reason_code="m1c_rehearsal_attempt_completed",
-                actor="m1c_rehearsal",
-                execution_result="completed",
-                validation_result="passed",
+                "preparing",
+                source="m1c_rehearsal_execution_engine",
+                message="Authoritative rehearsal execution claimed the task",
             )
             store.update_task_status(
                 approved_request.task_key,
