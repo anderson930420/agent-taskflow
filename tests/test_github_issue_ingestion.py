@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from agent_taskflow.github_issue_ingestion import (
     GitHubIssueIngestionRequest,
     GitHubIssueSnapshot,
     ingest_github_issue,
+    ingestion_result_to_dict,
 )
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.store import TaskMirrorStore
@@ -61,6 +63,7 @@ class GitHubIssueIngestionTests(unittest.TestCase):
         issue_number: int = 42,
         dry_run: bool = False,
         task_key: str | None = None,
+        force_reingest_issue: bool = False,
     ) -> GitHubIssueIngestionRequest:
         return GitHubIssueIngestionRequest(
             repo="anderson930420/agent-taskflow",
@@ -69,6 +72,7 @@ class GitHubIssueIngestionTests(unittest.TestCase):
             artifact_root=self.root / "artifacts",
             task_key=task_key,
             dry_run=dry_run,
+            force_reingest_issue=force_reingest_issue,
         )
 
     def test_ingest_open_issue_creates_queued_task(self) -> None:
@@ -171,6 +175,56 @@ class GitHubIssueIngestionTests(unittest.TestCase):
         self.assertEqual(payload["repo"], "anderson930420/agent-taskflow")
         self.assertEqual(payload["issue_number"], 42)
         self.assertFalse(payload["dry_run"])
+
+    def test_force_reingest_records_audit_fields_for_stale_residue(self) -> None:
+        self.store.init_db()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO task_events (
+                    task_key, event_type, source, message, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "AT-GH-42",
+                    "github_issue_ingested",
+                    "github",
+                    "stale ingestion residue",
+                    json.dumps(
+                        {
+                            "repo": "anderson930420/agent-taskflow",
+                            "issue_number": 42,
+                        }
+                    ),
+                    "2026-08-14T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO task_artifacts (task_key, artifact_type, path, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    "AT-GH-42",
+                    "issue_spec",
+                    "/stale/AT-GH-42/issue_spec.md",
+                    "2026-08-14T00:00:00Z",
+                ),
+            )
+
+        result = ingest_github_issue(
+            self.request(force_reingest_issue=True),
+            store=self.store,
+            fetcher=lambda repo, issue_number: open_issue(),
+        )
+
+        self.assertTrue(result.wrote_task)
+        self.assertTrue(ingestion_result_to_dict(result)["force_reingest_issue"])
+        task = self.store.get_task("AT-GH-42")
+        self.assertIsNotNone(task)
+        events = self.store.list_task_events("AT-GH-42")
+        payload = json.loads(events[-1].payload_json or "{}")
+        self.assertTrue(payload["force_reingest_issue"])
 
     def test_ingest_does_not_create_task_worktree_record(self) -> None:
         ingest_github_issue(

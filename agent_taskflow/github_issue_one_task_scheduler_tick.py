@@ -58,6 +58,7 @@ class GitHubIssueOneTaskSchedulerTickRequest:
     issue_limit: int = 100
     include_labels: tuple[str, ...] = ()
     exclude_labels: tuple[str, ...] = ()
+    force_reingest_issue_numbers: tuple[int, ...] = ()
     lock_path: Path | None = None
     fail_if_locked: bool = True
     operator: str | None = None
@@ -145,6 +146,11 @@ class GitHubIssueOneTaskSchedulerTickRequest:
             self,
             "exclude_labels",
             _normalize_labels(self.exclude_labels),
+        )
+        object.__setattr__(
+            self,
+            "force_reingest_issue_numbers",
+            _normalize_issue_numbers(self.force_reingest_issue_numbers),
         )
         object.__setattr__(
             self,
@@ -376,6 +382,7 @@ def _automation_request(
             issue_limit=request.issue_limit,
             include_labels=request.include_labels,
             exclude_labels=request.exclude_labels,
+            force_reingest_issue_numbers=request.force_reingest_issue_numbers,
             select_first_issue=True,
             confirm_select_first_issue=True,
             confirm_ingest_issue=True,
@@ -408,6 +415,7 @@ def _automation_request(
         issue_limit=request.issue_limit,
         include_labels=request.include_labels,
         exclude_labels=request.exclude_labels,
+        force_reingest_issue_numbers=request.force_reingest_issue_numbers,
         select_first_issue=True,
         confirm_select_first_issue=True,
         operator=request.operator,
@@ -651,6 +659,25 @@ def _normalize_labels(labels: tuple[str, ...]) -> tuple[str, ...]:
             continue
         normalized.append(value)
         seen.add(value)
+    return tuple(normalized)
+
+
+def _normalize_issue_numbers(issue_numbers: tuple[int, ...]) -> tuple[int, ...]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for issue_number in issue_numbers:
+        try:
+            parsed = int(issue_number)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "force_reingest_issue_numbers must contain positive integers"
+            ) from exc
+        if parsed <= 0:
+            raise ValueError("force_reingest_issue_numbers must contain positive integers")
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append(parsed)
     return tuple(normalized)
 
 

@@ -103,6 +103,7 @@ class GitHubIssueOneTaskAutomationRequest:
     issue_limit: int = 100
     include_labels: tuple[str, ...] = ()
     exclude_labels: tuple[str, ...] = ()
+    force_reingest_issue_numbers: tuple[int, ...] = ()
 
     select_first_issue: bool = False
     confirm_select_first_issue: bool = False
@@ -176,6 +177,11 @@ class GitHubIssueOneTaskAutomationRequest:
             self,
             "exclude_labels",
             _normalize_labels(self.exclude_labels),
+        )
+        object.__setattr__(
+            self,
+            "force_reingest_issue_numbers",
+            _normalize_issue_numbers(self.force_reingest_issue_numbers),
         )
 
         lock_path = self.lock_path
@@ -408,6 +414,9 @@ def run_github_issue_one_task_automation(
         provider=request.provider,
         tools=request.tools,
         pi_bin=request.pi_bin,
+        force_reingest_issue=(
+            selected_issue_number in request.force_reingest_issue_numbers
+        ),
     )
     try:
         if ingestion_fetcher is None:
@@ -681,6 +690,7 @@ def _run_discovery(
         limit=request.issue_limit,
         include_labels=request.include_labels,
         exclude_labels=request.exclude_labels,
+        force_reingest_issue_numbers=request.force_reingest_issue_numbers,
     )
     if discovery_fetcher is None:
         return discover_github_issues(discovery_request)
@@ -944,6 +954,25 @@ def _normalize_labels(labels: tuple[str, ...]) -> tuple[str, ...]:
             continue
         seen.add(value)
         normalized.append(value)
+    return tuple(normalized)
+
+
+def _normalize_issue_numbers(issue_numbers: tuple[int, ...]) -> tuple[int, ...]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for issue_number in issue_numbers:
+        try:
+            parsed = int(issue_number)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "force_reingest_issue_numbers must contain positive integers"
+            ) from exc
+        if parsed <= 0:
+            raise ValueError("force_reingest_issue_numbers must contain positive integers")
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append(parsed)
     return tuple(normalized)
 
 

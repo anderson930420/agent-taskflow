@@ -202,6 +202,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
                     issue_limit=7,
                     include_labels=("ready",),
                     exclude_labels=("skip",),
+                    force_reingest_issue_numbers=(702, 702),
                     operator="codex",
                     operator_note="scheduled tick test",
                     remote="upstream",
@@ -232,6 +233,7 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         self.assertEqual(automation_request.issue_limit, 7)
         self.assertEqual(automation_request.include_labels, ("ready",))
         self.assertEqual(automation_request.exclude_labels, ("skip",))
+        self.assertEqual(automation_request.force_reingest_issue_numbers, (702,))
         self.assertEqual(automation_request.operator, "codex")
         self.assertEqual(automation_request.operator_note, "scheduled tick test")
         self.assertEqual(automation_request.remote, "upstream")

@@ -53,6 +53,7 @@ class GitHubIssueDiscoveryRequest:
     limit: int = 100
     include_labels: tuple[str, ...] = ()
     exclude_labels: tuple[str, ...] = ()
+    force_reingest_issue_numbers: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         repo = self.repo.strip()
@@ -79,6 +80,11 @@ class GitHubIssueDiscoveryRequest:
             self,
             "exclude_labels",
             tuple(_normalize_label(label) for label in self.exclude_labels),
+        )
+        object.__setattr__(
+            self,
+            "force_reingest_issue_numbers",
+            _normalize_issue_numbers(self.force_reingest_issue_numbers),
         )
 
 
@@ -194,6 +200,8 @@ def discover_github_issues(
     not_eligible: list[dict[str, Any]] = []
     recommended_candidates: list[dict[str, Any]] = []
 
+    force_reingest_issue_numbers = set(request.force_reingest_issue_numbers)
+
     for issue in sorted(issues, key=lambda item: item.number):
         match = local_matches.get(issue.number)
         labels = {_normalize_label(label) for label in issue.labels}
@@ -203,8 +211,12 @@ def discover_github_issues(
         exclude_present = [
             label for label in request.exclude_labels if label and label in labels
         ]
+        force_reingest_issue = issue.number in force_reingest_issue_numbers
 
-        if match is not None:
+        # Preserve the established dedup classification for ordinary discovery.
+        # A force-selected issue is the only case that continues to the normal
+        # open/label eligibility checks before becoming a candidate.
+        if match is not None and not force_reingest_issue:
             already_ingested.append(
                 {
                     "number": issue.number,
@@ -258,8 +270,14 @@ def discover_github_issues(
 
         candidate = {
             **base,
-            "reason": "open issue not found in local task mirror",
+            "reason": (
+                "open issue explicitly selected for force re-ingestion"
+                if force_reingest_issue
+                else "open issue not found in local task mirror"
+            ),
         }
+        if force_reingest_issue:
+            candidate["force_reingest_issue"] = True
         new_issues.append(candidate)
         recommended_candidates.append(candidate)
 
@@ -271,7 +289,7 @@ def discover_github_issues(
         "recommended_candidate_count": len(recommended_candidates),
     }
 
-    return {
+    result = {
         "ok": True,
         "status": "discovered",
         "repo": request.repo,
@@ -283,6 +301,11 @@ def discover_github_issues(
         "summary": summary,
         "safety": dict(SAFETY_BLOCK),
     }
+    if request.force_reingest_issue_numbers:
+        result["force_reingest_issue_numbers"] = list(
+            request.force_reingest_issue_numbers
+        )
+    return result
 
 
 def read_local_issue_matches(
@@ -395,6 +418,20 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _normalize_issue_numbers(issue_numbers: tuple[int, ...]) -> tuple[int, ...]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for issue_number in issue_numbers:
+        parsed = _positive_int(issue_number)
+        if parsed is None:
+            raise ValueError("force_reingest_issue_numbers must contain positive integers")
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append(parsed)
+    return tuple(normalized)
 
 
 def _json_object(value: str | None) -> dict[str, Any]:

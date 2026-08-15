@@ -60,6 +60,7 @@ class GitHubIssueIngestionStatusHardeningTests(unittest.TestCase):
         *,
         issue_number: int = 42,
         task_key: str | None = None,
+        force_reingest_issue: bool = False,
     ) -> GitHubIssueIngestionRequest:
         return GitHubIssueIngestionRequest(
             repo="anderson930420/agent-taskflow",
@@ -67,6 +68,7 @@ class GitHubIssueIngestionStatusHardeningTests(unittest.TestCase):
             local_repo_path=self.local_repo,
             artifact_root=self.root / "artifacts",
             task_key=task_key,
+            force_reingest_issue=force_reingest_issue,
         )
 
     def seed_task(self, *, task_key: str, status: str) -> None:
@@ -135,6 +137,26 @@ class GitHubIssueIngestionStatusHardeningTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         payload = json.loads(events[0].payload_json or "{}")
         self.assertEqual(payload["issue_state"], "closed")
+
+    def test_force_reingest_refuses_existing_derived_task(self) -> None:
+        self.seed_task(task_key="AT-GH-42", status="implementing")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "task AT-GH-42 already exists with status implementing",
+        ):
+            ingest_github_issue(
+                self.request(force_reingest_issue=True),
+                store=self.store,
+                fetcher=lambda repo, issue_number: open_issue(),
+            )
+
+        task = self.store.get_task("AT-GH-42")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, "implementing")
+        self.assertEqual(task.title, "Existing local task title")
+        self.assertEqual(self.store.list_task_events("AT-GH-42"), [])
 
     def test_closed_issue_still_blocks_new_task(self) -> None:
         result = ingest_github_issue(

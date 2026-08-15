@@ -106,6 +106,32 @@ can still be selected on a later tick. The JSON output includes
 `summary.failed_ingestion_count` at the scheduler, nested automation, and
 discovery summary levels.
 
+### Repairing Stale Ingestion Residue
+
+Use the repeatable operator flag `--force-reingest-issue N` only to repair a
+known stale local mirror record: for example, old `task_events` residue
+(often alongside `task_artifacts` residue) causes discovery to report an open
+issue as `already_ingested`, but no `tasks` row exists for its derived
+`AT-GH-N` key.
+The forced issue must still be open and pass every blocked, include-label, and
+exclude-label check. The ingestion step refuses loudly if a `tasks` row does
+exist, including its current status; it never overwrites that task. The nested
+discovery and ingestion JSON plus the ingestion event payload record the force
+action for audit.
+
+Example:
+
+```bash
+PYTHONPATH=. .venv/bin/python3 scripts/run_github_issue_one_task_scheduler_tick.py \
+  --repo OWNER/REPO \
+  --db-path /absolute/path/to/state.db \
+  --local-repo-path /absolute/path/to/repo \
+  --artifact-root /absolute/path/to/artifacts \
+  --force-reingest-issue 20 \
+  --confirmed \
+  --json
+```
+
 Example:
 
 ```bash

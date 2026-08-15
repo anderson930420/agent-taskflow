@@ -57,6 +57,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--issue-limit", type=int, default=100)
     parser.add_argument("--include-label", action="append", default=[])
     parser.add_argument("--exclude-label", action="append", default=[])
+    parser.add_argument(
+        "--force-reingest-issue",
+        action="append",
+        type=int,
+        default=[],
+        metavar="N",
+        help=(
+            "Explicitly re-ingest issue N when stale local ingestion residue "
+            "exists without its derived task row. May be repeated."
+        ),
+    )
     parser.add_argument("--lock-path", default=None)
     parser.add_argument("--operator", default=None)
     parser.add_argument("--operator-note", default=None)
@@ -190,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             issue_limit=int(args.issue_limit),
             include_labels=tuple(args.include_label),
             exclude_labels=tuple(args.exclude_label),
+            force_reingest_issue_numbers=tuple(args.force_reingest_issue),
             lock_path=(
                 Path(args.lock_path).expanduser()
                 if args.lock_path is not None
