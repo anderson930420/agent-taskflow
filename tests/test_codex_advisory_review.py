@@ -17,6 +17,7 @@ from agent_taskflow.codex_advisory_review import (
     build_review_prompt,
     detect_evidence,
     generate_codex_advisory_review,
+    parse_codex_command,
     validate_payload,
 )
 
@@ -358,6 +359,11 @@ class CodexAdvisoryConfirmRunTests(unittest.TestCase):
     def test_request_rejects_empty_codex_command(self) -> None:
         with self.assertRaises(ValueError):
             self._request(codex_command="   ")
+
+    def test_default_codex_command_parses_to_headless_exec(self) -> None:
+        self.assertEqual(
+            parse_codex_command(module.DEFAULT_CODEX_COMMAND), ["codex", "exec"]
+        )
 
     # --- invocation behavior ------------------------------------------------
 

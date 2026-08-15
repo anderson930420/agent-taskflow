@@ -53,7 +53,7 @@ GENERATED_ARTIFACT_FILENAMES = (
     MARKDOWN_FILENAME,
 )
 
-DEFAULT_CODEX_COMMAND = "codex"
+DEFAULT_CODEX_COMMAND = "codex exec"
 DEFAULT_TIMEOUT_SECONDS = 300
 
 # Mutable advisory fields Codex output may contribute. Everything else (schema,

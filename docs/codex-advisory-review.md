@@ -130,15 +130,22 @@ agent-taskflow-codex-advisory-review \
   --worktree-path /path/to/worktree \
   --artifact-dir /path/to/artifacts/GH-1234 \
   --confirm-run \
-  --codex-command codex \
   --timeout-seconds 300
 ```
 
 - Dry-run remains the default. The Codex CLI is **never** invoked unless
   `--confirm-run` is explicitly supplied.
-- `--codex-command` (default `codex`) may only be used together with
-  `--confirm-run`. The command is split with `shlex.split` and always run with
-  `shell=False`.
+- `--codex-command` (default `codex exec`) may only be used together with
+  `--confirm-run`. The default uses Codex's headless `exec` mode, which receives
+  the advisory prompt on stdin. The command is split with `shlex.split` and
+  always run with `shell=False`.
+- Sandbox choice is environment-specific and is not part of the default
+  command. For example, a host where bubblewrap user namespaces are unavailable
+  may need this explicit override:
+
+  ```bash
+  --codex-command "codex exec --sandbox danger-full-access"
+  ```
 - `--timeout-seconds` (default `300`) must be a positive integer.
 - The advisory prompt is sent to Codex on stdin. The reviewer captures stdout,
   stderr, exit code, timeout status, and duration.
