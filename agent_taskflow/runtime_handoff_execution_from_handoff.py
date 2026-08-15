@@ -579,20 +579,26 @@ def run_runtime_handoff_execution_from_handoff(
                     raise Level2ExecutionAuthorityError(
                         "Level 2 runtime result did not come from ExecutionEngine"
                     )
-                if authority_summary.get("canonical_attempt_bound") is not True:
-                    raise Level2ExecutionAuthorityError(
-                        "Level 2 runtime result is missing canonical Attempt binding"
+                # A run the engine already refused keeps its own failure
+                # reason. Its reserved Attempt id is still recorded above, so
+                # the evidence says which Attempt the blocked run belonged to —
+                # identification is not authorization, and the binding
+                # requirement below applies only to a successful run.
+                if runner_ok:
+                    if authority_summary.get("canonical_attempt_bound") is not True:
+                        raise Level2ExecutionAuthorityError(
+                            "Level 2 runtime result is missing canonical Attempt binding"
+                        )
+                    if not canonical_attempt_id:
+                        raise Level2ExecutionAuthorityError(
+                            "Level 2 runtime result is missing canonical_attempt_id"
+                        )
+                    verify_canonical_attempt(
+                        db_path=request.db_path,
+                        task_key=request.task_key,
+                        attempt_id=canonical_attempt_id,
                     )
-                if not canonical_attempt_id:
-                    raise Level2ExecutionAuthorityError(
-                        "Level 2 runtime result is missing canonical_attempt_id"
-                    )
-                verify_canonical_attempt(
-                    db_path=request.db_path,
-                    task_key=request.task_key,
-                    attempt_id=canonical_attempt_id,
-                )
-                canonical_attempt_store_verified = True
+                    canonical_attempt_store_verified = True
             except Level2ExecutionAuthorityError as exc:
                 runner_ok = False
                 runner_error = (

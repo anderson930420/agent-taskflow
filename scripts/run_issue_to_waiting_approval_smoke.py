@@ -8,11 +8,15 @@ This smoke proves the full local chain works end-to-end:
   -> queued TaskRecord
   -> Phase 6E Task Execution Package (implementation_prompt.md +
      task_execution_package.json + store artifacts + event)
-  -> Phase 6E+1 explicit queued-task handoff (--confirm-handoff)
-  -> approved_task_runner with INJECTED fake executor and fake
-     validator (no Pi, no OpenCode, no real external AI, no
-     network)
-  -> task reaches waiting_approval
+  -> Phase 6E+1 queued-task handoff verification (package + intake
+     runner handoff preflight)
+  -> one canonical ExecutionEngine invocation, which reserves the
+     Attempt through the runtime-admission claim before the executor
+     starts
+  -> approved_task_runner below the engine, with INJECTED fake
+     executor and fake validator (no Pi, no OpenCode, no real
+     external AI, no network)
+  -> task reaches waiting_approval bound to that Attempt
   -> evidence is recorded in TaskMirrorStore for operator review
 
 This is a local acceptance smoke. It is NOT a scheduler, NOT a
@@ -39,6 +43,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from datetime import datetime, timezone  # noqa: E402
 
+from agent_taskflow.approved_task_runner import run_approved_task  # noqa: E402
 from agent_taskflow.executors.base import (  # noqa: E402
     Executor,
     ExecutorContext,
@@ -63,6 +68,10 @@ from agent_taskflow.queued_task_handoff import (  # noqa: E402
     INTAKE_RUNNER_HANDOFF_RECOMMENDED_COMMAND_KIND,
     QueuedTaskHandoffRequest,
     run_queued_task_handoff,
+)
+from agent_taskflow.scheduler_execution_engine_authority import (  # noqa: E402
+    DirectRuntimeHandoffAuthorityRequest,
+    SchedulerExecutionEngineAuthority,
 )
 from agent_taskflow.store import TaskMirrorStore  # noqa: E402
 from agent_taskflow.task_execution_package import (  # noqa: E402
@@ -476,6 +485,88 @@ def _write_smoke_intake_runner_handoff_pair(
     return handoff_path
 
 
+def _execute_through_canonical_engine(
+    *,
+    paths: _ChainPaths,
+    task_key: str,
+    base_branch: str,
+    handoff_artifact_path: Path,
+    package_view: dict[str, Any],
+    handoff_view: dict[str, Any],
+) -> dict[str, Any]:
+    """Cross the runtime boundary exactly once, through engine authority.
+
+    The injected fakes stay below the real ``run_approved_task``; the engine
+    supplies the canonical runtime store, so the Attempt is reserved by the
+    runtime-admission claim before the executor starts.
+    """
+
+    runner_result: dict[str, Any] = {}
+
+    def runner(**kwargs: Any) -> dict[str, Any]:
+        nonlocal runner_result
+        result = run_approved_task(
+            kwargs["approved_task_request"],
+            store=kwargs.get("store"),
+            executor_registry={EXECUTOR_NAME: FakeLocalSmokeExecutor()},
+            validator_registry={VALIDATOR_NAME: FakeLocalSmokeValidator()},
+        )
+        runner_result = result.to_dict()
+        return runner_result
+
+    authority = SchedulerExecutionEngineAuthority(
+        DirectRuntimeHandoffAuthorityRequest(
+            repo=DEFAULT_REPO,
+            db_path=paths.db_path,
+            local_repo_path=paths.repo_path,
+            artifact_root=paths.artifact_root,
+            executor=EXECUTOR_NAME,
+            validators=(VALIDATOR_NAME,),
+            worktree_root=paths.worktree_root,
+            base_branch=base_branch,
+            approved_task_preflight=False,
+        ),
+        approved_task_runner_fn=runner,
+    )
+    payload = authority.execute_from_runtime_handoff(
+        task_key=task_key,
+        handoff={
+            "handoff_artifact_path": str(handoff_artifact_path),
+            "verifier_report_artifact_path": handoff_view.get(
+                "verifier_report_artifact_path"
+            ),
+        },
+        handoff_id=handoff_view.get("handoff_id"),
+        runtime_execution_id=f"issue-waiting-approval-{task_key}",
+    )
+    summary = payload.get("summary") or {}
+    runner_safety = runner_result.get("safety") or {}
+    return {
+        "ok": payload.get("ok") is True,
+        "status": payload.get("status"),
+        "phase": payload.get("phase"),
+        "executor": EXECUTOR_NAME,
+        "error": payload.get("error"),
+        "package": package_view,
+        "handoff": handoff_view,
+        "runner_result": runner_result,
+        "safety": {
+            "approved_task_runner_started": bool(runner_result),
+            "executor_started": runner_safety.get("executor_started") is True,
+            "validators_started": runner_safety.get("validators_started") is True,
+            "workspace_prepared": runner_safety.get("workspace_prepared") is True,
+        },
+        "runtime": {
+            "execution_authority": summary.get("execution_authority"),
+            "canonical_attempt_bound": summary.get("canonical_attempt_bound"),
+            "canonical_attempt_id": summary.get("canonical_attempt_id"),
+            "canonical_attempt_store_verified": summary.get(
+                "canonical_attempt_store_verified"
+            ),
+        },
+    }
+
+
 # --------------------------------------------------------------------- main flow
 
 
@@ -597,10 +688,11 @@ def run_smoke(
         f"codex advisory review json missing: {codex_review_result.json_path}",
     )
 
-    # 4. Phase 6E+1 explicit handoff to approved_task_runner, with injected
-    #    fake executor and fake validator. preflight=False keeps the smoke
-    #    hermetic (no real Pi/OpenCode/pytest check).
-    handoff_result = run_queued_task_handoff(
+    # 4. Verify the Phase 6E+1 package and intake-runner handoff binding with
+    #    the real preflight, in preview mode. A freshly intaken task is Level 2,
+    #    so the confirmed queued-handoff entrypoint deliberately fails closed
+    #    for it: the runtime boundary below is the canonical ExecutionEngine.
+    handoff_preview = run_queued_task_handoff(
         QueuedTaskHandoffRequest(
             task_key=task_key,
             executor=EXECUTOR_NAME,
@@ -611,18 +703,36 @@ def run_smoke(
             base_branch=base_branch,
             validators=(VALIDATOR_NAME,),
             preflight=False,
-            dry_run=False,
-            confirm_handoff=True,
+            dry_run=True,
+            confirm_handoff=False,
             intake_runner_handoff_artifact_path=handoff_artifact_path,
         ),
         store=store,
-        executor_registry={EXECUTOR_NAME: FakeLocalSmokeExecutor()},
-        validator_registry={VALIDATOR_NAME: FakeLocalSmokeValidator()},
-    )
-    handoff_dict = handoff_result.to_dict()
+    ).to_dict()
     _require(
-        handoff_dict["package"]["verified"] is True,
+        handoff_preview["ok"] is True,
+        f"handoff preflight was not ok: {handoff_preview.get('error')}",
+    )
+    _require(
+        handoff_preview["package"]["verified"] is True,
         "handoff did not verify the task execution package",
+    )
+    _require(
+        handoff_preview["safety"]["approved_task_runner_started"] is False,
+        "handoff preview must not start the approved task runner",
+    )
+
+    # 4b. One canonical ExecutionEngine invocation. The real approved task
+    #     runner stays below the engine with an injected fake executor and fake
+    #     validator (no Pi, no OpenCode, no real external AI, no network);
+    #     preflight=False keeps the smoke hermetic.
+    handoff_dict = _execute_through_canonical_engine(
+        paths=paths,
+        task_key=task_key,
+        base_branch=base_branch,
+        handoff_artifact_path=handoff_artifact_path,
+        package_view=handoff_preview["package"],
+        handoff_view=handoff_preview["handoff"],
     )
     _require(
         handoff_dict["safety"]["approved_task_runner_started"] is True,
@@ -635,6 +745,18 @@ def run_smoke(
     _require(
         handoff_dict["status"] == APPROVED_TASK_STATUS,
         f"handoff status {handoff_dict['status']!r} != {APPROVED_TASK_STATUS!r}",
+    )
+    _require(
+        handoff_dict["runtime"]["execution_authority"] == "execution_engine",
+        "execution did not cross the canonical ExecutionEngine authority",
+    )
+    _require(
+        handoff_dict["runtime"]["canonical_attempt_bound"] is True,
+        "execution did not bind the canonical Attempt reserved for it",
+    )
+    _require(
+        bool(handoff_dict["runtime"]["canonical_attempt_id"]),
+        "execution did not report a canonical Attempt id",
     )
 
     # 4. Store readback verifies waiting_approval and recorded evidence.
@@ -696,6 +818,9 @@ def run_smoke(
             "executor_started": handoff_dict["safety"]["executor_started"],
             "workspace_prepared": handoff_dict["safety"]["workspace_prepared"],
         },
+        "execution_authority": handoff_dict["runtime"]["execution_authority"],
+        "canonical_attempt_id": handoff_dict["runtime"]["canonical_attempt_id"],
+        "canonical_attempt_bound": handoff_dict["runtime"]["canonical_attempt_bound"],
         "runner_summary": {
             "status": runner_result.get("status"),
             "phase": runner_result.get("phase"),

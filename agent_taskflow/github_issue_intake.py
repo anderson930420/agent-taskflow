@@ -245,7 +245,7 @@ def _write_selected_issue(
             f"Task already exists for selected issue: {task_key}"
         )
 
-    store.upsert_task(
+    store.upsert_task_with_level2_identity(
         TaskRecord(
             task_key=task_key,
             project=_project_from_repo(repo),

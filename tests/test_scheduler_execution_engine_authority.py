@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from agent_taskflow.attempt_store import AttemptStore
+from agent_taskflow.canonical_runtime_path import CanonicalRuntimeTaskStore
 from agent_taskflow.execution_engine_approved_task_adapter import (
     ApprovedTaskRunnerExecutionEngineAdapter,
 )
@@ -342,20 +344,22 @@ class AdapterCanonicalAttemptBindingTests(unittest.TestCase):
 
     def test_adapter_binds_exact_new_canonical_attempt(self) -> None:
         approved_requests: list[Any] = []
+        runtime_stores: list[Any] = []
 
-        def canonical_runner(request: Any) -> dict[str, Any]:
+        def canonical_runner(request: Any, *, store: Any = None) -> dict[str, Any]:
             approved_requests.append(request)
-            attempt = self.attempts.create_attempt(
+            runtime_stores.append(store)
+            # The engine supplies the canonical runtime store; taking the claim
+            # through it is what reserves the Attempt this run belongs to.
+            store.update_task_status(
                 request.task_key,
-                executor=request.executor,
+                "preparing",
+                source="m1c_test",
             )
-            self.attempts.close_attempt(
-                attempt.attempt_id,
-                status="waiting_approval",
-                reason_code="m1c_test_complete",
-                actor="m1c_test",
-                execution_result="completed",
-                validation_result="passed",
+            store.update_task_status(
+                request.task_key,
+                "waiting_approval",
+                source="m1c_test",
             )
             return {
                 "ok": True,
@@ -375,7 +379,17 @@ class AdapterCanonicalAttemptBindingTests(unittest.TestCase):
         self.assertEqual(len(approved_requests), 1)
         self.assertEqual(approved_requests[0].db_path, self.db_path)
         self.assertTrue(approved_requests[0].confirm_approved_task)
+        self.assertIsInstance(runtime_stores[0], CanonicalRuntimeTaskStore)
         self.assertTrue(result.metadata["canonical_attempt_bound"])
+        self.assertTrue(result.metadata["canonical_attempt_reserved"])
+        # The bound id is the one reserved before the run, not one recovered
+        # by diffing the Attempt table afterwards.
+        reserved = runtime_stores[0].reserved_runtime_claim(TASK_KEY)
+        self.assertIsNotNone(reserved)
+        assert reserved is not None
+        self.assertEqual(
+            result.metadata["canonical_attempt_id"], reserved.attempt_id
+        )
         attempt = self.attempts.get_attempt(
             str(result.metadata["canonical_attempt_id"])
         )
@@ -384,6 +398,172 @@ class AdapterCanonicalAttemptBindingTests(unittest.TestCase):
         self.assertFalse(attempt.is_active)
         self.assertFalse(attempt.is_legacy)
         self.assertEqual(attempt.validation_result, "passed")
+
+    def test_adapter_reports_reserved_attempt_for_blocked_run(self) -> None:
+        runtime_stores: list[Any] = []
+
+        def blocked_runner(request: Any, *, store: Any = None) -> dict[str, Any]:
+            runtime_stores.append(store)
+            store.update_task_status(
+                request.task_key,
+                "preparing",
+                source="m1c_test",
+            )
+            store.update_task_status(
+                request.task_key,
+                "blocked",
+                source="m1c_test",
+                blocked_reason="codex_advisory_evidence",
+            )
+            return {
+                "ok": False,
+                "status": "blocked",
+                "phase": "codex_advisory_evidence",
+                "safety": {"executor_started": True, "validators_started": False},
+            }
+
+        result = ApprovedTaskRunnerExecutionEngineAdapter(
+            approved_task_runner=blocked_runner
+        ).execute(self.request())
+
+        reserved = runtime_stores[0].reserved_runtime_claim(TASK_KEY)
+        self.assertIsNotNone(reserved)
+        assert reserved is not None
+        self.assertFalse(result.ok)
+        # Identification is not authorization: the blocked run names its
+        # Attempt but is never reported as bound.
+        self.assertEqual(
+            result.metadata["canonical_attempt_id"], reserved.attempt_id
+        )
+        self.assertTrue(result.metadata["canonical_attempt_reserved"])
+        self.assertFalse(result.metadata["canonical_attempt_bound"])
+        self.assertEqual(result.metadata["execution_authority"], "execution_engine")
+        self.assertFalse(result.metadata["legacy_fallback_allowed"])
+
+    def test_adapter_rejects_attempt_it_did_not_reserve(self) -> None:
+        def foreign_attempt_runner(request: Any, *, store: Any = None) -> dict[str, Any]:
+            # An Attempt created outside the reserved runtime claim must never
+            # be accepted as this execution's canonical binding.
+            attempt = self.attempts.create_attempt(
+                request.task_key,
+                executor=request.executor,
+            )
+            self.attempts.close_attempt(
+                attempt.attempt_id,
+                status="waiting_approval",
+                reason_code="m1c_test_complete",
+                actor="m1c_test",
+                execution_result="completed",
+                validation_result="passed",
+            )
+            return {
+                "ok": True,
+                "status": "waiting_approval",
+                "phase": "waiting_approval",
+                "safety": {"executor_started": True, "validators_started": True},
+            }
+
+        result = ApprovedTaskRunnerExecutionEngineAdapter(
+            approved_task_runner=foreign_attempt_runner
+        ).execute(self.request())
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.metadata["canonical_attempt_bound"])
+        self.assertFalse(result.metadata["canonical_attempt_reserved"])
+        self.assertIsNone(result.metadata["canonical_attempt_id"])
+        self.assertIn(
+            "did not bind the canonical Attempt reserved for it",
+            str(result.metadata["contract_error"]),
+        )
+
+    def test_adapter_rejects_a_reserved_attempt_that_never_closed(self) -> None:
+        # The runner claims (reserving the Attempt) but reports success without
+        # releasing it. A still-active Attempt is not a valid binding.
+        def non_terminal_runner(request: Any, *, store: Any = None) -> dict[str, Any]:
+            store.update_task_status(
+                request.task_key,
+                "preparing",
+                source="m1c_test",
+            )
+            return {
+                "ok": True,
+                "status": "waiting_approval",
+                "safety": {"executor_started": True, "validators_started": True},
+            }
+
+        result = ApprovedTaskRunnerExecutionEngineAdapter(
+            approved_task_runner=non_terminal_runner
+        ).execute(self.request())
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.metadata["canonical_attempt_bound"])
+        # The Attempt is still identified, it is simply not authorized.
+        self.assertTrue(result.metadata["canonical_attempt_reserved"])
+        self.assertTrue(result.metadata["canonical_attempt_id"])
+
+    def test_adapter_rejects_a_reserved_attempt_from_another_task(self) -> None:
+        other_key = "AT-GH-OTHER-TASK"
+        self.store.upsert_task(
+            TaskRecord(
+                task_key=other_key,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                title="Another task",
+                status="queued",
+                repo_path=self.repo,
+                artifact_dir=self.artifacts,
+            )
+        )
+        foreign = self.attempts.create_attempt(other_key, executor="noop")
+        self.attempts.close_attempt(
+            foreign.attempt_id,
+            status="waiting_approval",
+            reason_code="m1c_test_complete",
+            actor="m1c_test",
+            execution_result="completed",
+            validation_result="passed",
+        )
+
+        def canonical_runner(request: Any, *, store: Any = None) -> dict[str, Any]:
+            store.update_task_status(request.task_key, "preparing", source="m1c_test")
+            store.update_task_status(
+                request.task_key, "waiting_approval", source="m1c_test"
+            )
+            return {
+                "ok": True,
+                "status": "waiting_approval",
+                "safety": {"executor_started": True, "validators_started": True},
+            }
+
+        with mock.patch.object(
+            ApprovedTaskRunnerExecutionEngineAdapter,
+            "_reserved_attempt_id",
+            staticmethod(lambda store, task_key: foreign.attempt_id),
+        ):
+            result = ApprovedTaskRunnerExecutionEngineAdapter(
+                approved_task_runner=canonical_runner
+            ).execute(self.request())
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.metadata["canonical_attempt_bound"])
+        self.assertIn(
+            "did not bind the canonical Attempt reserved for it",
+            str(result.metadata["contract_error"]),
+        )
+
+    def test_adapter_engine_exception_blocks_without_legacy_fallback(self) -> None:
+        def exploding_runner(request: Any, *, store: Any = None) -> dict[str, Any]:
+            raise RuntimeError("runner exploded")
+
+        result = ApprovedTaskRunnerExecutionEngineAdapter(
+            approved_task_runner=exploding_runner
+        ).execute(self.request())
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(result.metadata["canonical_attempt_bound"])
+        self.assertFalse(result.metadata["legacy_fallback_allowed"])
+        self.assertEqual(result.metadata["error_type"], "RuntimeError")
 
     def test_adapter_rejects_success_without_new_attempt(self) -> None:
         calls: list[Any] = []

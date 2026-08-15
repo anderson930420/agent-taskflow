@@ -14,7 +14,7 @@ value is accepted only through ``ExecutionEngineResult`` and a successful Level
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +54,49 @@ SCHEDULER_EXECUTION_ENGINE_AUTHORITY_SOURCE = (
 EFFECTIVE_AUTHORITY_EXECUTION_ENGINE = "execution_engine"
 
 
+@dataclass(frozen=True)
+class DirectRuntimeHandoffAuthorityRequest:
+    """Engine-authority inputs for a canonical caller outside the tick.
+
+    ``SchedulerExecutionEngineAuthority`` reads its scheduler request purely by
+    attribute. A caller that reaches the same runtime handoff without a
+    scheduler tick — the one-task automation path, and local golden-path
+    smokes — supplies this typed value instead of an ad-hoc namespace, so the
+    fields the request builder consumes stay explicit and validated.
+    """
+
+    repo: str
+    db_path: Path
+    local_repo_path: Path
+    artifact_root: Path
+    executor: str | None = None
+    model: str | None = None
+    provider: str | None = None
+    tools: tuple[str, ...] = ()
+    pi_bin: str | None = None
+    command: tuple[str, ...] | None = None
+    validators: tuple[str, ...] = ()
+    worktree_root: Path | None = None
+    base_branch: str = "main"
+    approved_task_preflight: bool = False
+    operator: str | None = None
+    operator_note: str | None = None
+    use_execution_engine: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("db_path", "local_repo_path", "artifact_root"):
+            value = Path(getattr(self, name)).expanduser()
+            if not value.is_absolute():
+                raise ValueError(f"{name} must be absolute: {value}")
+            object.__setattr__(self, name, value)
+        if self.worktree_root is not None:
+            object.__setattr__(self, "worktree_root", Path(self.worktree_root))
+        object.__setattr__(self, "tools", tuple(self.tools or ()))
+        object.__setattr__(self, "validators", tuple(self.validators or ()))
+        base_branch = str(self.base_branch or "").strip() or "main"
+        object.__setattr__(self, "base_branch", base_branch)
+
+
 class SchedulerExecutionEngineAuthority:
     """Stateful one-tick bridge from runtime handoff to one engine call."""
 
@@ -86,15 +129,21 @@ class SchedulerExecutionEngineAuthority:
     @staticmethod
     def _runner_delegate(
         runner: Callable[..., Any],
-    ) -> Callable[[Any], Any]:
-        """Adapt the historical injected test hook below engine authority."""
+    ) -> Callable[..., Any]:
+        """Adapt the historical injected test hook below engine authority.
 
-        def delegate(request: Any) -> Any:
+        ``store`` is the canonical runtime store the engine reserved the
+        Attempt through. An injected runner that persists runtime evidence must
+        use it, otherwise its executor start carries no runtime claim.
+        """
+
+        def delegate(request: Any, *, store: Any = None) -> Any:
             return runner(
                 task_key=request.task_key,
                 approved_task_request=request,
                 db_path=request.db_path,
                 artifact_root=request.artifact_root,
+                store=store,
             )
 
         return delegate
@@ -375,6 +424,7 @@ class SchedulerExecutionEngineAuthority:
 
 
 __all__ = [
+    "DirectRuntimeHandoffAuthorityRequest",
     "EFFECTIVE_AUTHORITY_EXECUTION_ENGINE",
     "SCHEDULER_EXECUTION_ENGINE_AUTHORITY_SCHEMA_VERSION",
     "SCHEDULER_EXECUTION_ENGINE_AUTHORITY_SOURCE",

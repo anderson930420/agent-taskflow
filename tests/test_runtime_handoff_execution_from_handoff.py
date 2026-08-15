@@ -13,8 +13,11 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SMOKE_SCRIPT = REPO_ROOT / "scripts" / "run_minimal_runtime_handoff_execution_smoke.py"
 
+from agent_taskflow.level2_execution_authority import ensure_level2_task_identity
 from agent_taskflow.runtime_handoff_execution_from_handoff import (
     HANDOFF_CONSUMED_EVENT_TYPE,
+    REASON_LEVEL2_CANONICAL_ATTEMPT_INVALID,
+    REASON_LEVEL2_ENGINE_AUTHORITY_REQUIRED,
     RUNTIME_EXECUTION_ARTIFACT_TYPE,
     RUNTIME_FINISHED_EVENT_TYPE,
     RUNTIME_PREFLIGHT_EVENT_TYPE,
@@ -23,6 +26,10 @@ from agent_taskflow.runtime_handoff_execution_from_handoff import (
     RuntimeHandoffExecutionRequest,
     check_runtime_handoff_preflight,
     run_runtime_handoff_execution_from_handoff,
+)
+from agent_taskflow.scheduler_execution_engine_authority import (
+    DirectRuntimeHandoffAuthorityRequest,
+    SchedulerExecutionEngineAuthority,
 )
 from agent_taskflow.store import TaskMirrorStore
 
@@ -436,6 +443,162 @@ class RuntimeHandoffExecutionTests(unittest.TestCase):
             "import subprocess",
         ):
             self.assertNotIn(forbidden, source, f"unexpected import: {forbidden}")
+
+
+class Level2FirstRunEvidenceTests(unittest.TestCase):
+    """A task's first run is already Level 2, so the guards must be live."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workspace = Path(self._tmp.name)
+        self.task_key = "AT-L6A-LEVEL2-FIRST-RUN"
+        self.seeded = _seed_to_handoff(self.workspace, self.task_key)
+        # A task created through any ingestion path is canonical from the
+        # moment it is persisted; promote the seeded task to that same state.
+        ensure_level2_task_identity(self.seeded["db_path"], self.task_key)
+
+    def _authority(self, runner: Any) -> Any:
+        return SchedulerExecutionEngineAuthority(
+            DirectRuntimeHandoffAuthorityRequest(
+                repo="anderson930420/agent-taskflow",
+                db_path=self.seeded["db_path"],
+                local_repo_path=self.workspace / "repo",
+                artifact_root=self.seeded["artifact_root"],
+                executor="noop",
+            ),
+            approved_task_runner_fn=runner,
+        )
+
+    def _runtime_artifact(self) -> dict[str, Any]:
+        artifacts = [
+            record
+            for record in self.seeded["store"].list_task_artifacts(self.task_key)
+            if record.artifact_type == RUNTIME_EXECUTION_ARTIFACT_TYPE
+        ]
+        self.assertEqual(len(artifacts), 1, artifacts)
+        return json.loads(artifacts[0].path.read_text(encoding="utf-8"))
+
+    def test_first_run_rejects_a_non_authority_callback(self) -> None:
+        runner = _FakeRunner()
+
+        payload = run_runtime_handoff_execution_from_handoff(
+            _make_request(
+                self.seeded,
+                dry_run=False,
+                confirm_run_approved_task_runner=True,
+            ),
+            approved_task_runner_fn=runner,
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            REASON_LEVEL2_ENGINE_AUTHORITY_REQUIRED,
+            payload["reasons"],
+        )
+        self.assertEqual(runner.calls, 0)
+
+    def test_first_run_evidence_records_the_engine_authority_and_attempt(
+        self,
+    ) -> None:
+        def runner(**kwargs: Any) -> dict[str, Any]:
+            store = kwargs["store"]
+            task_key = kwargs["task_key"]
+            store.update_task_status(task_key, "preparing", source="l6a_test")
+            store.update_task_status(task_key, "waiting_approval", source="l6a_test")
+            return {
+                "ok": True,
+                "status": "waiting_approval",
+                "phase": "waiting_approval",
+                "safety": {"executor_started": True, "validators_started": True},
+            }
+
+        payload = run_runtime_handoff_execution_from_handoff(
+            _make_request(
+                self.seeded,
+                dry_run=False,
+                confirm_run_approved_task_runner=True,
+            ),
+            approved_task_runner_fn=self._authority(runner).execute_from_runtime_handoff,
+        )
+
+        self.assertTrue(payload["ok"], payload)
+        artifact = self._runtime_artifact()
+        # The regression this closes: these were null on every first run.
+        self.assertEqual(artifact["execution_authority"], "execution_engine")
+        self.assertTrue(artifact["canonical_attempt_id"])
+        self.assertTrue(artifact["canonical_attempt_bound"])
+        self.assertTrue(artifact["canonical_attempt_store_verified"])
+
+    def test_blocked_first_run_identifies_its_attempt_without_binding_it(
+        self,
+    ) -> None:
+        def blocked_runner(**kwargs: Any) -> dict[str, Any]:
+            store = kwargs["store"]
+            task_key = kwargs["task_key"]
+            store.update_task_status(task_key, "preparing", source="l6a_test")
+            store.update_task_status(
+                task_key,
+                "blocked",
+                source="l6a_test",
+                blocked_reason="codex_advisory_evidence",
+            )
+            return {
+                "ok": False,
+                "status": "blocked",
+                "phase": "codex_advisory_evidence",
+                "error": "codex advisory evidence is required",
+                "safety": {"executor_started": True, "validators_started": False},
+            }
+
+        payload = run_runtime_handoff_execution_from_handoff(
+            _make_request(
+                self.seeded,
+                dry_run=False,
+                confirm_run_approved_task_runner=True,
+            ),
+            approved_task_runner_fn=self._authority(
+                blocked_runner
+            ).execute_from_runtime_handoff,
+        )
+
+        self.assertFalse(payload["ok"])
+        artifact = self._runtime_artifact()
+        self.assertEqual(artifact["execution_authority"], "execution_engine")
+        # Identification survives a blocked run; authorization does not.
+        self.assertTrue(artifact["canonical_attempt_id"])
+        self.assertFalse(artifact["canonical_attempt_bound"])
+        self.assertFalse(artifact["canonical_attempt_store_verified"])
+        # The engine's own reason is preserved, not replaced by a binding
+        # complaint that would hide why the run stopped.
+        self.assertNotIn(
+            REASON_LEVEL2_CANONICAL_ATTEMPT_INVALID,
+            str(artifact["runner_error"]),
+        )
+
+    def test_legacy_task_retains_its_historical_first_run_behaviour(self) -> None:
+        legacy_key = "AT-L6A-LEGACY-FIRST-RUN"
+        seeded = _seed_to_handoff(self.workspace / "legacy", legacy_key)
+        runner = _FakeRunner()
+
+        payload = run_runtime_handoff_execution_from_handoff(
+            _make_request(
+                seeded,
+                dry_run=False,
+                confirm_run_approved_task_runner=True,
+            ),
+            approved_task_runner_fn=runner,
+        )
+
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(runner.calls, 1)
+        artifacts = [
+            record
+            for record in seeded["store"].list_task_artifacts(legacy_key)
+            if record.artifact_type == RUNTIME_EXECUTION_ARTIFACT_TYPE
+        ]
+        artifact = json.loads(artifacts[0].path.read_text(encoding="utf-8"))
+        self.assertIsNone(artifact["execution_authority"])
 
 
 if __name__ == "__main__":
