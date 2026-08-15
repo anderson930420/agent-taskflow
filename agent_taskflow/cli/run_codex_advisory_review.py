@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from agent_taskflow.codex_advisory_review import (
+    DEFAULT_CODEX_COMMAND,
     DEFAULT_TIMEOUT_SECONDS,
     CodexAdvisoryReviewError,
     CodexAdvisoryReviewRequest,
@@ -61,7 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-command",
         default=None,
         help=(
-            "Codex CLI command (default: codex). Only used with --confirm-run."
+            "Codex CLI command (default: codex exec). Only used with "
+            "--confirm-run."
         ),
     )
     parser.add_argument(
@@ -92,7 +94,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     confirm_run = bool(args.confirm_run)
-    codex_command = args.codex_command if args.codex_command is not None else "codex"
+    codex_command = (
+        args.codex_command
+        if args.codex_command is not None
+        else DEFAULT_CODEX_COMMAND
+    )
 
     try:
         request = CodexAdvisoryReviewRequest(

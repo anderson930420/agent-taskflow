@@ -167,6 +167,7 @@ class RunCodexAdvisoryReviewScriptTests(unittest.TestCase):
                 rc = self.cli.main([*self.base_args(), "--confirm-run"])
         self.assertEqual(rc, 0)
         run_mock.assert_called_once()
+        self.assertEqual(run_mock.call_args.args[0], ["codex", "exec"])
         self.assertIs(run_mock.call_args.kwargs["shell"], False)
         payload = json.loads(
             (self.artifact_dir / "codex-advisory-review.json").read_text(encoding="utf-8")
