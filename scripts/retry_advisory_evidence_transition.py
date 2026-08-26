@@ -16,31 +16,7 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
-import types
 from typing import Sequence
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_ROOT = REPO_ROOT / "agent_taskflow"
-
-
-def _bootstrap_source_package_without_runtime_imports() -> None:
-    """Expose package submodules without executing runtime-heavy ``__init__``.
-
-    This recovery command is a SQLite/artifact operator utility and must remain
-    runnable from a source checkout that has no application dependencies
-    installed, matching ``scripts/reset_task_status.py``.
-    """
-
-    if "agent_taskflow" in sys.modules:
-        return
-    package = types.ModuleType("agent_taskflow")
-    package.__file__ = str(PACKAGE_ROOT / "__init__.py")
-    package.__package__ = "agent_taskflow"
-    package.__path__ = [str(PACKAGE_ROOT)]
-    sys.modules["agent_taskflow"] = package
-
-
-_bootstrap_source_package_without_runtime_imports()
 
 from agent_taskflow.advisory_evidence_retry import (  # noqa: E402
     AdvisoryEvidenceRetryError,
@@ -71,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db-path",
         type=Path,
-        help="SQLite state DB path (default: TaskMirrorStore default)",
+        help="SQLite state DB path (default: agent-taskflow state DB)",
     )
     parser.add_argument(
         "--artifact-dir",

@@ -70,6 +70,7 @@ RUNTIME_REASON_CODES = frozenset(
         "runtime_internal_error",
         "runtime_governance_blocked",
         "attempt_resource_allocation_failed",
+        "advisory_evidence_retry_recovered",
     }
 )
 
