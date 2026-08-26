@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -142,7 +143,7 @@ _MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (
 
 def init_db(path: str | Path | None = None) -> None:
     """Initialize the mirror database. Safe to run repeatedly."""
-    with connect(path) as conn:
+    with closing(connect(path)) as conn, conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -304,7 +305,7 @@ class TaskMirrorStore:
         *,
         preserve_existing_status: bool = True,
     ) -> None:
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             self._upsert_task_in_connection(
                 conn,
                 record,
@@ -339,7 +340,7 @@ class TaskMirrorStore:
         )
 
         AttemptStore(self.db_path).init_db()
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT 1 FROM tasks WHERE task_key = ?",
@@ -444,7 +445,7 @@ class TaskMirrorStore:
         )
 
     def get_task(self, task_key: str) -> TaskRecord | None:
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             row = conn.execute(
                 """
                 SELECT *
@@ -477,7 +478,7 @@ class TaskMirrorStore:
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 f"""
                 SELECT *
@@ -492,7 +493,7 @@ class TaskMirrorStore:
 
     def list_projects(self) -> list[dict[str, Any]]:
         """Return distinct projects represented in the local task mirror."""
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 """
                 SELECT
@@ -550,7 +551,7 @@ class TaskMirrorStore:
                 f"%{_escape_like_pattern(marker)}%" for marker in payload_markers
             )
 
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 f"""
                 SELECT *
@@ -672,7 +673,7 @@ class TaskMirrorStore:
         placeholders = ", ".join("?" for _ in runtime_event_types)
         params: list[Any] = [task_key, *runtime_event_types]
 
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 f"""
                 SELECT id, task_key, event_type, source, message,
@@ -831,7 +832,7 @@ class TaskMirrorStore:
             where_clause += " AND status = ?"
             update_params += (validated_expected_status,)
 
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             cursor = conn.execute(
                 f"""
                 UPDATE tasks
@@ -933,7 +934,7 @@ class TaskMirrorStore:
             created_at=utc_now_iso(),
         )
 
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             conn.execute(
                 """
                 INSERT INTO task_events (
@@ -1171,7 +1172,7 @@ class TaskMirrorStore:
         )
 
     def list_task_events(self, task_key: str) -> list[TaskEventRecord]:
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 """
                 SELECT *
@@ -1197,7 +1198,7 @@ class TaskMirrorStore:
             created_at=utc_now_iso(),
         )
 
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             conn.execute(
                 """
                 INSERT INTO task_artifacts (
@@ -1217,7 +1218,7 @@ class TaskMirrorStore:
             )
 
     def list_task_artifacts(self, task_key: str) -> list[TaskArtifactRecord]:
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 """
                 SELECT *
@@ -1234,7 +1235,7 @@ class TaskMirrorStore:
         now = utc_now_iso()
         created_at = record.created_at or now
 
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             conn.execute(
                 """
                 INSERT INTO task_worktrees (
@@ -1272,7 +1273,7 @@ class TaskMirrorStore:
             )
 
     def get_task_worktree(self, task_key: str) -> TaskWorktreeRecord | None:
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             row = conn.execute(
                 """
                 SELECT *
@@ -1305,7 +1306,7 @@ class TaskMirrorStore:
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
-        with connect(self.db_path) as conn:
+        with closing(connect(self.db_path)) as conn, conn:
             rows = conn.execute(
                 f"""
                 SELECT task_worktrees.*

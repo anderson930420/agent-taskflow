@@ -27,21 +27,30 @@ The core semantic is::
 
 Contract validation is never reimplemented here: precondition (c) delegates to
 ``check_required_codex_advisory_evidence``, so the advisory artifact must
-satisfy exactly the same contract the runner requires. This module only reads
-files and the local SQLite mirror. It never invokes Codex, runs a subprocess,
-approves, merges, pushes, creates PRs, cleans up, deletes branches or
-worktrees, mutates approval records, or reserves a new Attempt. Reaching
-``waiting_approval`` is not approval; human final approval is always required.
+satisfy exactly the same contract the runner requires. Dry-run and all
+precondition reads open SQLite read-only. A confirmed transition is delegated
+to the canonical engine-authorized runtime store, which atomically changes the
+Task, its existing closed Attempt, and the audit events. This module never
+invokes Codex, runs a subprocess, approves, merges, pushes, creates PRs,
+cleans up, deletes branches or worktrees, mutates approval records, or reserves
+a new Attempt. Reaching ``waiting_approval`` is not approval; human final
+approval is always required.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_taskflow import canonical_runtime_path
+from agent_taskflow.advisory_evidence_retry_authority import (
+    advisory_evidence_retry_engine_authority,
+)
 from agent_taskflow.codex_advisory_evidence_gate import (
     REQUIREMENT_NAME,
     RequiredCodexAdvisoryEvidenceRequest,
@@ -49,8 +58,15 @@ from agent_taskflow.codex_advisory_evidence_gate import (
     check_required_codex_advisory_evidence,
 )
 from agent_taskflow.codex_advisory_review import detect_evidence
-from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.lifecycle_control_schema import (
+    ADVISORY_EVIDENCE_RETRY_RECOVERED_REASON,
+)
+from agent_taskflow.runtime_admission import RuntimeAdmissionError
+from agent_taskflow.store import default_db_path
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.validator_process_runtime_path import (
+    ValidatorProcessRuntimeTaskStore,
+)
 
 
 RETRY_FROM_STATUS = "blocked"
@@ -59,6 +75,7 @@ RETRY_REASON = "advisory_evidence_retry"
 RETRY_SOURCE = "advisory_evidence_retry_cli"
 RETRY_EVENT_TYPE = "note"
 RETRY_AUDIT_KIND = "advisory_evidence_retry"
+RETRY_ATTEMPT_REASON = ADVISORY_EVIDENCE_RETRY_RECOVERED_REASON
 
 PYTEST_LOG_FILENAME = "pytest.log"
 PYTEST_LAUNCH_SPEC_FILENAME = "validator-launch-spec-pytest.json"
@@ -150,6 +167,31 @@ class PreconditionCheck:
 
 
 @dataclass(frozen=True)
+class _CanonicalAttemptBinding:
+    """Read-only snapshot of the closed Attempt being recovered."""
+
+    task_id: str
+    attempt_id: str
+    status: str
+    is_active: bool
+    is_legacy: bool
+    ended_at: str | None
+    artifact_root: Path | None
+
+    def planned_update(self) -> dict[str, Any]:
+        return {
+            "attempt_id": self.attempt_id,
+            "from_status": self.status,
+            "to_status": RETRY_TO_STATUS,
+            "execution_result": "completed",
+            "validation_result": "passed",
+            "lifecycle_reason_code": RETRY_ATTEMPT_REASON,
+            "is_active": self.is_active,
+            "ended_at": self.ended_at,
+        }
+
+
+@dataclass(frozen=True)
 class AdvisoryEvidenceRetryResult:
     """Structured dry-run report or performed-transition result."""
 
@@ -167,6 +209,7 @@ class AdvisoryEvidenceRetryResult:
     mutated: bool
     audit_event_recorded: bool
     codex_advisory_evidence: dict[str, Any]
+    attempt_update: dict[str, Any] | None
 
     @property
     def ok(self) -> bool:
@@ -193,6 +236,9 @@ class AdvisoryEvidenceRetryResult:
             "mutated": self.mutated,
             "audit_event_recorded": self.audit_event_recorded,
             "codex_advisory_evidence": dict(self.codex_advisory_evidence),
+            "attempt_update": (
+                dict(self.attempt_update) if self.attempt_update is not None else None
+            ),
             "ok": self.ok,
             "requires_human_review": True,
             "not_approval": True,
@@ -257,41 +303,178 @@ def summarize_pytest_log(log_path: Path) -> tuple[bool, str | None, str | None]:
     return True, summary_line, None
 
 
-def _check_task_status(
-    store: TaskMirrorStore, task_key: str
-) -> tuple[PreconditionCheck, str | None]:
-    task = store.get_task(task_key)
-    if task is None:
-        return (
-            PreconditionCheck(
-                name=CHECK_TASK_BLOCKED,
-                satisfied=False,
-                summary=f"Task {task_key} was not found in the state DB",
-                details={"task_found": False, "observed_status": None},
-            ),
-            None,
+def _resolved_db_path(request: AdvisoryEvidenceRetryRequest) -> Path:
+    """Resolve a path without opening it or creating missing parents."""
+
+    return Path(
+        default_db_path() if request.db_path is None else request.db_path
+    ).expanduser().resolve()
+
+
+def _read_only_connection(db_path: Path) -> sqlite3.Connection:
+    """Open SQLite strictly read-only without changing pragmas or filesystem."""
+
+    if not db_path.is_file():
+        raise AdvisoryEvidenceRetryError(
+            f"read-only recovery database does not exist: {db_path}"
         )
-    if task.status != RETRY_FROM_STATUS:
+    try:
+        connection = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=5,
+        )
+    except sqlite3.DatabaseError as exc:
+        raise AdvisoryEvidenceRetryError(
+            f"could not open recovery database read-only: {exc}"
+        ) from exc
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _check_task_status(
+    db_path: Path,
+    task_key: str,
+    artifact_dir: Path,
+) -> tuple[PreconditionCheck, str | None, _CanonicalAttemptBinding | None]:
+    """Read Task and matching canonical Attempt through one ``mode=ro`` URI."""
+
+    try:
+        with closing(_read_only_connection(db_path)) as connection:
+            task = connection.execute(
+                """
+                SELECT task_id, status, active_attempt_id, is_legacy
+                FROM tasks
+                WHERE task_key = ?
+                """,
+                (task_key,),
+            ).fetchone()
+            if task is None:
+                return (
+                    PreconditionCheck(
+                        name=CHECK_TASK_BLOCKED,
+                        satisfied=False,
+                        summary=f"Task {task_key} was not found in the state DB",
+                        details={"task_found": False, "observed_status": None},
+                    ),
+                    None,
+                    None,
+                )
+            attempt = connection.execute(
+                """
+                SELECT attempt_id, task_id, status, is_active, is_legacy,
+                       ended_at, artifact_root
+                FROM attempts
+                WHERE task_id = ? AND artifact_root = ?
+                ORDER BY attempt_number DESC
+                LIMIT 1
+                """,
+                (task["task_id"], str(artifact_dir)),
+            ).fetchone()
+    except sqlite3.DatabaseError as exc:
+        raise AdvisoryEvidenceRetryError(
+            f"could not read recovery state database read-only: {exc}"
+        ) from exc
+
+    observed_status = str(task["status"])
+    if observed_status != RETRY_FROM_STATUS:
         return (
             PreconditionCheck(
                 name=CHECK_TASK_BLOCKED,
                 satisfied=False,
                 summary=(
-                    f"Task {task_key} status is {task.status!r}; expected "
+                    f"Task {task_key} status is {observed_status!r}; expected "
                     f"{RETRY_FROM_STATUS!r}"
                 ),
-                details={"task_found": True, "observed_status": task.status},
+                details={"task_found": True, "observed_status": observed_status},
             ),
-            task.status,
+            observed_status,
+            None,
+        )
+    if attempt is None:
+        return (
+            PreconditionCheck(
+                name=CHECK_TASK_BLOCKED,
+                satisfied=False,
+                summary=(
+                    f"Task {task_key} is blocked but has no canonical Attempt "
+                    f"bound to artifact dir {artifact_dir}"
+                ),
+                details={
+                    "task_found": True,
+                    "observed_status": observed_status,
+                    "canonical_attempt_found": False,
+                },
+            ),
+            observed_status,
+            None,
+        )
+    binding = _CanonicalAttemptBinding(
+        task_id=str(attempt["task_id"]),
+        attempt_id=str(attempt["attempt_id"]),
+        status=str(attempt["status"]),
+        is_active=bool(attempt["is_active"]),
+        is_legacy=bool(attempt["is_legacy"]),
+        ended_at=attempt["ended_at"],
+        artifact_root=(
+            Path(attempt["artifact_root"]).expanduser().resolve()
+            if attempt["artifact_root"] is not None
+            else None
+        ),
+    )
+    if (
+        task["active_attempt_id"] is not None
+        or bool(task["is_legacy"])
+        or binding.status != RETRY_FROM_STATUS
+        or binding.is_active
+        or binding.is_legacy
+        or binding.ended_at is None
+    ):
+        return (
+            PreconditionCheck(
+                name=CHECK_TASK_BLOCKED,
+                satisfied=False,
+                summary=(
+                    f"Task {task_key} is blocked but its matching canonical "
+                    "Attempt is not a closed blocked Attempt"
+                ),
+                details={
+                    "task_found": True,
+                    "observed_status": observed_status,
+                    "canonical_attempt_found": True,
+                    "attempt_id": binding.attempt_id,
+                    "attempt_status": binding.status,
+                    "attempt_is_active": binding.is_active,
+                    "attempt_is_legacy": binding.is_legacy,
+                    "attempt_ended_at": binding.ended_at,
+                    "task_is_legacy": bool(task["is_legacy"]),
+                },
+            ),
+            observed_status,
+            binding,
         )
     return (
         PreconditionCheck(
             name=CHECK_TASK_BLOCKED,
             satisfied=True,
-            summary=f"Task {task_key} is {RETRY_FROM_STATUS}",
-            details={"task_found": True, "observed_status": task.status},
+            summary=(
+                f"Task {task_key} and canonical Attempt {binding.attempt_id} "
+                f"are {RETRY_FROM_STATUS}"
+            ),
+            details={
+                "task_found": True,
+                "observed_status": observed_status,
+                "canonical_attempt_found": True,
+                "attempt_id": binding.attempt_id,
+                "attempt_status": binding.status,
+                "attempt_is_active": binding.is_active,
+                "attempt_is_legacy": binding.is_legacy,
+                "attempt_ended_at": binding.ended_at,
+                "task_is_legacy": bool(task["is_legacy"]),
+            },
         ),
-        task.status,
+        observed_status,
+        binding,
     )
 
 
@@ -441,6 +624,7 @@ def _audit_payload(
     *,
     evidence: RequiredCodexAdvisoryEvidenceResult,
     pytest_check: PreconditionCheck,
+    attempt: _CanonicalAttemptBinding,
 ) -> dict[str, Any]:
     return {
         "kind": RETRY_AUDIT_KIND,
@@ -467,13 +651,46 @@ def _audit_payload(
         "not_validation_authority": True,
         "no_subprocess_invoked": True,
         "no_new_attempt_reserved": True,
+        "attempt_id": attempt.attempt_id,
+        "attempt_from_status": attempt.status,
+        "attempt_to_status": RETRY_TO_STATUS,
+        "attempt_execution_result": "completed",
+        "attempt_validation_result": "passed",
+        "attempt_lifecycle_reason_code": RETRY_ATTEMPT_REASON,
     }
+
+
+def _canonical_store_for_request(
+    request: AdvisoryEvidenceRetryRequest,
+    store: Any | None,
+) -> ValidatorProcessRuntimeTaskStore:
+    """Resolve only the final canonical runtime store; reject bare mirrors."""
+
+    if store is not None:
+        if not isinstance(store, ValidatorProcessRuntimeTaskStore):
+            raise AdvisoryEvidenceRetryError(
+                "advisory recovery requires the canonical engine-authorized "
+                "runtime store; bare TaskMirrorStore callers are rejected"
+            )
+        resolved = _resolved_db_path(request)
+        if Path(store.db_path).expanduser().resolve() != resolved:
+            raise AdvisoryEvidenceRetryError(
+                "canonical recovery store database does not match request db_path"
+            )
+        return store
+
+    resolved = canonical_runtime_path.canonical_runtime_task_store(request.db_path)
+    if not isinstance(resolved, ValidatorProcessRuntimeTaskStore):
+        raise AdvisoryEvidenceRetryError(
+            "canonical engine-authorized runtime store is not installed"
+        )
+    return resolved
 
 
 def run_advisory_evidence_retry(
     request: AdvisoryEvidenceRetryRequest,
     *,
-    store: TaskMirrorStore | None = None,
+    store: Any | None = None,
 ) -> AdvisoryEvidenceRetryResult:
     """Report on, or perform, one audited advisory-evidence retry transition.
 
@@ -491,10 +708,11 @@ def run_advisory_evidence_retry(
     precondition check and the compare-and-set write).
     """
 
-    current_store = store or TaskMirrorStore(request.db_path)
-
-    status_check, observed_status = _check_task_status(
-        current_store, request.task_key
+    db_path = _resolved_db_path(request)
+    status_check, observed_status, attempt = _check_task_status(
+        db_path,
+        request.task_key,
+        request.artifact_dir,
     )
     executor_check = _check_executor_evidence(request.artifact_dir)
     pytest_check = _check_pytest_evidence(request.artifact_dir)
@@ -524,33 +742,37 @@ def run_advisory_evidence_retry(
             mutated=False,
             audit_event_recorded=False,
             codex_advisory_evidence=evidence.to_dict(),
+            attempt_update=attempt.planned_update() if attempt is not None else None,
         )
 
     try:
-        current_store.update_task_status(
-            request.task_key,
-            RETRY_TO_STATUS,
-            source=RETRY_SOURCE,
-            message=(
-                "Operator-confirmed advisory evidence retry moved the task to "
-                "waiting_approval"
-            ),
-            expected_current_status=RETRY_FROM_STATUS,
-        )
-    except (KeyError, ValueError) as exc:
-        raise AdvisoryEvidenceRetryError(str(exc)) from exc
-
-    current_store.record_task_event(
-        request.task_key,
-        RETRY_EVENT_TYPE,
-        RETRY_SOURCE,
-        message="Operator-confirmed advisory evidence retry transition recorded",
-        payload=_audit_payload(
-            request,
-            evidence=evidence,
-            pytest_check=pytest_check,
-        ),
-    )
+        assert attempt is not None
+        current_store = _canonical_store_for_request(request, store)
+        with advisory_evidence_retry_engine_authority(
+            task_key=request.task_key,
+            db_path=current_store.db_path,
+        ):
+            current_store.recover_advisory_evidence_retry(
+                request.task_key,
+                attempt_id=attempt.attempt_id,
+                artifact_dir=request.artifact_dir,
+                actor=request.operator,
+                task_event_source=RETRY_SOURCE,
+                audit_payload=_audit_payload(
+                    request,
+                    evidence=evidence,
+                    pytest_check=pytest_check,
+                    attempt=attempt,
+                ),
+            )
+    except (RuntimeAdmissionError, ValueError, sqlite3.DatabaseError) as exc:
+        detail = str(exc)
+        if (
+            "compare-and-set" in detail.lower()
+            or "reset lineage reservation required" in detail.lower()
+        ):
+            detail = f"advisory recovery compare-and-set rejected: {detail}"
+        raise AdvisoryEvidenceRetryError(detail) from exc
 
     return AdvisoryEvidenceRetryResult(
         task_key=request.task_key,
@@ -567,6 +789,7 @@ def run_advisory_evidence_retry(
         mutated=True,
         audit_event_recorded=True,
         codex_advisory_evidence=evidence.to_dict(),
+        attempt_update=attempt.planned_update(),
     )
 
 
@@ -578,6 +801,7 @@ __all__ = [
     "PYTEST_LAUNCH_SPEC_FILENAME",
     "PYTEST_LOG_FILENAME",
     "RETRY_AUDIT_KIND",
+    "RETRY_ATTEMPT_REASON",
     "RETRY_EVENT_TYPE",
     "RETRY_FROM_STATUS",
     "RETRY_REASON",

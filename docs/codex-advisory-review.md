@@ -704,6 +704,12 @@ python3 scripts/retry_advisory_evidence_transition.py \
 the evidence — the recovery path never reserves a new Attempt and never creates
 a new artifact directory.
 
+`reset_task_status.py` and this recovery command now have deliberately aligned
+Attempt semantics: reset remains `blocked -> queued` and reserves a new Attempt
+for a re-run, while advisory recovery keeps the verified existing Attempt and
+closes its evidence-backed state as `waiting_approval` / `completed` /
+`passed`. Neither path turns `waiting_approval` into approval.
+
 ### Preconditions
 
 All four are evaluated deterministically from disk and the local SQLite mirror,
@@ -740,15 +746,30 @@ With `--confirm-transition` and every precondition satisfied, the command:
 - applies `blocked -> waiting_approval` under a compare-and-set on the `blocked`
   status (a task that left `blocked` concurrently is an error, not a silent
   overwrite);
+- atomically updates the matching closed canonical Attempt to
+  `waiting_approval`, `execution_result=completed`, and
+  `validation_result=passed`, then appends an Attempt-bound
+  `advisory_evidence_retry_recovered` lifecycle event carrying the operator;
 - records a `task_events` audit payload with `kind=advisory_evidence_retry`
   carrying the operator identity, `reason=advisory_evidence_retry`, the artifact
   directory, the advisory `review_status` / `risk_level`, and the observed
   pytest summary line;
 - prints the full JSON result, including every precondition check.
 
-Without `--confirm-transition` the command is a read-only report: it mutates
-nothing, records no event, and exits 0. With `--confirm-transition` and a failed
-precondition it mutates nothing, prints the blocking errors, and exits 1.
+Without `--confirm-transition` the command is a read-only report: its database
+precondition reads use SQLite `mode=ro`, so it does not create a missing
+database or parent directory and does not change journal mode. It reports the
+Attempt update that would be applied, mutates nothing, records no event, and
+exits 0. A missing database is a clear error rather than a created empty DB.
+With `--confirm-transition` and a failed precondition it mutates nothing,
+prints the blocking errors, and exits 1.
+
+The recovery-only transition is an engine code-path boundary, not unforgeable
+database-level authority: a direct SQLite writer with database access could
+forge the transaction-local authorization row. That is an accepted limitation
+for this single-operator deployment; ordinary callers and bare
+`TaskMirrorStore` writes fail closed because only the canonical recovery store
+path creates that row and consumes it in the same transaction.
 
 ### What it does not do
 

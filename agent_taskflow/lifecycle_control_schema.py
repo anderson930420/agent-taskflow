@@ -10,6 +10,7 @@ from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import connect
 
 LIFECYCLE_CONTROL_MIGRATION = "level2_lifecycle_control_v1"
+ADVISORY_EVIDENCE_RETRY_RECOVERED_REASON = "advisory_evidence_retry_recovered"
 
 # The graph is intentionally forward-only. Failure terminals are reachable from
 # every active phase; review/completion terminals require at least preparation.
@@ -53,6 +54,33 @@ ATTEMPT_TRANSITIONS: tuple[tuple[str, str], ...] = (
     ("validating", "canceled"),
 )
 
+# This edge is intentionally kept out of ``ATTEMPT_TRANSITIONS``. Generic
+# lifecycle callers must not treat a previously blocked Attempt as reopenable.
+# The trigger below accepts it only while the canonical advisory-recovery path
+# has placed a matching transaction-local authorization row.
+RECOVERY_ATTEMPT_TRANSITIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "blocked",
+        "waiting_approval",
+        ADVISORY_EVIDENCE_RETRY_RECOVERED_REASON,
+    ),
+)
+
+
+def _add_column_if_missing(
+    conn,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    columns = {
+        row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})")
+    }
+    if column_name not in columns:
+        conn.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"
+        )
+
 
 def migrate_lifecycle_control(db_path: str | Path | None = None) -> None:
     """Install the forward-only Attempt graph and persisted control switches."""
@@ -65,17 +93,48 @@ def migrate_lifecycle_control(db_path: str | Path | None = None) -> None:
                 entity_kind TEXT NOT NULL CHECK(entity_kind IN ('attempt')),
                 from_status TEXT NOT NULL,
                 to_status TEXT NOT NULL,
-                PRIMARY KEY(entity_kind, from_status, to_status)
+                reason_code TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(entity_kind, from_status, to_status, reason_code)
             )
             """
+        )
+        _add_column_if_missing(
+            conn,
+            "lifecycle_allowed_transitions",
+            "reason_code",
+            "TEXT NOT NULL DEFAULT ''",
         )
         conn.executemany(
             """
             INSERT OR IGNORE INTO lifecycle_allowed_transitions(
-                entity_kind, from_status, to_status
-            ) VALUES ('attempt', ?, ?)
+                entity_kind, from_status, to_status, reason_code
+            ) VALUES ('attempt', ?, ?, '')
             """,
             ATTEMPT_TRANSITIONS,
+        )
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO lifecycle_allowed_transitions(
+                entity_kind, from_status, to_status, reason_code
+            ) VALUES ('attempt', ?, ?, ?)
+            """,
+            RECOVERY_ATTEMPT_TRANSITIONS,
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lifecycle_transition_authorizations (
+                attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+                task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                from_status TEXT NOT NULL,
+                to_status TEXT NOT NULL,
+                reason_code TEXT NOT NULL,
+                authority_kind TEXT NOT NULL
+                    CHECK(authority_kind = 'execution_engine'),
+                actor TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(attempt_id, reason_code)
+            )
+            """
         )
         conn.execute(
             """
@@ -143,6 +202,22 @@ def migrate_lifecycle_control(db_path: str | Path | None = None) -> None:
                 WHERE entity_kind = 'attempt'
                   AND from_status = OLD.status
                   AND to_status = NEW.status
+                  AND reason_code = ''
+             )
+             AND NOT EXISTS (
+                SELECT 1
+                FROM lifecycle_allowed_transitions AS allowed
+                JOIN lifecycle_transition_authorizations AS authorization
+                  ON authorization.reason_code = allowed.reason_code
+                 AND authorization.attempt_id = OLD.attempt_id
+                 AND authorization.task_id = OLD.task_id
+                 AND authorization.from_status = OLD.status
+                 AND authorization.to_status = NEW.status
+                 AND authorization.authority_kind = 'execution_engine'
+                WHERE allowed.entity_kind = 'attempt'
+                  AND allowed.from_status = OLD.status
+                  AND allowed.to_status = NEW.status
+                  AND allowed.reason_code <> ''
              )
             BEGIN
                 SELECT RAISE(ABORT, 'illegal attempt lifecycle transition');
@@ -159,7 +234,9 @@ def migrate_lifecycle_control(db_path: str | Path | None = None) -> None:
 
 
 __all__ = [
+    "ADVISORY_EVIDENCE_RETRY_RECOVERED_REASON",
     "ATTEMPT_TRANSITIONS",
     "LIFECYCLE_CONTROL_MIGRATION",
+    "RECOVERY_ATTEMPT_TRANSITIONS",
     "migrate_lifecycle_control",
 ]

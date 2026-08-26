@@ -14,14 +14,21 @@ from uuid import uuid4
 
 import agent_taskflow.attempt_scoped_runtime_path as attempt_path
 import agent_taskflow.canonical_runtime_path as canonical_path
+from agent_taskflow.advisory_evidence_retry_authority import (
+    require_advisory_evidence_retry_engine_authority,
+)
 from agent_taskflow.executor_process_runtime_path import ExecutorProcessRuntimeTaskStore
 from agent_taskflow.lifecycle_control import RuntimeControlStore
+from agent_taskflow.lifecycle_control_schema import (
+    ADVISORY_EVIDENCE_RETRY_RECOVERED_REASON,
+)
 from agent_taskflow.models import require_absolute_path, utc_now_iso
 from agent_taskflow.reset_lineage import ResetLineageStore
 from agent_taskflow.reset_lineage_schema import migrate_reset_lineage
 from agent_taskflow.runtime_admission import (
     DEFAULT_LEASE_TTL_SECONDS,
     ActiveAttemptExistsError,
+    RuntimeAdmissionError,
     RuntimeClaim,
 )
 from agent_taskflow.store import connect
@@ -316,6 +323,204 @@ class ResetLineageRuntimeTaskStore(ExecutorProcessRuntimeTaskStore):
 
     def init_db(self) -> None:
         migrate_reset_lineage(self.db_path)
+
+    def recover_advisory_evidence_retry(
+        self,
+        task_key: str,
+        *,
+        attempt_id: str,
+        artifact_dir: str | Path,
+        actor: str,
+        task_event_source: str,
+        audit_payload: dict[str, Any],
+    ) -> None:
+        """Atomically recover one closed Attempt after advisory evidence arrives.
+
+        This is the sole engine-owned exception to the forward-only Attempt
+        graph.  It is deliberately not exposed by ``TaskMirrorStore``: the
+        caller must hold the short-lived authority context established by the
+        advisory recovery entry point.  The lifecycle trigger additionally
+        requires the matching transaction-local authorization row below.
+        """
+
+        normalized = normalize_task_key(task_key)
+        normalized_attempt_id = attempt_id.strip()
+        normalized_actor = actor.strip()
+        if not normalized_attempt_id:
+            raise ValueError("attempt_id must not be empty")
+        if not normalized_actor:
+            raise ValueError("actor must not be empty")
+        require_advisory_evidence_retry_engine_authority(
+            task_key=normalized,
+            db_path=self.db_path,
+        )
+        self.init_db()
+        now = utc_now_iso()
+        expected_artifact_dir = str(Path(artifact_dir).expanduser().resolve())
+
+        with closing(connect(self.db_path)) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT tasks.task_id, tasks.task_key, tasks.status AS task_status,
+                       tasks.active_attempt_id, tasks.is_legacy AS task_is_legacy,
+                       attempts.attempt_id, attempts.status AS attempt_status,
+                       attempts.is_active, attempts.is_legacy AS attempt_is_legacy,
+                       attempts.ended_at,
+                       COALESCE(attempts.artifact_root, attempt_resources.artifact_root)
+                           AS artifact_root
+                FROM tasks
+                JOIN attempts ON attempts.task_id = tasks.task_id
+                LEFT JOIN attempt_resources
+                  ON attempt_resources.attempt_id = attempts.attempt_id
+                WHERE tasks.task_key = ? AND attempts.attempt_id = ?
+                """,
+                (normalized, normalized_attempt_id),
+            ).fetchone()
+            if row is None:
+                raise RuntimeAdmissionError(
+                    "advisory recovery compare-and-set rejected: canonical "
+                    "Attempt binding no longer exists"
+                )
+            persisted_artifact_dir = row["artifact_root"]
+            if (
+                row["task_status"] != "blocked"
+                or row["active_attempt_id"] is not None
+                or bool(row["task_is_legacy"])
+                or row["attempt_status"] != "blocked"
+                or bool(row["is_active"])
+                or bool(row["attempt_is_legacy"])
+                or row["ended_at"] is None
+                or persisted_artifact_dir is None
+                or str(Path(persisted_artifact_dir).expanduser().resolve())
+                != expected_artifact_dir
+            ):
+                raise RuntimeAdmissionError(
+                    "advisory recovery compare-and-set rejected: Task or "
+                    "canonical Attempt no longer matches the verified blocked state"
+                )
+
+            # Perform the Task compare-and-set first. If a reset or another
+            # writer won the race after the read-only precondition snapshot,
+            # callers receive the specific CAS classification before any
+            # recovery authorization or Attempt transition is attempted.
+            task_cursor = conn.execute(
+                """
+                UPDATE tasks
+                SET status = 'waiting_approval', blocked_reason = NULL,
+                    updated_at = ?, last_synced_at = ?
+                WHERE task_id = ?
+                  AND status = 'blocked'
+                  AND active_attempt_id IS NULL
+                """,
+                (now, now, row["task_id"]),
+            )
+            if task_cursor.rowcount != 1:
+                raise RuntimeAdmissionError(
+                    "advisory recovery compare-and-set rejected: Task left "
+                    "blocked before recovery could commit"
+                )
+
+            conn.execute(
+                """
+                INSERT INTO lifecycle_transition_authorizations(
+                    attempt_id, task_id, from_status, to_status, reason_code,
+                    authority_kind, actor, created_at
+                ) VALUES (?, ?, 'blocked', 'waiting_approval', ?,
+                          'execution_engine', ?, ?)
+                """,
+                (
+                    normalized_attempt_id,
+                    row["task_id"],
+                    ADVISORY_EVIDENCE_RETRY_RECOVERED_REASON,
+                    normalized_actor,
+                    now,
+                ),
+            )
+            attempt_cursor = conn.execute(
+                """
+                UPDATE attempts
+                SET status = 'waiting_approval', execution_result = 'completed',
+                    validation_result = 'passed', updated_at = ?
+                WHERE attempt_id = ?
+                  AND task_id = ?
+                  AND status = 'blocked'
+                  AND is_active = 0
+                """,
+                (now, normalized_attempt_id, row["task_id"]),
+            )
+            if attempt_cursor.rowcount != 1:
+                raise RuntimeAdmissionError(
+                    "advisory recovery compare-and-set rejected: canonical "
+                    "Attempt changed before recovery could commit"
+                )
+            conn.execute(
+                """
+                INSERT INTO lifecycle_events(
+                    task_id, attempt_id, from_status, to_status, reason_code,
+                    actor, timestamp, metadata_json
+                ) VALUES (?, ?, 'blocked', 'waiting_approval', ?, ?, ?, ?)
+                """,
+                (
+                    row["task_id"],
+                    normalized_attempt_id,
+                    ADVISORY_EVIDENCE_RETRY_RECOVERED_REASON,
+                    normalized_actor,
+                    now,
+                    json.dumps(
+                        {
+                            "artifact_dir": expected_artifact_dir,
+                            "operator": normalized_actor,
+                            "task_status": "waiting_approval",
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO task_events(
+                    task_key, event_type, source, message, payload_json, created_at
+                ) VALUES (?, 'status_changed', ?, ?, ?, ?)
+                """,
+                (
+                    normalized,
+                    task_event_source,
+                    "Operator-confirmed advisory evidence retry moved the task to "
+                    "waiting_approval",
+                    json.dumps(
+                        {"status": "waiting_approval", "blocked_reason": None},
+                        sort_keys=True,
+                    ),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO task_events(
+                    task_key, event_type, source, message, payload_json, created_at
+                ) VALUES (?, 'note', ?, ?, ?, ?)
+                """,
+                (
+                    normalized,
+                    task_event_source,
+                    "Operator-confirmed advisory evidence retry transition recorded",
+                    json.dumps(audit_payload, sort_keys=True),
+                    now,
+                ),
+            )
+            # Authorization exists only long enough for the guarded Attempt
+            # transition; the durable proof is the lifecycle event.
+            conn.execute(
+                """
+                DELETE FROM lifecycle_transition_authorizations
+                WHERE attempt_id = ? AND reason_code = ?
+                """,
+                (
+                    normalized_attempt_id,
+                    ADVISORY_EVIDENCE_RETRY_RECOVERED_REASON,
+                ),
+            )
 
 
 def install_reset_runtime_path(

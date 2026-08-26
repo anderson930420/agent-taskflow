@@ -20,9 +20,11 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_taskflow.advisory_evidence_retry import (
     CHECK_ADVISORY_EVIDENCE,
@@ -50,8 +52,13 @@ from agent_taskflow.codex_advisory_review import (
     STDOUT_FILENAME,
     build_default_checklist,
 )
+from agent_taskflow.attempt_store import AttemptStore
+from agent_taskflow.level2_execution_authority import verify_canonical_attempt
 from agent_taskflow.models import TaskRecord
-from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.store import TaskMirrorStore, connect
+from agent_taskflow.validator_process_runtime_path import (
+    ValidatorProcessRuntimeTaskStore,
+)
 from scripts import retry_advisory_evidence_transition as script
 
 
@@ -142,6 +149,9 @@ class AdvisoryEvidenceRetryTestCase(unittest.TestCase):
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         self.store = TaskMirrorStore(self.db_path)
         self.store.init_db()
+        self.attempts = AttemptStore(self.db_path)
+        self.attempts.init_db()
+        self.attempt_id: str | None = None
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -159,6 +169,11 @@ class AdvisoryEvidenceRetryTestCase(unittest.TestCase):
                 repo_path=self.repo,
                 artifact_dir=self.artifact_dir,
             )
+        )
+        self.attempts.register_task_identity(
+            self.task_key,
+            task_class="canonical",
+            is_legacy=False,
         )
 
     def _write_executor_evidence(self) -> None:
@@ -194,6 +209,20 @@ class AdvisoryEvidenceRetryTestCase(unittest.TestCase):
 
     def _seed_complete_attempt(self, *, status: str = RETRY_FROM_STATUS) -> None:
         self._seed_task(status=status)
+        attempt = self.attempts.create_attempt(
+            self.task_key,
+            artifact_root=self.artifact_dir,
+            actor="test",
+            reason_code="attempt_created",
+        )
+        self.attempts.close_attempt(
+            attempt.attempt_id,
+            status="blocked",
+            reason_code="runtime_governance_blocked",
+            actor="test",
+            execution_result="blocked",
+        )
+        self.attempt_id = attempt.attempt_id
         self._write_executor_evidence()
         self._write_pytest_evidence()
         self._write_advisory_evidence()
@@ -209,7 +238,6 @@ class AdvisoryEvidenceRetryTestCase(unittest.TestCase):
                 operator="operator@example.com",
                 confirm_transition=confirm_transition,
             ),
-            store=self.store,
         )
 
     def _check(self, result, name):
@@ -437,6 +465,14 @@ class HappyPathTests(AdvisoryEvidenceRetryTestCase):
         self.assertTrue(result.to_dict()["dry_run"])
         self.assertEqual(self._current_status(), RETRY_FROM_STATUS)
         self.assertEqual(self._audit_events(), [])
+        self.assertIsNotNone(result.attempt_update)
+        assert result.attempt_update is not None
+        self.assertEqual(result.attempt_update["attempt_id"], self.attempt_id)
+        self.assertEqual(result.attempt_update["to_status"], RETRY_TO_STATUS)
+        attempt = self.attempts.get_attempt(self.attempt_id or "")
+        assert attempt is not None
+        self.assertEqual(attempt.status, RETRY_FROM_STATUS)
+        self.assertEqual(attempt.execution_result, "blocked")
 
     def test_confirmed_transition_moves_task_to_waiting_approval(self) -> None:
         self._seed_complete_attempt()
@@ -450,6 +486,12 @@ class HappyPathTests(AdvisoryEvidenceRetryTestCase):
         self.assertEqual(result.to_status, RETRY_TO_STATUS)
         self.assertEqual(result.observed_status, RETRY_TO_STATUS)
         self.assertEqual(self._current_status(), RETRY_TO_STATUS)
+        attempt = self.attempts.get_attempt(self.attempt_id or "")
+        assert attempt is not None
+        self.assertEqual(attempt.status, RETRY_TO_STATUS)
+        self.assertEqual(attempt.execution_result, "completed")
+        self.assertEqual(attempt.validation_result, "passed")
+        self.assertFalse(attempt.is_active)
 
     def test_confirmed_transition_records_audit_event(self) -> None:
         self._seed_complete_attempt()
@@ -473,6 +515,8 @@ class HappyPathTests(AdvisoryEvidenceRetryTestCase):
         self.assertTrue(payload["not_merge"])
         self.assertTrue(payload["not_cleanup"])
         self.assertTrue(payload["not_validation_authority"])
+        self.assertEqual(payload["attempt_id"], self.attempt_id)
+        self.assertEqual(payload["attempt_to_status"], RETRY_TO_STATUS)
 
         sources = {
             event.source
@@ -481,10 +525,17 @@ class HappyPathTests(AdvisoryEvidenceRetryTestCase):
         }
         self.assertIn(RETRY_SOURCE, sources)
 
+        lifecycle_events = self.attempts.list_lifecycle_events(self.task_key)
+        recovered = lifecycle_events[-1]
+        self.assertEqual(recovered.attempt_id, self.attempt_id)
+        self.assertEqual(recovered.from_status, RETRY_FROM_STATUS)
+        self.assertEqual(recovered.to_status, RETRY_TO_STATUS)
+        self.assertEqual(
+            recovered.reason_code, "advisory_evidence_retry_recovered"
+        )
+
     def test_needs_attention_advisory_status_is_valid_evidence(self) -> None:
-        self._seed_task()
-        self._write_executor_evidence()
-        self._write_pytest_evidence()
+        self._seed_complete_attempt()
         self._write_advisory_evidence(
             review_status="needs_attention", risk_level="medium"
         )
@@ -504,6 +555,43 @@ class HappyPathTests(AdvisoryEvidenceRetryTestCase):
 
         self.assertEqual(self.store.list_approval_decisions(self.task_key), [])
 
+    def test_recovered_attempt_is_accepted_for_canonical_handoff(self) -> None:
+        self._seed_complete_attempt()
+
+        self._run(confirm_transition=True)
+
+        verification = verify_canonical_attempt(
+            db_path=self.db_path,
+            task_key=self.task_key,
+            attempt_id=self.attempt_id or "",
+        )
+        self.assertEqual(verification.attempt.status, RETRY_TO_STATUS)
+
+    def test_mid_transition_failure_rolls_back_task_and_attempt(self) -> None:
+        self._seed_complete_attempt()
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER recovery_test_lifecycle_failure
+                BEFORE INSERT ON lifecycle_events
+                WHEN NEW.reason_code = 'advisory_evidence_retry_recovered'
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected lifecycle failure');
+                END
+                """
+            )
+
+        with self.assertRaisesRegex(AdvisoryEvidenceRetryError, "injected lifecycle failure"):
+            self._run(confirm_transition=True)
+
+        self.assertEqual(self._current_status(), RETRY_FROM_STATUS)
+        attempt = self.attempts.get_attempt(self.attempt_id or "")
+        assert attempt is not None
+        self.assertEqual(attempt.status, RETRY_FROM_STATUS)
+        self.assertEqual(attempt.execution_result, "blocked")
+        self.assertIsNone(attempt.validation_result)
+        self.assertEqual(self._audit_events(), [])
+
     def test_second_confirmed_run_is_rejected_after_transition(self) -> None:
         self._seed_complete_attempt()
         self._run(confirm_transition=True)
@@ -514,25 +602,24 @@ class HappyPathTests(AdvisoryEvidenceRetryTestCase):
         self.assertFalse(result.preconditions_satisfied)
         self.assertEqual(len(self._audit_events()), 1)
 
-    def test_transition_race_raises_retry_error(self) -> None:
+    def test_transition_compare_and_set_rejects_a_task_status_race(self) -> None:
         self._seed_complete_attempt()
 
-        class RacingStore:
-            """Store proxy that loses the compare-and-set on the status write."""
+        with mock.patch.object(
+            ValidatorProcessRuntimeTaskStore,
+            "recover_advisory_evidence_retry",
+            side_effect=sqlite3.IntegrityError("reset lineage reservation required"),
+        ):
+            with self.assertRaisesRegex(AdvisoryEvidenceRetryError, "compare-and-set"):
+                self._run(confirm_transition=True)
 
-            def __init__(self, inner: TaskMirrorStore) -> None:
-                self._inner = inner
+        self.assertEqual(self._current_status(), RETRY_FROM_STATUS)
+        self.assertEqual(self._audit_events(), [])
 
-            def get_task(self, task_key: str):
-                return self._inner.get_task(task_key)
+    def test_bare_task_mirror_store_is_rejected(self) -> None:
+        self._seed_complete_attempt()
 
-            def update_task_status(self, *args, **kwargs):
-                raise ValueError("Task status is 'queued'; expected 'blocked'")
-
-            def record_task_event(self, *args, **kwargs):  # pragma: no cover
-                raise AssertionError("audit event must not be recorded on a race")
-
-        with self.assertRaises(AdvisoryEvidenceRetryError):
+        with self.assertRaisesRegex(AdvisoryEvidenceRetryError, "canonical"):
             run_advisory_evidence_retry(
                 AdvisoryEvidenceRetryRequest(
                     task_key=self.task_key,
@@ -541,11 +628,45 @@ class HappyPathTests(AdvisoryEvidenceRetryTestCase):
                     operator="operator@example.com",
                     confirm_transition=True,
                 ),
-                store=RacingStore(self.store),
+                store=self.store,
             )
 
         self.assertEqual(self._current_status(), RETRY_FROM_STATUS)
-        self.assertEqual(self._audit_events(), [])
+
+    def test_canonical_store_rejects_direct_non_engine_recovery_call(self) -> None:
+        self._seed_complete_attempt()
+        store = ValidatorProcessRuntimeTaskStore(self.db_path)
+
+        with self.assertRaisesRegex(RuntimeError, "engine-authorized"):
+            store.recover_advisory_evidence_retry(
+                self.task_key,
+                attempt_id=self.attempt_id or "",
+                artifact_dir=self.artifact_dir,
+                actor="operator@example.com",
+                task_event_source=RETRY_SOURCE,
+                audit_payload={},
+            )
+
+        self.assertEqual(self._current_status(), RETRY_FROM_STATUS)
+
+    def test_allowlist_does_not_grant_generic_blocked_reopen(self) -> None:
+        self._seed_complete_attempt()
+        ValidatorProcessRuntimeTaskStore(self.db_path).init_db()
+
+        with connect(self.db_path) as connection:
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "illegal attempt lifecycle transition",
+            ):
+                connection.execute(
+                    "UPDATE attempts SET status = 'waiting_approval' WHERE attempt_id = ?",
+                    (self.attempt_id,),
+                )
+
+        self.assertEqual(self._current_status(), RETRY_FROM_STATUS)
+        attempt = self.attempts.get_attempt(self.attempt_id or "")
+        assert attempt is not None
+        self.assertEqual(attempt.status, RETRY_FROM_STATUS)
 
 
 class RequestValidationTests(AdvisoryEvidenceRetryTestCase):
@@ -663,6 +784,41 @@ class CliTests(AdvisoryEvidenceRetryTestCase):
         self.assertFalse(payload["mutated"])
         self.assertEqual(self._current_status(), RETRY_FROM_STATUS)
 
+    def test_dry_run_missing_db_fails_without_creating_path(self) -> None:
+        missing_db = self.root / "missing-parent" / "missing.db"
+
+        exit_code, _stdout, stderr = self._run_main(
+            [
+                "--task-key",
+                self.task_key,
+                "--db-path",
+                str(missing_db),
+                "--artifact-dir",
+                str(self.artifact_dir),
+                "--operator",
+                "operator@example.com",
+            ]
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("read-only", stderr)
+        self.assertFalse(missing_db.exists())
+        self.assertFalse(missing_db.parent.exists())
+
+    def test_dry_run_preserves_existing_non_wal_journal_mode(self) -> None:
+        self._seed_complete_attempt()
+        with sqlite3.connect(self.db_path) as connection:
+            before = connection.execute("PRAGMA journal_mode = DELETE").fetchone()[0]
+        self.assertEqual(before.lower(), "delete")
+
+        exit_code, stdout, _stderr = self._run_main(self._base_args())
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(json.loads(stdout)["dry_run"])
+        with sqlite3.connect(self.db_path) as connection:
+            after = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        self.assertEqual(after.lower(), "delete")
+
     def test_confirm_transition_performs_transition(self) -> None:
         self._seed_complete_attempt()
 
@@ -756,7 +912,8 @@ class GovernanceInvariantTests(unittest.TestCase):
         self.assertIn('RETRY_FROM_STATUS = "blocked"', MODULE_SOURCE)
         self.assertIn('RETRY_TO_STATUS = "waiting_approval"', MODULE_SOURCE)
         self.assertNotIn('"accepted"', MODULE_SOURCE)
-        self.assertNotIn('"completed"', MODULE_SOURCE)
+        self.assertIn('"completed"', MODULE_SOURCE)
+        self.assertIn("RETRY_ATTEMPT_REASON", MODULE_SOURCE)
 
 
 if __name__ == "__main__":
