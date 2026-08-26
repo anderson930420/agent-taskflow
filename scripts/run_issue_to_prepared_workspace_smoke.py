@@ -645,7 +645,13 @@ def run_smoke(
             "generated": True,
             "dry_run": codex_review_result.dry_run,
             "confirm_run": codex_review_result.confirm_run,
-            "cli_invoked": bool(codex_review_result.codex_output_paths()),
+            # Surface the payload flag, which is set only downstream of the
+            # actual subprocess.run in codex_advisory_review.py. Deriving this
+            # from codex_output_paths() would only prove which branch was
+            # taken, so a refactor could decouple it from real invocation.
+            "codex_cli_invoked": bool(
+                codex_review_result.payload.get("codex_cli_invoked", False)
+            ),
         },
         "execution_authority": execution_summary.get("execution_authority"),
         "canonical_attempt_id": canonical_attempt_id,
