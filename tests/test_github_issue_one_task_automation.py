@@ -9,17 +9,25 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
+from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.github_issue_discovery import GitHubIssueDiscoveryIssue
 from agent_taskflow.github_issue_ingestion import GitHubIssueSnapshot
 from agent_taskflow.github_issue_one_task_automation import (
     GITHUB_ISSUE_ONE_TASK_AUTOMATION_SCHEMA_VERSION,
     GITHUB_ISSUE_ONE_TASK_AUTOMATION_SOURCE,
     GitHubIssueOneTaskAutomationRequest,
+    _canonical_runtime_runner,
     run_github_issue_one_task_automation,
 )
+from agent_taskflow.level2_execution_authority import Level2ExecutionAuthorityError
 from agent_taskflow.mission_contract import build_mission_contract, write_mission_contract
 from agent_taskflow.models import TaskWorktreeRecord
+from agent_taskflow.scheduler_execution_engine_authority import (
+    DirectRuntimeHandoffAuthorityRequest,
+    SchedulerExecutionEngineAuthority,
+)
 from agent_taskflow.store import TaskMirrorStore
 
 
@@ -100,8 +108,21 @@ class _FakeApprovedTaskRunnerWithWorktree:
         db_path = Path(kwargs["db_path"])
         task_key = str(kwargs["task_key"])
         artifact_root = Path(kwargs["artifact_root"])
-        store = TaskMirrorStore(db_path)
+        # A newly ingested task is Level 2, so this runner is invoked below the
+        # ExecutionEngine and must persist runtime evidence through the
+        # canonical runtime store the engine reserved the Attempt with.
+        store = kwargs.get("store") or TaskMirrorStore(db_path)
         task = store.get_task(task_key)
+
+        store.update_task_status(
+            task_key,
+            "preparing",
+            source="github-issue-one-task-automation-test",
+            message="fake approved task runner claimed the task",
+        )
+        # After the claim, evidence belongs to the Attempt's own artifact root.
+        if task is not None and hasattr(store, "bind_task"):
+            task = store.bind_task(task)
         artifact_dir = task.artifact_dir if task is not None else artifact_root / task_key
         artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -180,7 +201,9 @@ class _FakeApprovedTaskRunnerWithWorktree:
         }
 
 
-class GitHubIssueOneTaskAutomationTests(unittest.TestCase):
+class _AutomationWorkspaceMixin(unittest.TestCase):
+    """Shared workspace and request helpers for the automation suites."""
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -254,6 +277,8 @@ class GitHubIssueOneTaskAutomationTests(unittest.TestCase):
             )
         return completed.stdout.strip()
 
+
+class GitHubIssueOneTaskAutomationTests(_AutomationWorkspaceMixin):
     def test_first_confirmed_run_ingests_one_issue_and_calls_watcher_once(self) -> None:
         task_key = "AT-GH-501"
         base_sha, branch_name = self.init_repo_for_task(task_key)
@@ -766,6 +791,99 @@ class GitHubIssueOneTaskAutomationTests(unittest.TestCase):
         self.assertFalse(self.db_path.exists())
         self.assertFalse(result["safety"]["issue_ingested"])
         self.assertFalse(result["safety"]["watcher_called"])
+
+
+class GitHubIssueOneTaskAutomationEngineAuthorityTests(_AutomationWorkspaceMixin):
+    """The automation path must cross engine authority, and fail closed."""
+
+    def _run_execution_only(self, runner: Any, issue_number: int, title: str) -> Any:
+        return run_github_issue_one_task_automation(
+            self.confirmed_request(publish_after_execution=False),
+            discovery_fetcher=lambda request: [
+                discovery_issue(issue_number, title=title, labels=("ready",))
+            ],
+            ingestion_fetcher=lambda repo, number: issue_snapshot(
+                issue_number, title=title, labels=("ready",)
+            ),
+            approved_task_runner_fn=runner,
+        )
+
+    def test_execution_binds_the_canonical_attempt_reserved_by_the_engine(
+        self,
+    ) -> None:
+        task_key = "AT-GH-701"
+        base_sha, branch_name = self.init_repo_for_task(task_key)
+        runner = _FakeApprovedTaskRunnerWithWorktree(
+            repo_path=self.local_repo,
+            branch=branch_name,
+            base_sha=base_sha,
+        )
+
+        result = self._run_execution_only(runner, 701, "Engine authority issue")
+
+        self.assertTrue(result["ok"], msg=f"result: {result!r}")
+        runtime = result["execution"]["stages"]["runtime_execution"]
+        self.assertEqual(runtime["execution_authority"], "execution_engine")
+        attempt_id = runtime["canonical_attempt_id"]
+        self.assertTrue(attempt_id)
+        # The bound Attempt is the one the runtime-admission claim reserved.
+        attempt = AttemptStore(self.db_path).get_attempt(str(attempt_id))
+        self.assertIsNotNone(attempt)
+        assert attempt is not None
+        self.assertFalse(attempt.is_legacy)
+        self.assertFalse(attempt.is_active)
+        self.assertEqual(attempt.status, "waiting_approval")
+        self.assertEqual(attempt.execution_result, "completed")
+        self.assertEqual(attempt.validation_result, "passed")
+
+    def test_classification_failure_never_falls_back_to_the_caller_runner(
+        self,
+    ) -> None:
+        task_key = "AT-GH-702"
+        base_sha, branch_name = self.init_repo_for_task(task_key)
+        runner = _FakeApprovedTaskRunnerWithWorktree(
+            repo_path=self.local_repo,
+            branch=branch_name,
+            base_sha=base_sha,
+        )
+
+        with mock.patch(
+            "agent_taskflow.github_issue_one_task_automation.is_level2_task",
+            side_effect=Level2ExecutionAuthorityError("classification exploded"),
+        ):
+            result = self._run_execution_only(runner, 702, "Authority error issue")
+
+        self.assertFalse(result["ok"], msg=f"result: {result!r}")
+        self.assertEqual(result["status"], "execution_failed")
+        self.assertIn(
+            "level2_classification_failed",
+            " ".join(result["reasons"]),
+        )
+        # Fail closed: an authority error must never hand the work to a
+        # non-authoritative callback.
+        self.assertEqual(runner.call_count, 0)
+
+    def test_engine_authority_callback_is_passed_through_unchanged(self) -> None:
+        # A caller that already holds the bound authority callback (the
+        # scheduler tick) must not be wrapped a second time.
+        authority = SchedulerExecutionEngineAuthority(
+            DirectRuntimeHandoffAuthorityRequest(
+                repo=self.repo,
+                db_path=self.db_path,
+                local_repo_path=self.local_repo,
+                artifact_root=self.artifact_root,
+            )
+        )
+        callback = authority.execute_from_runtime_handoff
+
+        runner, error = _canonical_runtime_runner(
+            self.confirmed_request(),
+            task_key="AT-GH-703",
+            approved_task_runner_fn=callback,
+        )
+
+        self.assertIsNone(error)
+        self.assertIs(runner, callback)
 
 
 def _db_counts(db_path: Path) -> dict[str, int]:

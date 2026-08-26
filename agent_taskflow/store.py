@@ -304,6 +304,67 @@ class TaskMirrorStore:
         *,
         preserve_existing_status: bool = True,
     ) -> None:
+        with connect(self.db_path) as conn:
+            self._upsert_task_in_connection(
+                conn,
+                record,
+                preserve_existing_status=preserve_existing_status,
+            )
+
+    def upsert_task_with_level2_identity(
+        self,
+        record: TaskRecord,
+        *,
+        preserve_existing_status: bool = True,
+    ) -> bool:
+        """Upsert one task and atomically promote only a newly created record.
+
+        Task creation and canonical Level 2 promotion commit in the same
+        ``BEGIN IMMEDIATE`` transaction, so no observer and no crash can leave a
+        newly created task persisted as legacy: either both writes land or
+        neither does.
+
+        A task that already exists is still updated by the normal upsert
+        policy, but its current identity is deliberately preserved — this
+        promotes new tasks and never retro-promotes historical ones. The
+        boolean result reports whether this call created and promoted the task.
+        """
+
+        # The additive Task/Attempt schema must exist before the transaction is
+        # opened so promotion can update the identity columns without needing a
+        # separate migration commit inside it.
+        from agent_taskflow.attempt_store import AttemptStore
+        from agent_taskflow.level2_execution_authority import (
+            ensure_level2_task_identity,
+        )
+
+        AttemptStore(self.db_path).init_db()
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT 1 FROM tasks WHERE task_key = ?",
+                (record.task_key,),
+            ).fetchone()
+            self._upsert_task_in_connection(
+                conn,
+                record,
+                preserve_existing_status=preserve_existing_status,
+            )
+            if existing is None:
+                ensure_level2_task_identity(
+                    self.db_path,
+                    record.task_key,
+                    connection=conn,
+                )
+            return existing is None
+
+    @staticmethod
+    def _upsert_task_in_connection(
+        conn: sqlite3.Connection,
+        record: TaskRecord,
+        *,
+        preserve_existing_status: bool,
+    ) -> None:
         now = utc_now_iso()
         created_at = record.created_at or now
         updated_at = record.updated_at or now
@@ -314,74 +375,73 @@ class TaskMirrorStore:
         if record.tools is not None:
             tools_json = json.dumps(record.tools, sort_keys=True)
 
-        with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO tasks (
-                    task_key,
-                    project,
-                    board,
-                    hermes_task_id,
-                    title,
-                    status,
-                    repo_path,
-                    artifact_dir,
-                    blocked_reason,
-                    created_at,
-                    updated_at,
-                    last_synced_at,
-                    executor,
-                    model,
-                    provider,
-                    tools,
-                    pi_bin
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(task_key) DO UPDATE SET
-                    project = excluded.project,
-                    board = excluded.board,
-                    hermes_task_id = excluded.hermes_task_id,
-                    title = excluded.title,
-                    status = CASE
-                        WHEN ? THEN tasks.status
-                        ELSE excluded.status
-                    END,
-                    repo_path = excluded.repo_path,
-                    artifact_dir = excluded.artifact_dir,
-                    blocked_reason = CASE
-                        WHEN ? THEN tasks.blocked_reason
-                        ELSE excluded.blocked_reason
-                    END,
-                    updated_at = excluded.updated_at,
-                    last_synced_at = excluded.last_synced_at,
-                    executor = excluded.executor,
-                    model = excluded.model,
-                    provider = excluded.provider,
-                    tools = excluded.tools,
-                    pi_bin = excluded.pi_bin
-                """,
-                (
-                    record.task_key,
-                    record.project,
-                    record.board,
-                    record.hermes_task_id,
-                    record.title,
-                    record.status,
-                    str(record.repo_path),
-                    str(record.artifact_dir) if record.artifact_dir else None,
-                    record.blocked_reason,
-                    created_at,
-                    updated_at,
-                    last_synced_at,
-                    record.executor,
-                    record.model,
-                    record.provider,
-                    tools_json,
-                    record.pi_bin,
-                    preserve_existing_status,
-                    preserve_existing_status,
-                ),
+        conn.execute(
+            """
+            INSERT INTO tasks (
+                task_key,
+                project,
+                board,
+                hermes_task_id,
+                title,
+                status,
+                repo_path,
+                artifact_dir,
+                blocked_reason,
+                created_at,
+                updated_at,
+                last_synced_at,
+                executor,
+                model,
+                provider,
+                tools,
+                pi_bin
             )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_key) DO UPDATE SET
+                project = excluded.project,
+                board = excluded.board,
+                hermes_task_id = excluded.hermes_task_id,
+                title = excluded.title,
+                status = CASE
+                    WHEN ? THEN tasks.status
+                    ELSE excluded.status
+                END,
+                repo_path = excluded.repo_path,
+                artifact_dir = excluded.artifact_dir,
+                blocked_reason = CASE
+                    WHEN ? THEN tasks.blocked_reason
+                    ELSE excluded.blocked_reason
+                END,
+                updated_at = excluded.updated_at,
+                last_synced_at = excluded.last_synced_at,
+                executor = excluded.executor,
+                model = excluded.model,
+                provider = excluded.provider,
+                tools = excluded.tools,
+                pi_bin = excluded.pi_bin
+            """,
+            (
+                record.task_key,
+                record.project,
+                record.board,
+                record.hermes_task_id,
+                record.title,
+                record.status,
+                str(record.repo_path),
+                str(record.artifact_dir) if record.artifact_dir else None,
+                record.blocked_reason,
+                created_at,
+                updated_at,
+                last_synced_at,
+                record.executor,
+                record.model,
+                record.provider,
+                tools_json,
+                record.pi_bin,
+                preserve_existing_status,
+                preserve_existing_status,
+            ),
+        )
 
     def get_task(self, task_key: str) -> TaskRecord | None:
         with connect(self.db_path) as conn:

@@ -241,7 +241,7 @@ def ingest_github_issue(
     would_write_task = existing is None
     summary_status = "ingested" if existing is None else "reused"
 
-    store.upsert_task(
+    store.upsert_task_with_level2_identity(
         TaskRecord(
             task_key=task_key,
             project=project,

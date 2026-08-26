@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+import inspect
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -25,6 +26,7 @@ from agent_taskflow.approved_task_runner import (
     ApprovedTaskRunRequest,
     run_approved_task,
 )
+from agent_taskflow import canonical_runtime_path
 from agent_taskflow.execution_engine_contract import (
     EXECUTION_STATUS_BLOCKED,
     STEP_STATUS_BLOCKED,
@@ -92,6 +94,9 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
         approved_task_runner: Callable[[ApprovedTaskRunRequest], Any] | None = None,
     ) -> None:
         self._approved_task_runner = approved_task_runner or run_approved_task
+        self._runner_accepts_store = self._runner_takes_store(
+            self._approved_task_runner
+        )
 
     def execute(self, request: ExecutionEngineRequest) -> ExecutionEngineResult:
         try:
@@ -124,17 +129,31 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
 
         before_attempt_ids = self._attempt_ids(request)
         approved_request = self._build_approved_request(request)
+        runtime_store = self._canonical_runtime_store(request)
         try:
             with execution_engine_primitive_authority(
                 task_key=request.task_key,
                 db_path=request.lifecycle_db_path,
             ):
-                result = self._approved_task_runner(approved_request)
+                result = self._invoke_runner(approved_request, runtime_store)
         except Exception as exc:  # noqa: BLE001 - surfaced as a blocked result.
-            return self._adapter_failure_result(request, exc)
+            return self._adapter_failure_result(
+                request,
+                exc,
+                reserved_attempt_id=self._reserved_attempt_id(
+                    runtime_store, request.task_key
+                ),
+            )
         mapped = self._map_result(request, result)
         if request.metadata.get("level2_execution") is not True:
             return mapped
+
+        # The Attempt reserved by the runtime-admission claim identifies this
+        # run regardless of how it ended. Identification is not authorization:
+        # a blocked run reports the id with canonical_attempt_bound=False.
+        reserved_attempt_id = self._reserved_attempt_id(
+            runtime_store, request.task_key
+        )
         if not mapped.ok:
             return replace(
                 mapped,
@@ -143,16 +162,23 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
                     "execution_authority": "execution_engine",
                     "legacy_fallback_allowed": False,
                     "canonical_attempt_bound": False,
+                    "canonical_attempt_id": reserved_attempt_id,
+                    "canonical_attempt_reserved": reserved_attempt_id is not None,
                 },
             )
 
-        attempt = self._new_canonical_attempt(request, before_attempt_ids)
+        attempt = self._reserved_canonical_attempt(
+            request,
+            reserved_attempt_id,
+            before_attempt_ids,
+        )
         if attempt is None:
             return self._level2_failure_result(
                 request,
-                "successful Level 2 execution did not produce exactly one new "
-                "closed canonical Attempt",
+                "successful Level 2 execution did not bind the canonical "
+                "Attempt reserved for it",
                 prior=mapped,
+                reserved_attempt_id=reserved_attempt_id,
             )
         return replace(
             mapped,
@@ -162,6 +188,7 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
                 "legacy_fallback_allowed": False,
                 "canonical_attempt_bound": True,
                 "canonical_attempt_id": attempt.attempt_id,
+                "canonical_attempt_reserved": True,
                 "canonical_attempt_status": attempt.status,
                 "canonical_attempt_number": attempt.attempt_number,
                 "canonical_execution_result": attempt.execution_result,
@@ -173,6 +200,68 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
                 "canonical_attempt_downstream_valid": True,
             },
         )
+
+    # -- canonical runtime claim -------------------------------------------
+
+    @staticmethod
+    def _canonical_runtime_store(
+        request: ExecutionEngineRequest,
+    ) -> Any | None:
+        """Return the claim-aware store one Level 2 execution must run through.
+
+        Supplying the store *before* delegation is what makes the canonical
+        runtime claim — and therefore the reserved Attempt id and the executor
+        start credentials — exist before the executor starts, instead of being
+        reconstructed from the Attempt table afterwards.
+        """
+
+        if request.metadata.get("level2_execution") is not True:
+            return None
+        if request.dry_run or request.lifecycle_db_path is None:
+            return None
+        # Resolved through the accessor on purpose: later installers rebind
+        # the canonicalization hook, and instantiating the public class here
+        # would hand the runner a store it silently replaces.
+        return canonical_runtime_path.canonical_runtime_task_store(
+            request.lifecycle_db_path
+        )
+
+    def _invoke_runner(
+        self,
+        approved_request: ApprovedTaskRunRequest,
+        runtime_store: Any | None,
+    ) -> Any:
+        if runtime_store is not None and self._runner_accepts_store:
+            return self._approved_task_runner(approved_request, store=runtime_store)
+        return self._approved_task_runner(approved_request)
+
+    @staticmethod
+    def _reserved_attempt_id(
+        runtime_store: Any | None,
+        task_key: str,
+    ) -> str | None:
+        if runtime_store is None:
+            return None
+        claim = runtime_store.reserved_runtime_claim(task_key)
+        return claim.attempt_id if claim is not None else None
+
+    @staticmethod
+    def _runner_takes_store(runner: Callable[..., Any]) -> bool:
+        """Report whether ``runner`` can receive the canonical runtime store."""
+
+        try:
+            signature = inspect.signature(runner)
+        except (TypeError, ValueError):  # pragma: no cover - exotic callables.
+            return False
+        for parameter in signature.parameters.values():
+            if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+                return True
+            if parameter.name == "store" and parameter.kind in {
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            }:
+                return True
+        return False
 
     # -- request mapping ---------------------------------------------------
 
@@ -237,35 +326,27 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
             return set()
 
     @staticmethod
-    def _new_canonical_attempt(
+    def _reserved_canonical_attempt(
         request: ExecutionEngineRequest,
+        reserved_attempt_id: str | None,
         before_attempt_ids: set[str],
     ) -> Any | None:
-        if request.lifecycle_db_path is None:
-            return None
-        try:
-            attempts = AttemptStore(request.lifecycle_db_path).list_attempts(
-                request.task_key
-            )
-        except (KeyError, sqlite3.DatabaseError):
-            return None
-        created = [
-            attempt
-            for attempt in attempts
-            if attempt.attempt_id not in before_attempt_ids
-            and not attempt.is_legacy
-            and not attempt.is_active
-            and attempt.status in {"waiting_approval", "completed"}
-            and attempt.execution_result == "completed"
-            and attempt.validation_result == "passed"
-        ]
-        if len(created) != 1:
+        """Accept the reserved Attempt only when it satisfies the contract.
+
+        The id comes from the claim this execution took, not from a diff of the
+        Attempt table, so an engine cannot present an Attempt it did not
+        reserve. The acceptance conditions are unchanged: the Attempt must
+        belong to this Task, be new to this execution, be closed, and be valid
+        for downstream handoff.
+        """
+
+        if request.lifecycle_db_path is None or not reserved_attempt_id:
             return None
         try:
             verification = verify_canonical_attempt(
                 db_path=request.lifecycle_db_path,
                 task_key=request.task_key,
-                attempt_id=created[0].attempt_id,
+                attempt_id=reserved_attempt_id,
                 preexisting_attempt_ids=before_attempt_ids,
             )
         except Level2ExecutionAuthorityError:
@@ -544,8 +625,11 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
     def _adapter_failure_result(
         request: ExecutionEngineRequest,
         exc: Exception,
+        *,
+        reserved_attempt_id: str | None = None,
     ) -> ExecutionEngineResult:
         message = f"{exc.__class__.__name__}: {exc}"
+        level2 = request.metadata.get("level2_execution") is True
         return ExecutionEngineResult(
             ok=False,
             task_key=request.task_key,
@@ -568,6 +652,17 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
                 "adapter": "approved_task_runner",
                 "error_type": exc.__class__.__name__,
                 "error_message": str(exc),
+                **(
+                    {
+                        "execution_authority": "execution_engine",
+                        "legacy_fallback_allowed": False,
+                        "canonical_attempt_bound": False,
+                        "canonical_attempt_id": reserved_attempt_id,
+                        "canonical_attempt_reserved": reserved_attempt_id is not None,
+                    }
+                    if level2
+                    else {}
+                ),
             },
         )
 
@@ -577,6 +672,7 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
         message: str,
         *,
         prior: ExecutionEngineResult | None = None,
+        reserved_attempt_id: str | None = None,
     ) -> ExecutionEngineResult:
         metadata = dict(prior.metadata) if prior is not None else {}
         metadata.update(
@@ -585,6 +681,8 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
                 "execution_authority": "execution_engine",
                 "legacy_fallback_allowed": False,
                 "canonical_attempt_bound": False,
+                "canonical_attempt_id": reserved_attempt_id,
+                "canonical_attempt_reserved": reserved_attempt_id is not None,
                 "contract_error": message,
             }
         )

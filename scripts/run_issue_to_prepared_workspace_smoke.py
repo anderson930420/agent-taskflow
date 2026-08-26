@@ -25,12 +25,21 @@ if str(REPO_ROOT) not in sys.path:
 from fastapi.testclient import TestClient
 
 from agent_taskflow.api.main import create_app
+from agent_taskflow.approved_task_runner import run_approved_task
+from agent_taskflow.codex_advisory_review import (
+    CodexAdvisoryReviewRequest,
+    generate_codex_advisory_review,
+)
 from agent_taskflow.dispatcher import Dispatcher
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
 from agent_taskflow.github_issue_ingestion import (
     GitHubIssueIngestionRequest,
     GitHubIssueSnapshot,
     ingest_github_issue,
+)
+from agent_taskflow.scheduler_execution_engine_authority import (
+    DirectRuntimeHandoffAuthorityRequest,
+    SchedulerExecutionEngineAuthority,
 )
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -42,6 +51,10 @@ DEFAULT_PROJECT = "agent-taskflow"
 DEFAULT_ISSUE_NUMBER = 9001
 DEFAULT_TASK_KEY = f"AT-GH-{DEFAULT_ISSUE_NUMBER}"
 SMOKE_EXECUTOR = "issue-prepared-workspace-smoke"
+# Registered executor slot the script-local executor is injected into. The
+# canonical runner only accepts a supported executor name; the class below still
+# reports its own name on the persisted executor run.
+SMOKE_EXECUTOR_SLOT = "noop"
 SMOKE_VALIDATOR = "issue-prepared-workspace-smoke"
 SMOKE_ARTIFACT_NAME = "issue_to_prepared_workspace_result.txt"
 SMOKE_WORKTREE_FILE = "issue_to_prepared_workspace_marker.txt"
@@ -246,16 +259,92 @@ def _make_dispatcher_factory() -> Any:
         return Dispatcher(
             store,
             executor_registry={
-                SMOKE_EXECUTOR: IssuePreparedWorkspaceSmokeExecutor(),
+                SMOKE_EXECUTOR_SLOT: IssuePreparedWorkspaceSmokeExecutor(),
             },
             validator_registry={
                 SMOKE_VALIDATOR: IssuePreparedWorkspaceSmokeValidator(),
             },
             validators=validators,
-            default_executor=SMOKE_EXECUTOR,
+            default_executor=SMOKE_EXECUTOR_SLOT,
         )
 
     return dispatcher_factory
+
+
+def _execution_failure_detail(payload: dict[str, Any]) -> str:
+    """Return the runner's own reason, not just the engine's wrapper summary."""
+
+    engine_result = payload.get("execution_engine_result") or {}
+    metadata = engine_result.get("metadata") or {}
+    parts = [
+        str(payload.get("error") or ""),
+        str(metadata.get("runner_error") or ""),
+        str(metadata.get("contract_error") or ""),
+    ]
+    return " | ".join(part for part in parts if part) or "no failure detail reported"
+
+
+def _execute_through_canonical_engine(
+    *,
+    db_path: Path,
+    repo_path: Path,
+    artifact_root: Path,
+    worktree_root: Path,
+    task_key: str,
+    runtime_handoff_path: Path,
+) -> dict[str, Any]:
+    """Execute the prepared task through the canonical ExecutionEngine.
+
+    The script-local executor and validator stay below the real approved task
+    runner, which the engine invokes with the canonical runtime store: the
+    Attempt is therefore reserved by the runtime-admission claim before the
+    executor starts.
+    """
+
+    runtime_handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_handoff_path.write_text(
+        json.dumps(
+            {
+                "task_key": task_key,
+                "source": "issue_to_prepared_workspace_smoke",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    def runner(**kwargs: Any) -> dict[str, Any]:
+        return run_approved_task(
+            kwargs["approved_task_request"],
+            store=kwargs.get("store"),
+            executor_registry={
+                SMOKE_EXECUTOR_SLOT: IssuePreparedWorkspaceSmokeExecutor()
+            },
+            validator_registry={
+                SMOKE_VALIDATOR: IssuePreparedWorkspaceSmokeValidator()
+            },
+        ).to_dict()
+
+    authority = SchedulerExecutionEngineAuthority(
+        DirectRuntimeHandoffAuthorityRequest(
+            repo=DEFAULT_REPO,
+            db_path=db_path,
+            local_repo_path=repo_path,
+            artifact_root=artifact_root,
+            executor=SMOKE_EXECUTOR_SLOT,
+            validators=(SMOKE_VALIDATOR,),
+            worktree_root=worktree_root,
+            base_branch="main",
+            approved_task_preflight=False,
+        ),
+        approved_task_runner_fn=runner,
+    )
+    return authority.execute_from_runtime_handoff(
+        task_key=task_key,
+        handoff={"handoff_artifact_path": str(runtime_handoff_path)},
+        handoff_id=f"issue-prepared-workspace-{task_key}",
+        runtime_execution_id=f"issue-prepared-workspace-{task_key}",
+    )
 
 
 def run_smoke(
@@ -371,16 +460,74 @@ def run_smoke(
         _require(prepared_record.worktree_path.is_dir(), "prepared worktree path is missing")
         prepare_verified_before_dispatch = True
 
-        start_payload = _assert_response(
+        # v0.2.5: the canonical runner requires valid Codex advisory artifact
+        # contract evidence before a task may reach waiting_approval. Generate
+        # the dry-run artifact (no Codex CLI, no subprocess) so the gate is
+        # satisfied by genuine evidence. This is required evidence, not
+        # Codex approval.
+        codex_review_result = generate_codex_advisory_review(
+            CodexAdvisoryReviewRequest(
+                task_key=normalized_task_key,
+                artifact_dir=artifact_root / normalized_task_key,
+                dry_run=True,
+            )
+        )
+        _require(
+            Path(codex_review_result.json_path).is_file(),
+            f"codex advisory review json missing: {codex_review_result.json_path}",
+        )
+        _require(
+            codex_review_result.dry_run is True
+            and codex_review_result.confirm_run is False,
+            "advisory evidence must be generated without invoking any CLI",
+        )
+
+        # A freshly ingested task is Level 2, so the Mission Control dispatcher
+        # API must refuse to start it directly. Asserting that refusal keeps the
+        # fail-closed guard covered by the golden path.
+        direct_start_payload = _assert_response(
             client.post(
                 f"/api/tasks/{normalized_task_key}/start",
                 json={
-                    "executor": SMOKE_EXECUTOR,
+                    "executor": SMOKE_EXECUTOR_SLOT,
                     "validators": [SMOKE_VALIDATOR],
                 },
             ),
             200,
-            "start task",
+            "direct dispatcher start",
+        )
+        _require(
+            direct_start_payload.get("ok") is False,
+            "Mission Control dispatcher API must not start a Level 2 task directly",
+        )
+        direct_start_blocked_reason = str(direct_start_payload.get("message") or "")
+        _require(
+            "canonical ExecutionEngine path" in direct_start_blocked_reason,
+            f"unexpected direct-start refusal: {direct_start_blocked_reason}",
+        )
+        task_after_refusal = store.get_task(normalized_task_key)
+        _require(
+            task_after_refusal is not None
+            and task_after_refusal.status == "queued",
+            "refused direct start must leave the task queued",
+        )
+
+        start_payload = _execute_through_canonical_engine(
+            db_path=db_path,
+            repo_path=repo_path,
+            artifact_root=artifact_root,
+            worktree_root=repo_path / ".worktrees",
+            task_key=normalized_task_key,
+            runtime_handoff_path=(
+                artifact_root / normalized_task_key / "runtime_handoff.json"
+            ),
+        )
+        # Check the engine result before any artifact readback, so a failed
+        # execution reports its own reason instead of a downstream missing
+        # artifact.
+        _require(
+            start_payload.get("ok") is True,
+            f"canonical execution failed: {_execution_failure_detail(start_payload)}",
         )
 
         task_payload = _assert_response(
@@ -425,8 +572,23 @@ def run_smoke(
     artifact_names = _artifact_names(artifacts_payload)
     evidence_item = evidence_payload.get("item", {})
     dispatcher_status = str(start_payload.get("status"))
+    execution_summary = start_payload.get("summary") or {}
+    canonical_attempt_id = execution_summary.get("canonical_attempt_id")
 
     _require(dispatcher_status == "waiting_approval", f"dispatcher status mismatch: {dispatcher_status}")
+    _require(start_payload.get("ok") is True, f"canonical execution failed: {start_payload.get('error')}")
+    _require(
+        execution_summary.get("execution_authority") == "execution_engine",
+        "execution did not cross the canonical ExecutionEngine authority",
+    )
+    _require(
+        execution_summary.get("canonical_attempt_bound") is True,
+        "execution did not bind the canonical Attempt reserved for it",
+    )
+    _require(
+        isinstance(canonical_attempt_id, str) and bool(canonical_attempt_id),
+        "execution did not report a canonical Attempt id",
+    )
     _require(task_item.get("status") == "waiting_approval", "task did not reach waiting_approval")
     _require(len(runs) == 1, f"expected one executor run, got {len(runs)}")
     _require(runs[0].get("executor") == SMOKE_EXECUTOR, "executor run name mismatch")
@@ -444,7 +606,8 @@ def run_smoke(
         "executor artifact preview content mismatch",
     )
     _require(
-        evidence_item.get("mission_contract", {}).get("executor") == SMOKE_EXECUTOR,
+        evidence_item.get("mission_contract", {}).get("executor")
+        == SMOKE_EXECUTOR_SLOT,
         "review evidence did not read mission contract executor",
     )
     review_evidence_available = bool(
@@ -477,6 +640,16 @@ def run_smoke(
         "prepare_status": prepare_status,
         "prepare_verified_before_dispatch": prepare_verified_before_dispatch,
         "dispatcher_status": dispatcher_status,
+        "direct_dispatcher_start_refused": True,
+        "advisory_evidence": {
+            "generated": True,
+            "dry_run": codex_review_result.dry_run,
+            "confirm_run": codex_review_result.confirm_run,
+            "cli_invoked": bool(codex_review_result.codex_output_paths()),
+        },
+        "execution_authority": execution_summary.get("execution_authority"),
+        "canonical_attempt_id": canonical_attempt_id,
+        "canonical_attempt_bound": execution_summary.get("canonical_attempt_bound"),
         "final_status": task_item.get("status"),
         "review_evidence_available": review_evidence_available,
         "validation_summary": {

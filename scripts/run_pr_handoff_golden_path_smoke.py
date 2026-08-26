@@ -234,6 +234,13 @@ def run_smoke(
         issue_summary.get("review_evidence_available") is True,
         "review evidence was unavailable before handoff",
     )
+    # The upstream execution is Level 2, so the handoff must consume the exact
+    # Attempt that execution bound, not reselect one.
+    canonical_attempt_id = issue_summary.get("canonical_attempt_id")
+    _require(
+        isinstance(canonical_attempt_id, str) and bool(canonical_attempt_id),
+        "issue execution did not report a canonical Attempt id",
+    )
 
     db_path = Path(str(issue_summary["db_path"]))
     store = TaskMirrorStore(db_path)
@@ -250,6 +257,7 @@ def run_smoke(
             db_path=db_path,
             output_dir=output_dir,
             repo=DEFAULT_REPO,
+            canonical_attempt_id=str(canonical_attempt_id),
         ),
         store=store,
     )

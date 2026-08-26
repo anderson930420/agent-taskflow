@@ -240,10 +240,31 @@ class RunIssueToPreparedWorkspaceSmokeTests(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8").lower()
 
         self.assertNotIn("opencode", text)
-        self.assertNotIn("codex", text)
         self.assertNotIn("claude", text)
         self.assertNotIn("pi_executor", text)
         self.assertNotIn('"pi"', text)
+        # The smoke must not select a real AI executor. Its only Codex
+        # reference is the advisory artifact the waiting_approval gate
+        # requires; the executor slot itself stays the local noop slot.
+        self.assertNotIn('"codex"', text)
+        self.assertNotIn("codex_executor", text)
+        smoke = _load_smoke_module()
+        self.assertEqual(smoke.SMOKE_EXECUTOR_SLOT, "noop")
+
+    def test_smoke_generates_advisory_evidence_without_invoking_codex(self) -> None:
+        smoke = _load_smoke_module()
+
+        payload = smoke.run_smoke(
+            workspace_root=self.workspace_root,
+            task_key="AT-ADVISORY-EVIDENCE-DRY-RUN",
+            issue_number=9105,
+        )
+
+        advisory = payload["advisory_evidence"]
+        self.assertTrue(advisory["generated"])
+        self.assertTrue(advisory["dry_run"])
+        self.assertFalse(advisory["confirm_run"])
+        self.assertFalse(advisory["cli_invoked"])
 
 
 if __name__ == "__main__":
