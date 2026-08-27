@@ -61,6 +61,23 @@ class SchedulerExecutionEngineRequestBuilderTests(unittest.TestCase):
         self.assertFalse(request.dry_run)
         self.assertFalse(request.preflight)
 
+    def test_advisory_generation_options_are_mapped(self) -> None:
+        request = build_scheduler_execution_engine_request(
+            make_input(
+                dry_run=False,
+                auto_generate_codex_advisory_evidence=True,
+                codex_advisory_command="codex exec --sandbox workspace-write",
+                codex_advisory_timeout_seconds=120,
+            )
+        )
+
+        self.assertTrue(request.auto_generate_codex_advisory_evidence)
+        self.assertEqual(
+            request.codex_advisory_command,
+            "codex exec --sandbox workspace-write",
+        )
+        self.assertEqual(request.codex_advisory_timeout_seconds, 120)
+
     def test_executor_profile_is_mapped(self) -> None:
         request = build_scheduler_execution_engine_request(
             make_input(

@@ -135,6 +135,23 @@ class BuildRequestTests(unittest.TestCase):
         # The P5-b builder forbids publication; the opt-in path is execution-only.
         self.assertIs(request.metadata["publish_after_execution"], False)
 
+    def test_request_maps_advisory_generation_options(self) -> None:
+        request = build_scheduler_tick_execution_engine_request(
+            scheduler_request(
+                auto_generate_codex_advisory_evidence=True,
+                codex_advisory_command="codex exec --sandbox workspace-write",
+                codex_advisory_timeout_seconds=120,
+            ),
+            task_key="AT-GH-1",
+        )
+
+        self.assertTrue(request.auto_generate_codex_advisory_evidence)
+        self.assertEqual(
+            request.codex_advisory_command,
+            "codex exec --sandbox workspace-write",
+        )
+        self.assertEqual(request.codex_advisory_timeout_seconds, 120)
+
 
 class RouteThroughEngineTests(unittest.TestCase):
     def test_engine_called_exactly_once_and_block_is_evidence(self) -> None:

@@ -108,6 +108,25 @@ class ExecutionEngineContractTests(unittest.TestCase):
         self.assertEqual(request.metadata["labels"], ["contract"])
         self.assertEqual(metadata, {"labels": ["contract"]})
 
+    def test_advisory_generation_options_serialize_and_reject_dry_run(self) -> None:
+        request = make_request(
+            dry_run=False,
+            auto_generate_codex_advisory_evidence=True,
+            codex_advisory_command="codex exec --sandbox workspace-write",
+            codex_advisory_timeout_seconds=120,
+        )
+
+        payload = to_json_dict(request)
+
+        self.assertTrue(payload["auto_generate_codex_advisory_evidence"])
+        self.assertEqual(
+            payload["codex_advisory_command"],
+            "codex exec --sandbox workspace-write",
+        )
+        self.assertEqual(payload["codex_advisory_timeout_seconds"], 120)
+        with self.assertRaisesRegex(ValueError, "requires dry_run=False"):
+            make_request(auto_generate_codex_advisory_evidence=True)
+
     def test_protocol_can_be_implemented_by_fake_engine(self) -> None:
         class FakeEngine:
             def execute(

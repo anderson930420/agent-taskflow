@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+import shlex
 import subprocess
 from typing import Any, Mapping, Sequence
 
 from agent_taskflow.api.schemas import json_safe
 from agent_taskflow.atomic_write import atomic_write_text
+from agent_taskflow.codex_advisory_review import (
+    DEFAULT_CODEX_COMMAND,
+    DEFAULT_TIMEOUT_SECONDS,
+    CodexAdvisoryReviewRequest,
+    generate_codex_advisory_review,
+)
 from agent_taskflow.codex_advisory_evidence_gate import (
     RequiredCodexAdvisoryEvidenceRequest,
     RequiredCodexAdvisoryEvidenceResult,
@@ -85,6 +92,12 @@ class ApprovedTaskRunRequest:
     # task may transition into waiting_approval. This requires advisory evidence,
     # not Codex approval; the deterministic contract validator must pass.
     require_codex_advisory_evidence: bool = True
+    # v0.3.1: explicit, opt-in post-validator evidence generation. This is
+    # confirm-run only; advisory output remains non-authoritative and the
+    # existing deterministic evidence gate remains the transition authority.
+    auto_generate_codex_advisory_evidence: bool = False
+    codex_advisory_command: str = DEFAULT_CODEX_COMMAND
+    codex_advisory_timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     command: tuple[str, ...] | None = None
     # Executor profile overrides. When provided these take precedence over the
     # TaskRecord profile fields; otherwise the recorded TaskRecord profile is
@@ -134,6 +147,35 @@ class ApprovedTaskRunRequest:
             tools = tuple(part.strip() for part in self.tools if str(part).strip())
             object.__setattr__(self, "tools", tools or None)
         object.__setattr__(
+            self,
+            "auto_generate_codex_advisory_evidence",
+            bool(self.auto_generate_codex_advisory_evidence),
+        )
+        codex_command = str(self.codex_advisory_command or "").strip()
+        object.__setattr__(self, "codex_advisory_command", codex_command)
+        try:
+            codex_command_args = shlex.split(codex_command)
+        except ValueError as exc:
+            raise ValueError(f"codex_advisory_command is invalid: {exc}") from exc
+        if not codex_command_args:
+            raise ValueError("codex_advisory_command must not be empty")
+        if isinstance(self.codex_advisory_timeout_seconds, bool) or not isinstance(
+            self.codex_advisory_timeout_seconds, int
+        ):
+            raise ValueError("codex_advisory_timeout_seconds must be an integer")
+        if self.codex_advisory_timeout_seconds <= 0:
+            raise ValueError("codex_advisory_timeout_seconds must be a positive integer")
+        if self.auto_generate_codex_advisory_evidence:
+            if self.dry_run:
+                raise ValueError(
+                    "auto_generate_codex_advisory_evidence requires dry_run=False"
+                )
+            if not self.require_codex_advisory_evidence:
+                raise ValueError(
+                    "auto_generate_codex_advisory_evidence requires "
+                    "require_codex_advisory_evidence=True"
+                )
+        object.__setattr__(
             self, "claude_code_enable_invocation", bool(self.claude_code_enable_invocation)
         )
         if self.claude_code_command is not None:
@@ -173,6 +215,7 @@ class ApprovedTaskRunResult:
     safety: dict[str, Any]
     error: str | None = None
     codex_advisory_evidence: dict[str, Any] = field(default_factory=dict)
+    codex_advisory_generation: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return json_safe(asdict(self))
@@ -550,6 +593,15 @@ def run_approved_task(
                 ),
             )
 
+    codex_advisory_generation = _generate_codex_advisory_evidence(
+        request,
+        effective_task,
+        worktree_path=workspace_result.worktree_path,
+    )
+    if codex_advisory_generation is None:
+        codex_advisory_generation = _codex_advisory_generation_payload(request)
+    codex_advisory_artifacts = _generation_artifact_paths(codex_advisory_generation)
+
     # v0.2.5 pre-waiting-approval gate: deterministic validators have passed, but
     # the task may only enter waiting_approval when valid Codex advisory artifact
     # contract evidence is also present. This requires advisory evidence, not
@@ -582,8 +634,50 @@ def run_approved_task(
                 contract_path=contract_path,
                 executor_result=executor_result,
                 validation_results=validator_results,
+                additional_artifacts=codex_advisory_artifacts,
             ),
             codex_advisory_evidence=evidence_result.to_dict(),
+            codex_advisory_generation=codex_advisory_generation,
+        )
+
+    if (
+        codex_advisory_generation["attempted"]
+        and codex_advisory_generation["review_status"] == "tool_error"
+    ):
+        tool_error = codex_advisory_generation["tool_error"] or {}
+        category = tool_error.get("category", "unknown")
+        message = tool_error.get("message", "Codex advisory review failed")
+        reason = f"Codex advisory evidence auto-generation failed: {category}: {message}"
+        _block_task(current_store, effective_task.task_key, reason)
+        return _blocked_failure(
+            request,
+            task=effective_task,
+            phase=PHASE_CODEX_ADVISORY_EVIDENCE,
+            error=reason,
+            task_status_changed=True,
+            preflight=preflight_payload,
+            workspace=_workspace_payload(workspace_result),
+            executor_run=_executor_run_payload(
+                executor_run_id,
+                request.executor,
+                executor_result=executor_result,
+                started=True,
+                finished=True,
+                ok=True,
+            ),
+            validators=[_validator_payload(item) for item in validator_results],
+            artifacts=_collect_artifacts(
+                current_store,
+                effective_task.task_key,
+                contract_path=contract_path,
+                executor_result=executor_result,
+                validation_results=validator_results,
+                additional_artifacts=codex_advisory_artifacts,
+            ),
+            codex_advisory_evidence=(
+                evidence_result.to_dict() if evidence_result is not None else {}
+            ),
+            codex_advisory_generation=codex_advisory_generation,
         )
 
     current_store.update_task_status(
@@ -617,10 +711,12 @@ def run_approved_task(
             contract_path=contract_path,
             executor_result=executor_result,
             validation_results=validator_results,
+            additional_artifacts=codex_advisory_artifacts,
         ),
         codex_advisory_evidence=(
             evidence_result.to_dict() if evidence_result is not None else {}
         ),
+        codex_advisory_generation=codex_advisory_generation,
         summary={
             "final_task_status": APPROVED_TASK_STATUS,
             "requires_human_review": True,
@@ -876,6 +972,7 @@ def _dry_run_result(
             db_written=False,
             read_only=True,
         ),
+        codex_advisory_generation=_codex_advisory_generation_payload(request),
     )
 
 
@@ -924,6 +1021,7 @@ def _blocked_preview(
             read_only=True,
         ),
         error=error,
+        codex_advisory_generation=_codex_advisory_generation_payload(request),
     )
 
 
@@ -940,6 +1038,7 @@ def _blocked_failure(
     validators: list[dict[str, Any]] | None = None,
     artifacts: list[dict[str, Any]] | None = None,
     codex_advisory_evidence: dict[str, Any] | None = None,
+    codex_advisory_generation: dict[str, Any] | None = None,
 ) -> ApprovedTaskRunResult:
     payload_workspace = workspace if workspace is not None else _workspace_preview(request, task.task_key)
     payload_executor_run = (
@@ -990,7 +1089,92 @@ def _blocked_failure(
         ),
         error=error,
         codex_advisory_evidence=codex_advisory_evidence or {},
+        codex_advisory_generation=(
+            codex_advisory_generation
+            if codex_advisory_generation is not None
+            else _codex_advisory_generation_payload(request)
+        ),
     )
+
+
+def _codex_advisory_generation_payload(
+    request: ApprovedTaskRunRequest,
+) -> dict[str, Any]:
+    """Return the no-attempt record carried by every terminal runner result."""
+
+    enabled = bool(request.auto_generate_codex_advisory_evidence)
+    return {
+        "enabled": enabled,
+        "attempted": False,
+        "skipped_reason": "not_reached" if enabled else "disabled",
+        "invoked": False,
+        "review_status": None,
+        "risk_level": None,
+        "tool_error": None,
+        "artifact_paths": [],
+        "duration_seconds": None,
+    }
+
+
+def _generate_codex_advisory_evidence(
+    request: ApprovedTaskRunRequest,
+    task: TaskRecord,
+    *,
+    worktree_path: Path | None,
+) -> dict[str, Any] | None:
+    """Generate confirm-run advisory evidence once after validators pass.
+
+    This helper produces evidence only. The caller still evaluates the existing
+    deterministic evidence gate and decides whether the task may advance.
+    """
+
+    if not request.auto_generate_codex_advisory_evidence:
+        return None
+
+    existing_evidence = _check_codex_advisory_evidence(request, task)
+    generation = _codex_advisory_generation_payload(request)
+    if existing_evidence is not None and existing_evidence.satisfied:
+        generation["skipped_reason"] = "advisory_evidence_already_present"
+        return generation
+
+    artifact_dir = task.artifact_dir
+    if artifact_dir is None:  # pragma: no cover - guarded earlier in the runner.
+        raise ApprovedTaskRunnerError("Task artifact_dir is required")
+    result = generate_codex_advisory_review(
+        CodexAdvisoryReviewRequest(
+            task_key=task.task_key,
+            artifact_dir=artifact_dir,
+            repo_path=request.repo_path,
+            worktree_path=worktree_path,
+            dry_run=False,
+            confirm_run=True,
+            codex_command=request.codex_advisory_command,
+            timeout_seconds=request.codex_advisory_timeout_seconds,
+        )
+    )
+    invocation = result.payload.get("codex_invocation") or {}
+    generation.update(
+        {
+            "attempted": True,
+            "skipped_reason": None,
+            "invoked": True,
+            "review_status": result.payload.get("review_status"),
+            "risk_level": result.payload.get("risk_level"),
+            "tool_error": result.payload.get("tool_error"),
+            "artifact_paths": [
+                str(path)
+                for path in (*result.artifact_paths(), *result.codex_output_paths())
+            ],
+            "duration_seconds": invocation.get("duration_seconds"),
+        }
+    )
+    return generation
+
+
+def _generation_artifact_paths(generation: Mapping[str, Any]) -> tuple[Path, ...]:
+    """Return generated advisory artifact paths for the proof-of-work index."""
+
+    return tuple(Path(path) for path in generation.get("artifact_paths") or ())
 
 
 def _check_codex_advisory_evidence(
@@ -1168,6 +1352,7 @@ def _collect_artifacts(
     contract_path: Path,
     executor_result: ExecutorResult | None,
     validation_results: Sequence[ValidatorResult],
+    additional_artifacts: Sequence[Path] = (),
 ) -> list[dict[str, str]]:
     artifacts: list[dict[str, str]] = []
     if contract_path.exists():
@@ -1182,6 +1367,8 @@ def _collect_artifacts(
             artifacts.append({"kind": "validator_log", "path": str(validator_result.log_path)})
         for artifact_path in validator_result.artifacts.values():
             artifacts.append({"kind": "validator_artifact", "path": str(artifact_path)})
+    for artifact_path in additional_artifacts:
+        artifacts.append({"kind": "advisory_artifact", "path": str(artifact_path)})
 
     deduped: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()

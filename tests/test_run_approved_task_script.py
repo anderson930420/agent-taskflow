@@ -164,6 +164,24 @@ class RunApprovedTaskScriptTests(unittest.TestCase):
         self.assertEqual(payload["status"], "preview")
         self.assertTrue(payload["safety"]["read_only"])
 
+    def test_script_rejects_auto_advisory_generation_in_dry_run(self) -> None:
+        self._add_task("AT-GH-503A")
+
+        result = self.run_script(
+            "--task-key",
+            "AT-GH-503A",
+            "--executor",
+            "noop",
+            "--dry-run",
+            "--auto-generate-codex-advisory-evidence",
+            "--json",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["phase"], "cli")
+        self.assertIn("requires dry_run=False", payload["summary"])
+
     def test_script_refuses_non_queued_task(self) -> None:
         self._add_task("AT-GH-504", status="blocked")
 

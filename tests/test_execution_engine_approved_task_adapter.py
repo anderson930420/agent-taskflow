@@ -134,6 +134,23 @@ class AdapterRequestMappingTests(unittest.TestCase):
         self.assertFalse(approved.dry_run)
         self.assertFalse(approved.preflight)
 
+    def test_forwards_advisory_generation_options(self) -> None:
+        request = make_request(
+            dry_run=False,
+            auto_generate_codex_advisory_evidence=True,
+            codex_advisory_command="codex exec --sandbox workspace-write",
+            codex_advisory_timeout_seconds=120,
+        )
+
+        approved, _, _ = run_adapter(request, success_result())
+
+        self.assertTrue(approved.auto_generate_codex_advisory_evidence)
+        self.assertEqual(
+            approved.codex_advisory_command,
+            "codex exec --sandbox workspace-write",
+        )
+        self.assertEqual(approved.codex_advisory_timeout_seconds, 120)
+
 
 class AdapterResultMappingTests(unittest.TestCase):
     def test_success_result_maps_to_ok_result(self) -> None:

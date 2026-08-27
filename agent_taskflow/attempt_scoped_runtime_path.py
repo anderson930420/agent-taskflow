@@ -421,6 +421,7 @@ def install_attempt_scoped_runtime_path(
     original_write_contract = approved_task_runner_module._write_mission_contract
     original_build_context = approved_task_runner_module._build_executor_context
     original_ensure_prompt = approved_task_runner_module._ensure_implementation_prompt
+    original_generate_codex = approved_task_runner_module._generate_codex_advisory_evidence
     original_check_codex = approved_task_runner_module._check_codex_advisory_evidence
     original_resolve_executor = approved_task_runner_module._resolve_executor
     original_resolve_validator = approved_task_runner_module._resolve_validator
@@ -455,6 +456,11 @@ def install_attempt_scoped_runtime_path(
         bound = store.bind_task(task) if store is not None else task
         return original_check_codex(request, bound)
 
+    def attempt_generate_codex(request: Any, task: Any, **kwargs: Any):
+        store = _approved_store()
+        bound = store.bind_task(task) if store is not None else task
+        return original_generate_codex(request, bound, **kwargs)
+
     def attempt_resolve_executor(request: Any, task: Any, *, executor_registry: Any):
         executor = original_resolve_executor(
             request,
@@ -476,6 +482,7 @@ def install_attempt_scoped_runtime_path(
     approved_task_runner_module._write_mission_contract = attempt_write_mission_contract
     approved_task_runner_module._build_executor_context = attempt_build_executor_context
     approved_task_runner_module._ensure_implementation_prompt = attempt_ensure_prompt
+    approved_task_runner_module._generate_codex_advisory_evidence = attempt_generate_codex
     approved_task_runner_module._check_codex_advisory_evidence = attempt_check_codex
     approved_task_runner_module._resolve_executor = attempt_resolve_executor
     approved_task_runner_module._resolve_validator = attempt_resolve_validator

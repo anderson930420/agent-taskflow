@@ -102,6 +102,28 @@ class GitHubIssueOneTaskSchedulerTickTests(unittest.TestCase):
         values.update(overrides)
         return GitHubIssueOneTaskSchedulerTickRequest(**values)
 
+    def test_advisory_generation_requires_confirmation_and_is_reported(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires confirmed mode"):
+            self.request(auto_generate_codex_advisory_evidence=True)
+
+        request = self.request(
+            confirmed=True,
+            auto_generate_codex_advisory_evidence=True,
+            codex_advisory_command="codex exec --sandbox workspace-write",
+            codex_advisory_timeout_seconds=120,
+        )
+        result = run_github_issue_one_task_scheduler_tick(
+            request,
+            discovery_fetcher=lambda _request: [],
+        )
+
+        self.assertTrue(result["runner_config"]["auto_generate_codex_advisory_evidence"])
+        self.assertEqual(
+            result["runner_config"]["codex_advisory_command"],
+            "codex exec --sandbox workspace-write",
+        )
+        self.assertEqual(result["runner_config"]["codex_advisory_timeout_seconds"], 120)
+
     def test_dry_run_acquires_lock_and_calls_automation_without_writes(self) -> None:
         discovery_calls: list[int] = []
 
