@@ -4,6 +4,11 @@ This executor is a pure pass-through to the Pi CLI. It does not call any AI,
 run validators, approve tasks, or mutate dispatcher state. Canonical Attempt
 runs use PR-7 managed process groups; plain local contexts retain the historical
 synchronous compatibility path.
+
+When the artifact directory carries a mirrored issue spec, that spec is handed
+to the mission-prompt renderer so the bounded worker receives the actual task
+definition and not just the issue title. The renderer contains it as untrusted
+external content; this adapter only reads the file.
 """
 
 from __future__ import annotations
@@ -23,6 +28,14 @@ from agent_taskflow.executors.pi_orchestrator import (
     build_pi_mission_plan,
     write_pi_mission_plan,
 )
+
+
+# Mirrored GitHub issue spec, copied into every Attempt artifact directory by
+# agent_taskflow.attempt_resources.ATTEMPT_INPUT_FILENAMES. The filename is
+# re-declared here (as it is in task_execution_package and
+# waiting_approval_summary) to keep the executor adapter free of ingestion
+# imports.
+ISSUE_SPEC_FILENAME = "issue_spec.md"
 
 
 class PiExecutor(Executor):
@@ -85,10 +98,12 @@ class PiExecutor(Executor):
                         original_prompt = raw
                 except OSError:
                     pass
+            issue_spec = self._read_issue_spec(context.artifact_dir)
             rendered = render_pi_mission_prompt(
                 contract,
                 original_prompt=original_prompt,
                 mission_plan=mission_plan,
+                issue_spec=issue_spec,
             )
             protocol_prompt_path = write_pi_mission_prompt(
                 context.artifact_dir, rendered
@@ -290,6 +305,22 @@ class PiExecutor(Executor):
             summary=summary,
             artifacts=artifacts,
         )
+
+    @staticmethod
+    def _read_issue_spec(artifact_dir: Path) -> str | None:
+        """Return the mirrored issue spec text, or None when unavailable.
+
+        A missing or unreadable spec is not an execution failure: tasks that did
+        not come from a GitHub issue simply have no spec to inline.
+        """
+        spec_path = artifact_dir / ISSUE_SPEC_FILENAME
+        try:
+            if not spec_path.is_file():
+                return None
+            raw = spec_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        return raw if raw.strip() else None
 
     def _build_command(self, prompt_text: str) -> list[str]:
         command: list[str] = [self.pi_bin]
