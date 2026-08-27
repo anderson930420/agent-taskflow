@@ -12,7 +12,7 @@ or expose API/Mission Control actions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -35,16 +35,11 @@ from agent_taskflow.pr_handoff import (
     PrHandoffRequest,
     create_pr_handoff,
 )
-from agent_taskflow.runtime_handoff_execution_from_handoff import (
-    RUNTIME_EXECUTION_ARTIFACT_TYPE,
-    RUNTIME_FINISHED_EVENT_TYPE,
+from agent_taskflow.pr_preparation_attempt_binding import (
+    PRPreparationAttemptBinding,
+    resolve_pr_preparation_attempt_binding,
 )
 from agent_taskflow.store import TaskMirrorStore
-from agent_taskflow.level2_execution_authority import (
-    Level2ExecutionAuthorityError,
-    is_level2_task,
-    verify_canonical_attempt,
-)
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.waiting_approval_summary import (
     WaitingApprovalSummaryRequest,
@@ -162,6 +157,7 @@ def run_pr_preparation_pipeline(
         _require_all_confirmations(request)
 
     preflight = _run_preflight(request)
+    effective_request = _request_with_bound_attempt(request, preflight)
     stages: dict[str, Any] = {_STAGE_PREFLIGHT: preflight["summary"]}
     if not preflight["ok"]:
         return _failure_response(
@@ -172,9 +168,9 @@ def run_pr_preparation_pipeline(
             stages=stages,
         )
 
-    if request.dry_run:
+    if effective_request.dry_run:
         handoff_preview = _run_pr_handoff_stage(
-            request,
+            effective_request,
             preflight=preflight,
             dry_run=True,
         )
@@ -187,10 +183,14 @@ def run_pr_preparation_pipeline(
                 stage_result=handoff_preview,
                 stages=stages,
             )
-        return _dry_run_response(request, preflight=preflight, handoff=handoff_preview)
+        return _dry_run_response(
+            effective_request,
+            preflight=preflight,
+            handoff=handoff_preview,
+        )
 
     handoff_stage = _run_pr_handoff_stage(
-        request,
+        effective_request,
         preflight=preflight,
         dry_run=False,
     )
@@ -205,7 +205,7 @@ def run_pr_preparation_pipeline(
         )
 
     branch_stage = _run_branch_push_stage(
-        request,
+        effective_request,
         preflight=preflight,
         handoff=handoff_stage,
         branch_push_fn=branch_push_fn or _default_branch_push_fn,
@@ -222,7 +222,7 @@ def run_pr_preparation_pipeline(
         )
 
     draft_stage = _run_draft_pr_stage(
-        request,
+        effective_request,
         preflight=preflight,
         branch_push=branch_stage,
         draft_pr_fn=draft_pr_fn or _default_draft_pr_fn,
@@ -243,7 +243,7 @@ def run_pr_preparation_pipeline(
     draft_pr_created = draft_stage["summary"].get("created") is True
     draft_pr_already_created = draft_stage["summary"].get("already_created") is True
     duplicate_trigger_suppressed = bool(
-        request.resume_existing
+        effective_request.resume_existing
         and not branch_pushed
         and not draft_pr_created
         and draft_pr_already_created
@@ -258,13 +258,13 @@ def run_pr_preparation_pipeline(
             else "draft_pr_created"
         ),
         "mode": "confirmed",
-        "task_key": request.task_key,
+        "task_key": effective_request.task_key,
         "single_use_enforced": True,
         "duplicate_trigger_suppressed": duplicate_trigger_suppressed,
         "stages": stages,
         "safety": _safety(
             dry_run=False,
-            resume_existing=request.resume_existing,
+            resume_existing=effective_request.resume_existing,
             github_mutated=branch_pushed or draft_pr_created,
             branch_pushed=branch_pushed,
             draft_pr_created=draft_pr_created,
@@ -288,6 +288,21 @@ def _require_all_confirmations(request: PRPreparationPipelineRequest) -> None:
             "Confirmed PR preparation requires all GitHub mutation "
             f"confirmations before any write or mutation: {', '.join(missing)}"
         )
+
+
+def _request_with_bound_attempt(
+    request: PRPreparationPipelineRequest,
+    preflight: dict[str, Any],
+) -> PRPreparationPipelineRequest:
+    """Pass the evidence-bound id through unchanged to exact-id handoff."""
+
+    summary = preflight.get("summary") or {}
+    if summary.get("level2_task") is not True:
+        return request
+    attempt_id = summary.get("canonical_attempt_id")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        return request
+    return replace(request, canonical_attempt_id=attempt_id)
 
 
 def _run_preflight(request: PRPreparationPipelineRequest) -> dict[str, Any]:
@@ -331,20 +346,13 @@ def _run_preflight(request: PRPreparationPipelineRequest) -> dict[str, Any]:
     if task.status != "waiting_approval":
         reasons.append(f"task_status_not_waiting_approval: {task.status}")
 
-    canonical_attempt_verified = False
-    try:
-        if is_level2_task(request.db_path, request.task_key):
-            if request.canonical_attempt_id is None:
-                reasons.append("canonical_attempt_id_required_for_level2")
-            else:
-                verify_canonical_attempt(
-                    db_path=request.db_path,
-                    task_key=request.task_key,
-                    attempt_id=request.canonical_attempt_id,
-                )
-                canonical_attempt_verified = True
-    except Level2ExecutionAuthorityError as exc:
-        reasons.append(f"canonical_attempt_invalid: {exc}")
+    binding = resolve_pr_preparation_attempt_binding(
+        db_path=request.db_path,
+        task_key=request.task_key,
+        requested_attempt_id=request.canonical_attempt_id,
+        store=store,
+    )
+    reasons.extend(binding.reasons)
 
     worktree = store.get_task_worktree(request.task_key)
     if worktree is None:
@@ -362,14 +370,7 @@ def _run_preflight(request: PRPreparationPipelineRequest) -> dict[str, Any]:
                 f"{request.base_branch} != {worktree.base_branch}"
             )
 
-    runtime = _runtime_evidence(
-        store,
-        request.task_key,
-        canonical_attempt_id=(
-            request.canonical_attempt_id if canonical_attempt_verified else None
-        ),
-    )
-    reasons.extend(runtime["reasons"])
+    runtime = binding.to_summary()
 
     repo = _source_repo(request)
     if repo is None:
@@ -382,7 +383,7 @@ def _run_preflight(request: PRPreparationPipelineRequest) -> dict[str, Any]:
         worktree=worktree,
         runtime=runtime,
         repo=repo,
-        canonical_attempt_verified=canonical_attempt_verified,
+        binding=binding,
     )
 
 
@@ -394,7 +395,7 @@ def _preflight_result(
     worktree: Any,
     runtime: dict[str, Any] | None,
     repo: str | None,
-    canonical_attempt_verified: bool = False,
+    binding: PRPreparationAttemptBinding | None = None,
 ) -> dict[str, Any]:
     passed = not reasons
     runtime = runtime or {
@@ -415,8 +416,17 @@ def _preflight_result(
         "branch": worktree.branch if worktree is not None else None,
         "base_branch": worktree.base_branch if worktree is not None else request.base_branch,
         "repo": repo,
-        "canonical_attempt_id": request.canonical_attempt_id,
-        "canonical_attempt_verified": canonical_attempt_verified,
+        "level2_task": binding.level2_task if binding is not None else False,
+        "canonical_attempt_id": (
+            binding.attempt_id if binding is not None else request.canonical_attempt_id
+        ),
+        "canonical_attempt_verified": (
+            binding.canonical_attempt_verified if binding is not None else False
+        ),
+        "canonical_attempt_path": binding.path if binding is not None else None,
+        "recovery_operator": (
+            binding.recovery_operator if binding is not None else None
+        ),
     }
     return {
         "ok": passed,
@@ -431,69 +441,6 @@ def _preflight_result(
             "base_branch": worktree.base_branch if worktree is not None else None,
             "base_sha": worktree.base_sha if worktree is not None else None,
         },
-    }
-
-
-def _runtime_evidence(
-    store: TaskMirrorStore,
-    task_key: str,
-    *,
-    canonical_attempt_id: str | None = None,
-) -> dict[str, Any]:
-    reasons: list[str] = []
-    artifacts = [
-        artifact
-        for artifact in store.list_task_artifacts(task_key)
-        if artifact.artifact_type == RUNTIME_EXECUTION_ARTIFACT_TYPE
-    ]
-    events = [
-        event
-        for event in store.list_task_events(task_key)
-        if event.event_type == RUNTIME_FINISHED_EVENT_TYPE
-    ]
-
-    if not artifacts:
-        reasons.append("runtime_handoff_execution_artifact_missing")
-    if not events:
-        reasons.append("runtime_execution_finished_event_missing")
-
-    payloads: list[dict[str, Any]] = []
-    for artifact in artifacts:
-        payload, artifact_reasons = _read_json_artifact(artifact.path)
-        reasons.extend(artifact_reasons)
-        if payload is not None:
-            payloads.append(payload)
-    for event in events:
-        payload = _event_payload(event.payload_json)
-        if payload is not None:
-            payloads.append(payload)
-
-    runner_ok_values = [
-        payload.get("runner_ok")
-        for payload in payloads
-        if isinstance(payload.get("runner_ok"), bool)
-    ]
-    if any(value is False for value in runner_ok_values):
-        reasons.append("runtime_runner_not_ok")
-    if canonical_attempt_id is not None:
-        if not payloads:
-            reasons.append("runtime_exact_canonical_attempt_evidence_missing")
-        for payload in payloads:
-            if payload.get("execution_authority") != "execution_engine":
-                reasons.append("runtime_execution_authority_invalid")
-            if payload.get("canonical_attempt_id") != canonical_attempt_id:
-                reasons.append("runtime_canonical_attempt_id_mismatch")
-            if payload.get("canonical_attempt_bound") is not True:
-                reasons.append("runtime_canonical_attempt_not_bound")
-            if payload.get("canonical_attempt_store_verified") is not True:
-                reasons.append("runtime_canonical_attempt_not_store_verified")
-
-    return {
-        "runtime_evidence_found": bool(artifacts and events and not reasons),
-        "artifact_count": len(artifacts),
-        "finished_event_count": len(events),
-        "runner_ok": runner_ok_values[-1] if runner_ok_values else None,
-        "reasons": _unique_strings(reasons),
     }
 
 
@@ -515,18 +462,6 @@ def _read_json_artifact(
     if not isinstance(payload, dict):
         return None, [f"{context}_json_not_object: {path}"]
     return payload, []
-
-
-def _event_payload(payload_json: str | None) -> dict[str, Any] | None:
-    if not payload_json:
-        return None
-    try:
-        payload = json.loads(payload_json)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return payload
 
 
 def _source_repo(request: PRPreparationPipelineRequest) -> str | None:

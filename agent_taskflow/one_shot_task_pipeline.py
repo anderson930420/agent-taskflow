@@ -70,12 +70,16 @@ from agent_taskflow.scheduler_proposals import (
     create_scheduler_proposal,
     verify_proposal_hashes,
 )
+from agent_taskflow.pr_preparation_attempt_binding import (
+    NORMAL_PATH,
+    RECOVERY_PATH,
+    resolve_pr_preparation_attempt_binding,
+)
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.level2_execution_authority import (
     Level2ExecutionAuthorityError,
     is_execution_engine_authority_callback,
     is_level2_task,
-    verify_canonical_attempt,
 )
 from agent_taskflow.tasks import normalize_task_key
 
@@ -1600,18 +1604,24 @@ def _runtime_reuse_reasons(
             attempt_id = runtime_execution.get("canonical_attempt_id")
             if runtime_execution.get("execution_authority") != "execution_engine":
                 reasons.append("runtime_execution_authority_invalid")
-            if runtime_execution.get("canonical_attempt_bound") is not True:
-                reasons.append("runtime_canonical_attempt_unbound")
-            if runtime_execution.get("canonical_attempt_store_verified") is not True:
-                reasons.append("runtime_canonical_attempt_not_store_verified")
             if not isinstance(attempt_id, str) or not attempt_id.strip():
                 reasons.append("runtime_canonical_attempt_id_missing")
             else:
-                verify_canonical_attempt(
+                attempt_binding = resolve_pr_preparation_attempt_binding(
                     db_path=store.db_path,
                     task_key=task_key,
-                    attempt_id=attempt_id,
+                    requested_attempt_id=attempt_id,
+                    store=store,
                 )
+                reasons.extend(attempt_binding.reasons)
+                if attempt_binding.path == NORMAL_PATH:
+                    if runtime_execution.get("canonical_attempt_bound") is not True:
+                        reasons.append("runtime_canonical_attempt_unbound")
+                    if runtime_execution.get("canonical_attempt_store_verified") is not True:
+                        reasons.append("runtime_canonical_attempt_not_store_verified")
+                elif attempt_binding.path == RECOVERY_PATH:
+                    if runtime_execution.get("canonical_attempt_bound") is not False:
+                        reasons.append("runtime_canonical_attempt_recovery_binding_mismatch")
     except Level2ExecutionAuthorityError as exc:
         reasons.append(f"runtime_canonical_attempt_invalid: {exc}")
     return _unique_strings(reasons)
