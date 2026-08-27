@@ -264,7 +264,11 @@ class RunIssueToPreparedWorkspaceSmokeTests(unittest.TestCase):
         self.assertTrue(advisory["generated"])
         self.assertTrue(advisory["dry_run"])
         self.assertFalse(advisory["confirm_run"])
-        self.assertFalse(advisory["cli_invoked"])
+        # codex_cli_invoked is set only downstream of the real subprocess.run,
+        # so this proves the CLI was never invoked -- not merely that the
+        # confirm-run branch was skipped (issue #181).
+        self.assertFalse(advisory["codex_cli_invoked"])
+        self.assertNotIn("cli_invoked", advisory)
 
 
 if __name__ == "__main__":

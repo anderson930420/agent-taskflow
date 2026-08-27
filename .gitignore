@@ -25,3 +25,6 @@ id_ed25519.pub
 
 # Local Agent Taskflow runtime state
 .agent-taskflow/
+
+# operator secrets (see ops/notify.env.example)
+ops/notify.env
