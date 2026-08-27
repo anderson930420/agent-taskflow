@@ -286,6 +286,11 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
             ),
             dry_run=request.dry_run,
             preflight=request.preflight,
+            auto_generate_codex_advisory_evidence=(
+                request.auto_generate_codex_advisory_evidence
+            ),
+            codex_advisory_command=request.codex_advisory_command,
+            codex_advisory_timeout_seconds=request.codex_advisory_timeout_seconds,
             command=executor_profile.command,
             model=executor_profile.model,
             provider=executor_profile.provider,

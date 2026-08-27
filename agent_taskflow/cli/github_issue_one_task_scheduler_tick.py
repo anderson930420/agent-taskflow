@@ -116,6 +116,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Root directory for isolated approved-task worktrees.",
     )
     parser.add_argument(
+        "--auto-generate-codex-advisory-evidence",
+        action="store_true",
+        help=(
+            "Generate confirm-run Codex advisory evidence after successful "
+            "validators. Requires --confirmed and remains advisory only."
+        ),
+    )
+    parser.add_argument(
+        "--codex-advisory-command",
+        default="codex exec",
+        help="Codex advisory command string executed as argv, never through a shell.",
+    )
+    parser.add_argument(
+        "--codex-advisory-timeout-seconds",
+        type=int,
+        default=300,
+        help="Timeout in seconds for an enabled Codex advisory invocation.",
+    )
+    parser.add_argument(
         "--command",
         default=None,
         help=(
@@ -222,6 +241,11 @@ def main(argv: list[str] | None = None) -> int:
                 else None
             ),
             approved_task_preflight=bool(args.approved_task_preflight),
+            auto_generate_codex_advisory_evidence=(
+                bool(args.auto_generate_codex_advisory_evidence)
+            ),
+            codex_advisory_command=args.codex_advisory_command,
+            codex_advisory_timeout_seconds=args.codex_advisory_timeout_seconds,
             command=_parse_command(args.command),
             model=args.model,
             provider=args.provider,

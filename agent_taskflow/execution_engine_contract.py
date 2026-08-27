@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
+import shlex
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -241,6 +242,9 @@ class ExecutionEngineRequest:
     source: str = REQUEST_SOURCE_MANUAL
     dry_run: bool = True
     preflight: bool = True
+    auto_generate_codex_advisory_evidence: bool = False
+    codex_advisory_command: str = "codex exec"
+    codex_advisory_timeout_seconds: int = 300
     executor_profile: ExecutionEngineExecutorProfile
     validator_profile: ExecutionEngineValidatorProfile
     workspace: ExecutionEngineWorkspaceProfile
@@ -255,6 +259,30 @@ class ExecutionEngineRequest:
             "task_key",
             _require_non_empty(self.task_key, "task_key"),
         )
+        object.__setattr__(
+            self,
+            "auto_generate_codex_advisory_evidence",
+            bool(self.auto_generate_codex_advisory_evidence),
+        )
+        codex_command = str(self.codex_advisory_command or "").strip()
+        object.__setattr__(self, "codex_advisory_command", codex_command)
+        try:
+            codex_command_args = shlex.split(codex_command)
+        except ValueError as exc:
+            raise ValueError(f"codex_advisory_command is invalid: {exc}") from exc
+        if not codex_command_args:
+            raise ValueError("codex_advisory_command must not be empty")
+        if isinstance(self.codex_advisory_timeout_seconds, bool) or not isinstance(
+            self.codex_advisory_timeout_seconds, int
+        ):
+            raise ValueError("codex_advisory_timeout_seconds must be an integer")
+        if self.codex_advisory_timeout_seconds <= 0:
+            raise ValueError("codex_advisory_timeout_seconds must be a positive integer")
+        if self.auto_generate_codex_advisory_evidence:
+            if self.dry_run:
+                raise ValueError(
+                    "auto_generate_codex_advisory_evidence requires dry_run=False"
+                )
         if self.runtime_handoff_path is not None:
             object.__setattr__(
                 self,

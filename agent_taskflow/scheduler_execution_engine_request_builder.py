@@ -103,6 +103,9 @@ class SchedulerExecutionEngineRequestBuildInput:
     dry_run: bool = True
     confirmed: bool = False
     preflight: bool = True
+    auto_generate_codex_advisory_evidence: bool = False
+    codex_advisory_command: str = "codex exec"
+    codex_advisory_timeout_seconds: int = 300
     publish_after_execution: bool = False
     execution_only: bool = True
     operator: str | None = None
@@ -224,6 +227,11 @@ def build_scheduler_execution_engine_request(
         source=REQUEST_SOURCE_SCHEDULED_TICK,
         dry_run=input.dry_run,
         preflight=input.preflight,
+        auto_generate_codex_advisory_evidence=(
+            input.auto_generate_codex_advisory_evidence
+        ),
+        codex_advisory_command=input.codex_advisory_command,
+        codex_advisory_timeout_seconds=input.codex_advisory_timeout_seconds,
         executor_profile=ExecutionEngineExecutorProfile(
             executor=input.executor,
             model=input.model,

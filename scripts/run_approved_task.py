@@ -122,6 +122,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Shell command to run when --executor shell is selected.",
     )
     parser.add_argument(
+        "--auto-generate-codex-advisory-evidence",
+        action="store_true",
+        help=(
+            "Generate confirm-run Codex advisory evidence after validators pass. "
+            "Requires non-dry-run execution and keeps human review required."
+        ),
+    )
+    parser.add_argument(
+        "--codex-advisory-command",
+        default="codex exec",
+        help="Codex advisory command string executed as argv, never through a shell.",
+    )
+    parser.add_argument(
+        "--codex-advisory-timeout-seconds",
+        type=int,
+        default=300,
+        help="Timeout in seconds for an enabled Codex advisory invocation.",
+    )
+    parser.add_argument(
         "--claude-code-enable-invocation",
         action="store_true",
         help=(
@@ -199,6 +218,11 @@ def main(argv: list[str] | None = None) -> int:
             confirm_approved_task=args.confirm_approved_task,
             dry_run=args.dry_run,
             preflight=args.preflight,
+            auto_generate_codex_advisory_evidence=(
+                bool(args.auto_generate_codex_advisory_evidence)
+            ),
+            codex_advisory_command=args.codex_advisory_command,
+            codex_advisory_timeout_seconds=args.codex_advisory_timeout_seconds,
             command=tuple(args.command) if args.command is not None else None,
             claude_code_enable_invocation=args.claude_code_enable_invocation,
             claude_code_command=_parse_claude_code_command(args.claude_code_command_json),

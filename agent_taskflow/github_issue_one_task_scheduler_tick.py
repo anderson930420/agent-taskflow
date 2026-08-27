@@ -11,8 +11,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shlex
 from typing import Any, Callable
 
+from agent_taskflow.codex_advisory_review import (
+    DEFAULT_CODEX_COMMAND,
+    DEFAULT_TIMEOUT_SECONDS,
+)
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS
 from agent_taskflow.execution_engine_contract import ExecutionEngine
 from agent_taskflow.github_issue_discovery import IssueListFetcher
@@ -72,6 +77,9 @@ class GitHubIssueOneTaskSchedulerTickRequest:
     validators: tuple[str, ...] = DEFAULT_VALIDATORS
     worktree_root: Path | None = None
     approved_task_preflight: bool = True
+    auto_generate_codex_advisory_evidence: bool = False
+    codex_advisory_command: str = DEFAULT_CODEX_COMMAND
+    codex_advisory_timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     command: tuple[str, ...] | None = None
 
     # Executor profile metadata threaded down to ingestion and the approved
@@ -133,6 +141,31 @@ class GitHubIssueOneTaskSchedulerTickRequest:
                 "ExecutionEngine opt-in path is execution-only and confirmed-"
                 "mode only; a dry-run tick cannot enable --use-execution-engine"
             )
+
+        object.__setattr__(
+            self,
+            "auto_generate_codex_advisory_evidence",
+            bool(self.auto_generate_codex_advisory_evidence),
+        )
+        codex_command = str(self.codex_advisory_command or "").strip()
+        object.__setattr__(self, "codex_advisory_command", codex_command)
+        try:
+            codex_command_args = shlex.split(codex_command)
+        except ValueError as exc:
+            raise ValueError(f"codex_advisory_command is invalid: {exc}") from exc
+        if not codex_command_args:
+            raise ValueError("codex_advisory_command must not be empty")
+        if isinstance(self.codex_advisory_timeout_seconds, bool) or not isinstance(
+            self.codex_advisory_timeout_seconds, int
+        ):
+            raise ValueError("codex_advisory_timeout_seconds must be an integer")
+        if self.codex_advisory_timeout_seconds <= 0:
+            raise ValueError("codex_advisory_timeout_seconds must be a positive integer")
+        if self.auto_generate_codex_advisory_evidence:
+            if not self.confirmed:
+                raise ValueError(
+                    "auto_generate_codex_advisory_evidence requires confirmed mode"
+                )
 
         if self.issue_limit <= 0:
             raise ValueError("issue_limit must be positive")
@@ -570,6 +603,11 @@ def _runner_config_payload(request: GitHubIssueOneTaskSchedulerTickRequest) -> d
         "provider": request.provider,
         "tools": list(request.tools) if request.tools else None,
         "pi_bin": request.pi_bin,
+        "auto_generate_codex_advisory_evidence": (
+            request.auto_generate_codex_advisory_evidence
+        ),
+        "codex_advisory_command": request.codex_advisory_command,
+        "codex_advisory_timeout_seconds": request.codex_advisory_timeout_seconds,
     }
 
 

@@ -205,6 +205,9 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         claude_code_enable_invocation: bool = False,
         claude_code_command: tuple[str, ...] | None = None,
         claude_code_timeout_seconds: int | None = None,
+        auto_generate_codex_advisory_evidence: bool = False,
+        codex_advisory_command: str = "codex exec",
+        codex_advisory_timeout_seconds: int = 300,
     ) -> ApprovedTaskRunRequest:
         return ApprovedTaskRunRequest(
             task_key=task_key,
@@ -226,6 +229,11 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             claude_code_enable_invocation=claude_code_enable_invocation,
             claude_code_command=claude_code_command,
             claude_code_timeout_seconds=claude_code_timeout_seconds,
+            auto_generate_codex_advisory_evidence=(
+                auto_generate_codex_advisory_evidence
+            ),
+            codex_advisory_command=codex_advisory_command,
+            codex_advisory_timeout_seconds=codex_advisory_timeout_seconds,
         )
 
     def _write_fake_claude_script(self, *, exit_code: int = 0) -> Path:
@@ -251,6 +259,32 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        return script
+
+    def _write_fake_codex_script(
+        self,
+        *,
+        stdout: str,
+        exit_code: int = 0,
+        marker_path: Path | None = None,
+    ) -> Path:
+        """Write a bounded fake confirm-run advisory command for runner tests."""
+
+        script = self.root / "fake_codex.py"
+        lines = ["import pathlib, sys"]
+        if marker_path is not None:
+            lines.append(
+                f"pathlib.Path({str(marker_path)!r}).write_text('invoked\\n')"
+            )
+        lines.extend(
+            [
+                f"print({stdout!r})",
+                "sys.stderr.write('fake codex stderr\\n')",
+                f"sys.exit({exit_code})",
+                "",
+            ]
+        )
+        script.write_text("\n".join(lines), encoding="utf-8")
         return script
 
     def test_missing_confirmation_flag_refuses_to_run(self) -> None:
@@ -425,6 +459,131 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertFalse(result.safety["merged"])
         self.assertFalse(result.safety["approved"])
         self.assertFalse(result.safety["cleanup_performed"])
+
+    def test_auto_generation_creates_confirm_run_evidence_after_validators(self) -> None:
+        self._add_task("AT-GH-412")
+        marker_path = self.root / "codex-invoked.txt"
+        codex_script = self._write_fake_codex_script(
+            stdout=json.dumps({"review_status": "looks_good", "risk_level": "low"}),
+            marker_path=marker_path,
+        )
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-412",
+                validators=("policy",),
+                auto_generate_codex_advisory_evidence=True,
+                codex_advisory_command=f"{sys.executable} {codex_script}",
+                codex_advisory_timeout_seconds=60,
+            ),
+            store=self.store,
+            executor_registry={"noop": NoopExecutor()},
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertTrue(result.ok, msg=result.error)
+        self.assertEqual(result.status, APPROVED_TASK_STATUS)
+        self.assertTrue(marker_path.is_file())
+        self.assertTrue(result.codex_advisory_evidence["satisfied"])
+        self.assertTrue(result.codex_advisory_generation["enabled"])
+        self.assertTrue(result.codex_advisory_generation["attempted"])
+        self.assertTrue(result.codex_advisory_generation["invoked"])
+        self.assertEqual(result.codex_advisory_generation["review_status"], "looks_good")
+
+        artifact_dir = self.store.get_task("AT-GH-412").artifact_dir
+        assert artifact_dir is not None
+        for filename in (
+            "codex-advisory-review-prompt.md",
+            "codex-advisory-review.json",
+            "codex-advisory-review.md",
+            "codex-advisory-review-stdout.txt",
+            "codex-advisory-review-stderr.txt",
+        ):
+            self.assertTrue((artifact_dir / filename).is_file(), filename)
+
+    def test_auto_generation_tool_error_blocks_after_writing_evidence(self) -> None:
+        self._add_task("AT-GH-413")
+        codex_script = self._write_fake_codex_script(
+            stdout="not JSON",
+            exit_code=0,
+        )
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-413",
+                validators=("policy",),
+                auto_generate_codex_advisory_evidence=True,
+                codex_advisory_command=f"{sys.executable} {codex_script}",
+                codex_advisory_timeout_seconds=60,
+            ),
+            store=self.store,
+            executor_registry={"noop": NoopExecutor()},
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.phase, "codex_advisory_evidence")
+        self.assertEqual(self.store.get_task("AT-GH-413").status, RUN_STATUS_BLOCKED)
+        self.assertEqual(result.codex_advisory_generation["review_status"], "tool_error")
+        self.assertEqual(
+            result.codex_advisory_generation["tool_error"]["category"],
+            "codex_output_parse_error",
+        )
+        self.assertIn("auto-generation failed", result.error or "")
+        artifact_dir = self.store.get_task("AT-GH-413").artifact_dir
+        assert artifact_dir is not None
+        payload = json.loads(
+            (artifact_dir / "codex-advisory-review.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(payload["review_status"], "tool_error")
+
+    def test_auto_generation_skips_valid_existing_evidence(self) -> None:
+        self._add_task("AT-GH-414")
+        self._write_codex_advisory_evidence("AT-GH-414")
+        marker_path = self.root / "codex-should-not-run.txt"
+        codex_script = self._write_fake_codex_script(
+            stdout=json.dumps({"review_status": "looks_good"}),
+            marker_path=marker_path,
+        )
+
+        result = run_approved_task(
+            self._request(
+                task_key="AT-GH-414",
+                validators=("policy",),
+                auto_generate_codex_advisory_evidence=True,
+                codex_advisory_command=f"{sys.executable} {codex_script}",
+            ),
+            store=self.store,
+            executor_registry={"noop": NoopExecutor()},
+            validator_registry={"policy": PolicyCheckValidator()},
+            preflight_runner=lambda **kwargs: _preflight_result(),
+        )
+
+        self.assertTrue(result.ok, msg=result.error)
+        self.assertFalse(marker_path.exists())
+        self.assertFalse(result.codex_advisory_generation["attempted"])
+        self.assertEqual(
+            result.codex_advisory_generation["skipped_reason"],
+            "advisory_evidence_already_present",
+        )
+
+    def test_auto_generation_rejects_dry_run_and_disabled_evidence_gate(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires dry_run=False"):
+            self._request(
+                dry_run=True,
+                confirm_approved_task=False,
+                auto_generate_codex_advisory_evidence=True,
+            )
+        with self.assertRaisesRegex(ValueError, "require_codex_advisory_evidence=True"):
+            ApprovedTaskRunRequest(
+                task_key="AT-GH-415",
+                executor="noop",
+                repo_path=self.repo,
+                auto_generate_codex_advisory_evidence=True,
+                require_codex_advisory_evidence=False,
+            )
 
     def test_claude_code_dry_run_then_validators_then_waiting_approval(self) -> None:
         # v0.2.7: the Claude Code bounded implementer executor runs as a dry-run

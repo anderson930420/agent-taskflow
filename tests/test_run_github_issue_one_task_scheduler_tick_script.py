@@ -363,6 +363,11 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
                 "--command",
                 "python -m pytest",
                 "--skip-approved-task-preflight",
+                "--auto-generate-codex-advisory-evidence",
+                "--codex-advisory-command",
+                "codex exec --sandbox workspace-write",
+                "--codex-advisory-timeout-seconds",
+                "120",
                 "--json",
             ],
             payload,
@@ -377,6 +382,12 @@ class RunGitHubIssueOneTaskSchedulerTickScriptTests(unittest.TestCase):
         self.assertEqual(request.worktree_root, self.worktree_root)
         self.assertEqual(request.command, ("python", "-m", "pytest"))
         self.assertFalse(request.approved_task_preflight)
+        self.assertTrue(request.auto_generate_codex_advisory_evidence)
+        self.assertEqual(
+            request.codex_advisory_command,
+            "codex exec --sandbox workspace-write",
+        )
+        self.assertEqual(request.codex_advisory_timeout_seconds, 120)
 
     def test_confirmed_defaults_to_execution_only(self) -> None:
         payload = {

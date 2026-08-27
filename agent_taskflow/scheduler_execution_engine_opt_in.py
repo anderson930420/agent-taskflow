@@ -147,6 +147,13 @@ def build_scheduler_tick_execution_engine_request(
         dry_run=False,
         confirmed=True,
         preflight=bool(request.approved_task_preflight),
+        auto_generate_codex_advisory_evidence=(
+            bool(getattr(request, "auto_generate_codex_advisory_evidence", False))
+        ),
+        codex_advisory_command=getattr(request, "codex_advisory_command", "codex exec"),
+        codex_advisory_timeout_seconds=getattr(
+            request, "codex_advisory_timeout_seconds", 300
+        ),
         base_branch=getattr(request, "base_branch", None) or "main",
         # The scheduler opt-in path is execution-only by construction; the
         # builder rejects any attempt to publish.
