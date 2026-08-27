@@ -1,6 +1,8 @@
 # Spec draft: runner auto-generation of Codex advisory evidence (post-M1)
 
-> Draft, uncommitted. Read-only design study produced on `main` @ `b5cca7f`.
+> Read-only design study produced on `main` @ `b5cca7f`, committed as-is.
+> Implementation is tracked by #189, which resolves every open decision in §7 —
+> read the issue, not §7, for the decisions that are actually in force.
 > Implements the item #184 explicitly listed as out of scope: *"Auto-invoking the
 > advisory review from inside the runner."*
 
