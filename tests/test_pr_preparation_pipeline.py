@@ -871,6 +871,81 @@ class PRPreparationPipelineTests(unittest.TestCase):
             )
         )
 
+    def test_bound_downstream_handoff_rejects_evidence_for_other_attempt(self) -> None:
+        bound_attempt = self._seed_level2_attempt()
+        other_attempt = self._seed_level2_attempt()
+        self._clear_runtime_evidence()
+        self._seed_runtime_evidence(other_attempt.attempt_id)
+
+        one_shot_result = {
+            "stages": {
+                "runtime_execution": {
+                    "execution_authority": "execution_engine",
+                    "canonical_attempt_id": bound_attempt.attempt_id,
+                    "canonical_attempt_bound": True,
+                }
+            }
+        }
+
+        self.assertNotEqual(bound_attempt.attempt_id, other_attempt.attempt_id)
+        self.assertEqual(
+            canonical_attempt_binding_error(
+                one_shot_result,
+                db_path=self.db_path,
+                task_key=self.task_key,
+            ),
+            "runtime_canonical_attempt_id_mismatch",
+        )
+
+    def test_bound_downstream_handoff_without_stored_evidence_verifies_exact_attempt(
+        self,
+    ) -> None:
+        attempt = self._seed_level2_attempt()
+        newer_attempt = self._seed_level2_attempt()
+        self._clear_runtime_evidence()
+
+        def _binding_error(attempt_id: str) -> str | None:
+            return canonical_attempt_binding_error(
+                {
+                    "stages": {
+                        "runtime_execution": {
+                            "execution_authority": "execution_engine",
+                            "canonical_attempt_id": attempt_id,
+                            "canonical_attempt_bound": True,
+                        }
+                    }
+                },
+                db_path=self.db_path,
+                task_key=self.task_key,
+            )
+
+        self.assertNotEqual(attempt.attempt_id, newer_attempt.attempt_id)
+        self.assertIsNone(_binding_error(attempt.attempt_id))
+        self.assertIsNotNone(_binding_error("attempt-not-in-store"))
+
+    def test_unbound_downstream_handoff_without_stored_evidence_still_fails(
+        self,
+    ) -> None:
+        attempt = self._seed_level2_attempt()
+        self._clear_runtime_evidence()
+
+        self.assertEqual(
+            canonical_attempt_binding_error(
+                {
+                    "stages": {
+                        "runtime_execution": {
+                            "execution_authority": "execution_engine",
+                            "canonical_attempt_id": attempt.attempt_id,
+                            "canonical_attempt_bound": False,
+                        }
+                    }
+                },
+                db_path=self.db_path,
+                task_key=self.task_key,
+            ),
+            "runtime_handoff_execution_artifact_missing",
+        )
+
     def test_level2_runner_failure_without_recovery_audit_still_fails(self) -> None:
         attempt = self._seed_level2_attempt()
         self._clear_runtime_evidence()

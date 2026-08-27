@@ -23,6 +23,7 @@ from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.level2_execution_authority import (
     Level2ExecutionAuthorityError,
     is_level2_task,
+    verify_canonical_attempt,
 )
 from agent_taskflow.tasks import normalize_task_key
 
@@ -460,7 +461,15 @@ def canonical_attempt_binding_error(
     db_path: Path | None = None,
     task_key: str | None = None,
 ) -> str | None:
-    """Require engine authority and the shared exact Attempt decision for Level 2."""
+    """Require engine authority and the exact bound Attempt for Level 2.
+
+    A bound runtime stage carries its own in-run binding decision, so its exact
+    Attempt is verified against the store as reported. An audited recovery
+    reaches this gate deliberately unbound, so its exact Attempt is resolved
+    from persisted runtime evidence instead. Persisted evidence, when the store
+    holds any, must agree with a bound runtime stage; it is never used to
+    select a different Attempt.
+    """
 
     runtime_stage = (result.get("stages") or {}).get("runtime_execution") or {}
     level2 = False
@@ -476,29 +485,48 @@ def canonical_attempt_binding_error(
     attempt_id = runtime_stage.get("canonical_attempt_id")
     if not isinstance(attempt_id, str) or not attempt_id.strip():
         return "canonical_attempt_binding_required_for_downstream_handoff"
-    if db_path is not None and task_key is not None:
-        binding = resolve_pr_preparation_attempt_binding(
-            db_path=db_path,
-            task_key=task_key,
-            requested_attempt_id=attempt_id,
+    bound = runtime_stage.get("canonical_attempt_bound") is True
+    if db_path is None or task_key is None:
+        return (
+            None
+            if bound
+            else "canonical_attempt_binding_required_for_downstream_handoff"
         )
-        if not binding.canonical_attempt_verified or binding.reasons:
-            return next(
-                iter(binding.reasons),
-                "canonical_attempt_store_verification_failed",
+
+    binding = resolve_pr_preparation_attempt_binding(
+        db_path=db_path,
+        task_key=task_key,
+        requested_attempt_id=attempt_id,
+    )
+    if bound:
+        if binding.runtime_evidence_recorded:
+            if binding.reasons or binding.path != NORMAL_PATH:
+                return next(
+                    iter(binding.reasons),
+                    "canonical_attempt_binding_required_for_downstream_handoff",
+                )
+            if not binding.canonical_attempt_verified:
+                return "canonical_attempt_store_verification_failed"
+            return None
+        try:
+            verify_canonical_attempt(
+                db_path=db_path,
+                task_key=task_key,
+                attempt_id=attempt_id,
             )
-        if (
-            binding.path == NORMAL_PATH
-            and runtime_stage.get("canonical_attempt_bound") is not True
-        ):
-            return "canonical_attempt_binding_required_for_downstream_handoff"
-        if (
-            binding.path == RECOVERY_PATH
-            and runtime_stage.get("canonical_attempt_bound") is not False
-        ):
-            return "runtime_canonical_attempt_recovery_binding_mismatch"
-    elif runtime_stage.get("canonical_attempt_bound") is not True:
-        return "canonical_attempt_binding_required_for_downstream_handoff"
+        except Level2ExecutionAuthorityError as exc:
+            return f"canonical_attempt_store_verification_failed: {exc}"
+        return None
+
+    if binding.reasons or binding.path != RECOVERY_PATH:
+        return next(
+            iter(binding.reasons),
+            "canonical_attempt_binding_required_for_downstream_handoff",
+        )
+    if runtime_stage.get("canonical_attempt_bound") is not False:
+        return "runtime_canonical_attempt_recovery_binding_mismatch"
+    if not binding.canonical_attempt_verified:
+        return "canonical_attempt_store_verification_failed"
     return None
 
 

@@ -51,6 +51,12 @@ class PRPreparationAttemptBinding:
     runtime_evidence_found: bool
     reasons: tuple[str, ...]
 
+    @property
+    def runtime_evidence_recorded(self) -> bool:
+        """True when the store holds runtime evidence to resolve an Attempt from."""
+
+        return bool(self.artifact_count or self.finished_event_count)
+
     def to_summary(self) -> dict[str, Any]:
         return {
             "runtime_evidence_found": self.runtime_evidence_found,
