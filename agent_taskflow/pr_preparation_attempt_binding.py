@@ -128,7 +128,12 @@ def resolve_pr_preparation_attempt_binding(
         for payload in payloads
         if isinstance(payload.get("runner_ok"), bool)
     ]
-    runner_ok = runner_values[-1] if runner_values else None
+    runner_ok_missing = any(
+        not isinstance(payload.get("runner_ok"), bool) for payload in payloads
+    )
+    runner_ok = runner_values[-1] if runner_values and not runner_ok_missing else None
+    if runner_ok_missing:
+        reasons.append("runtime_runner_ok_missing")
 
     if not level2_task:
         if any(value is False for value in runner_values):
@@ -185,6 +190,18 @@ def resolve_pr_preparation_attempt_binding(
         )
     except Level2ExecutionAuthorityError as exc:
         reasons.append(f"canonical_attempt_invalid: {exc}")
+
+    if runner_ok_missing:
+        return _binding_result(
+            level2_task=True,
+            attempt_id=attempt_id,
+            path=None,
+            canonical_attempt_verified=verification is not None,
+            artifact_count=len(artifacts),
+            finished_event_count=len(events),
+            runner_ok=runner_ok,
+            reasons=reasons,
+        )
 
     if all(value is True for value in runner_values) and runner_values:
         for payload in payloads:

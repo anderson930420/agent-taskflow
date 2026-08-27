@@ -834,6 +834,61 @@ class PRPreparationPipelineTests(unittest.TestCase):
         self.assertEqual(preflight["canonical_attempt_path"], "bound_attempt")
         self.assertIsNone(preflight["recovery_operator"])
 
+    def test_level2_preflight_rejects_any_runtime_payload_without_boolean_runner_ok(
+        self,
+    ) -> None:
+        attempt = self._seed_level2_attempt()
+        for evidence_source in ("artifact", "event"):
+            with self.subTest(evidence_source=evidence_source):
+                self._clear_runtime_evidence()
+                self._seed_runtime_evidence(attempt.attempt_id)
+                if evidence_source == "artifact":
+                    runtime_artifact = next(
+                        artifact
+                        for artifact in self.store.list_task_artifacts(self.task_key)
+                        if artifact.artifact_type == RUNTIME_EXECUTION_ARTIFACT_TYPE
+                    )
+                    payload = json.loads(
+                        runtime_artifact.path.read_text(encoding="utf-8")
+                    )
+                    payload.pop("runner_ok")
+                    runtime_artifact.path.write_text(
+                        json.dumps(payload, sort_keys=True), encoding="utf-8"
+                    )
+                else:
+                    with sqlite3.connect(self.db_path) as conn:
+                        payload_json = conn.execute(
+                            """
+                            SELECT payload_json
+                            FROM task_events
+                            WHERE task_key = ? AND event_type = ?
+                            """,
+                            (self.task_key, RUNTIME_FINISHED_EVENT_TYPE),
+                        ).fetchone()[0]
+                        payload = json.loads(payload_json)
+                        payload["runner_ok"] = "true"
+                        conn.execute(
+                            """
+                            UPDATE task_events
+                            SET payload_json = ?
+                            WHERE task_key = ? AND event_type = ?
+                            """,
+                            (
+                                json.dumps(payload, sort_keys=True),
+                                self.task_key,
+                                RUNTIME_FINISHED_EVENT_TYPE,
+                            ),
+                        )
+
+                result = run_pr_preparation_pipeline(self._request(dry_run=True))
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["failed_stage"], "preflight")
+                self.assertIn("runtime_runner_ok_missing", result["reasons"])
+                preflight = result["stages"]["preflight"]
+                self.assertIsNone(preflight["runner_ok"])
+                self.assertIsNone(preflight["canonical_attempt_path"])
+
     def test_recovered_level2_task_requires_matching_recovery_audit(self) -> None:
         attempt = self._seed_level2_attempt()
         self._clear_runtime_evidence()
