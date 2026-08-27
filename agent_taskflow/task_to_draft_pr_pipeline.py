@@ -14,11 +14,15 @@ from agent_taskflow.pr_preparation_pipeline import (
     PRPreparationPipelineRequest,
     run_pr_preparation_pipeline,
 )
+from agent_taskflow.pr_preparation_attempt_binding import (
+    NORMAL_PATH,
+    RECOVERY_PATH,
+    resolve_pr_preparation_attempt_binding,
+)
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.level2_execution_authority import (
     Level2ExecutionAuthorityError,
     is_level2_task,
-    verify_canonical_attempt,
 )
 from agent_taskflow.tasks import normalize_task_key
 
@@ -456,7 +460,7 @@ def canonical_attempt_binding_error(
     db_path: Path | None = None,
     task_key: str | None = None,
 ) -> str | None:
-    """Require engine authority and exact store binding for Level 2."""
+    """Require engine authority and the shared exact Attempt decision for Level 2."""
 
     runtime_stage = (result.get("stages") or {}).get("runtime_execution") or {}
     level2 = False
@@ -470,21 +474,31 @@ def canonical_attempt_binding_error(
     if not level2 and runtime_stage.get("execution_authority") != "execution_engine":
         return None
     attempt_id = runtime_stage.get("canonical_attempt_id")
-    if (
-        runtime_stage.get("canonical_attempt_bound") is not True
-        or not isinstance(attempt_id, str)
-        or not attempt_id.strip()
-    ):
+    if not isinstance(attempt_id, str) or not attempt_id.strip():
         return "canonical_attempt_binding_required_for_downstream_handoff"
     if db_path is not None and task_key is not None:
-        try:
-            verify_canonical_attempt(
-                db_path=db_path,
-                task_key=task_key,
-                attempt_id=attempt_id,
+        binding = resolve_pr_preparation_attempt_binding(
+            db_path=db_path,
+            task_key=task_key,
+            requested_attempt_id=attempt_id,
+        )
+        if not binding.canonical_attempt_verified or binding.reasons:
+            return next(
+                iter(binding.reasons),
+                "canonical_attempt_store_verification_failed",
             )
-        except Level2ExecutionAuthorityError as exc:
-            return f"canonical_attempt_store_verification_failed: {exc}"
+        if (
+            binding.path == NORMAL_PATH
+            and runtime_stage.get("canonical_attempt_bound") is not True
+        ):
+            return "canonical_attempt_binding_required_for_downstream_handoff"
+        if (
+            binding.path == RECOVERY_PATH
+            and runtime_stage.get("canonical_attempt_bound") is not False
+        ):
+            return "runtime_canonical_attempt_recovery_binding_mismatch"
+    elif runtime_stage.get("canonical_attempt_bound") is not True:
+        return "canonical_attempt_binding_required_for_downstream_handoff"
     return None
 
 

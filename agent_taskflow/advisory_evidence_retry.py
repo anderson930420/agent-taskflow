@@ -45,7 +45,7 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from agent_taskflow import canonical_runtime_path
 from agent_taskflow.advisory_evidence_retry_authority import (
@@ -114,6 +114,69 @@ _PYTEST_SUMMARY_LABELS = (
 
 class AdvisoryEvidenceRetryError(RuntimeError):
     """Raised when an audited advisory-evidence retry cannot proceed safely."""
+
+
+@dataclass(frozen=True)
+class AdvisoryEvidenceRetryAuditVerification:
+    """Read-only verification of recovery evidence for downstream consumers."""
+
+    valid: bool
+    operator: str | None
+    reasons: tuple[str, ...]
+
+
+def verify_advisory_evidence_retry_audit(
+    payload: Mapping[str, Any],
+    *,
+    task_key: str,
+    attempt_id: str,
+    artifact_dir: Path,
+) -> AdvisoryEvidenceRetryAuditVerification:
+    """Verify that one #184 audit payload authorizes this exact recovery.
+
+    The recovery transition remains the only writer of these payloads. This
+    helper lets downstream read-only consumers verify the same immutable
+    Task/Attempt/artifact binding without treating recovery as approval.
+    """
+
+    normalized_task_key = normalize_task_key(task_key)
+    normalized_attempt_id = str(attempt_id or "").strip()
+    expected_artifact_dir = str(Path(artifact_dir).expanduser().resolve())
+    operator = payload.get("operator")
+    resolved_operator = operator.strip() if isinstance(operator, str) else ""
+
+    required_values = (
+        ("kind", RETRY_AUDIT_KIND),
+        ("task_key", normalized_task_key),
+        ("from_status", RETRY_FROM_STATUS),
+        ("to_status", RETRY_TO_STATUS),
+        ("reason", RETRY_REASON),
+        ("attempt_id", normalized_attempt_id),
+        ("attempt_from_status", RETRY_FROM_STATUS),
+        ("attempt_to_status", RETRY_TO_STATUS),
+        ("attempt_execution_result", "completed"),
+        ("attempt_validation_result", "passed"),
+        ("artifact_dir", expected_artifact_dir),
+    )
+    reasons = [
+        f"{key}_mismatch"
+        for key, expected in required_values
+        if payload.get(key) != expected
+    ]
+    if payload.get("operator_confirmed") is not True:
+        reasons.append("operator_confirmation_missing")
+    if not resolved_operator:
+        reasons.append("operator_missing")
+    if payload.get("requires_human_review") is not True:
+        reasons.append("human_review_requirement_missing")
+    if payload.get("not_approval") is not True:
+        reasons.append("not_approval_marker_missing")
+
+    return AdvisoryEvidenceRetryAuditVerification(
+        valid=not reasons,
+        operator=resolved_operator or None,
+        reasons=tuple(reasons),
+    )
 
 
 @dataclass(frozen=True)
@@ -798,6 +861,7 @@ __all__ = [
     "CHECK_EXECUTOR_EVIDENCE",
     "CHECK_PYTEST_EVIDENCE",
     "CHECK_TASK_BLOCKED",
+    "AdvisoryEvidenceRetryAuditVerification",
     "PYTEST_LAUNCH_SPEC_FILENAME",
     "PYTEST_LOG_FILENAME",
     "RETRY_AUDIT_KIND",
@@ -813,4 +877,5 @@ __all__ = [
     "PreconditionCheck",
     "run_advisory_evidence_retry",
     "summarize_pytest_log",
+    "verify_advisory_evidence_retry_audit",
 ]

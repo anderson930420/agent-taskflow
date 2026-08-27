@@ -18,6 +18,7 @@ from agent_taskflow.pr_preparation_pipeline import (
     PRPreparationPipelineRequest,
     run_pr_preparation_pipeline,
 )
+from agent_taskflow.task_to_draft_pr_pipeline import canonical_attempt_binding_error
 import agent_taskflow.pr_preparation_pipeline as pr_preparation_pipeline_module
 from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.runtime_handoff_execution_from_handoff import (
@@ -305,6 +306,10 @@ class PRPreparationPipelineTests(unittest.TestCase):
     def _seed_runtime_evidence(
         self,
         canonical_attempt_id: str | None = None,
+        *,
+        runner_ok: bool = True,
+        canonical_attempt_bound: bool = True,
+        canonical_attempt_store_verified: bool = True,
     ) -> None:
         runtime_id = "runtime-test"
         runtime_path = (
@@ -323,7 +328,7 @@ class PRPreparationPipelineTests(unittest.TestCase):
             "preflight_passed": True,
             "approved_task_runner_called": True,
             "runner_returned": True,
-            "runner_ok": True,
+            "runner_ok": runner_ok,
             "runner_status": "waiting_approval",
             "runner_phase": "fake-runtime",
             "not_approval": True,
@@ -334,9 +339,9 @@ class PRPreparationPipelineTests(unittest.TestCase):
             payload.update(
                 {
                     "execution_authority": "execution_engine",
-                    "canonical_attempt_bound": True,
+                    "canonical_attempt_bound": canonical_attempt_bound,
                     "canonical_attempt_id": canonical_attempt_id,
-                    "canonical_attempt_store_verified": True,
+                    "canonical_attempt_store_verified": canonical_attempt_store_verified,
                 }
             )
         runtime_path.parent.mkdir(parents=True, exist_ok=True)
@@ -351,7 +356,7 @@ class PRPreparationPipelineTests(unittest.TestCase):
                 "kind": RUNTIME_FINISHED_EVENT_TYPE,
                 "task_key": self.task_key,
                 "runtime_execution_id": runtime_id,
-                "runner_ok": True,
+                "runner_ok": runner_ok,
                 "runner_status": "waiting_approval",
                 "runtime_execution_artifact_path": str(runtime_path),
                 "approved": False,
@@ -360,13 +365,74 @@ class PRPreparationPipelineTests(unittest.TestCase):
                 **(
                     {
                         "execution_authority": "execution_engine",
-                        "canonical_attempt_bound": True,
+                        "canonical_attempt_bound": canonical_attempt_bound,
                         "canonical_attempt_id": canonical_attempt_id,
-                        "canonical_attempt_store_verified": True,
+                        "canonical_attempt_store_verified": canonical_attempt_store_verified,
                     }
                     if canonical_attempt_id is not None
                     else {}
                 ),
+            },
+        )
+
+    def _clear_runtime_evidence(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM task_artifacts WHERE task_key = ? AND artifact_type = ?",
+                (self.task_key, RUNTIME_EXECUTION_ARTIFACT_TYPE),
+            )
+            conn.execute(
+                "DELETE FROM task_events WHERE task_key = ? AND event_type = ?",
+                (self.task_key, RUNTIME_FINISHED_EVENT_TYPE),
+            )
+
+    def _seed_level2_attempt(
+        self,
+        *,
+        task_key: str | None = None,
+        close: bool = True,
+    ) -> Any:
+        key = task_key or self.task_key
+        attempts = AttemptStore(self.db_path)
+        attempts.init_db()
+        attempts.register_task_identity(key, task_class="canonical", is_legacy=False)
+        artifact_dir = self.artifact_root / key
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        attempt = attempts.create_attempt(key, artifact_root=artifact_dir)
+        if not close:
+            return attempt
+        return attempts.close_attempt(
+            attempt.attempt_id,
+            status="waiting_approval",
+            reason_code="test_attempt_complete",
+            actor="pr_pipeline_test",
+            execution_result="completed",
+            validation_result="passed",
+        )
+
+    def _record_recovery_audit(self, attempt: Any) -> None:
+        assert attempt.artifact_root is not None
+        self.store.record_task_event(
+            self.task_key,
+            "note",
+            "advisory_evidence_retry_cli",
+            message="Audited recovery for test",
+            payload={
+                "kind": "advisory_evidence_retry",
+                "task_key": self.task_key,
+                "from_status": "blocked",
+                "to_status": "waiting_approval",
+                "reason": "advisory_evidence_retry",
+                "operator": "operator@example.com",
+                "operator_confirmed": True,
+                "artifact_dir": str(attempt.artifact_root),
+                "attempt_id": attempt.attempt_id,
+                "attempt_from_status": "blocked",
+                "attempt_to_status": "waiting_approval",
+                "attempt_execution_result": "completed",
+                "attempt_validation_result": "passed",
+                "requires_human_review": True,
+                "not_approval": True,
             },
         )
 
@@ -753,6 +819,122 @@ class PRPreparationPipelineTests(unittest.TestCase):
         self.assertTrue(second["ok"], msg=f"second: {second!r}")
         self.assertEqual(branch.call_count, 1)
         self.assertEqual(draft.call_count, 1)
+
+    def test_level2_preflight_uses_runtime_bound_attempt_without_caller_id(self) -> None:
+        attempt = self._seed_level2_attempt()
+        self._clear_runtime_evidence()
+        self._seed_runtime_evidence(attempt.attempt_id)
+
+        result = run_pr_preparation_pipeline(self._request(dry_run=True))
+
+        self.assertTrue(result["ok"], result)
+        preflight = result["stages"]["preflight"]
+        self.assertEqual(preflight["canonical_attempt_id"], attempt.attempt_id)
+        self.assertTrue(preflight["canonical_attempt_verified"])
+        self.assertEqual(preflight["canonical_attempt_path"], "bound_attempt")
+        self.assertIsNone(preflight["recovery_operator"])
+
+    def test_recovered_level2_task_requires_matching_recovery_audit(self) -> None:
+        attempt = self._seed_level2_attempt()
+        self._clear_runtime_evidence()
+        self._seed_runtime_evidence(
+            attempt.attempt_id,
+            runner_ok=False,
+            canonical_attempt_bound=False,
+            canonical_attempt_store_verified=False,
+        )
+        self._record_recovery_audit(attempt)
+
+        result = run_pr_preparation_pipeline(self._request(dry_run=True))
+
+        self.assertTrue(result["ok"], result)
+        preflight = result["stages"]["preflight"]
+        self.assertEqual(preflight["canonical_attempt_id"], attempt.attempt_id)
+        self.assertEqual(preflight["canonical_attempt_path"], "audited_recovery")
+        self.assertEqual(preflight["recovery_operator"], "operator@example.com")
+        self.assertFalse(preflight["runner_ok"])
+
+        one_shot_result = {
+            "stages": {
+                "runtime_execution": {
+                    "execution_authority": "execution_engine",
+                    "canonical_attempt_id": attempt.attempt_id,
+                    "canonical_attempt_bound": False,
+                }
+            }
+        }
+        self.assertIsNone(
+            canonical_attempt_binding_error(
+                one_shot_result,
+                db_path=self.db_path,
+                task_key=self.task_key,
+            )
+        )
+
+    def test_level2_runner_failure_without_recovery_audit_still_fails(self) -> None:
+        attempt = self._seed_level2_attempt()
+        self._clear_runtime_evidence()
+        self._seed_runtime_evidence(
+            attempt.attempt_id,
+            runner_ok=False,
+            canonical_attempt_bound=False,
+            canonical_attempt_store_verified=False,
+        )
+
+        result = run_pr_preparation_pipeline(self._request(dry_run=True))
+
+        self.assertFalse(result["ok"])
+        self.assertIn("runtime_runner_not_ok", result["reasons"])
+        self.assertIn("recovery_audit_event_missing", result["reasons"])
+
+    def test_level2_runtime_attempt_id_mismatch_still_fails(self) -> None:
+        attempt = self._seed_level2_attempt()
+        self._clear_runtime_evidence()
+        self._seed_runtime_evidence(attempt.attempt_id)
+
+        result = run_pr_preparation_pipeline(
+            self._request(dry_run=True, canonical_attempt_id="attempt-not-runtime")
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("runtime_canonical_attempt_id_mismatch", result["reasons"])
+
+    def test_level2_wrong_task_and_open_attempts_still_fail(self) -> None:
+        other_key = "AT-L7C-OTHER-TASK"
+        other_dir = self.artifact_root / other_key
+        self.store.upsert_task(
+            TaskRecord(
+                task_key=other_key,
+                project="agent-taskflow",
+                board="agent-taskflow",
+                title="Other task",
+                status="waiting_approval",
+                repo_path=self.repo,
+                artifact_dir=other_dir,
+            )
+        )
+        other_attempt = self._seed_level2_attempt(task_key=other_key)
+        self._seed_level2_attempt()
+        self._clear_runtime_evidence()
+        self._seed_runtime_evidence(other_attempt.attempt_id)
+
+        wrong_task = run_pr_preparation_pipeline(self._request(dry_run=True))
+        self.assertFalse(wrong_task["ok"])
+        self.assertTrue(
+            any("belongs to another Task" in reason for reason in wrong_task["reasons"])
+        )
+
+        self._clear_runtime_evidence()
+        open_attempt = AttemptStore(self.db_path).create_attempt(
+            self.task_key,
+            artifact_root=self.artifact_root / self.task_key,
+        )
+        self._seed_runtime_evidence(open_attempt.attempt_id)
+        non_terminal = run_pr_preparation_pipeline(self._request(dry_run=True))
+        self.assertFalse(non_terminal["ok"])
+        self.assertTrue(
+            any("is not closed" in reason for reason in non_terminal["reasons"])
+        )
 
     def test_preflight_requires_waiting_approval(self) -> None:
         self.store.update_task_status(self.task_key, "queued", source="test")
