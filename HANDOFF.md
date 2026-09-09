@@ -1,6 +1,7 @@
 # Handoff — V1 Step 1: Minimal Ticket UX
 
 Branch: `task/v1-step1`
+Draft PR: https://github.com/anderson930420/agent-taskflow/pull/195
 Worktree: `/home/ubuntu/agent-taskflow/.worktrees/v1-step1`
 Spec: `~/agent-taskflow-ops/v1/SPEC.md` §42 Step 1
 Instructions: `~/agent-taskflow-ops/v1/step1.md`
