@@ -36,6 +36,14 @@ TASK_STATUSES = {
     "canceled",
     # Operator-confirmed evidence-only / superseded task archive terminal state.
     "archived",
+    # V1 Master Spec §12 statuses owned by the Step 2 integration controller.
+    # "cancelled" is the spec spelling and is distinct from the legacy
+    # "canceled" value above; the two are deliberately not aliased.
+    "ready_for_integration",
+    "integrating",
+    "needs_review",
+    "needs_decision",
+    "cancelled",
     # Common external Kanban/Hermes-style mirror values.
     "backlog",
     "todo",
@@ -72,6 +80,18 @@ TASK_EVENT_TYPES = {
     "runtime_execution_finished",
     "worktree_recorded",
     "cleanup_recorded",
+    # V1 Master Spec Step 2 integration controller lifecycle events.
+    "integration_queued",
+    "integration_started",
+    "integration_completed",
+    "integration_blocked",
+    "reintegration_required",
+    "pr_state_polled",
+    "pr_review_changes_requested",
+    "pr_closed_unmerged",
+    "merge_detected",
+    "merge_verified",
+    "integration_cleanup_completed",
     "note",
 }
 
@@ -99,6 +119,13 @@ TASK_ARTIFACT_TYPES = {
     "runtime_handoff_execution",
     WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
     WORKFLOW_POLICY_ARTIFACT_INDEX_TYPE,
+    # V1 Master Spec Step 2 integration controller proof-of-work.
+    # Conflict, review, and merge-verification evidence are recorded as
+    # queryable rows plus task events rather than as artifact files, so they
+    # deliberately have no artifact type here.
+    "integration_result",
+    "integration_validator_evidence",
+    "integration_cleanup",
     "other",
 }
 

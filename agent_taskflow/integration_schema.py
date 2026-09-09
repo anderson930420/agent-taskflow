@@ -1,0 +1,185 @@
+"""Authoritative Step 2 integration schema (V1 Master Spec §32.1, §12).
+
+§32.1 is the authoritative field list for the Ticket PR / integration state.
+Names, types, enum values and defaults are fixed there, so they are declared
+once here and every other Step 2 module derives from these declarations.
+
+Ownership rule: Step 2 creates these fields and is their only writer. Every
+other component reads them and must tolerate ``None``.
+
+Integration-internal state that §32.1 does not list (``previous_integrated_
+base_sha``, ``new_target_sha``, validator/review/conflict evidence) is *not*
+part of this field list and lives in Step-2-private storage.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+__all__ = [
+    "CANCELLED",
+    "CI_STATUS_VALUES",
+    "COMPLETED",
+    "INTEGRATING",
+    "INTEGRATION_OWNED_STATUSES",
+    "NEEDS_DECISION",
+    "NEEDS_REVIEW",
+    "PR_STATE_VALUES",
+    "PrFieldSpec",
+    "READY_FOR_INTEGRATION",
+    "REVIEW_DECISION_VALUES",
+    "TICKET_PR_FIELDS",
+    "TICKET_PR_FIELD_NAMES",
+    "default_pr_state",
+    "sqlite_column_type",
+    "validate_pr_state",
+    "validate_transition",
+]
+
+
+# -- §12 statuses owned by the integration controller ----------------------
+#
+# The spec spells the cancelled state with two "l"s. The pre-V1 local mirror
+# uses the separate legacy value "canceled"; the two are deliberately kept
+# distinct rather than aliased, so a V1 integration transition can never be
+# confused with a legacy cancellation.
+READY_FOR_INTEGRATION = "ready_for_integration"
+INTEGRATING = "integrating"
+NEEDS_REVIEW = "needs_review"
+NEEDS_DECISION = "needs_decision"
+CANCELLED = "cancelled"
+COMPLETED = "completed"
+
+INTEGRATION_OWNED_STATUSES = frozenset(
+    {
+        READY_FOR_INTEGRATION,
+        INTEGRATING,
+        NEEDS_REVIEW,
+        NEEDS_DECISION,
+        CANCELLED,
+        COMPLETED,
+    }
+)
+
+# Transitions the integration controller and its watcher may perform.
+#
+# Deliberately absent:
+#   INTEGRATING      -> COMPLETED       cleanup requires verified merge (§36)
+#   NEEDS_DECISION   -> NEEDS_REVIEW    only a human disposition leaves
+#                                       needs_decision (§33.3, §33.4)
+INTEGRATION_TRANSITIONS: dict[str, frozenset[str]] = {
+    READY_FOR_INTEGRATION: frozenset({INTEGRATING}),
+    INTEGRATING: frozenset({READY_FOR_INTEGRATION, NEEDS_REVIEW, NEEDS_DECISION}),
+    NEEDS_REVIEW: frozenset(
+        {READY_FOR_INTEGRATION, NEEDS_DECISION, CANCELLED, COMPLETED}
+    ),
+    NEEDS_DECISION: frozenset({CANCELLED}),
+    CANCELLED: frozenset(),
+    COMPLETED: frozenset(),
+}
+
+
+def validate_transition(current: str, target: str) -> None:
+    """Raise ValueError unless integration may move ``current`` to ``target``."""
+    allowed = INTEGRATION_TRANSITIONS.get(current)
+    if allowed is None:
+        raise ValueError(
+            f"{current!r} is not a status the integration controller owns"
+        )
+    if target not in allowed:
+        raise ValueError(
+            f"Integration may not transition {current!r} -> {target!r}"
+        )
+
+
+# -- §32.1 Ticket PR fields ------------------------------------------------
+PR_STATE_VALUES = ("open", "closed")
+REVIEW_DECISION_VALUES = ("none", "approved", "changes_requested")
+CI_STATUS_VALUES = ("none", "pending", "success", "failure")
+
+
+@dataclass(frozen=True)
+class PrFieldSpec:
+    """One §32.1 field: its name, type, nullability, default and enum."""
+
+    name: str
+    python_type: str
+    nullable: bool
+    default: Any = None
+    enum: tuple[str, ...] | None = None
+
+
+TICKET_PR_FIELDS: tuple[PrFieldSpec, ...] = (
+    PrFieldSpec("pr_number", "int", True),
+    PrFieldSpec("pr_url", "str", True),
+    PrFieldSpec("pr_state", "str", True, enum=PR_STATE_VALUES),
+    PrFieldSpec("pr_merged", "bool", False, default=False),
+    PrFieldSpec("pr_head_sha", "str", True),
+    PrFieldSpec("merge_commit_sha", "str", True),
+    PrFieldSpec("review_decision", "str", True, enum=REVIEW_DECISION_VALUES),
+    PrFieldSpec("ci_status", "str", True, enum=CI_STATUS_VALUES),
+    PrFieldSpec("integrated_base_sha", "str", True),
+    PrFieldSpec("reintegration_count", "int", False, default=0),
+    PrFieldSpec("reintegration_required", "bool", False, default=False),
+    PrFieldSpec("pr_last_polled_at", "datetime", True),
+)
+
+TICKET_PR_FIELD_NAMES: tuple[str, ...] = tuple(spec.name for spec in TICKET_PR_FIELDS)
+
+_FIELDS_BY_NAME: dict[str, PrFieldSpec] = {spec.name: spec for spec in TICKET_PR_FIELDS}
+
+_SQLITE_TYPES = {"int": "INTEGER", "bool": "INTEGER", "str": "TEXT", "datetime": "TEXT"}
+
+
+def sqlite_column_type(spec: PrFieldSpec) -> str:
+    """Return the SQLite column type for one §32.1 field."""
+    return _SQLITE_TYPES[spec.python_type]
+
+
+def default_pr_state() -> dict[str, Any]:
+    """Return the §32.1 defaults, which every reader must tolerate."""
+    return {spec.name: spec.default for spec in TICKET_PR_FIELDS}
+
+
+def _coerce(spec: PrFieldSpec, value: Any) -> Any:
+    if value is None:
+        if not spec.nullable:
+            raise ValueError(f"{spec.name} is not nullable")
+        return None
+
+    if spec.python_type == "bool":
+        if not isinstance(value, bool):
+            raise ValueError(f"{spec.name} must be a bool, got {value!r}")
+        return value
+    if spec.python_type == "int":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{spec.name} must be an int, got {value!r}")
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"{spec.name} must be a string, got {value!r}")
+
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{spec.name} must not be empty")
+    if spec.enum is not None and normalized not in spec.enum:
+        raise ValueError(
+            f"{spec.name} must be one of {spec.enum}, got {value!r}"
+        )
+    return normalized
+
+
+def validate_pr_state(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a partial §32.1 update and return the normalized values.
+
+    Unknown field names are rejected: the §32.1 set is closed, so a typo or a
+    well-meaning extra field is a bug rather than an extension point.
+    """
+    unknown = sorted(set(values) - set(TICKET_PR_FIELD_NAMES))
+    if unknown:
+        raise ValueError(
+            f"Unknown Ticket PR field(s): {', '.join(unknown)}. "
+            f"§32.1 defines exactly: {', '.join(TICKET_PR_FIELD_NAMES)}"
+        )
+    return {name: _coerce(_FIELDS_BY_NAME[name], value) for name, value in values.items()}
