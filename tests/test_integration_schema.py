@@ -139,6 +139,14 @@ class LifecycleStatusTests(unittest.TestCase):
             (schema.NEEDS_REVIEW, schema.NEEDS_DECISION),
             (schema.NEEDS_REVIEW, schema.CANCELLED),
             (schema.NEEDS_REVIEW, schema.COMPLETED),
+            # §32 pickup ruling: a human can merge or close the PR while the
+            # Ticket waits in any of these.
+            (schema.READY_FOR_INTEGRATION, schema.CANCELLED),
+            (schema.READY_FOR_INTEGRATION, schema.COMPLETED),
+            (schema.NEEDS_DECISION, schema.CANCELLED),
+            (schema.NEEDS_DECISION, schema.COMPLETED),
+            (schema.PAUSED, schema.CANCELLED),
+            (schema.PAUSED, schema.COMPLETED),
         ]
         for current, target in allowed:
             schema.validate_transition(current, target)
@@ -150,6 +158,18 @@ class LifecycleStatusTests(unittest.TestCase):
     def test_needs_decision_cannot_be_self_approved_into_needs_review(self) -> None:
         with self.assertRaises(ValueError):
             schema.validate_transition(schema.NEEDS_DECISION, schema.NEEDS_REVIEW)
+
+    def test_an_in_flight_integration_can_be_neither_completed_nor_cancelled(self) -> None:
+        """§25.0 — nothing interrupts an integration that is running."""
+        for target in (schema.COMPLETED, schema.CANCELLED):
+            self.assertFalse(schema.can_transition(schema.INTEGRATING, target))
+
+    def test_a_paused_ticket_cannot_be_moved_to_needs_decision(self) -> None:
+        """§13 — a pause is the user's call; only a merge or a close ends it."""
+        self.assertFalse(schema.can_transition(schema.PAUSED, schema.NEEDS_DECISION))
+
+    def test_paused_is_resolved_through_status_vocab(self) -> None:
+        self.assertEqual(schema.PAUSED, to_persisted_status("paused"))
 
 
 if __name__ == "__main__":

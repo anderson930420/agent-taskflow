@@ -12,7 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_taskflow import integration_schema as schema
 from agent_taskflow import integration_git as git_ops
 from agent_taskflow.github_pr_adapter import GitHubPrAdapter
-from agent_taskflow.integration_queue import queue_for_repo
+from agent_taskflow.integration_cleanup import (
+    IntegrationCleanupRequest,
+    run_integration_cleanup,
+)
+from agent_taskflow.integration_queue import enqueue_for_integration, queue_for_repo
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.integration_watcher import (
     WatcherRequest,
@@ -336,6 +340,165 @@ class PrOutcomeTests(WatcherTestCase):
         self.make_reviewing_task("AT-201")
         self.integration.update_pr_state("AT-201", pr_number=None)
         self.assertEqual(self.outcomes(), [])
+
+
+
+class PrPickupScopeTests(WatcherTestCase):
+    """§32 pickup scope — human ruling: every Ticket with an open PR.
+
+    The pickup condition is ``pr_number IS NOT NULL AND pr_state = 'open'``,
+    and it is deliberately not scoped by status. A human can merge a PR on
+    GitHub while its Ticket sits in needs_decision or paused. A watcher scoped
+    to needs_review would never see that merge, so the Ticket would never reach
+    completed and its dependents would never be released. §32 says "all active
+    PR Tickets", and these tests pin what that means.
+    """
+
+    def cleanup(self, task_key: str):
+        return run_integration_cleanup(
+            IntegrationCleanupRequest(
+                task_key=task_key,
+                repo="owner/repo",
+                repo_path=self.fixture.repo,
+                target_branch="main",
+                remote="origin",
+                db_path=self.db_path,
+                confirm_cleanup=True,
+            ),
+            store=self.store,
+            integration_store=self.integration,
+        )
+
+    def merge_on_github(self, task_key: str, *, pr_number: int = 42) -> str:
+        merge_sha = self.fixture.merge_branch_into_target(f"task/{task_key}")
+        self.gh_runner.set_pr(
+            pr_number,
+            state="MERGED",
+            merged=True,
+            mergedAt="2026-09-10T05:00:00Z",
+            mergeCommit={"oid": merge_sha},
+        )
+        return merge_sha
+
+    def assert_merge_lands(self, task_key: str, parked_status: str) -> None:
+        worktree = self.make_reviewing_task(task_key)
+        self.store.update_task_status(task_key, parked_status, source="test")
+        merge_sha = self.merge_on_github(task_key)
+
+        picked = self.outcomes()
+        self.assertEqual([o.task_key for o in picked], [task_key])
+        self.assertTrue(picked[0].merged)
+        self.assertEqual(
+            self.integration.get_pr_state(task_key)["merge_commit_sha"], merge_sha
+        )
+        # Detection alone never completes a Ticket; §36 verification does.
+        self.assertEqual(self.status_of(task_key), parked_status)
+
+        result = self.cleanup(task_key)
+        self.assertTrue(result.ok, result.summary)
+        self.assertTrue(result.merge_verified)
+        self.assertEqual(result.merge_commit_sha, merge_sha)
+        self.assertEqual(self.status_of(task_key), schema.COMPLETED)
+        self.assertFalse(worktree.exists())
+
+    def test_a_needs_decision_ticket_whose_pr_is_merged_reaches_completed(self) -> None:
+        self.assert_merge_lands("AT-401", schema.NEEDS_DECISION)
+
+    def test_a_paused_ticket_whose_pr_is_merged_reaches_completed(self) -> None:
+        self.assert_merge_lands("AT-402", schema.PAUSED)
+
+    def test_a_ticket_with_a_null_pr_number_is_not_picked_up(self) -> None:
+        self.make_reviewing_task("AT-403")
+        self.integration.update_pr_state("AT-403", pr_number=None)
+        self.assertEqual(self.outcomes(), [])
+        self.assertEqual(self.gh_runner.calls, [])
+
+    def test_a_ticket_whose_pr_state_is_closed_is_not_picked_up(self) -> None:
+        self.make_reviewing_task("AT-404")
+        self.integration.update_pr_state("AT-404", pr_state="closed")
+        self.gh_runner.set_pr(42, state="MERGED", merged=True, mergeCommit={"oid": "x"})
+        self.assertEqual(self.outcomes(), [])
+        self.assertEqual(self.gh_runner.calls, [])
+        self.assertEqual(self.status_of("AT-404"), schema.NEEDS_REVIEW)
+
+    def test_pickup_is_not_scoped_by_status(self) -> None:
+        parked = {
+            "AT-410": schema.NEEDS_REVIEW,
+            "AT-411": schema.NEEDS_DECISION,
+            "AT-412": schema.PAUSED,
+            "AT-413": schema.READY_FOR_INTEGRATION,
+        }
+        for number, (key, status) in enumerate(parked.items(), start=50):
+            self.make_reviewing_task(key, pr_number=number)
+            self.store.update_task_status(key, status, source="test")
+        self.assertEqual({o.task_key for o in self.outcomes()}, set(parked))
+
+    def test_an_in_flight_integration_is_picked_up_but_not_polled(self) -> None:
+        """§25.0 — nothing is polled, recorded or transitioned mid-integration."""
+        self.make_reviewing_task("AT-405")
+        self.store.update_task_status("AT-405", schema.INTEGRATING, source="test")
+        self.merge_on_github("AT-405")
+        outcomes = self.outcomes()
+        self.assertEqual([o.task_key for o in outcomes], ["AT-405"])
+        self.assertTrue(outcomes[0].deferred)
+        self.assertEqual(self.gh_runner.calls, [])
+        self.assertEqual(self.integration.get_pr_state("AT-405")["pr_state"], "open")
+        self.assertEqual(self.status_of("AT-405"), schema.INTEGRATING)
+
+    def test_changes_requested_on_a_paused_ticket_keeps_it_paused(self) -> None:
+        """The review is kept as retry context, but a pause is the user's call."""
+        self.make_reviewing_task("AT-406")
+        self.store.update_task_status("AT-406", schema.PAUSED, source="test")
+        self.gh_runner.set_pr(
+            42,
+            reviewDecision="CHANGES_REQUESTED",
+            reviews=[
+                {
+                    "author": {"login": "octocat"},
+                    "state": "CHANGES_REQUESTED",
+                    "body": "split this",
+                    "submittedAt": "2026-09-10T03:00:00Z",
+                }
+            ],
+        )
+        self.outcomes()
+        self.assertEqual(self.status_of("AT-406"), schema.PAUSED)
+        self.assertEqual(len(self.integration.list_review_evidence("AT-406")), 1)
+
+    def test_a_pr_closed_unmerged_while_needs_decision_cancels_and_retains(self) -> None:
+        """§33.5 applies whatever status the Ticket was waiting in."""
+        worktree = self.make_reviewing_task("AT-407")
+        self.store.update_task_status("AT-407", schema.NEEDS_DECISION, source="test")
+        self.gh_runner.set_pr(42, state="CLOSED", merged=False)
+        self.outcomes()
+        self.assertEqual(self.status_of("AT-407"), schema.CANCELLED)
+        self.assertTrue(worktree.is_dir())
+
+    def test_a_pr_closed_while_queued_for_reintegration_cancels_and_dequeues(self) -> None:
+        self.make_reviewing_task("AT-408")
+        self.store.update_task_status("AT-408", schema.READY_FOR_INTEGRATION, source="test")
+        enqueue_for_integration(self.integration, "AT-408", repo="owner/repo")
+        self.gh_runner.set_pr(42, state="CLOSED", merged=False)
+        self.outcomes()
+        self.assertEqual(self.status_of("AT-408"), schema.CANCELLED)
+        self.assertEqual(queue_for_repo(self.integration, "owner/repo"), [])
+
+
+class FreshnessScopeTests(WatcherTestCase):
+    """Target-freshness polling keeps its §25.1 needs_review scope.
+
+    The §32 pickup ruling widens *PR-outcome* polling only. Re-integration is a
+    lifecycle action: §13 says a paused Ticket does not enter integration, and
+    a needs_decision Ticket is waiting for a human, so neither is re-queued.
+    """
+
+    def test_a_paused_ticket_is_never_requeued_for_reintegration(self) -> None:
+        self.make_reviewing_task("AT-420")
+        self.store.update_task_status("AT-420", schema.PAUSED, source="test")
+        self.fixture.advance_target()
+        self.assertEqual(self.freshness(), [])
+        self.assertEqual(self.status_of("AT-420"), schema.PAUSED)
+        self.assertEqual(queue_for_repo(self.integration, "owner/repo"), [])
 
 
 if __name__ == "__main__":

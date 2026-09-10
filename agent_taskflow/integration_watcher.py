@@ -5,7 +5,8 @@ Two tick functions, both idempotent (§32) and both dry-run by default:
 * :func:`poll_target_freshness` — fetches the latest target, computes
   ``behind_count`` for every ``needs_review`` Ticket, and returns a stale one
   to ``ready_for_integration`` with the two base SHAs recorded (§25.1).
-* :func:`poll_pr_outcomes` — reads PR state and applies the §33/§35 outcomes:
+* :func:`poll_pr_outcomes` — reads every *open* PR, whatever its Ticket's
+  status, and applies the §33/§35 outcomes:
   ``CHANGES_REQUESTED`` to ``needs_decision`` with the review persisted as
   retry context, closed-unmerged to ``cancelled`` *without touching the
   workspace*, and merged recorded as merge identity only.
@@ -31,7 +32,10 @@ from agent_taskflow import integration_git as git_ops
 from agent_taskflow import integration_schema as schema
 from agent_taskflow.github_pr_adapter import GitHubPrAdapter, GitHubPrError, PrSnapshot
 from agent_taskflow.integration_git import GitCommandLog, IntegrationGitError
-from agent_taskflow.integration_queue import enqueue_for_integration
+from agent_taskflow.integration_queue import (
+    enqueue_for_integration,
+    remove_from_queue,
+)
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
@@ -104,6 +108,9 @@ class PrOutcome:
     proposed_transition: str | None = None
     applied_transition: str | None = None
     cleanup_performed: bool = False
+    task_status: str | None = None
+    # True for an in-flight integration: picked up, but not polled (§25.0).
+    deferred: bool = False
 
 
 def _tasks_with_status(
@@ -231,6 +238,36 @@ def poll_target_freshness(
     return outcomes
 
 
+def _open_pr_candidates(
+    task_store: TaskMirrorStore,
+    integration: IntegrationStore,
+    task_keys: Sequence[str] | None,
+) -> list[tuple[Any, dict[str, Any]]]:
+    """Select every Ticket with an open PR, whatever its status (§32).
+
+    Human ruling on §32 pickup scope: the condition is
+
+        pr_number IS NOT NULL AND pr_state = 'open'
+
+    and it is deliberately **not** scoped by status. A human can merge a PR on
+    GitHub while its Ticket sits in needs_decision or paused. A watcher scoped
+    to needs_review would never see that merge, so the Ticket would never reach
+    completed and its dependents would never be released. §32 says "all active
+    PR Tickets", and this is what that means.
+    """
+    wanted = set(task_keys) if task_keys is not None else None
+    selected: list[tuple[Any, dict[str, Any]]] = []
+    for state in sorted(integration.list_pr_states(), key=lambda s: s["task_key"]):
+        if state["pr_number"] is None or state["pr_state"] != "open":
+            continue
+        if wanted is not None and state["task_key"] not in wanted:
+            continue
+        task = task_store.get_task(state["task_key"])
+        if task is not None:
+            selected.append((task, state))
+    return selected
+
+
 def poll_pr_outcomes(
     request: WatcherRequest,
     *,
@@ -238,31 +275,53 @@ def poll_pr_outcomes(
     integration_store: IntegrationStore | None = None,
     github: GitHubPrAdapter | None = None,
 ) -> list[PrOutcome]:
-    """Poll PR state and apply the §33/§35 outcomes. Idempotent."""
+    """Poll every open PR and apply the §33/§35 outcomes. Idempotent.
+
+    Pickup is ``pr_number IS NOT NULL AND pr_state = 'open'``; see
+    :func:`_open_pr_candidates` for why it is not scoped by status.
+    """
     task_store = store or TaskMirrorStore(request.db_path)
     task_store.init_db()
     integration = integration_store or IntegrationStore(store=task_store)
     adapter = github or GitHubPrAdapter(request.repo)
 
-    candidates = _tasks_with_status(task_store, schema.NEEDS_REVIEW, request.task_keys)
     outcomes: list[PrOutcome] = []
 
-    for task in candidates:
-        pr_state = integration.get_pr_state(task.task_key)
-        pr_number = pr_state["pr_number"]
-        if pr_number is None:
+    for task, pr_state in _open_pr_candidates(task_store, integration, request.task_keys):
+        pr_number = int(pr_state["pr_number"])
+
+        if task.status == schema.INTEGRATING:
+            # §25.0 — an in-flight integration is never interrupted. Nothing is
+            # polled or recorded, so pr_state stays 'open' and the next tick
+            # picks the Ticket up again once the integration has finished.
+            outcomes.append(
+                PrOutcome(
+                    task_key=task.task_key,
+                    pr_number=pr_number,
+                    pr_state=pr_state["pr_state"],
+                    merged=bool(pr_state["pr_merged"]),
+                    review_decision=pr_state["review_decision"],
+                    ci_status=pr_state["ci_status"],
+                    task_status=task.status,
+                    deferred=True,
+                )
+            )
             continue
 
         worktree = task_store.get_task_worktree(task.task_key)
-        cwd = worktree.worktree_path if worktree else request.repo_path
+        cwd = (
+            worktree.worktree_path
+            if worktree is not None and worktree.worktree_path.is_dir()
+            else request.repo_path
+        )
         try:
-            snapshot = adapter.poll_pr(pr_number=int(pr_number), cwd=cwd)
+            snapshot = adapter.poll_pr(pr_number=pr_number, cwd=cwd)
         except GitHubPrError:
             continue
 
-        transition = _proposed_transition(snapshot)
+        transition = _proposed_transition(snapshot, task.status)
         if not request.confirm_poll:
-            outcomes.append(_outcome(task.task_key, snapshot, transition, None))
+            outcomes.append(_outcome(task.task_key, snapshot, transition, None, task.status))
             continue
 
         _record_pr_state(integration, task.task_key, snapshot)
@@ -276,6 +335,7 @@ def poll_pr_outcomes(
                 "pr_state": snapshot.state,
                 "merged": snapshot.merged,
                 "review_decision": snapshot.review_decision,
+                "task_status": task.status,
                 # Recorded for observability only; §30 forbids it from
                 # influencing any lifecycle transition.
                 "ci_status": snapshot.ci_status,
@@ -292,23 +352,27 @@ def poll_pr_outcomes(
             task.task_key,
             snapshot,
             transition,
+            task_status=task.status,
             effective_head_sha=effective_head,
         )
-        outcomes.append(_outcome(task.task_key, snapshot, transition, applied))
+        outcomes.append(_outcome(task.task_key, snapshot, transition, applied, task.status))
 
     return outcomes
 
 
-def _proposed_transition(snapshot: PrSnapshot) -> str | None:
+def _proposed_transition(snapshot: PrSnapshot, task_status: str) -> str | None:
+    """Return the status change this poll calls for, if Step 2 may make it."""
     if snapshot.merged:
         # §35 — merge is *detected* here. Completing the Ticket requires §36
         # verification plus cleanup, which this watcher deliberately does not do.
         return None
     if snapshot.state == "closed":
-        return schema.CANCELLED
-    if snapshot.review_decision == "changes_requested":
-        return schema.NEEDS_DECISION
-    return None
+        target = schema.CANCELLED
+    elif snapshot.review_decision == "changes_requested":
+        target = schema.NEEDS_DECISION
+    else:
+        return None
+    return target if schema.can_transition(task_status, target) else None
 
 
 def _record_pr_state(
@@ -330,6 +394,7 @@ def _apply_transition(
     snapshot: PrSnapshot,
     transition: str | None,
     *,
+    task_status: str,
     effective_head_sha: str | None = None,
 ) -> str | None:
     if snapshot.merged:
@@ -344,6 +409,7 @@ def _apply_transition(
                     "pr_number": snapshot.number,
                     "merged_at": snapshot.merged_at,
                     "merge_commit_sha": snapshot.merge_commit_sha,
+                    "task_status": task_status,
                     "cleanup_performed": False,
                     "requires_merge_verification": True,
                 },
@@ -353,7 +419,7 @@ def _apply_transition(
             )
         return None
 
-    if transition == schema.NEEDS_DECISION:
+    if snapshot.state != "closed" and snapshot.review_decision == "changes_requested":
         review = snapshot.latest_review or {}
         # Idempotency: one review evidence row per reviewed head SHA.
         already = any(
@@ -363,6 +429,8 @@ def _apply_transition(
         )
         if already:
             return None
+        # The review is always kept as retry context (§33.2), even when the
+        # Ticket is paused or already waiting on a decision.
         integration.record_review_evidence(
             task_key,
             pr_number=snapshot.number,
@@ -373,13 +441,16 @@ def _apply_transition(
             reviewed_head_sha=effective_head_sha,
             comments=[review] if review else [],
         )
-        task_store.update_task_status(
-            task_key,
-            schema.NEEDS_DECISION,
-            source=SOURCE,
-            message=f"Changes requested on PR #{snapshot.number}",
-            expected_current_status=schema.NEEDS_REVIEW,
-        )
+        applied = None
+        if transition == schema.NEEDS_DECISION:
+            task_store.update_task_status(
+                task_key,
+                schema.NEEDS_DECISION,
+                source=SOURCE,
+                message=f"Changes requested on PR #{snapshot.number}",
+                expected_current_status=task_status,
+            )
+            applied = schema.NEEDS_DECISION
         task_store.record_task_event(
             task_key,
             "pr_review_changes_requested",
@@ -391,9 +462,11 @@ def _apply_transition(
                 "reviewer": review.get("author"),
                 "reviewed_at": review.get("submitted_at"),
                 "reviewed_head_sha": effective_head_sha,
+                "task_status": task_status,
+                "status_changed": applied is not None,
             },
         )
-        return schema.NEEDS_DECISION
+        return applied
 
     if transition == schema.CANCELLED:
         # §33.5 / §37.1 — cancel the Ticket but keep the workspace, branch,
@@ -404,8 +477,10 @@ def _apply_transition(
             schema.CANCELLED,
             source=SOURCE,
             message=f"PR #{snapshot.number} was closed without merging",
-            expected_current_status=schema.NEEDS_REVIEW,
+            expected_current_status=task_status,
         )
+        # A Ticket cancelled while queued for re-integration must leave the queue.
+        remove_from_queue(integration, task_key)
         task_store.record_task_event(
             task_key,
             "pr_closed_unmerged",
@@ -414,6 +489,7 @@ def _apply_transition(
             payload={
                 "pr_number": snapshot.number,
                 "pr_url": snapshot.url,
+                "previous_task_status": task_status,
                 "worktree_retained": True,
                 "branch_retained": True,
                 "artifacts_retained": True,
@@ -430,6 +506,7 @@ def _outcome(
     snapshot: PrSnapshot,
     transition: str | None,
     applied: str | None,
+    task_status: str | None = None,
 ) -> PrOutcome:
     return PrOutcome(
         task_key=task_key,
@@ -442,4 +519,5 @@ def _outcome(
         proposed_transition=transition,
         applied_transition=applied,
         cleanup_performed=False,
+        task_status=task_status,
     )

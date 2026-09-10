@@ -22,12 +22,14 @@ from dataclasses import dataclass
 from pathlib import Path
 import shutil
 from typing import Any
+from uuid import uuid4
 
 from agent_taskflow import integration_git as git_ops
 from agent_taskflow import integration_schema as schema
 from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.governance import assert_worktree_inside_repo_worktrees
 from agent_taskflow.integration_git import GitCommandLog
+from agent_taskflow.integration_queue import remove_from_queue
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.merge_verification import (
     MergeVerificationRequest,
@@ -203,6 +205,17 @@ def run_integration_cleanup(
             **extra,
         )
 
+    # The transition table decides which statuses a verified merge may complete.
+    # After the §32 pickup ruling that includes needs_decision, paused and
+    # ready_for_integration, because a human can merge while a Ticket waits in
+    # any of them. It never includes an in-flight integration.
+    if not cancelled_route and not schema.can_transition(task.status, schema.COMPLETED):
+        if task.status == schema.INTEGRATING:
+            reason = "an integration is in progress; cleanup waits for it to finish (§25.0)"
+        else:
+            reason = f"a Ticket in {task.status!r} cannot be completed"
+        return result(ok=False, status="blocked", summary=f"Cleanup refused: {reason}.")
+
     if cancelled_route:
         if not request.confirm_cancelled_cleanup:
             return result(
@@ -338,8 +351,11 @@ def _perform_cleanup(
             schema.COMPLETED,
             source=SOURCE,
             message="Merge verified and cleanup completed",
-            expected_current_status=schema.NEEDS_REVIEW,
+            expected_current_status=task.status,
         )
+        # A Ticket completed straight from ready_for_integration must not
+        # linger in its repo queue.
+        remove_from_queue(integration, request.task_key)
         summary = (
             f"Merge {verification.merge_commit_sha if verification else ''} verified; "
             "cleanup completed and Ticket marked completed"
@@ -487,7 +503,7 @@ def _finish(
 
     directory = Path(task.artifact_dir) / "integration"
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "cleanup.json"
+    path = directory / f"cleanup-{uuid4().hex[:12]}.json"
     atomic_write_json(path, result.to_summary_dict(), sort_keys=True)
     task_store.record_task_artifact(request.task_key, ARTIFACT_TYPE, path)
 

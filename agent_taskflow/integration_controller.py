@@ -245,6 +245,23 @@ def integrate_task(
             pr_state=pr_state,
         )
 
+    if pr_state["pr_merged"]:
+        # The §32 watcher records a human GitHub merge on any Ticket with an
+        # open PR, including one queued here for re-integration. Integrating a
+        # PR that has already merged would only push commits to a dead branch.
+        return _simple_result(
+            ok=False,
+            status="blocked",
+            mode=mode,
+            request=request,
+            final_task_status=task.status,
+            summary=(
+                f"PR #{pr_state['pr_number']} is already merged on GitHub; there "
+                "is nothing left to integrate. Run merge verification and cleanup."
+            ),
+            pr_state=pr_state,
+        )
+
     if request.dry_run or not request.confirm_integration:
         return _simple_result(
             ok=True,

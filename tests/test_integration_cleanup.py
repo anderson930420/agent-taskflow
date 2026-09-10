@@ -15,6 +15,7 @@ from agent_taskflow.integration_cleanup import (
     IntegrationCleanupRequest,
     run_integration_cleanup,
 )
+from agent_taskflow.integration_queue import enqueue_for_integration, queue_for_repo
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
@@ -245,6 +246,43 @@ class NeverMergesTests(CleanupTestCase):
         result = self.cleanup(delete_remote_branch=True)
         for command in result.git_commands:
             self.assertFalse({"--force", "-f", "--force-with-lease"} & set(command))
+
+
+
+class CompletionSourceTests(CleanupTestCase):
+    """Which statuses a verified merge may complete comes from the transition table."""
+
+    def test_cleanup_refuses_a_ticket_that_is_mid_integration(self) -> None:
+        """§25.0 — cleanup never races an in-flight integration."""
+        self._merge()
+        self.store.update_task_status("AT-301", schema.INTEGRATING, source="test")
+        result = self.cleanup()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(self.worktree.is_dir())
+        self.assertEqual(self.status_of("AT-301"), schema.INTEGRATING)
+
+    def test_a_second_run_is_refused_and_never_overwrites_the_evidence(self) -> None:
+        self._merge()
+        first = self.cleanup()
+        self.assertTrue(first.ok, first.summary)
+        again = self.cleanup()
+        self.assertFalse(again.ok)
+        self.assertEqual(again.status, "blocked")
+        self.assertEqual(self.status_of("AT-301"), schema.COMPLETED)
+        # The refusal gets its own evidence file; it never overwrites the
+        # record of the cleanup that actually happened.
+        self.assertTrue(first.cleanup_json_path.is_file())
+        self.assertNotEqual(first.cleanup_json_path, again.cleanup_json_path)
+
+    def test_completing_from_ready_for_integration_leaves_the_queue(self) -> None:
+        self._merge()
+        self.store.update_task_status("AT-301", schema.READY_FOR_INTEGRATION, source="test")
+        enqueue_for_integration(self.integration, "AT-301", repo="owner/repo")
+        result = self.cleanup()
+        self.assertTrue(result.ok, result.summary)
+        self.assertEqual(self.status_of("AT-301"), schema.COMPLETED)
+        self.assertEqual(queue_for_repo(self.integration, "owner/repo"), [])
 
 
 if __name__ == "__main__":

@@ -541,5 +541,27 @@ class NegativeScopeTests(ControllerTestCase):
         self.assertTrue(worktree.is_dir())
 
 
+
+class AlreadyMergedTests(ControllerTestCase):
+    def test_a_pr_that_is_already_merged_is_never_reintegrated(self) -> None:
+        """The §32 watcher can record a human merge on a Ticket queued for
+        re-integration; integrating it would only push to a dead branch."""
+        self.make_task("AT-101")
+        self.integration.update_pr_state(
+            "AT-101",
+            pr_number=42,
+            pr_state="closed",
+            pr_merged=True,
+            merge_commit_sha="abc123",
+        )
+        result = self.integrate("AT-101")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("already merged", result.summary)
+        self.assertEqual(self.gh_runner.calls, [])
+        self.assertEqual(result.git_commands, ())
+        self.assertEqual(self.status_of("AT-101"), schema.READY_FOR_INTEGRATION)
+
+
 if __name__ == "__main__":
     unittest.main()

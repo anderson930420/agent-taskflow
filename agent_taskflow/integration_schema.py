@@ -28,12 +28,14 @@ __all__ = [
     "INTEGRATION_OWNED_STATUSES",
     "NEEDS_DECISION",
     "NEEDS_REVIEW",
+    "PAUSED",
     "PR_STATE_VALUES",
     "PrFieldSpec",
     "READY_FOR_INTEGRATION",
     "REVIEW_DECISION_VALUES",
     "TICKET_PR_FIELDS",
     "TICKET_PR_FIELD_NAMES",
+    "can_transition",
     "default_pr_state",
     "sqlite_column_type",
     "validate_pr_state",
@@ -59,6 +61,8 @@ NEEDS_REVIEW = to_persisted_status("needs_review")
 NEEDS_DECISION = to_persisted_status("needs_decision")
 CANCELLED = to_persisted_status("cancelled")
 COMPLETED = to_persisted_status("completed")
+# Not integration-owned, but a source of CANCELLED / COMPLETED: see below.
+PAUSED = to_persisted_status("paused")
 
 INTEGRATION_OWNED_STATUSES = frozenset(
     {
@@ -71,22 +75,37 @@ INTEGRATION_OWNED_STATUSES = frozenset(
     }
 )
 
-# Transitions the integration controller and its watcher may perform.
+# Transitions the integration controller, its watcher, and cleanup may perform.
+# This table is the runtime source of truth: `can_transition` reads it, and the
+# watcher and cleanup consult it rather than keeping their own status lists.
+#
+# READY_FOR_INTEGRATION, NEEDS_DECISION and PAUSED can all reach CANCELLED and
+# COMPLETED because of the §32 pickup ruling: the watcher picks up every Ticket
+# with an open PR whatever its status, and a human can merge or close that PR
+# on GitHub while the Ticket waits in any of them. The outcome must still land.
 #
 # Deliberately absent:
-#   INTEGRATING      -> COMPLETED       cleanup requires verified merge (§36)
-#   NEEDS_DECISION   -> NEEDS_REVIEW    only a human disposition leaves
-#                                       needs_decision (§33.3, §33.4)
+#   INTEGRATING    -> COMPLETED / CANCELLED   an in-flight integration is never
+#                                             interrupted (§25.0)
+#   NEEDS_DECISION -> NEEDS_REVIEW            only a human disposition leaves
+#                                             needs_decision (§33.3, §33.4)
+#   PAUSED         -> NEEDS_DECISION          a pause is the user's call (§13)
 INTEGRATION_TRANSITIONS: dict[str, frozenset[str]] = {
-    READY_FOR_INTEGRATION: frozenset({INTEGRATING}),
+    READY_FOR_INTEGRATION: frozenset({INTEGRATING, CANCELLED, COMPLETED}),
     INTEGRATING: frozenset({READY_FOR_INTEGRATION, NEEDS_REVIEW, NEEDS_DECISION}),
     NEEDS_REVIEW: frozenset(
         {READY_FOR_INTEGRATION, NEEDS_DECISION, CANCELLED, COMPLETED}
     ),
-    NEEDS_DECISION: frozenset({CANCELLED}),
+    NEEDS_DECISION: frozenset({CANCELLED, COMPLETED}),
+    PAUSED: frozenset({CANCELLED, COMPLETED}),
     CANCELLED: frozenset(),
     COMPLETED: frozenset(),
 }
+
+
+def can_transition(current: str, target: str) -> bool:
+    """Return True when Step 2 may move a Ticket from ``current`` to ``target``."""
+    return target in INTEGRATION_TRANSITIONS.get(current, frozenset())
 
 
 def validate_transition(current: str, target: str) -> None:

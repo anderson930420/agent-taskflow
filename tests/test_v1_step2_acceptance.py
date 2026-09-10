@@ -312,7 +312,16 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         second = self.pr_outcomes()
         self.assertTrue(first[0].merged)
         self.assertEqual(self.integration.get_pr_state("AT-101")["merge_commit_sha"], merge_sha)
-        self.assertEqual([o.merged for o in second], [True])
+        # A merged PR is recorded as closed, so it leaves the §32 pickup set
+        # (pr_number IS NOT NULL AND pr_state = 'open'). Re-polling therefore
+        # re-processes nothing: no second merge_detected, no state change.
+        self.assertEqual(second, [])
+        merge_events = [
+            event
+            for event in self.store.list_task_events("AT-101")
+            if event.event_type == "merge_detected"
+        ]
+        self.assertEqual(len(merge_events), 1)
         self.assertNotEqual(self.status_of("AT-101"), schema.COMPLETED)
 
     def test_item_31_every_github_merge_method_is_supported(self) -> None:
