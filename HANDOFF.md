@@ -14,8 +14,9 @@ Spec: `~/agent-taskflow-ops/v1/SPEC.md` §42 Step 2 (Integration Controller,
 Re-integration, PR outcomes, Merge)
 Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 
-Status: **implementation-complete, awaiting human review.** Nothing is
-approved, merged to `main`, or finally complete.
+Status: **STOPPED at Ruling 2 of the re-review rulings — awaiting a human
+decision.** See "Review re-review rulings" below. Nothing is approved,
+merged to `main`, or finally complete.
 
 `task/v1-step1` has been merged into this branch twice, both times as a merge
 commit and never a rebase: first (`96a6cd3`) to bring in
@@ -23,6 +24,225 @@ commit and never a rebase: first (`96a6cd3`) to bring in
 again (`9e09ad7`) for the reworked Step 1 persistence layer — see "Merge of
 the reworked Step 1" below. This branch therefore contains Step 1 *and*
 Step 2; PR #196 reviews Step 2.
+
+---
+
+## Review re-review rulings (B1, B2, guards) — STOPPED at Ruling 2
+
+The independent re-review of PR #196 failed it on blockers B1 and B2 plus
+guard gaps. Three rulings followed, to be implemented in order, each only
+after the previous one's tests were green.
+
+| Ruling | State | Commit |
+| --- | --- | --- |
+| 1 — B1, every watcher tick scoped to its own repo | **done, tests green** | `9c0e425` |
+| 2 — B2, deterministic post-resolution verification | implemented; **stopped** — 6 tests red, one proven cause | `742822e` |
+| 3 — push allowlist, parsed merge guard, guard-test renames | **not started** — its prerequisite (Ruling 2 green) is not met | — |
+
+**Nothing from this turn has been pushed.** The branch carries these commits
+locally; PR #196 still points at `a0f5728`.
+
+### Stop condition hit — Ruling 2 check (a) contradicts git's behaviour
+
+Ruling 2 check (a): *"no rebase or merge in progress: no REBASE_HEAD, no
+MERGE_HEAD (and no rebase-merge/ or rebase-apply/ directory)"*.
+
+git 2.43.0 (this machine) leaves `REBASE_HEAD` behind after a rebase that
+stopped on a conflict and was then **successfully** completed with
+`git rebase --continue`. Observed directly:
+
+    at the conflict:            REBASE_HEAD present, rebase-merge/ present
+    after `rebase --continue`
+      (exit 0, "Successfully
+       rebased and updated
+       refs/heads/task/...")    REBASE_HEAD present, rebase-merge/ gone
+
+So check (a) as written flags every *correctly completed* rebase as still in
+progress. Initial integration rebases (§24), so **every correct AI resolution
+of an initial-integration conflict now stops at `needs_decision`.**
+Re-integration merges (§26) and is unaffected: `MERGE_HEAD` is removed when
+the merge commit is made.
+
+**What I did:** implemented check (a) exactly as ruled — the fail-closed
+reading, which never lets a half-finished rebase through and only also stops
+finished ones — and did **not** edit any test around it. Six tests are red:
+
+- `test_integration_controller.py::ConflictTests::test_a_resolved_conflict_adds_the_ai_hint` (pre-existing)
+- `test_integration_controller.py::ConflictTests::test_a_resolved_conflict_continues_to_validators_and_pr` (pre-existing)
+- `test_integration_controller.py::ConflictTests::test_a_resolved_conflict_with_red_validators_still_stops` (pre-existing)
+- `test_integration_controller.py::ResolutionVerificationTests::test_check_b_a_stray_file_left_by_the_resolver_stops_integration` (new)
+- `test_integration_controller.py::ResolutionVerificationTests::test_check_c_committed_conflict_markers_stop_integration` (new)
+- `test_integration_git.py::NonInteractiveGitTests::test_a_conflicted_rebase_is_continued_without_an_editor` (new)
+
+**All six fail for that single reason.** Proof: re-running exactly these six
+with `in_progress_operation` patched *in memory only* — a `REBASE_HEAD` with no
+`rebase-merge/` or `rebase-apply/` directory ignored — gives `6 passed`. No
+file was changed by that diagnostic.
+
+**Options — your decision:**
+
+1. **Keep (a) as ruled.** Initial-integration conflicts then always go to a
+   human; AI resolution never completes on that path, so it is effectively
+   unreachable. The three pre-existing `ConflictTests` above would have to be
+   rewritten to expect `needs_decision`.
+2. **Amend (a):** a rebase is in progress when `rebase-merge/` or
+   `rebase-apply/` exists; `REBASE_HEAD` counts only alongside one of them.
+   A stopped rebase always has one of those directories — they are what git
+   itself uses to track it — so no half-finished rebase can pass. All six go
+   green with no other change.
+3. **Have the control plane delete a stale `REBASE_HEAD`** before verifying.
+   Not recommended: it edits the very state the check inspects, and it needs
+   `update-ref`, which the git allowlist excludes on purpose.
+
+My recommendation is **2**, but it changes the ruling's wording, so it is
+yours to make.
+
+### Found and fixed while implementing Ruling 2 — `rebase --continue` failed silently
+
+Before this turn, `commit_conflict_resolution` ran `git rebase --continue`.
+With no TTY that fails on the editor — *"There was a problem with the editor
+'editor'"*, exit 1 — and leaves the rebase in progress; the return code was not
+checked (both observed directly). The old post-resolution check looked only for
+unmerged paths, so it passed, and the old flow went on to validate and push.
+During a stopped rebase the task branch ref still points at the pre-rebase
+commit, so by that flow even a *correct* AI resolution of an initial-integration
+conflict would publish the unresolved branch and record an
+`integrated_base_sha` the branch did not contain — the same outcome the
+reviewer's stage-only reproduction showed for a stage-only resolver. B2 was
+therefore real on the happy path too.
+
+Ruling 2's check (a) caught it. Fix: the control-plane git runner now forces
+`GIT_EDITOR=true` (accept the prepared message), the same way it already
+forces `GIT_PAGER`. With the fix, `rebase --continue` exits 0. Regression test:
+`test_a_conflicted_rebase_is_continued_without_an_editor` — itself one of the
+six red tests, red only because of the stale `REBASE_HEAD` above.
+
+### Ruling 1 — B1, repo-scoped watcher ticks: done
+
+**Ruling.** Both ticks — PR-state and target-freshness — pick up exactly
+`repo == tick repo AND pr_number IS NOT NULL AND pr_state = 'open'`, still not
+scoped by display status (SPEC §32.0). The freshness tick queues only its own
+repo's Tickets, into its own repo's queue.
+
+**Implementation.**
+
+- A PR's repository is read from its own §32.1 `pr_url`, which the controller
+  records when it creates the PR. A PR number alone is not an identity, since
+  the same number can be open in two repos. No new column was needed.
+- The repository filter runs in SQL (`IntegrationStore.list_open_pr_states`),
+  so another repository's rows are never loaded; each returned URL is then
+  parsed and compared exactly, case-insensitively like GitHub.
+- The freshness tick re-queues only `needs_review` (the §25.1 transition), into
+  its own repository's queue. `paused`, `needs_decision` and
+  `ready_for_integration` Tickets are picked up and reported but not re-queued.
+  An `integrating` Ticket is deferred with no git work at all (§25.0).
+- *My addition, same defect class, flagged for review:* the controller refuses
+  to update a PR whose URL names a different repository than the request.
+
+**Required test** — `tests/test_integration_watcher.py`, `CrossRepoScopeTests`:
+two repositories with PR #42 open in both, checked in both directions for both
+ticks (4 tests). Each asserts the other repository's Ticket row, PR state,
+private state, events and review evidence are unchanged; that the tick issued
+exactly one `gh` call (both Tickets are PR #42, so a call for the other Ticket
+would have been a second one) and none through the other repository's
+adapter; that nothing was queued into the other repository's queue; and that
+the other repository was never even fetched.
+
+**Tests added or renamed for Ruling 1:** `CrossRepoScopeTests` (4),
+`OpenPrPickupScopeTests` in `test_integration_store.py` (4),
+`CrossRepoGuardTests` in `test_integration_controller.py` (1). Freshness tests
+updated because the pick-up is no longer status-scoped:
+`test_only_needs_review_tickets_are_examined` → renamed
+`test_only_needs_review_tickets_are_requeued`;
+`test_a_paused_ticket_is_never_requeued_for_reintegration` → renamed
+`test_a_stale_paused_ticket_is_picked_up_but_not_requeued`;
+`test_freshness_polling_is_idempotent` and
+`test_an_in_progress_integration_is_not_interrupted` now assert the Ticket is
+picked up but not re-queued / deferred, instead of an empty result.
+
+**Reviewer's cross-repo reproduction** (`/tmp/step2_review_crossrepo.py`),
+re-run against this branch. It must be run with the worktree on `PYTHONPATH`:
+the script only adds `tests/` to `sys.path`, so run plainly it imports the
+*main* checkout, which has no Step 2 code at all.
+
+    freshness tick(repo=owner/repoA) touched: [('AT-0901', 0, False)]
+    queue owner/repoA: []
+    queue owner/repoB: []
+    gh argv: gh pr view 42 --repo owner/repoA
+    AT-0901 status -> canceled | pr_state -> closed
+    AT-0902 status -> waiting_for_review | pr_state -> open
+
+Repo A's ticks touched only repo A's Ticket; one `gh` call; repo B's Ticket is
+untouched. **B1 reproduced as fixed.**
+
+### Ruling 2 — B2, post-resolution verification: implemented, stopped
+
+After any AI conflict resolution and before validators, the control plane runs
+five checks (`integration_git.verify_conflict_resolution`): (a) no operation in
+progress, (b) clean worktree including untracked files, (c) no conflict
+markers — `<<<<<<<`, `>>>>>>>`, `|||||||` in any tracked file, and a lone
+`=======` only in files that conflicted, since it is also a valid setext
+heading underline — (d) HEAD differs from HEAD captured right before the
+resolver ran, (e) the target SHA resolved at the start of the run is an
+ancestor of HEAD. Any failure → `needs_decision` via §27.2.1: the conflict
+hunks and the AI's explanation are persisted as before, the failed checks are
+persisted in a new Step-2-private column
+(`integration_conflict_evidence.verification_json`, migration
+`v1_step2_conflict_verification`) and in the `integration_blocked` event and
+the result artifact; nothing is pushed and `integrated_base_sha` is not
+recorded; no auto retry. A resolution that fails verification no longer counts
+as a §39.3 AI success.
+
+**Tests added for Ruling 2:** in `test_integration_git.py`,
+`ResolutionVerificationTests` — all five checks passing, then one test per
+check (a)–(e) in which only that check fails, plus the lone-separator scoping
+test and the rebase-directory test; and `NonInteractiveGitTests` (the
+regression test). In `test_integration_controller.py`,
+`ResolutionVerificationTests` — the required *resolver that stages but does
+not commit ends in needs_decision, not needs_review*, and one end-to-end test
+per check. Plus one store test and one metrics test.
+
+**Reviewer's stage-only reproduction** (`/tmp/step2_review_stageonly.py`),
+re-run against this branch (worktree on `PYTHONPATH`, as above):
+
+    result.status: needs_decision | ticket status: needs_decision
+    recorded integrated_base_sha == latest target: False
+    in-progress op left in worktree: None
+
+Its last line then raises, because it runs `git rev-list` against
+`origin/task/AT-0911`, which does not exist — nothing was pushed. Confirmed
+with `git ls-remote`: the reproduction's origin has only `main`. **B2's
+stage-only case reproduced as fixed.**
+
+### Ruling 3 — guards: not started
+
+Its prerequisite, Ruling 2 green, is not met, so no part of it was done: no
+push allowlist, no parsed-argv merge guard, no guard-test renames. The ruling's
+known consequence — the §37 optional remote-branch cleanup
+(`integration_cleanup.py`, `git push <remote> --delete <branch>`) becoming
+unreachable under the allowlist — has therefore **not happened yet**. It will
+when Ruling 3 lands, and will be recorded then as a stop condition, as
+instructed. `delete_remote_branch` is still `False` by default.
+
+### Test counts this turn
+
+| | `pytest tests -q` |
+| --- | --- |
+| Before this turn (`a0f5728`) | `4767 passed, 8 skipped, 0 failed` |
+| At the stop (`742822e`) | `4786 passed, 6 failed, 8 skipped` |
+
+The six failures are exactly the six listed under the stop condition; nothing
+else in the repository went red. The count reconciles:
+
+    4767  passed before this turn
+     +25  tests added this turn (Ruling 1: 9, Ruling 2: 16)
+    ----
+    4792  = 4786 passed + 6 failed
+          (3 of the red tests pre-date this turn; 3 are new)
+
+`compileall agent_taskflow scripts tests`: exit 0. The packaged
+`agent_taskflow.cli.local_validation` was **not** run at the stop: its
+`unittest` step would fail on the same six tests and would add nothing.
 
 ---
 
