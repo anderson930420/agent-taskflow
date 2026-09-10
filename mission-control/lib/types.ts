@@ -436,3 +436,113 @@ export interface TaskReviewBundle {
 export interface TaskDogfoodEvidenceBundle {
   item: TaskDogfoodEvidence;
 }
+
+// ─── V1 Step 3: realtime progress (SPEC §14, §16, §17, §32.1) ───────────────
+//
+// These payloads are read-only projections of persisted orchestrator state.
+// Mission Control renders lifecycle; it never owns it.
+
+export type RuntimeStepStatus =
+  | "pending"
+  | "running"
+  | "passed"
+  | "failed"
+  | "blocked";
+
+export interface RuntimeObservedStep {
+  name: string;
+  label: string;
+  status: RuntimeStepStatus | string;
+  glyph: string;
+  summary?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * SPEC §32.1 Ticket PR fields. The Step 2 watcher is their sole writer, so
+ * every field here may be absent or null and `display` already carries the
+ * em-dash fallback for each one.
+ */
+export interface TicketPrView {
+  available: boolean;
+  pr_number?: number | null;
+  pr_url?: string | null;
+  pr_state?: string | null;
+  pr_merged?: boolean | null;
+  pr_head_sha?: string | null;
+  merge_commit_sha?: string | null;
+  review_decision?: string | null;
+  ci_status?: string | null;
+  integrated_base_sha?: string | null;
+  reintegration_count?: number | null;
+  reintegration_required?: boolean | null;
+  pr_last_polled_at?: string | null;
+  display: Record<string, string>;
+}
+
+export interface BoardTicket {
+  task_key: string;
+  repository: string;
+  status: TaskStatus;
+  section?: string | null;
+  title?: string | null;
+  repo_path?: string | null;
+  priority?: string | null;
+  branch?: string | null;
+  worktree_path?: string | null;
+  running: boolean;
+  eligible_for_execution: boolean;
+  blocked: boolean;
+  paused: boolean;
+  awaiting_review: boolean;
+  blocker?: string | null;
+  blocker_hint?: string | null;
+  attempt_id?: string | null;
+  attempt_number?: number | null;
+  current_phase?: string | null;
+  current_activity?: string | null;
+  steps: RuntimeObservedStep[];
+  pr: TicketPrView;
+  updated_at?: string | null;
+  display: Record<string, string>;
+}
+
+export interface BoardSection {
+  key: string;
+  title: string;
+  count: number;
+  tickets: BoardTicket[];
+}
+
+export interface BoardProjection {
+  schema_version: string;
+  generated_at: string;
+  sections: BoardSection[];
+  unsectioned: BoardTicket[];
+  notes: string[];
+}
+
+export interface TicketAttemptRef {
+  attempt_id: string;
+  attempt_number: number;
+  is_active: boolean;
+  current_phase?: string | null;
+  current_activity?: string | null;
+  updated_at?: string | null;
+}
+
+export interface TicketProjection {
+  schema_version: string;
+  generated_at: string;
+  ticket: BoardTicket;
+  attempts: TicketAttemptRef[];
+  selected_attempt_id?: string | null;
+  artifacts: Array<{
+    artifact_type: string;
+    path: string;
+    created_at?: string | null;
+  }>;
+  validators: Array<Record<string, unknown>>;
+  reviewer_hints: string[];
+  notes: string[];
+}

@@ -7,9 +7,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.responses import StreamingResponse
 
 from agent_taskflow.api.schemas import (
     ActionResponse,
@@ -56,6 +57,10 @@ from agent_taskflow.scheduler_proposal_readback import (
     list_scheduler_proposal_readbacks,
     list_task_scheduler_proposal_readbacks,
 )
+from agent_taskflow.api.realtime import (
+    RealtimeStreamOptions,
+    realtime_stream_response,
+)
 from agent_taskflow.api.review import (
     build_artifact_file_summaries,
     build_artifact_preview,
@@ -69,6 +74,11 @@ from agent_taskflow.governance import (
     assert_worktree_inside_repo_worktrees,
 )
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord, require_absolute_path
+from agent_taskflow.realtime_projection import (
+    build_board_projection,
+    build_ticket_projection,
+    projection_to_dict,
+)
 from agent_taskflow.level2_execution_authority import (
     Level2ExecutionAuthorityError,
     level2_direct_execution_error,
@@ -118,14 +128,19 @@ def create_app(
     db_path: str | Path | None = None,
     *,
     dispatcher_factory: DispatcherFactory | None = None,
+    realtime_options: RealtimeStreamOptions | None = None,
 ) -> FastAPI:
     """Create the Mission Control API app.
 
     db_path is injectable for tests. The default app uses the standard local
     mirror database path. Action routes mutate only the local mirror state and
     route execution through the dispatcher abstraction.
+
+    realtime_options tunes the SPEC 15 SSE stream; the default is an unbounded
+    stream that runs until the client disconnects.
     """
     store = TaskMirrorStore(db_path)
+    stream_options = realtime_options or RealtimeStreamOptions()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -815,6 +830,84 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return artifact_preview_to_dict(preview)
+
+    # -- V1 Step 3: realtime progress (SPEC 15, 16, 17) --------------------
+    #
+    # Every route below is read-only. They project persisted SQLite state for
+    # Mission Control; they never transition lifecycle, run validators, touch
+    # git, or contact GitHub.
+
+    def board_snapshot(project: str | None) -> dict[str, object]:
+        return projection_to_dict(
+            build_board_projection(store.db_path, project=project)
+        )
+
+    def ticket_snapshot(
+        task_key: str, attempt_id: str | None
+    ) -> dict[str, object] | None:
+        return projection_to_dict(
+            build_ticket_projection(
+                store.db_path, task_key, attempt_id=attempt_id
+            )
+        )
+
+    @app.get("/api/realtime/board")
+    def realtime_board(
+        project: str | None = Query(default=None),
+    ) -> dict[str, object]:
+        """Read-only SPEC 16 live board snapshot."""
+        return detail_response(board_snapshot(project))
+
+    @app.get("/api/realtime/stream")
+    def realtime_stream(
+        request: Request,
+        project: str | None = Query(default=None),
+    ) -> StreamingResponse:
+        """SPEC 15 SSE board stream: full snapshot first, then updates."""
+        return realtime_stream_response(
+            request, lambda: board_snapshot(project), stream_options
+        )
+
+    @app.get("/api/tasks/{task_key}/realtime")
+    def realtime_ticket(
+        task_key: str,
+        attempt_id: str | None = Query(default=None),
+    ) -> dict[str, object]:
+        """Read-only SPEC 17 live Ticket page snapshot."""
+        item = ticket_snapshot(task_key, attempt_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Task not found: {task_key}")
+        return detail_response(item)
+
+    @app.get("/api/tasks/{task_key}/realtime/stream")
+    def realtime_ticket_stream(
+        request: Request,
+        task_key: str,
+        attempt_id: str | None = Query(default=None),
+    ) -> StreamingResponse:
+        """SPEC 15 SSE Ticket stream: full snapshot first, then updates."""
+        if ticket_snapshot(task_key, attempt_id) is None:
+            raise HTTPException(status_code=404, detail=f"Task not found: {task_key}")
+        return realtime_stream_response(
+            request,
+            lambda: ticket_snapshot(task_key, attempt_id),
+            stream_options,
+        )
+
+    @app.get("/api/tasks/{task_key}/attempts")
+    def list_ticket_attempts(
+        task_key: str,
+        current_store: TaskMirrorStore = Depends(get_store),
+    ) -> dict[str, object]:
+        """Read-only Attempt list; SPEC 14.0 keeps earlier Attempts viewable."""
+        task = task_or_404(task_key, current_store)
+        projection = build_ticket_projection(store.db_path, task.task_key)
+        items = (
+            [attempt.to_dict() for attempt in projection.attempts]
+            if projection is not None
+            else []
+        )
+        return list_response(items)
 
 
     return app

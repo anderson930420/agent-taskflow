@@ -3,6 +3,7 @@ import { ActionPanel } from "../../../components/ActionPanel";
 import { ApprovalList } from "../../../components/ApprovalList";
 import { ArtifactList } from "../../../components/ArtifactList";
 import { DogfoodEvidencePanel } from "../../../components/DogfoodEvidencePanel";
+import { LiveTicketPanel } from "../../../components/LiveTicketPanel";
 import { RunList } from "../../../components/RunList";
 import { RuntimeAuditPanel } from "../../../components/RuntimeAuditPanel";
 import { RuntimeExecutionPanel } from "../../../components/RuntimeExecutionPanel";
@@ -84,6 +85,8 @@ export default async function TaskDetailPage({
           API base URL: <span className="mono">{API_BASE_URL}</span>
         </p>
       </header>
+
+      <LiveTicketPanel taskKey={decodedTaskKey} />
 
       <section className="panel">
         <h2>Task Metadata</h2>
