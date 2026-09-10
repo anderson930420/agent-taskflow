@@ -1,82 +1,89 @@
-"""SQLite persistence for V1 Tickets (SPEC §12, §44).
+"""Ticket persistence over the canonical `tasks` table.
 
-Task ID allocation and the Ticket insert share a single `BEGIN IMMEDIATE`
-transaction, so two concurrent creations can never be handed the same Task ID
-— and therefore never the same branch or worktree path.
+There is no separate Ticket table: `tasks` is the only canonical Ticket
+entity. A Ticket is a `tasks` row whose Step 1 columns (added by the
+`tasks_ticket_fields` migration in :mod:`agent_taskflow.store`) are populated,
+and its creation audit event goes to the existing `task_events` log.
+
+Task key allocation, the `tasks` insert and the audit write share one
+`BEGIN IMMEDIATE` transaction, so two concurrent creations can never be handed
+the same key — and therefore never the same branch or worktree path.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from contextlib import closing
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
 from agent_taskflow._helpers import require_non_empty
-from agent_taskflow.models import require_absolute_path, utc_now_iso
-from agent_taskflow.store import connect, default_db_path
+from agent_taskflow.models import (
+    TaskEventRecord,
+    require_absolute_path,
+    utc_now_iso,
+    validate_task_event_type,
+    validate_task_status,
+)
+from agent_taskflow.store import (
+    TaskMirrorStore,
+    connect,
+    default_db_path,
+    init_db as init_task_db,
+)
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.ticket_metadata import (
-    FIRST_TICKET_SEQUENCE,
-    format_ticket_id,
-    parse_ticket_sequence,
+    FIRST_TASK_KEY_SEQUENCE,
+    TASK_KEY_PREFIX,
+    format_task_key,
+    parse_task_key_sequence,
 )
-from agent_taskflow.ticket_models import (
-    TicketEventRecord,
-    TicketRecord,
-    validate_ticket_event_type,
-    validate_ticket_priority,
-    validate_ticket_status,
-)
-from agent_taskflow.ticket_schema import migrate_tickets
+from agent_taskflow.ticket_models import TicketRecord, validate_ticket_priority
 
 
-TICKET_COLUMNS = (
-    "ticket_id",
-    "repository",
-    "ticket_prefix",
-    "ticket_sequence",
+TICKET_CREATED_EVENT_TYPE = "created"
+
+# `tasks` columns a TicketRecord reads. `project` holds the repository slug.
+TICKET_SELECT_COLUMNS = (
+    "task_key",
+    "project",
     "prompt",
     "title",
-    "title_source",
     "priority",
     "status",
-    "blocked_by",
     "repo_path",
-    "github_repo",
     "base_branch",
     "branch",
-    "branch_slug_source",
     "worktree_path",
     "artifact_dir",
+    "ai_title_status",
+    "branch_slug_source",
+    "github_repo",
+    "blocked_by",
     "commit_message_suggestion",
     "created_at",
     "updated_at",
 )
+
+# A `tasks` row is a prompt-first Ticket when it carries a prompt. Legacy
+# mirror rows leave it NULL and stay readable through the task mirror API.
+_IS_TICKET = "prompt IS NOT NULL"
 
 
 class TicketStoreError(RuntimeError):
     """Raised when a Ticket cannot be persisted."""
 
 
-@dataclass(frozen=True)
-class TicketAllocation:
-    """The Task ID reserved for one in-flight Ticket creation."""
-
-    ticket_id: str
-    ticket_prefix: str
-    ticket_sequence: int
-
-
-TicketBuilder = Callable[[TicketAllocation], TicketRecord]
+TicketBuilder = Callable[[str], TicketRecord]
 
 
 def _row_to_ticket(row: sqlite3.Row) -> TicketRecord:
     return TicketRecord(
-        ticket_id=row["ticket_id"],
-        repository=row["repository"],
+        task_key=row["task_key"],
+        repository=row["project"],
         prompt=row["prompt"],
         title=row["title"],
         priority=row["priority"],
@@ -86,9 +93,7 @@ def _row_to_ticket(row: sqlite3.Row) -> TicketRecord:
         branch=row["branch"],
         worktree_path=Path(row["worktree_path"]),
         artifact_dir=Path(row["artifact_dir"]),
-        ticket_prefix=row["ticket_prefix"],
-        ticket_sequence=int(row["ticket_sequence"]),
-        title_source=row["title_source"],
+        ai_title_status=row["ai_title_status"],
         branch_slug_source=row["branch_slug_source"],
         github_repo=row["github_repo"],
         blocked_by=row["blocked_by"],
@@ -98,20 +103,8 @@ def _row_to_ticket(row: sqlite3.Row) -> TicketRecord:
     )
 
 
-def _row_to_ticket_event(row: sqlite3.Row) -> TicketEventRecord:
-    return TicketEventRecord(
-        ticket_id=row["ticket_id"],
-        event_type=row["event_type"],
-        actor=row["actor"],
-        message=row["message"],
-        payload_json=row["payload_json"],
-        created_at=row["created_at"],
-        event_id=int(row["event_id"]),
-    )
-
-
 class TicketStore:
-    """SQLite access for V1 Ticket records and their audit events."""
+    """SQLite access for prompt-first Tickets stored in `tasks`."""
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         self.db_path = (
@@ -121,36 +114,30 @@ class TicketStore:
         )
 
     def init_db(self) -> None:
-        migrate_tickets(self.db_path)
+        init_task_db(self.db_path)
 
     # ------------------------------------------------------------------
-    # Task ID allocation
+    # Task key allocation
     # ------------------------------------------------------------------
 
-    def _next_sequence(self, conn: sqlite3.Connection, prefix: str) -> int:
-        row = conn.execute(
-            """
-            SELECT MAX(ticket_sequence) AS highest
-            FROM tickets
-            WHERE ticket_prefix = ?
-            """,
-            (prefix,),
-        ).fetchone()
-        highest = int(row["highest"]) if row is not None and row["highest"] else 0
+    @staticmethod
+    def _next_task_key_sequence(conn: sqlite3.Connection) -> int:
+        """One global counter over every `AT-<digits>` key in `tasks`.
 
-        # Legacy mirror task keys share the same `<PREFIX>-<n>` shape and the
-        # same `.worktrees/<key>` layout, so skip past them too rather than
-        # derive a worktree path that an existing task already owns.
-        legacy = conn.execute(
+        Legacy mirror keys of the same shape (`AT-0009`) are counted too, so a
+        new Ticket can never reuse a key — or the `.worktrees/<key>` path — an
+        existing task already owns. Other shapes (`AT-GH-188`) are ignored.
+        """
+        rows = conn.execute(
             "SELECT task_key FROM tasks WHERE task_key GLOB ?",
-            (f"{prefix}-*",),
+            (f"{TASK_KEY_PREFIX}-*",),
         ).fetchall()
-        for legacy_row in legacy:
-            sequence = parse_ticket_sequence(legacy_row["task_key"], prefix)
+        highest = 0
+        for row in rows:
+            sequence = parse_task_key_sequence(row["task_key"])
             if sequence is not None and sequence > highest:
                 highest = sequence
-
-        return max(highest + 1, FIRST_TICKET_SEQUENCE)
+        return max(highest + 1, FIRST_TASK_KEY_SEQUENCE)
 
     # ------------------------------------------------------------------
     # Writes
@@ -159,20 +146,18 @@ class TicketStore:
     def create_ticket(
         self,
         *,
-        ticket_prefix: str,
         build: TicketBuilder,
         actor: str,
-        event_type: str = "ticket_created",
         message: str | None = None,
         payload: dict[str, Any] | None = None,
         blocked_by: str | None = None,
     ) -> TicketRecord:
-        """Allocate a Task ID, insert the Ticket, and record its audit event.
+        """Allocate a task key, insert the `tasks` row, record the audit event.
 
-        `build` receives the reserved allocation and returns the fully derived
+        `build` receives the reserved task key and returns the fully derived
         Ticket. Allocation, insert and audit write share one transaction.
         """
-        normalized_event_type = validate_ticket_event_type(event_type)
+        event_type = validate_task_event_type(TICKET_CREATED_EVENT_TYPE)
         normalized_actor = require_non_empty(actor, "actor")
         normalized_blocked_by = (
             normalize_task_key(blocked_by) if blocked_by is not None else None
@@ -186,24 +171,19 @@ class TicketStore:
                 # SPEC §5.2 rule 1: the blocker must exist. Cycle validation is
                 # Step 5; a freshly allocated Ticket cannot yet be inside one.
                 blocker = conn.execute(
-                    "SELECT 1 FROM tickets WHERE ticket_id = ?",
+                    "SELECT 1 FROM tasks WHERE task_key = ?",
                     (normalized_blocked_by,),
                 ).fetchone()
                 if blocker is None:
                     raise TicketStoreError(
-                        f"blocked_by ticket does not exist: {normalized_blocked_by}"
+                        f"blocked_by task does not exist: {normalized_blocked_by}"
                     )
 
-            sequence = self._next_sequence(conn, ticket_prefix)
-            allocation = TicketAllocation(
-                ticket_id=format_ticket_id(ticket_prefix, sequence),
-                ticket_prefix=ticket_prefix,
-                ticket_sequence=sequence,
-            )
-            ticket = build(allocation)
-            if ticket.ticket_id != allocation.ticket_id:
+            task_key = format_task_key(self._next_task_key_sequence(conn))
+            ticket = build(task_key)
+            if ticket.task_key != task_key:
                 raise TicketStoreError(
-                    "Ticket builder returned a different ticket_id than allocated"
+                    "Ticket builder returned a different task_key than allocated"
                 )
 
             record = replace(
@@ -214,44 +194,51 @@ class TicketStore:
 
             try:
                 conn.execute(
-                    f"""
-                    INSERT INTO tickets ({", ".join(TICKET_COLUMNS)})
-                    VALUES ({", ".join("?" for _ in TICKET_COLUMNS)})
+                    """
+                    INSERT INTO tasks (
+                        task_key, project, board, title, status,
+                        repo_path, artifact_dir,
+                        created_at, updated_at, last_synced_at,
+                        prompt, priority, ai_title_status, branch_slug_source,
+                        blocked_by, github_repo, base_branch, branch,
+                        worktree_path, commit_message_suggestion
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        record.ticket_id,
+                        record.task_key,
                         record.repository,
-                        record.ticket_prefix,
-                        record.ticket_sequence,
-                        record.prompt,
+                        record.repository,
                         record.title,
-                        record.title_source,
-                        record.priority,
                         record.status,
-                        record.blocked_by,
                         str(record.repo_path),
+                        str(record.artifact_dir),
+                        record.created_at,
+                        record.updated_at,
+                        record.created_at,
+                        record.prompt,
+                        record.priority,
+                        record.ai_title_status,
+                        record.branch_slug_source,
+                        record.blocked_by,
                         record.github_repo,
                         record.base_branch,
                         record.branch,
-                        record.branch_slug_source,
                         str(record.worktree_path),
-                        str(record.artifact_dir),
                         record.commit_message_suggestion,
-                        record.created_at,
-                        record.updated_at,
                     ),
                 )
                 conn.execute(
                     """
-                    INSERT INTO ticket_events (
-                        ticket_id, event_type, actor, message,
+                    INSERT INTO task_events (
+                        task_key, event_type, source, message,
                         payload_json, created_at
                     )
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        record.ticket_id,
-                        normalized_event_type,
+                        record.task_key,
+                        event_type,
                         normalized_actor,
                         message,
                         json.dumps(payload or {}, sort_keys=True),
@@ -260,7 +247,7 @@ class TicketStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise TicketStoreError(
-                    f"Could not persist ticket {record.ticket_id}: {exc}"
+                    f"Could not persist ticket {record.task_key}: {exc}"
                 ) from exc
 
             return record
@@ -269,11 +256,16 @@ class TicketStore:
     # Reads
     # ------------------------------------------------------------------
 
-    def get_ticket(self, ticket_id: str) -> TicketRecord | None:
-        normalized = normalize_task_key(ticket_id)
+    def get_ticket(self, task_key: str) -> TicketRecord | None:
+        """Return the Ticket view of one `tasks` row, or None.
+
+        None also covers legacy mirror rows, which have no Ticket columns.
+        """
+        normalized = normalize_task_key(task_key)
         with closing(connect(self.db_path)) as conn:
             row = conn.execute(
-                f"SELECT {', '.join(TICKET_COLUMNS)} FROM tickets WHERE ticket_id = ?",
+                f"SELECT {', '.join(TICKET_SELECT_COLUMNS)} FROM tasks"
+                f" WHERE task_key = ? AND {_IS_TICKET}",
                 (normalized,),
             ).fetchone()
         return None if row is None else _row_to_ticket(row)
@@ -282,49 +274,42 @@ class TicketStore:
         self,
         *,
         repository: str | None = None,
-        status: str | None = None,
+        statuses: Iterable[str] | None = None,
         priority: str | None = None,
     ) -> list[TicketRecord]:
-        clauses: list[str] = []
+        """List Tickets. `statuses` are persisted `TASK_STATUSES` values."""
+        clauses: list[str] = [_IS_TICKET]
         params: list[Any] = []
         if repository:
-            clauses.append("repository = ?")
+            clauses.append("project = ?")
             params.append(repository)
-        if status:
-            clauses.append("status = ?")
-            params.append(validate_ticket_status(status))
+        if statuses is not None:
+            normalized = sorted({validate_task_status(value) for value in statuses})
+            if not normalized:
+                return []
+            clauses.append(f"status IN ({', '.join('?' for _ in normalized)})")
+            params.extend(normalized)
         if priority:
             clauses.append("priority = ?")
             params.append(validate_ticket_priority(priority))
 
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with closing(connect(self.db_path)) as conn:
             rows = conn.execute(
-                f"SELECT {', '.join(TICKET_COLUMNS)} FROM tickets{where}"
-                " ORDER BY created_at DESC, ticket_id DESC",
+                f"SELECT {', '.join(TICKET_SELECT_COLUMNS)} FROM tasks"
+                f" WHERE {' AND '.join(clauses)}"
+                " ORDER BY created_at DESC, task_key DESC",
                 tuple(params),
             ).fetchall()
         return [_row_to_ticket(row) for row in rows]
 
-    def list_ticket_events(self, ticket_id: str) -> list[TicketEventRecord]:
-        normalized = normalize_task_key(ticket_id)
-        with closing(connect(self.db_path)) as conn:
-            rows = conn.execute(
-                """
-                SELECT event_id, ticket_id, event_type, actor, message,
-                       payload_json, created_at
-                FROM ticket_events
-                WHERE ticket_id = ?
-                ORDER BY event_id
-                """,
-                (normalized,),
-            ).fetchall()
-        return [_row_to_ticket_event(row) for row in rows]
+    def list_ticket_events(self, task_key: str) -> list[TaskEventRecord]:
+        """Return the Ticket's `task_events` audit trail, oldest first."""
+        return TaskMirrorStore(self.db_path).list_task_events(task_key)
 
 
 __all__ = [
-    "TICKET_COLUMNS",
-    "TicketAllocation",
+    "TICKET_CREATED_EVENT_TYPE",
+    "TICKET_SELECT_COLUMNS",
     "TicketBuilder",
     "TicketStore",
     "TicketStoreError",

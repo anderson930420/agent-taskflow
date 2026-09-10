@@ -1,8 +1,9 @@
 """Mission Control HTTP entry point for V1 Ticket creation (SPEC §10, §11).
 
 Read-only repository registry + prompt-first Ticket creation and readback.
-These routes create local state only: no Git command, no worktree, no branch,
-no executor, no GitHub call.
+A Ticket is a row in the canonical `tasks` table, so it is also visible
+through the existing `/api/tasks` routes. These routes create local state
+only: no Git command, no worktree, no branch, no executor, no GitHub call.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from agent_taskflow.models import TaskEventRecord
+from agent_taskflow.status_vocab import persisted_statuses_for_display
 from agent_taskflow.ticket_ai_metadata import TicketAIMetadataAdapter
 from agent_taskflow.ticket_creation import (
     TicketCreationError,
@@ -20,11 +23,7 @@ from agent_taskflow.ticket_creation import (
     create_ticket,
     ticket_to_dict,
 )
-from agent_taskflow.ticket_models import (
-    DEFAULT_TICKET_PRIORITY,
-    TicketEventRecord,
-    TicketRecord,
-)
+from agent_taskflow.ticket_models import DEFAULT_TICKET_PRIORITY, TicketRecord
 from agent_taskflow.ticket_repositories import (
     DEFAULT_PROJECTS_CONFIG_PATH,
     TicketRepositoryError,
@@ -46,18 +45,18 @@ class TicketResponse(BaseModel):
     """Stable Ticket creation/readback envelope."""
 
     ok: bool
-    ticket_id: str | None = None
+    task_key: str | None = None
     status: str | None = None
+    display_status: str | None = None
     message: str
     item: dict[str, Any] | None = None
 
 
-def ticket_event_to_dict(event: TicketEventRecord) -> dict[str, Any]:
+def ticket_event_to_dict(event: TaskEventRecord) -> dict[str, Any]:
     return {
-        "event_id": event.event_id,
-        "ticket_id": event.ticket_id,
+        "task_key": event.task_key,
         "event_type": event.event_type,
-        "actor": event.actor,
+        "source": event.source,
         "message": event.message,
         "payload_json": event.payload_json,
         "created_at": event.created_at,
@@ -76,18 +75,18 @@ def build_ticket_router(
     def get_ticket_store() -> TicketStore:
         return ticket_store
 
-    def ticket_or_404(ticket_id: str, store: TicketStore) -> TicketRecord:
+    def ticket_or_404(task_key: str, store: TicketStore) -> TicketRecord:
         try:
-            ticket = store.get_ticket(ticket_id)
+            ticket = store.get_ticket(task_key)
         except ValueError as exc:
             raise HTTPException(
                 status_code=404,
-                detail=f"Ticket not found: {ticket_id}",
+                detail=f"Ticket not found: {task_key}",
             ) from exc
         if ticket is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"Ticket not found: {ticket_id}",
+                detail=f"Ticket not found: {task_key}",
             )
         return ticket
 
@@ -122,25 +121,33 @@ def build_ticket_router(
         except TicketCreationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+        item = ticket_to_dict(result.ticket)
         return {
             "ok": True,
-            "ticket_id": result.ticket.ticket_id,
-            "status": result.ticket.status,
+            "task_key": result.ticket.task_key,
+            "status": item["status"],
+            "display_status": item["display_status"],
             "message": "Ticket created",
-            "item": ticket_to_dict(result.ticket),
+            "item": item,
         }
 
     @router.get("/api/tickets")
     def list_tickets(
         repository: str | None = Query(default=None),
-        status: str | None = Query(default=None),
+        status: str | None = Query(
+            default=None,
+            description="SPEC §12 display status; matches every persisted alias.",
+        ),
         priority: str | None = Query(default=None),
         store: TicketStore = Depends(get_ticket_store),
     ) -> dict[str, object]:
         try:
+            statuses = (
+                persisted_statuses_for_display(status) if status else None
+            )
             tickets = store.list_tickets(
                 repository=repository,
-                status=status,
+                statuses=statuses,
                 priority=priority,
             )
         except ValueError as exc:
@@ -148,13 +155,13 @@ def build_ticket_router(
         items = [ticket_to_dict(ticket) for ticket in tickets]
         return {"items": items, "count": len(items)}
 
-    @router.get("/api/tickets/{ticket_id}")
+    @router.get("/api/tickets/{task_key}")
     def get_ticket(
-        ticket_id: str,
+        task_key: str,
         store: TicketStore = Depends(get_ticket_store),
     ) -> dict[str, object]:
-        ticket = ticket_or_404(ticket_id, store)
-        events = store.list_ticket_events(ticket.ticket_id)
+        ticket = ticket_or_404(task_key, store)
+        events = store.list_ticket_events(ticket.task_key)
         return {
             "item": ticket_to_dict(ticket),
             "events": [ticket_event_to_dict(event) for event in events],

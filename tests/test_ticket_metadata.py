@@ -12,11 +12,12 @@ from agent_taskflow.ticket_metadata import (
     derive_artifact_dir,
     derive_branch_name,
     derive_ticket_metadata,
+    TASK_KEY_PREFIX,
     derive_worktree_path,
     fallback_title_from_prompt,
-    format_ticket_id,
+    format_task_key,
     normalize_prompt,
-    parse_ticket_sequence,
+    parse_task_key_sequence,
     slugify_branch_component,
 )
 from agent_taskflow.ticket_repositories import TicketRepository
@@ -30,7 +31,6 @@ def repository(root: Path) -> TicketRepository:
         artifacts_root=root / "artifacts",
         base_branch="main",
         branch_prefix="task/",
-        ticket_prefix="AT",
         github_repo="example/forms",
     )
 
@@ -92,43 +92,47 @@ class BranchSlugTests(unittest.TestCase):
         self.assertEqual(slugify_branch_component("!!! ???"), "ticket")
 
 
-class TicketIdTests(unittest.TestCase):
-    def test_ticket_id_is_zero_padded(self) -> None:
-        self.assertEqual(format_ticket_id("AT", 1), "AT-001")
-        self.assertEqual(format_ticket_id("AT", 98), "AT-098")
-        self.assertEqual(format_ticket_id("AT", 101), "AT-101")
+class TaskKeyTests(unittest.TestCase):
+    """One global counter, zero-padded to 4 digits (PR #195 ruling)."""
 
-    def test_ticket_id_grows_past_the_padding_width(self) -> None:
-        self.assertEqual(format_ticket_id("AT", 1000), "AT-1000")
+    def test_task_key_is_zero_padded_to_four_digits(self) -> None:
+        self.assertEqual(format_task_key(1), "AT-0001")
+        self.assertEqual(format_task_key(98), "AT-0098")
+        self.assertEqual(format_task_key(101), "AT-0101")
 
-    def test_rejects_bad_prefix_and_sequence(self) -> None:
+    def test_task_key_grows_past_the_padding_width(self) -> None:
+        self.assertEqual(format_task_key(10000), "AT-10000")
+
+    def test_prefix_is_fixed_not_per_repository(self) -> None:
+        self.assertEqual(TASK_KEY_PREFIX, "AT")
+
+    def test_rejects_non_positive_sequence(self) -> None:
         with self.assertRaises(ValueError):
-            format_ticket_id("AT/", 1)
-        with self.assertRaises(ValueError):
-            format_ticket_id("AT", 0)
+            format_task_key(0)
 
     def test_parse_round_trips(self) -> None:
-        self.assertEqual(parse_ticket_sequence("AT-098", "AT"), 98)
-        self.assertIsNone(parse_ticket_sequence("BJ-098", "AT"))
-        self.assertIsNone(parse_ticket_sequence("AT-GH-188", "AT"))
-        self.assertIsNone(parse_ticket_sequence("AT-abc", "AT"))
+        self.assertEqual(parse_task_key_sequence("AT-0098"), 98)
+        self.assertEqual(parse_task_key_sequence(format_task_key(42)), 42)
+        for key in ("AT-GH-188", "AT-MC-SMOKE", "BJ-0001", "AT-abc"):
+            with self.subTest(key=key):
+                self.assertIsNone(parse_task_key_sequence(key))
 
 
 class BranchNameTests(unittest.TestCase):
     def test_branch_matches_the_spec_example_shape(self) -> None:
         self.assertEqual(
-            derive_branch_name("task/", "AT-101", "separate ending image"),
-            "task/AT-101-separate-ending-image",
+            derive_branch_name("task/", "AT-0101", "separate ending image"),
+            "task/AT-0101-separate-ending-image",
         )
 
     def test_ticket_id_is_embedded_so_identical_slugs_cannot_collide(self) -> None:
-        first = derive_branch_name("task/", "AT-001", "same slug")
-        second = derive_branch_name("task/", "AT-002", "same slug")
+        first = derive_branch_name("task/", "AT-0001", "same slug")
+        second = derive_branch_name("task/", "AT-0002", "same slug")
         self.assertNotEqual(first, second)
 
     def test_unsafe_branch_prefix_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            derive_branch_name("../evil/", "AT-001", "slug")
+            derive_branch_name("../evil/", "AT-0001", "slug")
 
 
 class DerivedPathTests(unittest.TestCase):
@@ -141,28 +145,28 @@ class DerivedPathTests(unittest.TestCase):
 
     def test_worktree_path_is_worktrees_dir_plus_ticket_id(self) -> None:
         self.assertEqual(
-            derive_worktree_path(self.root / "forms" / ".worktrees", "AT-101"),
-            self.root / "forms" / ".worktrees" / "AT-101",
+            derive_worktree_path(self.root / "forms" / ".worktrees", "AT-0101"),
+            self.root / "forms" / ".worktrees" / "AT-0101",
         )
 
     def test_artifact_dir_is_artifacts_root_plus_ticket_id(self) -> None:
         self.assertEqual(
-            derive_artifact_dir(self.root / "artifacts", "AT-101"),
-            self.root / "artifacts" / "AT-101",
+            derive_artifact_dir(self.root / "artifacts", "AT-0101"),
+            self.root / "artifacts" / "AT-0101",
         )
 
     def test_derivation_is_pure_and_repeatable(self) -> None:
         repo = repository(self.root)
-        first = derive_ticket_metadata(repo, "AT-101", "separate ending image")
-        second = derive_ticket_metadata(repo, "AT-101", "separate ending image")
+        first = derive_ticket_metadata(repo, "AT-0101", "separate ending image")
+        second = derive_ticket_metadata(repo, "AT-0101", "separate ending image")
         self.assertEqual(first, second)
         self.assertEqual(first.base_branch, "main")
         self.assertEqual(first.github_repo, "example/forms")
-        self.assertEqual(first.branch, "task/AT-101-separate-ending-image")
+        self.assertEqual(first.branch, "task/AT-0101-separate-ending-image")
 
     def test_derivation_creates_nothing_on_disk(self) -> None:
         repo = repository(self.root)
-        derived = derive_ticket_metadata(repo, "AT-101", "slug")
+        derived = derive_ticket_metadata(repo, "AT-0101", "slug")
         self.assertFalse(derived.worktree_path.exists())
         self.assertFalse(derived.artifact_dir.exists())
 

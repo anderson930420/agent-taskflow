@@ -3,7 +3,8 @@
 Mission Control's repository dropdown and all Python-derived Ticket metadata
 resolve through this module. It reads the existing project registry
 (`config/projects.yaml`) via :mod:`agent_taskflow.projects` and never writes
-to it.
+to it. The registry's `task_key_prefix` is deliberately not read: Ticket task
+keys come from one global `AT-NNNN` counter.
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ DEFAULT_PROJECTS_CONFIG_PATH = Path("config/projects.yaml")
 
 DEFAULT_BASE_BRANCH = "main"
 DEFAULT_BRANCH_PREFIX = "task/"
-DEFAULT_TICKET_PREFIX = "AT"
 
 # Matches the local artifact root that GitHub Issue ingestion already uses when
 # a project does not configure `artifacts_root`.
@@ -42,7 +42,6 @@ class TicketRepository:
     artifacts_root: Path
     base_branch: str
     branch_prefix: str
-    ticket_prefix: str
     github_repo: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -54,7 +53,6 @@ class TicketRepository:
             "artifacts_root": str(self.artifacts_root),
             "base_branch": self.base_branch,
             "branch_prefix": self.branch_prefix,
-            "ticket_prefix": self.ticket_prefix,
             "github_repo": self.github_repo,
         }
 
@@ -112,11 +110,6 @@ def repository_from_config(name: str, config: dict[str, Any]) -> TicketRepositor
             "branch_prefix",
             DEFAULT_BRANCH_PREFIX,
         ),
-        ticket_prefix=_text_or_default(
-            config,
-            "task_key_prefix",
-            DEFAULT_TICKET_PREFIX,
-        ),
         github_repo=_optional_text(config, "github_repo"),
     )
 
@@ -159,7 +152,6 @@ __all__ = [
     "DEFAULT_BASE_BRANCH",
     "DEFAULT_BRANCH_PREFIX",
     "DEFAULT_PROJECTS_CONFIG_PATH",
-    "DEFAULT_TICKET_PREFIX",
     "TicketRepository",
     "TicketRepositoryError",
     "list_ticket_repositories",

@@ -1,7 +1,7 @@
 """Deterministic Ticket metadata derivation (SPEC §10.1).
 
 The user supplies repository, prompt and priority only. Every other field —
-Task ID, branch name, worktree path, artifact directory, base branch, and the
+task key, branch name, worktree path, artifact directory, base branch, and the
 deterministic title fallback — is derived here by Python.
 
 Path and branch values are *strings only*. Nothing in this module touches
@@ -25,17 +25,19 @@ from agent_taskflow.worktree import worktree_path_from_base
 # whitespace-normalized prompt.
 TITLE_FALLBACK_MAX_CHARS = 60
 
-# Branch slugs stay short so that `<prefix><TICKET_ID>-<slug>` remains a
+# Branch slugs stay short so that `<prefix><TASK_KEY>-<slug>` remains a
 # comfortable ref name.
 BRANCH_SLUG_MAX_CHARS = 40
 BRANCH_SLUG_FALLBACK = "ticket"
 
-# Zero-padded width of the numeric part of a Task ID (`AT-101`, `AT-098`).
-# Sequences past the padding width simply grow (`AT-1000`).
-TICKET_SEQUENCE_PAD = 3
-FIRST_TICKET_SEQUENCE = 1
+# Task keys come from ONE global counter, zero-padded to 4 digits: `AT-0001`
+# (human ruling on PR #195). The prefix is fixed; the registry's per-project
+# `task_key_prefix` is not used for Ticket keys. Past 9999 the number grows.
+TASK_KEY_PREFIX = "AT"
+TASK_KEY_SEQUENCE_PAD = 4
+FIRST_TASK_KEY_SEQUENCE = 1
 
-_TICKET_ID_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z0-9]+)-(?P<sequence>\d+)$")
+_TASK_KEY_PATTERN = re.compile(rf"^{TASK_KEY_PREFIX}-(?P<sequence>\d+)$")
 _UNSAFE_BRANCH_CHARS = re.compile(r"[^a-z0-9]+")
 _SAFE_BRANCH_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
@@ -69,35 +71,36 @@ def slugify_branch_component(value: str) -> str:
     return slug or BRANCH_SLUG_FALLBACK
 
 
-def format_ticket_id(prefix: str, sequence: int) -> str:
-    """Return the Task ID for one registry prefix and counter value."""
-    normalized_prefix = require_non_empty(prefix, "ticket_prefix")
-    if not normalized_prefix.isalnum():
+def format_task_key(sequence: int) -> str:
+    """Return the global Ticket task key for one counter value."""
+    if sequence < FIRST_TASK_KEY_SEQUENCE:
         raise ValueError(
-            f"ticket_prefix must be alphanumeric: {prefix!r}"
+            f"task key sequence must be >= {FIRST_TASK_KEY_SEQUENCE}"
         )
-    if sequence < FIRST_TICKET_SEQUENCE:
-        raise ValueError(f"ticket sequence must be >= {FIRST_TICKET_SEQUENCE}")
     return normalize_task_key(
-        f"{normalized_prefix}-{sequence:0{TICKET_SEQUENCE_PAD}d}"
+        f"{TASK_KEY_PREFIX}-{sequence:0{TASK_KEY_SEQUENCE_PAD}d}"
     )
 
 
-def parse_ticket_sequence(ticket_id: str, prefix: str) -> int | None:
-    """Return the counter value inside a Task ID, or None if it does not match."""
-    match = _TICKET_ID_PATTERN.match(ticket_id.strip())
-    if match is None or match.group("prefix") != prefix:
+def parse_task_key_sequence(task_key: str) -> int | None:
+    """Return the counter value inside an `AT-<digits>` key, else None.
+
+    Keys of any other shape (`AT-GH-188`, `AT-MC-SMOKE`, `BJ-0001`) are not
+    part of the counter and return None.
+    """
+    match = _TASK_KEY_PATTERN.match(task_key.strip())
+    if match is None:
         return None
     return int(match.group("sequence"))
 
 
-def derive_branch_name(branch_prefix: str, ticket_id: str, slug: str) -> str:
-    """Return `<branch_prefix><TICKET_ID>-<slug>` (SPEC §17 example format).
+def derive_branch_name(branch_prefix: str, task_key: str, slug: str) -> str:
+    """Return `<branch_prefix><TASK_KEY>-<slug>` (SPEC §17 example format).
 
-    The Task ID is embedded, so branch names cannot collide between Tickets
+    The task key is embedded, so branch names cannot collide between Tickets
     even when two Tickets produce an identical slug.
     """
-    normalized_id = normalize_task_key(ticket_id)
+    normalized_id = normalize_task_key(task_key)
     normalized_slug = slugify_branch_component(slug)
     branch = f"{branch_prefix.strip()}{normalized_id}-{normalized_slug}"
     if not _SAFE_BRANCH_NAME.match(branch) or ".." in branch or "//" in branch:
@@ -105,21 +108,21 @@ def derive_branch_name(branch_prefix: str, ticket_id: str, slug: str) -> str:
     return branch
 
 
-def derive_worktree_path(worktrees_dir: str | Path, ticket_id: str) -> Path:
-    """Return `<worktrees_dir>/<TICKET_ID>` (SPEC §9). String only."""
-    return worktree_path_from_base(worktrees_dir, ticket_id)
+def derive_worktree_path(worktrees_dir: str | Path, task_key: str) -> Path:
+    """Return `<worktrees_dir>/<TASK_KEY>` (SPEC §9). String only."""
+    return worktree_path_from_base(worktrees_dir, task_key)
 
 
-def derive_artifact_dir(artifacts_root: str | Path, ticket_id: str) -> Path:
-    """Return `<artifacts_root>/<TICKET_ID>` (SPEC §10.1). String only."""
-    return artifact_dir_for(ticket_id, artifacts_root)
+def derive_artifact_dir(artifacts_root: str | Path, task_key: str) -> Path:
+    """Return `<artifacts_root>/<TASK_KEY>` (SPEC §10.1). String only."""
+    return artifact_dir_for(task_key, artifacts_root)
 
 
 @dataclass(frozen=True)
 class TicketDerivedMetadata:
-    """Every Ticket field Python derives once the Task ID is allocated."""
+    """Every Ticket field Python derives once the task key is allocated."""
 
-    ticket_id: str
+    task_key: str
     branch: str
     worktree_path: Path
     artifact_dir: Path
@@ -130,13 +133,13 @@ class TicketDerivedMetadata:
 
 def derive_ticket_metadata(
     repository: TicketRepository,
-    ticket_id: str,
+    task_key: str,
     branch_slug: str,
 ) -> TicketDerivedMetadata:
     """Derive all Python-owned metadata for one Ticket."""
-    normalized_id = normalize_task_key(ticket_id)
+    normalized_id = normalize_task_key(task_key)
     return TicketDerivedMetadata(
-        ticket_id=normalized_id,
+        task_key=normalized_id,
         branch=derive_branch_name(
             repository.branch_prefix,
             normalized_id,
@@ -153,8 +156,9 @@ def derive_ticket_metadata(
 __all__ = [
     "BRANCH_SLUG_FALLBACK",
     "BRANCH_SLUG_MAX_CHARS",
-    "FIRST_TICKET_SEQUENCE",
-    "TICKET_SEQUENCE_PAD",
+    "FIRST_TASK_KEY_SEQUENCE",
+    "TASK_KEY_PREFIX",
+    "TASK_KEY_SEQUENCE_PAD",
     "TITLE_FALLBACK_MAX_CHARS",
     "TicketDerivedMetadata",
     "derive_artifact_dir",
@@ -162,8 +166,8 @@ __all__ = [
     "derive_ticket_metadata",
     "derive_worktree_path",
     "fallback_title_from_prompt",
-    "format_ticket_id",
+    "format_task_key",
     "normalize_prompt",
-    "parse_ticket_sequence",
+    "parse_task_key_sequence",
     "slugify_branch_component",
 ]

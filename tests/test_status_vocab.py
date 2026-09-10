@@ -9,6 +9,7 @@ value is itself; the alias table is asserted explicitly so drift is caught.
 from __future__ import annotations
 
 import unittest
+from collections import Counter
 
 from agent_taskflow.models import TASK_STATUSES, validate_task_status
 from agent_taskflow.status_vocab import (
@@ -21,6 +22,7 @@ from agent_taskflow.status_vocab import (
     StatusVocabularyError,
     canonical_persisted_status,
     is_alias_status,
+    persisted_statuses_for_display,
     to_display_status,
     to_persisted_status,
     unmapped_persisted_statuses,
@@ -231,6 +233,35 @@ class SemanticIntentTests(unittest.TestCase):
         for persisted in ("canceled", "archived"):
             with self.subTest(persisted=persisted):
                 self.assertEqual(to_display_status(persisted), "cancelled")
+
+
+class DisplayFilterTests(unittest.TestCase):
+    """Filtering stored rows by a display name must match every alias."""
+
+    def test_needs_review_filter_matches_every_review_spelling(self) -> None:
+        self.assertEqual(
+            persisted_statuses_for_display("needs_review"),
+            frozenset({"waiting_for_review", "waiting_approval", "accepted", "review"}),
+        )
+
+    def test_every_persisted_value_is_in_exactly_one_filter_set(self) -> None:
+        seen: Counter[str] = Counter()
+        for display in DISPLAY_STATUS_SEQUENCE:
+            seen.update(persisted_statuses_for_display(display))
+        self.assertEqual(set(seen), set(TASK_STATUSES))
+        self.assertEqual(set(seen.values()), {1})
+
+    def test_filter_set_always_contains_the_canonical_value(self) -> None:
+        for display in DISPLAY_STATUS_SEQUENCE:
+            with self.subTest(display=display):
+                self.assertIn(
+                    to_persisted_status(display),
+                    persisted_statuses_for_display(display),
+                )
+
+    def test_unknown_display_name_is_rejected(self) -> None:
+        with self.assertRaises(StatusVocabularyError):
+            persisted_statuses_for_display("created")
 
 
 class ErrorTests(unittest.TestCase):

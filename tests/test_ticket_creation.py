@@ -9,8 +9,11 @@ Covers SPEC §43 items 1-4 and the §44 invariants this step can affect:
          (derivation only — creation is Step 2).
 * §44    One Ticket = One Worktree.
 * §44    All lifecycle mutations are auditable.
-* §12.1  Initial status is `ready`, or `blocked`; never `queued`.
+* §12.1  Initial status is `ready`, or `blocked`; never `queued`, persisted
+         in the legacy vocabulary per §12.2.
 * Negative scope: creation runs no Git command and creates no directory.
+
+A Ticket is a row in the canonical `tasks` table (PR #195 ruling).
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from agent_taskflow.status_vocab import to_display_status
+from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.ticket_ai_metadata import (
     TicketAIMetadataRequest,
     TicketAIMetadataSuggestion,
@@ -38,6 +43,9 @@ from agent_taskflow.ticket_creation import (
 )
 from agent_taskflow.ticket_metadata import TITLE_FALLBACK_MAX_CHARS
 from agent_taskflow.ticket_models import (
+    AI_TITLE_FALLBACK,
+    AI_TITLE_GENERATED,
+    AI_TITLE_NOT_ATTEMPTED,
     METADATA_SOURCE_AI,
     METADATA_SOURCE_FALLBACK,
     RESERVED_INITIAL_TICKET_STATUS,
@@ -51,7 +59,7 @@ PROJECTS_YAML = """\
 projects:
   forms:
     project_slug: forms
-    task_key_prefix: AT
+    task_key_prefix: FM
     repo_path: {repo_path}
     github_repo: example/forms
     artifacts_root: {artifacts_root}
@@ -127,8 +135,7 @@ class MinimalCreationInputTests(TicketCreationTestCase):
     """SPEC §43.1 / §10: repository, prompt and priority are the whole form."""
 
     def test_ticket_is_creatable_from_three_inputs(self) -> None:
-        result = self.create()
-        ticket = result.ticket
+        ticket = self.create().ticket
 
         self.assertEqual(ticket.repository, "forms")
         self.assertEqual(ticket.prompt, PROMPT)
@@ -179,48 +186,45 @@ class DerivedMetadataTests(TicketCreationTestCase):
     def test_all_metadata_is_derived_by_python(self) -> None:
         ticket = self.create().ticket
 
-        self.assertEqual(ticket.ticket_id, "AT-001")
-        self.assertEqual(ticket.ticket_prefix, "AT")
+        self.assertEqual(ticket.task_key, "AT-0001")
         self.assertEqual(ticket.repo_path, self.repo_path)
         self.assertEqual(ticket.github_repo, "example/forms")
         self.assertEqual(ticket.base_branch, "main")
-        self.assertEqual(
-            ticket.worktree_path,
-            self.worktrees_dir / "AT-001",
-        )
-        self.assertEqual(ticket.artifact_dir, self.artifacts_root / "AT-001")
-        self.assertTrue(ticket.branch.startswith("task/AT-001-"))
+        self.assertEqual(ticket.worktree_path, self.worktrees_dir / "AT-0001")
+        self.assertEqual(ticket.artifact_dir, self.artifacts_root / "AT-0001")
+        self.assertTrue(ticket.branch.startswith("task/AT-0001-"))
 
     def test_registry_drives_base_branch_and_branch_prefix(self) -> None:
         ticket = self.create(request=self.request(repository="bullet_journal")).ticket
 
-        self.assertEqual(ticket.ticket_id, "BJ-001")
+        self.assertEqual(ticket.task_key, "AT-0001")
         self.assertEqual(ticket.base_branch, "trunk")
-        self.assertTrue(ticket.branch.startswith("worktree/BJ-001-"))
+        self.assertTrue(ticket.branch.startswith("worktree/AT-0001-"))
         # No worktrees_dir / artifacts_root configured: both fall back under
         # the repository path rather than being asked of the user.
         self.assertEqual(
             ticket.worktree_path,
-            self.other_repo_path / ".worktrees" / "BJ-001",
+            self.other_repo_path / ".worktrees" / "AT-0001",
         )
-        self.assertTrue(
-            ticket.artifact_dir.is_relative_to(self.other_repo_path)
-        )
+        self.assertTrue(ticket.artifact_dir.is_relative_to(self.other_repo_path))
 
-    def test_task_ids_are_allocated_per_repository_prefix(self) -> None:
+    def test_task_keys_come_from_one_global_counter(self) -> None:
         first = self.create().ticket
         second = self.create().ticket
         other = self.create(request=self.request(repository="bullet_journal")).ticket
 
-        self.assertEqual(first.ticket_id, "AT-001")
-        self.assertEqual(second.ticket_id, "AT-002")
-        self.assertEqual(other.ticket_id, "BJ-001")
+        self.assertEqual(first.task_key, "AT-0001")
+        self.assertEqual(second.task_key, "AT-0002")
+        # Not BJ-0001: the registry's per-project task_key_prefix is not used.
+        self.assertEqual(other.task_key, "AT-0003")
 
     def test_ticket_serializes_without_leaking_path_objects(self) -> None:
         payload = ticket_to_dict(self.create().ticket)
         json.dumps(payload)
-        self.assertEqual(payload["ticket_id"], "AT-001")
-        self.assertEqual(payload["worktree_path"], str(self.worktrees_dir / "AT-001"))
+        self.assertEqual(payload["task_key"], "AT-0001")
+        self.assertEqual(payload["worktree_path"], str(self.worktrees_dir / "AT-0001"))
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(payload["display_status"], "ready")
 
 
 class AiTitleFallbackTests(TicketCreationTestCase):
@@ -231,10 +235,10 @@ class AiTitleFallbackTests(TicketCreationTestCase):
         ticket = result.ticket
 
         self.assertEqual(ticket.title, PROMPT[:TITLE_FALLBACK_MAX_CHARS])
-        self.assertEqual(ticket.title_source, METADATA_SOURCE_FALLBACK)
+        self.assertEqual(ticket.ai_title_status, AI_TITLE_FALLBACK)
         self.assertEqual(ticket.branch_slug_source, METADATA_SOURCE_FALLBACK)
         self.assertFalse(result.used_ai_title)
-        self.assertIsNotNone(self.store.get_ticket(ticket.ticket_id))
+        self.assertIsNotNone(self.store.get_ticket(ticket.task_key))
 
     def test_adapter_raising_falls_back(self) -> None:
         def adapter(request: TicketAIMetadataRequest):
@@ -281,11 +285,11 @@ class AiTitleFallbackTests(TicketCreationTestCase):
 
         ticket = self.create(ai_adapter=adapter).ticket
         payload = json.loads(
-            self.store.list_ticket_events(ticket.ticket_id)[0].payload_json or "{}"
+            self.store.list_ticket_events(ticket.task_key)[0].payload_json or "{}"
         )
         self.assertTrue(payload["ai_attempted"])
         self.assertIn("model unavailable", payload["ai_error"])
-        self.assertEqual(payload["title_source"], METADATA_SOURCE_FALLBACK)
+        self.assertEqual(payload["ai_title_status"], AI_TITLE_FALLBACK)
 
     def test_successful_adapter_metadata_is_used(self) -> None:
         def adapter(request: TicketAIMetadataRequest):
@@ -301,8 +305,8 @@ class AiTitleFallbackTests(TicketCreationTestCase):
         ticket = result.ticket
 
         self.assertEqual(ticket.title, "Separate ending-page image")
-        self.assertEqual(ticket.title_source, METADATA_SOURCE_AI)
-        self.assertEqual(ticket.branch, "task/AT-001-separate-ending-image")
+        self.assertEqual(ticket.ai_title_status, AI_TITLE_GENERATED)
+        self.assertEqual(ticket.branch, "task/AT-0001-separate-ending-image")
         self.assertEqual(ticket.branch_slug_source, METADATA_SOURCE_AI)
         self.assertEqual(
             ticket.commit_message_suggestion,
@@ -314,6 +318,7 @@ class AiTitleFallbackTests(TicketCreationTestCase):
         result = self.create()
         self.assertFalse(result.metadata.ai_attempted)
         self.assertIsNone(result.metadata.ai_error)
+        self.assertEqual(result.ticket.ai_title_status, AI_TITLE_NOT_ATTEMPTED)
         self.assertEqual(result.ticket.title, PROMPT[:TITLE_FALLBACK_MAX_CHARS])
 
 
@@ -324,7 +329,7 @@ class OneTicketOneWorktreeTests(TicketCreationTestCase):
         first = self.create().ticket
         second = self.create().ticket
 
-        self.assertNotEqual(first.ticket_id, second.ticket_id)
+        self.assertNotEqual(first.task_key, second.task_key)
         self.assertNotEqual(first.worktree_path, second.worktree_path)
         self.assertNotEqual(first.branch, second.branch)
 
@@ -341,17 +346,17 @@ class OneTicketOneWorktreeTests(TicketCreationTestCase):
         self.assertEqual(first.title, second.title)
         self.assertNotEqual(first.branch, second.branch)
         self.assertNotEqual(first.worktree_path, second.worktree_path)
-        self.assertIn(first.ticket_id, first.branch)
-        self.assertIn(second.ticket_id, second.branch)
+        self.assertIn(first.task_key, first.branch)
+        self.assertIn(second.task_key, second.branch)
 
-    def test_worktree_path_ends_with_the_task_id(self) -> None:
+    def test_worktree_path_ends_with_the_task_key(self) -> None:
         ticket = self.create().ticket
-        self.assertEqual(ticket.worktree_path.name, ticket.ticket_id)
+        self.assertEqual(ticket.worktree_path.name, ticket.task_key)
         self.assertEqual(ticket.worktree_path.parent, self.worktrees_dir)
 
     def test_derived_identity_is_stable_across_readback(self) -> None:
         ticket = self.create().ticket
-        stored = self.store.get_ticket(ticket.ticket_id)
+        stored = self.store.get_ticket(ticket.task_key)
         assert stored is not None
         self.assertEqual(stored.branch, ticket.branch)
         self.assertEqual(stored.worktree_path, ticket.worktree_path)
@@ -359,30 +364,38 @@ class OneTicketOneWorktreeTests(TicketCreationTestCase):
 
 
 class InitialStatusTests(TicketCreationTestCase):
-    """SPEC §12.1: `ready`, or `blocked`; V1 never writes `queued`."""
+    """SPEC §12.1 display status, persisted per §12.2; never `queued`."""
 
-    def test_new_ticket_is_ready(self) -> None:
-        self.assertEqual(self.create().ticket.status, "ready")
+    def test_new_ticket_displays_ready_and_persists_created(self) -> None:
+        ticket = self.create().ticket
+        self.assertEqual(ticket.status, "created")
+        self.assertEqual(to_display_status(ticket.status), "ready")
 
     def test_ticket_created_with_blocked_by_is_blocked(self) -> None:
         blocker = self.create().ticket
         dependent = self.create(
-            request=self.request(blocked_by=blocker.ticket_id)
+            request=self.request(blocked_by=blocker.task_key)
         ).ticket
 
         self.assertEqual(dependent.status, "blocked")
-        self.assertEqual(dependent.blocked_by, blocker.ticket_id)
+        self.assertEqual(to_display_status(dependent.status), "blocked")
+        self.assertEqual(dependent.blocked_by, blocker.task_key)
 
     def test_unknown_blocker_is_rejected(self) -> None:
         with self.assertRaises(TicketCreationError):
-            self.create(request=self.request(blocked_by="AT-404"))
+            self.create(request=self.request(blocked_by="AT-0404"))
 
     def test_creation_never_writes_queued(self) -> None:
-        statuses = {
-            self.create().ticket.status,
-            self.create(request=self.request(priority="critical")).ticket.status,
-        }
-        self.assertNotIn(RESERVED_INITIAL_TICKET_STATUS, statuses)
+        tickets = [
+            self.create().ticket,
+            self.create(request=self.request(priority="critical")).ticket,
+        ]
+        for ticket in tickets:
+            self.assertNotEqual(ticket.status, RESERVED_INITIAL_TICKET_STATUS)
+            self.assertNotEqual(
+                to_display_status(ticket.status),
+                RESERVED_INITIAL_TICKET_STATUS,
+            )
 
 
 class AuditabilityTests(TicketCreationTestCase):
@@ -390,23 +403,31 @@ class AuditabilityTests(TicketCreationTestCase):
 
     def test_creation_writes_an_audit_event(self) -> None:
         ticket = self.create().ticket
-        events = self.store.list_ticket_events(ticket.ticket_id)
+        events = self.store.list_ticket_events(ticket.task_key)
 
         self.assertEqual(len(events), 1)
         event = events[0]
-        self.assertEqual(event.event_type, "ticket_created")
-        self.assertEqual(event.ticket_id, ticket.ticket_id)
+        self.assertEqual(event.event_type, "created")
+        self.assertEqual(event.task_key, ticket.task_key)
+        self.assertEqual(event.source, "mission_control")
         self.assertTrue(event.created_at)
 
         payload = json.loads(event.payload_json or "{}")
+        self.assertEqual(payload["kind"], "ticket_created")
         self.assertEqual(payload["repository"], "forms")
         self.assertEqual(payload["priority"], "normal")
-        self.assertEqual(payload["initial_status"], "ready")
+        self.assertEqual(payload["initial_status"], "created")
+        self.assertEqual(payload["initial_display_status"], "ready")
+
+    def test_audit_event_lives_in_the_task_event_log(self) -> None:
+        ticket = self.create().ticket
+        mirrored = TaskMirrorStore(self.db_path).list_task_events(ticket.task_key)
+        self.assertEqual([event.event_type for event in mirrored], ["created"])
 
     def test_audit_event_records_that_creation_touched_no_git(self) -> None:
         ticket = self.create().ticket
         payload = json.loads(
-            self.store.list_ticket_events(ticket.ticket_id)[0].payload_json or "{}"
+            self.store.list_ticket_events(ticket.task_key)[0].payload_json or "{}"
         )
         self.assertEqual(payload["safety_flags"], dict(CREATION_SAFETY_FLAGS))
         self.assertFalse(any(payload["safety_flags"].values()))
@@ -424,7 +445,7 @@ class NegativeScopeTests(TicketCreationTestCase):
         ), mock.patch.object(os, "system", forbidden):
             ticket = self.create().ticket
 
-        self.assertEqual(ticket.ticket_id, "AT-001")
+        self.assertEqual(ticket.task_key, "AT-0001")
 
     def test_creation_creates_no_directory(self) -> None:
         before = self.sandbox_dirs()
@@ -470,7 +491,7 @@ class RequestNormalizationTests(TicketCreationTestCase):
     def test_blank_blocked_by_is_treated_as_absent(self) -> None:
         ticket = self.create(request=self.request(blocked_by="   ")).ticket
         self.assertIsNone(ticket.blocked_by)
-        self.assertEqual(ticket.status, "ready")
+        self.assertEqual(ticket.status, "created")
 
     def test_request_is_immutable(self) -> None:
         request = self.request()
