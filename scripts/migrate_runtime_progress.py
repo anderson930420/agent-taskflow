@@ -2,9 +2,11 @@
 """Install the V1 Step 3 attempt-scoped runtime progress tables (SPEC 14).
 
 Additive and idempotent. It creates ``attempt_progress`` and
-``attempt_observed_steps`` only. It does not create, rename, backfill, or write
-any Ticket lifecycle column, and in particular none of the SPEC 32.1 PR fields
--- the Step 2 watcher is their sole writer.
+``attempt_observed_steps`` only, and adds no column to any existing table.
+
+It requires the Level 2 Task/Attempt lifecycle schema and never installs it.
+If that schema is missing the script fails closed (exit 2) before writing
+anything, and names the lifecycle migration the operator must run by hand.
 """
 
 from __future__ import annotations
@@ -35,9 +37,17 @@ _bootstrap_source_package_without_runtime_imports()
 from agent_taskflow.models import require_absolute_path  # noqa: E402
 from agent_taskflow.realtime_projection import PR_FIELD_NAMES  # noqa: E402
 from agent_taskflow.runtime_progress_schema import (  # noqa: E402
+    LIFECYCLE_MIGRATION_SCRIPT,
     RUNTIME_PROGRESS_MIGRATION,
+    RuntimeProgressPreconditionError,
     migrate_runtime_progress,
 )
+from agent_taskflow.attempt_schema import (  # noqa: E402
+    TASK_ATTEMPT_LIFECYCLE_MIGRATION,
+)
+
+#: Exit status when the lifecycle precondition is not met.
+EXIT_PRECONDITION_FAILED = 2
 
 
 def _parse_args() -> argparse.Namespace:
@@ -60,7 +70,26 @@ def main() -> int:
     # Proof, not assertion: capture the Ticket columns on both sides of the
     # migration so the operator can see it added none of them.
     columns_before = _task_columns(db_path)
-    migrate_runtime_progress(db_path)
+    try:
+        migrate_runtime_progress(db_path)
+    except RuntimeProgressPreconditionError as exc:
+        print(str(exc), file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "db_path": str(db_path),
+                    "migration": RUNTIME_PROGRESS_MIGRATION,
+                    "refused": True,
+                    "required_migration": TASK_ATTEMPT_LIFECYCLE_MIGRATION,
+                    "required_script": LIFECYCLE_MIGRATION_SCRIPT,
+                    "error": str(exc),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return EXIT_PRECONDITION_FAILED
 
     with sqlite3.connect(db_path) as conn:
         migration_recorded = conn.execute(
@@ -84,9 +113,11 @@ def main() -> int:
     print(
         json.dumps(
             {
+                "ok": True,
                 "db_path": str(db_path),
                 "migration": RUNTIME_PROGRESS_MIGRATION,
                 "migration_recorded": migration_recorded,
+                "lifecycle_migration_run_by_this_script": False,
                 "attempt_progress_installed": "attempt_progress" in tables,
                 "attempt_observed_steps_installed": (
                     "attempt_observed_steps" in tables

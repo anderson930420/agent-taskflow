@@ -8,6 +8,7 @@ and reconnect uses no replay, no ``Last-Event-ID``, and no backfill (§15.1).
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,7 +28,12 @@ from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.runtime_progress import find_progress_estimates
 from agent_taskflow.runtime_progress_store import RuntimeProgressStore
+from agent_taskflow.runtime_progress_schema import RUNTIME_PROGRESS_MIGRATION
 from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.ticket_models import (
+    DEFAULT_TICKET_PRIORITY,
+    TICKET_PRIORITY_SEQUENCE,
+)
 
 
 class SseFormattingTests(unittest.TestCase):
@@ -397,7 +403,165 @@ class SseStreamEndpointTests(RealtimeApiTestCase):
         self.assertEqual(response.status_code, 404)
 
 
+PROJECTS_YAML = """\
+projects:
+  forms:
+    project_slug: forms
+    task_key_prefix: FM
+    repo_path: {repo_path}
+    github_repo: example/forms
+    artifacts_root: {artifacts_root}
+    worktrees_dir: {worktrees_dir}
+    default_branch: main
+    branch_prefix: task/
+"""
+
+
+class TicketReproductionTests(unittest.TestCase):
+    """Review item 3c — the reviewer's own reproduction, end to end.
+
+    POST /api/tickets, then GET /api/realtime/board (the Ticket appears), then
+    GET /api/tasks/<id>/realtime (200, priority populated). Nothing here seeds
+    `tasks` directly: the Ticket exists only because Step 1's route wrote it,
+    so this proves the board and detail endpoints read the canonical table.
+
+    Also the production shape: the app is built exactly as startup builds it,
+    with no attempt or progress migration applied.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        repo_path = root / "sandbox" / "forms"
+        repo_path.mkdir(parents=True)
+        config_path = root / "projects.yaml"
+        config_path.write_text(
+            PROJECTS_YAML.format(
+                repo_path=repo_path,
+                artifacts_root=root / "sandbox" / "artifacts",
+                worktrees_dir=repo_path / ".worktrees",
+            ),
+            encoding="utf-8",
+        )
+        (root / "db").mkdir()
+        self.db_path = root / "db" / "state.db"
+        self.priority = next(
+            p for p in TICKET_PRIORITY_SEQUENCE if p != DEFAULT_TICKET_PRIORITY
+        )
+        self.client_context = TestClient(
+            create_app(
+                self.db_path,
+                projects_config_path=config_path,
+                realtime_options=RealtimeStreamOptions(
+                    poll_interval=0.0, max_updates=1, max_polls=2
+                ),
+            )
+        )
+        self.client = self.client_context.__enter__()
+
+    def tearDown(self) -> None:
+        self.client_context.__exit__(None, None, None)
+        self.tmp.cleanup()
+
+    def create_ticket(self, **extra: object) -> dict[str, object]:
+        response = self.client.post(
+            "/api/tickets",
+            json={
+                "repository": "forms",
+                "prompt": "Separate the ending page image from the hero",
+                "priority": self.priority,
+                **extra,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def board_ticket(self, task_key: str) -> tuple[str, dict[str, object]]:
+        board = self.client.get("/api/realtime/board")
+        self.assertEqual(board.status_code, 200)
+        for section in board.json()["item"]["sections"]:
+            for ticket in section["tickets"]:
+                if ticket["task_key"] == task_key:
+                    return section["key"], ticket
+        self.fail(f"{task_key} is not on the board")
+
+    def test_created_ticket_appears_on_the_board(self) -> None:
+        created = self.create_ticket()
+        section, ticket = self.board_ticket(created["task_key"])
+        # Persisted `created` is the §12 display status `ready` (§12.1, §12.2).
+        self.assertEqual(section, "READY")
+        self.assertEqual(ticket["status"], created["status"])
+        self.assertEqual(ticket["display_status"], "ready")
+        self.assertTrue(ticket["eligible_for_execution"])
+        self.assertEqual(ticket["priority"], self.priority)
+
+    def test_detail_returns_200_with_priority_populated(self) -> None:
+        created = self.create_ticket()
+        item = created["item"]
+        response = self.client.get(f"/api/tasks/{created['task_key']}/realtime")
+        self.assertEqual(response.status_code, 200, response.text)
+        ticket = response.json()["item"]["ticket"]
+        self.assertEqual(ticket["priority"], self.priority)
+        self.assertEqual(ticket["display"]["priority"], self.priority)
+        self.assertEqual(ticket["repository"], "forms")
+
+    def test_detail_reads_branch_and_worktree_from_tasks(self) -> None:
+        # Step 1 writes these on `tasks` and creates no `task_worktrees` row.
+        created = self.create_ticket()
+        item = created["item"]
+        ticket = self.client.get(
+            f"/api/tasks/{created['task_key']}/realtime"
+        ).json()["item"]["ticket"]
+        self.assertEqual(ticket["branch"], item["branch"])
+        self.assertEqual(ticket["worktree_path"], item["worktree_path"])
+        self.assertNotEqual(ticket["display"]["branch"], "—")
+
+    def test_blocked_ticket_renders_its_blocker_from_tasks(self) -> None:
+        blocker = self.create_ticket()
+        blocked = self.create_ticket(blocked_by=blocker["task_key"])
+        section, ticket = self.board_ticket(blocked["task_key"])
+        self.assertEqual(section, "BLOCKED")
+        self.assertEqual(ticket["blocker"], blocker["task_key"])
+        self.assertEqual(ticket["blocker_hint"], f"Waiting for {blocker['task_key']}")
+        self.assertFalse(ticket["eligible_for_execution"])
+
+    def test_ticket_is_on_the_board_with_no_progress_schema_installed(self) -> None:
+        created = self.create_ticket()
+        with sqlite3.connect(self.db_path) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertNotIn("attempt_progress", tables)
+        self.assertNotIn("attempts", tables)
+        _section, ticket = self.board_ticket(created["task_key"])
+        self.assertTrue(all(step["status"] == "pending" for step in ticket["steps"]))
+
+
 class DefaultAppWiringTests(unittest.TestCase):
+    def test_startup_runs_no_step3_migration(self) -> None:
+        # 3a — nothing may run Step 3's migration at process startup.
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            with TestClient(create_app(db_path)):
+                pass
+            with sqlite3.connect(db_path) as conn:
+                tables = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                recorded = conn.execute(
+                    "SELECT 1 FROM schema_migrations WHERE name = ?",
+                    (RUNTIME_PROGRESS_MIGRATION,),
+                ).fetchone()
+        self.assertNotIn("attempt_progress", tables)
+        self.assertNotIn("attempt_observed_steps", tables)
+        self.assertIsNone(recorded)
+
     def test_default_app_exposes_realtime_routes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = create_app(Path(tmp) / "state.db")

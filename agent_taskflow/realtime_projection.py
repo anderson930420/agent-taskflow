@@ -172,6 +172,27 @@ def _row_value(row: sqlite3.Row, key: str) -> Any:
     return row[key] if key in row.keys() else None
 
 
+def _worktree_value(
+    worktree: sqlite3.Row | None, row: sqlite3.Row, key: str
+) -> str | None:
+    """Resolve ``branch`` / ``worktree_path`` for one Ticket.
+
+    A ``task_worktrees`` record describes a worktree that was actually prepared,
+    so it wins. Otherwise fall back to the ``tasks`` column: Step 1 stores a
+    Ticket's derived branch and worktree path on ``tasks`` itself and writes no
+    ``task_worktrees`` row at creation. Both reads tolerate the column being
+    absent.
+    """
+
+    if worktree is not None and worktree[key]:
+        return str(worktree[key])
+    value = _row_value(row, key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _display_status(persisted_status: str) -> str | None:
     """Return the §12 display name for a persisted status, or ``None``.
 
@@ -548,8 +569,8 @@ def _build_ticket(
         title=_row_value(row, "title"),
         repo_path=_row_value(row, "repo_path"),
         priority=str(priority).strip() if priority else None,
-        branch=worktree["branch"] if worktree is not None else None,
-        worktree_path=worktree["worktree_path"] if worktree is not None else None,
+        branch=_worktree_value(worktree, row, "branch"),
+        worktree_path=_worktree_value(worktree, row, "worktree_path"),
         running=section == BOARD_SECTION_RUNNING,
         eligible_for_execution=section == BOARD_SECTION_READY,
         blocked=section == BOARD_SECTION_BLOCKED,

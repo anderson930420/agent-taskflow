@@ -55,7 +55,34 @@ class Step3FilesExistTests(unittest.TestCase):
 
 
 class NoLifecycleWriteInStep3CodeTests(unittest.TestCase):
-    """Forbidden layer — the Python control plane owns lifecycle (§2.1)."""
+    """Forbidden layer — the Python control plane owns lifecycle (§2.1).
+
+    A source scan is necessary but **not sufficient**: it only sees SQL written
+    in Step 3's own files, and it missed a chained call into another module's
+    migration. The authoritative gate is the schema diff in
+    ``tests/test_runtime_progress_schema_diff.py``, which applies the migration
+    to a real database and compares the whole schema.
+    """
+
+    def test_no_step3_module_imports_another_modules_migration(self) -> None:
+        for relative in STEP3_PY_MODULES:
+            tree = ast.parse(read(relative), filename=relative)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom) or not node.module:
+                    continue
+                for alias in node.names:
+                    is_migration = alias.name.startswith("migrate_") or alias.name in {
+                        "init_db",
+                        "init_task_db",
+                    }
+                    if not is_migration:
+                        continue
+                    with self.subTest(file=relative, name=alias.name):
+                        self.assertEqual(
+                            node.module,
+                            "agent_taskflow.runtime_progress_schema",
+                            f"{relative} imports {alias.name} from {node.module}",
+                        )
 
     LIFECYCLE_CALL_TOKENS = (
         "update_task_status",
@@ -66,6 +93,18 @@ class NoLifecycleWriteInStep3CodeTests(unittest.TestCase):
         "register_task_identity",
         "upsert_task(",
         "upsert_task_with_level2_identity",
+        # Other modules' migrations. A chained call to one of these is how the
+        # lifecycle migration slipped past the SQL scan below.
+        "migrate_task_attempt_lifecycle(",
+        "migrate_lifecycle_control(",
+        "migrate_attempt_resources(",
+        "migrate_runtime_admission(",
+        "migrate_canonical_runtime_admission(",
+        "migrate_executor_process_lifecycle(",
+        "migrate_validator_process_lifecycle(",
+        "migrate_reset_lineage(",
+        "migrate_project_class_controls(",
+        "init_task_db(",
     )
 
     LIFECYCLE_SQL_PATTERNS = (

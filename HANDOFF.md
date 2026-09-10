@@ -2,13 +2,22 @@
 
 Branch: `task/v1-step3`
 Draft PR: https://github.com/anderson930420/agent-taskflow/pull/197
-Base: `4266c02` (`main`), with `task/v1-step1` merged in for the SPEC §12.2
-status vocabulary bridge (merge, not rebase — see §4.6)
+Base: `4266c02` (`main`), with `task/v1-step1` merged in **twice** — first for
+the SPEC §12.2 status-vocabulary bridge, then for its post-review rework that
+collapsed Tickets into `tasks`. Merges only; never rebased (§4.6).
 Spec: `~/agent-taskflow-ops/v1/SPEC.md` §42 Step 3
 Instructions: `~/agent-taskflow-ops/v1/step3.md`
 
-Step 3 only. Nothing here transitions lifecycle, schedules, integrates, touches
-git, or contacts GitHub.
+**Scope of the "no lifecycle" claim.** Step 3's *own* code transitions no
+lifecycle state, schedules nothing, integrates nothing, touches no git and
+contacts no GitHub. The branch as a whole is not read-only, though: it carries
+Step 1's merged code, and Step 1's `POST /api/tickets` writes a new `tasks` row
+with its initial persisted status (`created`, or `blocked` when `blocked_by` is
+given) plus a `created` event. That is Step 1's creation path (§12.1), not a
+Step 3 transition, and no Step 3 code calls it.
+
+> *Correction:* this line used to read "Nothing here transitions lifecycle",
+> which stopped being true once Step 1 was merged in.
 
 ---
 
@@ -28,7 +37,7 @@ git, or contacts GitHub.
 | `agent_taskflow/realtime_projection.py` | create | Read-only board / Ticket projection. Consumes `status_vocab` (§12.2); holds no copy of the vocabulary bridge. |
 | `agent_taskflow/api/realtime.py` | create | §15 SSE transport. |
 | `agent_taskflow/status_vocab.py` | **consume (merged in from `task/v1-step1`)** | The single §12.2 bridge between the persisted and display vocabularies. Not modified here. |
-| `scripts/migrate_runtime_progress.py` | create | Operator migration, matching the repo's `migrate_*.py` pattern. |
+| `scripts/migrate_runtime_progress.py` | create | Operator migration, matching the repo's `migrate_*.py` pattern. Fails closed (exit 2) without the lifecycle schema; never installs it. |
 | `mission-control/lib/realtime.ts`, `components/ExecutionStepList.tsx`, `components/LiveBoard.tsx`, `components/LiveTicketPanel.tsx`, `app/live/page.tsx` | create | §16 live board and §17 live Ticket page. |
 
 No existing module was rewritten.
@@ -61,6 +70,33 @@ Two additive tables, both hanging off an Attempt (§14.0):
 Both carry `CHECK` constraints on the step and status vocabularies and a
 `BEFORE INSERT` trigger asserting the Attempt belongs to the Task, mirroring the
 existing `lifecycle_events` guard in `attempt_schema.py`.
+
+**The migration never installs lifecycle schema, and fails closed without it.**
+Both tables foreign-key into `attempts` and join on `tasks.task_id`, which come
+from the Level 2 lifecycle migration `level2_task_attempt_lifecycle_v1`. If
+that schema is missing, `migrate_runtime_progress` raises
+`RuntimeProgressPreconditionError` before writing anything — the check opens
+the database read-only, so it cannot even create the file — and the message
+names the command to run by hand:
+
+```
+python scripts/migrate_task_attempt_lifecycle.py --db-path <db>
+```
+
+The operator script exits 2 with the same instructions. The migration adds no
+column to any existing table, `tasks` included;
+`tests/test_runtime_progress_schema_diff.py` proves it by diffing the whole
+schema of a real fixture database.
+
+> **Correction.** Earlier rounds said this migration "touches nothing that
+> already exists" and created no Ticket lifecycle column. That was false.
+> `migrate_runtime_progress` used to call `migrate_task_attempt_lifecycle`
+> first, which — measured on a base database — adds **six** columns to `tasks`
+> (`task_id`, `task_class`, `active_attempt_id`, `final_outcome`, `closed_at`,
+> `is_legacy`) and two tables (`attempts`, `lifecycle_events`). The review
+> cited three of those columns. The source-scan test missed it because the
+> writes lived in another module. Both are fixed: the chained call is gone, and
+> a schema-diff test now backs the scan instead of relying on it.
 
 `RuntimeProgressStore` exposes exactly two §14 writes — `record_step` and
 `set_current_activity` — plus read helpers. It writes to those two tables and
@@ -145,16 +181,9 @@ for tests; the default is unbounded.
 
 ## 3. What was deliberately skipped, and why
 
-1. **No runtime call sites were wired.** Step 3 ships the progress *write
-   surface* (`RuntimeProgressStore`), which is the allowed layer. It does not
-   call it from `dispatcher.py` / `approved_task_runner.py`, because those are
-   the control plane that owns lifecycle (§2.1) and "any lifecycle state
-   transition" is a forbidden layer for this step. Wiring is further blocked by
-   a real design gap: §14.0 requires an Attempt to attach ObservedSteps to, and
-   the legacy dispatcher path does not own one — creating an Attempt from Step 3
-   would itself be a lifecycle write. **This is the main follow-up** and belongs
-   with whoever owns the executor loop. Consequence today: the board and Ticket
-   page render every step as `pending` until a runtime starts recording.
+1. **Runtime call-site wiring — reclassified.** Earlier rounds filed this here
+   as a deliberate skip. The review is right that it is a **stop condition that
+   was hit**, not a skip. It now lives in §4.7.
 2. **No board section for `needs_decision`** — this is the flagged watchlist
    item; see §4.3 below.
 3. **No progress percentage, ETA, or completion estimate** (§14.2), **no DAG
@@ -165,11 +194,15 @@ for tests; the default is unbounded.
 5. **No validator execution**, no scheduler, no lease/claim/capacity, no
    integration controller or per-repo lock, no cleanup, no Ticket creation or
    metadata derivation, no webhook path.
-6. **No auto-migration at API startup.** `create_app` does not run
-   `migrate_runtime_progress`; that would write schema to whatever database the
-   service points at. Operators run the migration script explicitly, matching
-   every other migration in this repo. The read path tolerates the tables being
-   absent and renders an all-`pending` board.
+6. **Step 3 adds no startup migration — but the app does migrate at startup.**
+   *Correction:* this item used to read "No auto-migration at API startup",
+   which was false for the app as a whole. What is true: `create_app` never runs
+   Step 3's `migrate_runtime_progress`, and that migration never chains another
+   (pinned by `test_startup_runs_no_step3_migration`). What is also true: the
+   lifespan calls `store.init_db()` (pre-existing on `main`, and it applies
+   Step 1's `tasks_ticket_fields`) and `ticket_store.init_db()` (Step 1). Those
+   are startup migrations in code that is not Step 3's — see §4.8. The read path
+   tolerates Step 3's tables being absent and renders an all-`pending` board.
 7. **`WORKFLOW.md` was not edited.** Repo convention gives each component a
    paragraph there, but that is outside the layers step3.md allows and CLAUDE.md
    says not to edit unrelated files. Flagged here as a documentation follow-up
@@ -285,87 +318,126 @@ One post-merge rename for clarity: the attempts route handler was
 `list_ticket_attempts`, which now reads confusingly next to Step 1's separate
 Ticket entity. It is `list_task_attempts`; the route path is unchanged.
 
+**Second merge (post-review).** `task/v1-step1` was reworked after its own
+review (`dcad084`: Tickets collapsed into `tasks`, one global `AT-0001` counter)
+and merged again as `1141a25`, again without rebasing. Step 1's history was
+linear on top of the first merge, so only `dcad084` came in. It merged with **no
+conflicts**: `TaskBoard.tsx` kept `/live` while Step 1 reverted its own
+"Create Ticket" link, and `HANDOFF.md` auto-merged because this side only
+prepends the Step 3 document — the appendix now carries Step 1's rewritten
+handoff. Suite before/after the merge: 4682 → 4701 (§5).
+
+### 4.7 Runtime ObservedStep writes have no producer — STOP CONDITION HIT
+
+Reclassified from §3.1 at the review's request. §42 lists "Runtime ObservedStep
+writes" as a Step 3 deliverable. Step 3 ships the write surface
+(`RuntimeProgressStore.record_step`, `.set_current_activity`), but nothing in
+the runtime calls it, so every board step renders `pending` today.
+
+Producing those writes needs a forbidden layer, which is exactly the case
+step3.md covers ("If the step seems to require a forbidden layer, stop and
+write it in the handoff note instead of proceeding"):
+
+- The producer is the execution runtime — `dispatcher.py` /
+  `approved_task_runner.py` — the control plane that owns lifecycle (§2.1).
+- §14.0 attaches ObservedSteps to an **Attempt**. The legacy dispatcher path
+  creates none, and neither does `POST /api/tickets`: on a freshly started app
+  there is no `attempts` table at all (§4.9). Creating an Attempt from Step 3
+  would itself be a lifecycle write.
+
+**Decision needed from the human:** who wires `RuntimeProgressStore` into the
+executor loop, and where a Ticket's Attempt gets created so there is something
+to attach steps to. Not repaired here.
+
+### 4.8 "Nothing may run migrations at process startup" contradicts existing code — STOP CONDITION HIT
+
+For Step 3's own code the ruling now holds and is tested: the app never applies
+`v1_step3_runtime_progress_v1`, and that migration chains nothing
+(`test_startup_runs_no_step3_migration`,
+`tests/test_runtime_progress_schema_diff.py`).
+
+For the app as a whole it does not hold, and the code that breaks it is not
+Step 3's. `create_app`'s lifespan runs:
+
+- `store.init_db()` — **pre-existing on `main`**. It creates the base tables and
+  applies `store.py`'s `_MIGRATIONS` registry, which Step 1 extended with
+  `tasks_ticket_fields` (ten columns and two unique indexes on `tasks`).
+- `ticket_store.init_db()` — **Step 1**. It calls the same `init_task_db`.
+
+Changing either would alter `main`'s startup contract and Step 1's code, both
+outside Step 3's layers, so this is reported, not repaired.
+
+**Decision needed from the human:** whether the ruling is scoped to Step 3's
+migration (satisfied) or is repo-wide, in which case `store.init_db()` and
+`ticket_store.init_db()` at startup need their own ticket.
+
+### 4.9 Review item 3c — the reviewer's reproduction, run for real
+
+The board and detail endpoints read the canonical `tasks` table. Run through the
+real app (`create_app`, real lifespan) against a scratch database, with nothing
+seeded by hand:
+
+```
+POST /api/tickets -> 200
+  task_key=AT-0001 status=created display_status=ready
+GET /api/realtime/board -> 200
+  AT-0001 found in section 'READY'; status=created display_status=ready priority=high eligible_for_execution=True
+GET /api/tasks/AT-0001/realtime -> 200
+  priority='high' repository='forms' branch='task/AT-0001-separate-the-ending-page-image-from-the'
+  worktree_path='/tmp/tmphtb2krbk/sandbox/forms/.worktrees/AT-0001'
+  steps=[('Prepare', 'pending'), ('Scout', 'pending')] ... (all pending: True)
+Step 3 tables created by startup: none
+```
+
+One gap found while preparing it: the projection read branch and worktree only
+from `task_worktrees`, but Step 1 stores a Ticket's derived branch and worktree
+path on `tasks` and writes no `task_worktrees` row — so for a Step 1 Ticket
+they would have rendered `—`. It now prefers a `task_worktrees` record (a
+worktree that was actually prepared) and falls back to the `tasks` columns.
+Pinned by `TicketReproductionTests` in `tests/test_api_realtime.py` — five
+tests, including a `blocked_by` Ticket rendering `Waiting for <key>` from
+`tasks.blocked_by`.
+
 ### Not hit
 
-- **No pre-existing test went red.** See §5.
-- **No decision the spec assigns to the human was required to proceed** — the
-  concurrency gate, merge, and cleanup-of-unmerged-work paths were not touched.
+- No pre-existing test went red, in any round (§5).
+- No push was rejected; the branch never diverged from `origin`.
 
 ---
 
 ## 5. Validation
 
-Baseline was captured first, on a pristine worktree at the same base commit
-(`/home/ubuntu/agent-taskflow-wt-base-4266c02`, `4266c02`), so any red test
-would be attributable to this branch:
+This round's counts use `python -m unittest discover -s tests` — the repo's
+documented runner, and the one the reviewer used. Earlier rounds quoted pytest
+counts, which are not comparable to unittest's `Ran N tests`; they are kept
+below for history only.
 
-```
-baseline: 4390 passed, 8 skipped, 822 subtests passed
-```
+### This round (post-review)
 
-### Full Python suite — this branch, after the Step 1 merge
-
-```
-$ /home/ubuntu/agent-taskflow/.venv/bin/python -m pytest tests -q
-4676 passed, 8 skipped, 1527 subtests passed in 539.94s (0:08:59)
-```
-
-**No pre-existing test went red, and no test went red at any point.** The
-arithmetic accounts for every added test:
-
-| Source | Tests | Measured by |
+| Point | Tree | Result |
 |---|---|---|
-| baseline at `4266c02` | 4390 | pristine worktree |
-| Step 3, before the merge | +162 | full run at `e3c7656` gave 4552 |
-| Step 1, merged in | +114 | its five test files run alone |
-| Step 3 §12.2 bridge tests | +10 | 8 projection + 2 frontend-source |
-| **total** | **4676** | matches the run above |
+| BEFORE the second merge | `760d015` | Ran 4682 tests, OK (skipped=8) |
+| AFTER the merge | `1141a25` | Ran 4701 tests, OK (skipped=8) |
+| AFTER the Step 3 fixes | `1141a25` + the fixes in the commit carrying this handoff | Ran 4722 tests, OK (skipped=8) |
 
-Skips are unchanged at 8 throughout.
+- Merge delta **+19** equals `dcad084`'s own reported delta (4510 → 4529).
+- Fix delta **+21** is exactly the new tests: schema-diff file 10, fail-closed
+  script tests +4, reviewer reproduction 5, startup-runs-no-Step-3-migration 1,
+  cross-module migration import check 1.
+- **No test went red at any point.** Skips unchanged at 8.
 
-### Step 3 tests in isolation
+| Command | Result |
+|---|---|
+| `python -m compileall agent_taskflow scripts tests` | OK |
+| `scripts/validate_workflow_contract.py` | passed |
+| `scripts/validate_workflow_policy.py` | passed |
+| `cd mission-control && npm run build` | completed; route table lists `/live`, `/tickets/[taskKey]`, `/tickets/new` alongside the existing routes |
 
-```
-$ ... -m pytest -q tests/test_runtime_progress.py \
-      tests/test_runtime_progress_store.py tests/test_realtime_projection.py \
-      tests/test_api_realtime.py tests/test_realtime_negative_scope.py \
-      tests/test_mission_control_realtime_frontend.py \
-      tests/test_migrate_runtime_progress_script.py
-162 passed, 535 subtests passed in 8.72s
-```
+### Earlier rounds (pytest, history only)
 
-### Byte-compile
-
-```
-$ ... -m compileall agent_taskflow scripts tests
-COMPILEALL OK
-```
-
-### Repo validators
-
-```
-$ ... scripts/validate_workflow_contract.py
-Workflow contract validation / source path: WORKFLOW.md / status: passed
-
-$ ... scripts/validate_workflow_policy.py
-Workflow policy validation / source path: examples/workflow-policy.example.json / status: passed
-```
-
-### Mission Control build
-
-```
-$ cd mission-control && npm run build
-✓ Compiled successfully in 3.0s
-  Finished TypeScript in 5.5s
-Route (app)
-┌ ƒ /
-├ ○ /_not-found
-├ ƒ /live
-├ ƒ /tasks/[taskKey]
-└ ƒ /tasks/new
-```
-
-The new `/live` route is registered and TypeScript passes.
+- baseline `4266c02`: 4390 passed, 8 skipped
+- `e3c7656`, Step 3 alone: 4552 passed, 8 skipped
+- `760d015`, after the first Step 1 merge and §12.2: 4676 passed, 8 skipped
 
 ---
 
@@ -395,7 +467,8 @@ $PY -m pytest -q \
   tests/test_api_realtime.py \
   tests/test_realtime_negative_scope.py \
   tests/test_mission_control_realtime_frontend.py \
-  tests/test_migrate_runtime_progress_script.py
+  tests/test_migrate_runtime_progress_script.py \
+  tests/test_runtime_progress_schema_diff.py
 ```
 
 Mapping to the acceptance gate:
@@ -413,7 +486,9 @@ Mapping to the acceptance gate:
 | §15.1 no replay / no `Last-Event-ID` | `test_api_realtime.py::SseFormattingTests`, `SseStreamEndpointTests::test_stream_ignores_a_last_event_id_header` |
 | §14.0 latest Attempt by default, earlier viewable | `test_realtime_projection.py::AttemptScopedDetailTests`, `test_runtime_progress_store.py::RetryKeepsEarlierAttemptTests` |
 | Negative: no percentage / ETA / estimate | `test_realtime_negative_scope.py::NoProgressEstimateAnywhereTests` |
-| Negative: no lifecycle status write | `test_realtime_negative_scope.py::NoLifecycleWriteInStep3CodeTests` |
+| Negative: no lifecycle status write | `test_runtime_progress_schema_diff.py` (authoritative: whole-schema diff), `test_realtime_negative_scope.py::NoLifecycleWriteInStep3CodeTests` (source scan, not sufficient alone) |
+| Review 3c: board and detail read `tasks` | `test_api_realtime.py::TicketReproductionTests` |
+| Review 3a: fail closed, never chain a lifecycle migration | `test_runtime_progress_schema_diff.py::FailClosedPreconditionTests`, `test_migrate_runtime_progress_script.py::FailClosedTests` |
 | Negative: no Git / GitHub call | `test_realtime_negative_scope.py::NoGitOrGithubCallInStep3CodeTests` |
 
 ### Byte-compile
@@ -444,15 +519,33 @@ Do **not** symlink `node_modules` to another checkout — Turbopack rejects a
 symlink that points outside the project root and the build fails with
 `Symlink [project]/node_modules is invalid`.
 
-### Manual smoke (optional, read-only)
+### Manual smoke (optional)
 
-Against a **scratch** database — never the production one:
+Against a **scratch** database — never the production one. This exact sequence
+was run for this handoff:
 
 ```bash
 DB=/tmp/step3-smoke/state.db
 mkdir -p /tmp/step3-smoke
+
+# 1. Step 3's migration alone refuses: exit 2, and the DB file is not created.
+$PY scripts/migrate_runtime_progress.py --db-path "$DB"
+
+# 2. Install the lifecycle schema on purpose, as the refusal instructs.
+$PY scripts/migrate_task_attempt_lifecycle.py --db-path "$DB"
+
+# 3. Now Step 3's migration installs its two tables and adds no tasks column.
 $PY scripts/migrate_runtime_progress.py --db-path "$DB"
 ```
+
+Observed: step 1 exit 2 with the operator instructions and no file created;
+step 2 exit 0; step 3 exit 0 with `task_columns_added_by_this_migration: []`
+and `lifecycle_migration_run_by_this_script: false`.
+
+Caveat: `migrate_task_attempt_lifecycle.py` has no source-package bootstrap, so
+it imports `agent_taskflow` from the venv's editable install — which points at
+the **main** checkout, not this worktree. That is harmless here because neither
+branch changes the lifecycle migration.
 
 Then point the API at it and read:
 
@@ -467,8 +560,9 @@ The first frame is `event: snapshot`, and no frame ever contains an `id:` line.
 
 ## 7. Governance
 
-- No commit was pushed to `main`; no merge, no force-push. Only
-  `task/v1-step3` was pushed.
+- No commit was pushed to `main`; nothing was merged to `main`; no force-push;
+  the branch was never rebased. Only `task/v1-step3` was pushed, with normal
+  pushes.
 - The PR is a **draft**.
 - No task was approved, closed, or marked complete.
 - No deployment, systemd, nginx, or cron configuration was touched.
