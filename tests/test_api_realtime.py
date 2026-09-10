@@ -194,6 +194,8 @@ class RealtimeBoardEndpointTests(RealtimeApiTestCase):
         )
         ticket = running["tickets"][0]
         self.assertEqual(ticket["task_key"], "AT-101")
+        self.assertEqual(ticket["status"], "implementing")
+        self.assertEqual(ticket["display_status"], "running")
         self.assertEqual(ticket["current_phase"], "Implementer")
         self.assertEqual(
             ticket["current_activity"], "Adding frontend regression tests"
@@ -233,6 +235,10 @@ class RealtimeTicketEndpointTests(RealtimeApiTestCase):
         ticket = payload["ticket"]
         self.assertEqual(ticket["repository"], "forms")
         self.assertEqual(ticket["status"], "implementing")
+        # SPEC §12.2 — persisted spelling plus its §12 display name.
+        self.assertEqual(ticket["display_status"], "running")
+        self.assertEqual(ticket["display"]["status"], "implementing")
+        self.assertEqual(ticket["display"]["display_status"], "running")
         self.assertEqual(ticket["current_phase"], "Implementer")
         self.assertEqual(len(ticket["steps"]), 7)
         self.assertIn("artifacts", payload)

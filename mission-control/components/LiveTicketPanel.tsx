@@ -27,6 +27,10 @@ function Row({ label, value }: { label: string; value: string }) {
  * activity, artifact links, and the SPEC §31 review surface. The SPEC §32.1
  * PR fields are owned by the Step 2 watcher — each one may be absent or null
  * and renders as an em dash when it is.
+ *
+ * Status is shown twice on purpose (SPEC §12.2): the SPEC §12 display name a
+ * reviewer reads, and underneath it the legacy TASK_STATUSES value actually
+ * persisted, so the render stays auditable against the database.
  */
 export function LiveTicketPanel({ taskKey }: { taskKey: string }) {
   const [projection, setProjection] = useState<TicketProjection | null>(null);
@@ -105,7 +109,8 @@ export function LiveTicketPanel({ taskKey }: { taskKey: string }) {
             <tbody>
               <Row label="Repository" value={ticket.display.repository} />
               <Row label="Priority" value={ticket.display.priority} />
-              <Row label="Status" value={ticket.display.status} />
+              <Row label="Status" value={ticket.display.display_status} />
+              <Row label="Persisted status" value={ticket.display.status} />
               <Row label="Board section" value={ticket.display.section} />
               <Row label="Branch" value={ticket.display.branch} />
               <Row label="Worktree" value={ticket.display.worktree_path} />

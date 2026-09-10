@@ -28,13 +28,20 @@ from agent_taskflow.realtime_projection import (
     BOARD_SECTION_READY_FOR_REVIEW,
     BOARD_SECTION_RUNNING,
     DASH,
+    DISPLAY_STATUS_SECTIONS,
     PR_FIELD_NAMES,
+    UNSECTIONED_DISPLAY_STATUSES,
     build_board_projection,
     build_ticket_projection,
     projection_to_dict,
 )
 from agent_taskflow.runtime_progress import find_progress_estimates
 from agent_taskflow.runtime_progress_store import RuntimeProgressStore
+from agent_taskflow.status_vocab import (
+    DISPLAY_STATUS_SEQUENCE,
+    PERSISTED_TO_DISPLAY,
+    to_display_status,
+)
 from agent_taskflow.store import TaskMirrorStore
 
 
@@ -176,11 +183,7 @@ class BoardSectionTests(ProjectionTestCase):
         )
 
     def test_needs_decision_ticket_is_not_placed_in_the_five_sections(self) -> None:
-        self.add_task("AT-200", "blocked")
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE tasks SET status = 'needs_decision' WHERE task_key = 'AT-200'"
-            )
+        self.add_task("AT-200", "needs_decision")
         projection = build_board_projection(self.db_path)
         for section in projection.sections:
             with self.subTest(section=section.key):
@@ -192,6 +195,93 @@ class BoardSectionTests(ProjectionTestCase):
         assert ticket is not None
         self.assertFalse(ticket.running)
         self.assertFalse(ticket.eligible_for_execution)
+
+
+class StatusVocabularyBridgeTests(ProjectionTestCase):
+    """SPEC §12.2 — status_vocab is the single bridge; the board keeps no copy."""
+
+    def test_section_map_is_keyed_only_by_display_statuses(self) -> None:
+        self.assertTrue(
+            set(DISPLAY_STATUS_SECTIONS) <= set(DISPLAY_STATUS_SEQUENCE),
+            set(DISPLAY_STATUS_SECTIONS) - set(DISPLAY_STATUS_SEQUENCE),
+        )
+
+    def test_every_display_status_is_either_sectioned_or_unsectioned(self) -> None:
+        covered = set(DISPLAY_STATUS_SECTIONS) | set(UNSECTIONED_DISPLAY_STATUSES)
+        self.assertEqual(covered, set(DISPLAY_STATUS_SEQUENCE))
+
+    def test_projection_source_holds_no_legacy_status_table(self) -> None:
+        # The bridge lives in status_vocab. A legacy spelling appearing as a
+        # key in this module would mean the mapping was copied back in.
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "agent_taskflow"
+            / "realtime_projection.py"
+        ).read_text(encoding="utf-8")
+        legacy_only = set(PERSISTED_TO_DISPLAY) - set(DISPLAY_STATUS_SEQUENCE)
+        for status in sorted(legacy_only):
+            with self.subTest(status=status):
+                self.assertNotIn(f'"{status}"', source)
+
+    def test_every_persisted_status_lands_somewhere_without_raising(self) -> None:
+        for index, persisted in enumerate(sorted(PERSISTED_TO_DISPLAY)):
+            task_key = f"AT-{700 + index}"
+            with self.subTest(persisted=persisted):
+                self.add_task(task_key, persisted)
+        projection = build_board_projection(self.db_path)
+        placed = {
+            ticket.task_key
+            for section in projection.sections
+            for ticket in section.tickets
+        } | {ticket.task_key for ticket in projection.unsectioned}
+        self.assertEqual(len(placed), len(PERSISTED_TO_DISPLAY))
+
+    def test_ticket_exposes_both_persisted_and_display_status(self) -> None:
+        self.add_task("AT-101", "implementing")
+        ticket = build_board_projection(self.db_path).find("AT-101")
+        assert ticket is not None
+        self.assertEqual(ticket.status, "implementing")
+        self.assertEqual(ticket.display_status, "running")
+        self.assertEqual(ticket.display()["status"], "implementing")
+        self.assertEqual(ticket.display()["display_status"], "running")
+
+    def test_display_status_always_matches_status_vocab(self) -> None:
+        for index, persisted in enumerate(sorted(PERSISTED_TO_DISPLAY)):
+            self.add_task(f"AT-{800 + index}", persisted)
+        projection = build_board_projection(self.db_path)
+        for index, persisted in enumerate(sorted(PERSISTED_TO_DISPLAY)):
+            ticket = projection.find(f"AT-{800 + index}")
+            assert ticket is not None
+            with self.subTest(persisted=persisted):
+                self.assertEqual(
+                    ticket.display_status, to_display_status(persisted)
+                )
+
+    def test_legacy_review_spellings_share_the_review_section(self) -> None:
+        # waiting_approval and waiting_for_review are distinct legacy values
+        # that status_vocab collapses onto needs_review.
+        self.add_task("AT-301", "waiting_approval")
+        self.add_task("AT-302", "waiting_for_review")
+        sections = self.sections(build_board_projection(self.db_path))
+        self.assertEqual(
+            sections[BOARD_SECTION_READY_FOR_REVIEW], ["AT-301", "AT-302"]
+        )
+
+    def test_unknown_status_renders_unsectioned_instead_of_raising(self) -> None:
+        # A value outside both vocabularies must never break a render.
+        self.add_task("AT-400", "queued")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE tasks SET status = 'not-a-status' WHERE task_key = 'AT-400'"
+            )
+        projection = build_board_projection(self.db_path)
+        ticket = projection.find("AT-400")
+        assert ticket is not None
+        self.assertIsNone(ticket.display_status)
+        self.assertIsNone(ticket.section)
+        self.assertFalse(ticket.running)
+        self.assertFalse(ticket.eligible_for_execution)
+        self.assertEqual(ticket.display()["display_status"], DASH)
 
 
 class BlockedAndPausedDisplayTests(ProjectionTestCase):
@@ -229,11 +319,7 @@ class BlockedAndPausedDisplayTests(ProjectionTestCase):
         self.assertEqual(ticket.display()["blocker_hint"], DASH)
 
     def test_paused_ticket_is_never_rendered_as_eligible(self) -> None:
-        self.add_task("AT-115", "blocked")
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE tasks SET status = 'paused' WHERE task_key = 'AT-115'"
-            )
+        self.add_task("AT-115", "paused")
         projection = build_board_projection(self.db_path)
         ticket = projection.find("AT-115")
         assert ticket is not None

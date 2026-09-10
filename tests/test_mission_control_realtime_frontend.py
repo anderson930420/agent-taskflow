@@ -193,6 +193,15 @@ class TicketPageTests(RealtimeFrontendTests):
     def test_ticket_panel_renders_dash_for_missing_values(self) -> None:
         self.assertIn("—", self.live_ticket)
 
+    def test_ticket_panel_shows_display_and_persisted_status(self) -> None:
+        # SPEC §12.2 — the §12 name a reviewer reads, plus the legacy value
+        # actually persisted, so the render stays auditable.
+        self.assertIn("ticket.display.display_status", self.live_ticket)
+        self.assertIn('label="Persisted status"', self.live_ticket)
+
+    def test_realtime_types_carry_the_display_status(self) -> None:
+        self.assertIn("display_status?:", self.types)
+
     def test_ticket_panel_lets_earlier_attempts_stay_viewable(self) -> None:
         self.assertIn("attempt", self.live_ticket.lower())
         self.assertIn("selected_attempt_id", self.live_ticket)

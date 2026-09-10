@@ -1,7 +1,9 @@
 # Handoff — V1 Step 3: Realtime Progress
 
 Branch: `task/v1-step3`
-Base: `4266c02` (`main`)
+Draft PR: https://github.com/anderson930420/agent-taskflow/pull/197
+Base: `4266c02` (`main`), with `task/v1-step1` merged in for the SPEC §12.2
+status vocabulary bridge (merge, not rebase — see §4.6)
 Spec: `~/agent-taskflow-ops/v1/SPEC.md` §42 Step 3
 Instructions: `~/agent-taskflow-ops/v1/step3.md`
 
@@ -23,8 +25,9 @@ git, or contacts GitHub.
 | `agent_taskflow/runtime_progress.py` | create | §14.1 vocabulary + §14.2 guard. |
 | `agent_taskflow/runtime_progress_schema.py` | create | Additive attempt-scoped tables. |
 | `agent_taskflow/runtime_progress_store.py` | create | The runtime progress write surface. |
-| `agent_taskflow/realtime_projection.py` | create | Read-only board / Ticket projection. |
+| `agent_taskflow/realtime_projection.py` | create | Read-only board / Ticket projection. Consumes `status_vocab` (§12.2); holds no copy of the vocabulary bridge. |
 | `agent_taskflow/api/realtime.py` | create | §15 SSE transport. |
+| `agent_taskflow/status_vocab.py` | **consume (merged in from `task/v1-step1`)** | The single §12.2 bridge between the persisted and display vocabularies. Not modified here. |
 | `scripts/migrate_runtime_progress.py` | create | Operator migration, matching the repo's `migrate_*.py` pattern. |
 | `mission-control/lib/realtime.ts`, `components/ExecutionStepList.tsx`, `components/LiveBoard.tsx`, `components/LiveTicketPanel.tsx`, `app/live/page.tsx` | create | §16 live board and §17 live Ticket page. |
 
@@ -81,13 +84,18 @@ Ticket per poll.
 - Per-ticket booleans `running` / `eligible_for_execution` / `blocked` /
   `paused` are computed from the section, so a BLOCKED or PAUSED Ticket is
   structurally incapable of rendering as running or as eligible.
+- Sectioning runs on the §12 *display* vocabulary: persisted status →
+  `status_vocab.to_display_status()` → `DISPLAY_STATUS_SECTIONS`. Per §12.2 the
+  projection keeps no copy of the legacy↔display mapping, and a value outside
+  both vocabularies renders unsectioned rather than raising.
 - BLOCKED renders its blocker as §16 shows it — `Waiting for AT-101`.
 - Every value also ships a `display` mapping with `—` substituted for null.
 
 ### §32.1 PR fields — read-only and optional
 
-Step 2 has not landed (the `v1-step1` and `v1-step2` worktrees are still at the
-base commit), so none of the §32.1 columns exist yet. The projection:
+Step 2 has not landed, so none of the §32.1 columns exist yet. (Step 1 *has*
+now been merged into this branch — see §4.1 — but it does not touch these
+columns.) The projection:
 
 - discovers which of the twelve columns exist via `PRAGMA table_info(tasks)`
   and reads only those;
@@ -173,38 +181,60 @@ for tests; the default is unbounded.
 
 Per step3.md, these are reported, **not repaired**.
 
-### 4.1 Ticket status vocabulary contradicts existing code (ambiguity / contradiction)
+### 4.1 Ticket status vocabulary — RESOLVED by human ruling (SPEC §12.2)
 
-SPEC §12 defines the V1 Ticket statuses as:
+**Originally reported as a contradiction; the human has ruled and this branch
+now implements the ruling.**
 
-```
-queued ready blocked paused preparing running validating
-ready_for_integration integrating needs_review needs_decision
-completed failed cancelled
-```
+The conflict was: SPEC §12 names (`ready`, `paused`, `needs_review`,
+`needs_decision`, `ready_for_integration`, `integrating`, `failed`,
+`cancelled`) were not writable statuses, and §12 spells it `cancelled` where
+the repo persists `canceled`.
 
-`agent_taskflow/models.py::TASK_STATUSES` today allows:
+**Ruling (SPEC §12.2):** no repo-wide migration. `TASK_STATUSES` stays the
+canonical *persisted* vocabulary; §12 names are the Mission Control *display*
+vocabulary; `agent_taskflow/status_vocab.py` is the single bridge. Persisted
+spelling of cancelled stays `canceled`. A repo-wide rename is deferred to its
+own ticket after Steps 1–3 merge.
 
-```
-unknown created queued preparing implementing validating waiting_approval
-waiting_for_review blocked accepted rejected cleaned completed canceled
-archived  (+ external mirror values: backlog todo in_progress review done)
-```
+**What changed here:**
 
-So `ready`, `paused`, `needs_review`, `needs_decision`, `ready_for_integration`,
-`integrating`, `failed`, and `cancelled` are **not writable statuses today**,
-and `cancelled` vs `canceled` differ in spelling.
+1. `task/v1-step1` was **merged** into this branch (not rebased — see §4.6) to
+   bring in `status_vocab.py`.
+2. The dual-vocabulary `STATUS_SECTIONS` table is **deleted**. The projection
+   no longer carries any copy of the legacy↔display mapping.
+3. `realtime_projection.py` now converts persisted → display with
+   `status_vocab.to_display_status()` and keeps only
+   `DISPLAY_STATUS_SECTIONS`, a §16 *board layout* map keyed exclusively by the
+   14 §12 display names. That map is Step 3's own concern (which of the five
+   sections a display status belongs to), not a status vocabulary.
+4. `UNSECTIONED_DISPLAY_STATUSES` is derived, not hand-written, so the board
+   note now lists every §12 status with no §16 section
+   (`needs_decision, completed, failed, cancelled`) instead of hard-coding one.
+5. `BoardTicket` exposes **both** spellings: `status` (persisted — the
+   auditable truth, §44) and `display_status` (§12). The Ticket page shows the
+   §12 name as *Status* and the persisted value as *Persisted status*
+   underneath, so a reviewer can check the render against the database.
 
-Step 1 owns Ticket creation and metadata derivation and is a forbidden layer
-here; any lifecycle transition is also forbidden. **Nothing was changed.**
-Instead `STATUS_SECTIONS` in `realtime_projection.py` maps *both* vocabularies
-onto the five §16 sections, and any status in neither table is left unsectioned
-rather than guessed into a section. The board therefore works before and after
-Step 1 lands.
+Behaviour this corrected, which the old dual table got wrong:
 
-**Decision needed from the human / Step 1:** whether the repo migrates to the
-§12 vocabulary, and if so what happens to `waiting_approval`,
-`waiting_for_review`, `accepted`, `cleaned`, and `archived`.
+- `created` now displays as `ready` and lands in **READY**; it was previously
+  unsectioned.
+- `accepted` now displays as `needs_review` and stays in **READY FOR REVIEW**,
+  matching §33.1 (approved but not yet merged is still awaiting review). It was
+  previously unsectioned.
+- The external mirror spellings `backlog` / `todo` / `done` are now placed
+  rather than dropped off the board.
+
+A test asserts the projection source contains no legacy-only status literal, so
+the mapping cannot drift back in. Another walks every value in
+`PERSISTED_TO_DISPLAY` through the board and asserts each one is placed.
+
+A value outside **both** vocabularies (which `status_vocab` raises on) is caught
+and rendered unsectioned with `display_status = —`, never as an error: the hard
+rule is that nothing blocks a render.
+
+**No decision outstanding.**
 
 ### 4.2 §14.1 and §14.2 disagree on step order (ambiguity)
 
@@ -236,6 +266,25 @@ handled as specified: read defensively, render `—`, never create. Recorded her
 because it is the reason several PR fields render as `—` in every screenshot
 today.
 
+### 4.6 Merge, not rebase, onto a published PR branch
+
+The §12.2 ruling required picking up `task/v1-step1`. This branch is published
+as draft PR #197, and SPEC §26 keeps the no-force-push invariant for a published
+PR branch in V1, so a **merge** was used and the merge commit is the accepted
+cost. The branch was never rebased and never force-pushed.
+
+Three files conflicted, all additive on both sides and resolved as unions:
+
+- `agent_taskflow/api/main.py` — both branches extended the `create_app`
+  signature and appended routes. Kept both; verified both route sets coexist.
+- `mission-control/components/TaskBoard.tsx` — auto-merged.
+- `HANDOFF.md` — add/add. **Both documents were kept**; Step 1's is reproduced
+  verbatim in the appendix rather than dropped.
+
+One post-merge rename for clarity: the attempts route handler was
+`list_ticket_attempts`, which now reads confusingly next to Step 1's separate
+Ticket entity. It is `list_task_attempts`; the route path is unchanged.
+
 ### Not hit
 
 - **No pre-existing test went red.** See §5.
@@ -254,16 +303,25 @@ would be attributable to this branch:
 baseline: 4390 passed, 8 skipped, 822 subtests passed
 ```
 
-### Full Python suite — this branch
+### Full Python suite — this branch, after the Step 1 merge
 
 ```
 $ /home/ubuntu/agent-taskflow/.venv/bin/python -m pytest tests -q
-4552 passed, 8 skipped, 1357 subtests passed in 444.82s (0:07:24)
+4676 passed, 8 skipped, 1527 subtests passed in 539.94s (0:08:59)
 ```
 
-The delta against the baseline is exactly this branch's additions:
-`4552 - 4390 = 162` new tests and `1357 - 822 = 535` new subtests, with the
-skip count unchanged at 8. **No pre-existing test went red.**
+**No pre-existing test went red, and no test went red at any point.** The
+arithmetic accounts for every added test:
+
+| Source | Tests | Measured by |
+|---|---|---|
+| baseline at `4266c02` | 4390 | pristine worktree |
+| Step 3, before the merge | +162 | full run at `e3c7656` gave 4552 |
+| Step 1, merged in | +114 | its five test files run alone |
+| Step 3 §12.2 bridge tests | +10 | 8 projection + 2 frontend-source |
+| **total** | **4676** | matches the run above |
+
+Skips are unchanged at 8 throughout.
 
 ### Step 3 tests in isolation
 

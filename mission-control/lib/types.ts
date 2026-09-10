@@ -483,7 +483,10 @@ export interface TicketPrView {
 export interface BoardTicket {
   task_key: string;
   repository: string;
+  /** Persisted TASK_STATUSES value — the auditable truth. */
   status: TaskStatus;
+  /** SPEC §12 display name for `status`, bridged by status_vocab (§12.2). */
+  display_status?: string | null;
   section?: string | null;
   title?: string | null;
   repo_path?: string | null;

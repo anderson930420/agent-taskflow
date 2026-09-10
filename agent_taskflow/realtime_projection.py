@@ -47,6 +47,11 @@ from agent_taskflow.runtime_progress import (
     step_glyph,
 )
 from agent_taskflow.runtime_progress_store import RuntimeProgressStore
+from agent_taskflow.status_vocab import (
+    DISPLAY_STATUS_SEQUENCE,
+    StatusVocabularyError,
+    to_display_status,
+)
 from agent_taskflow.store import TaskMirrorStore, connect
 from agent_taskflow.tasks import normalize_task_key
 
@@ -73,35 +78,46 @@ BOARD_SECTIONS: tuple[str, ...] = (
     BOARD_SECTION_READY_FOR_REVIEW,
 )
 
-# The repository's own status vocabulary and the §12 V1 vocabulary are both
-# mapped, because Step 1 (which introduces the §12 names) has not landed. A
-# status that is absent from this table is deliberately left unsectioned rather
-# than guessed into one of the five.
-STATUS_SECTIONS: dict[str, str] = {
-    # §12 V1 vocabulary
-    "running": BOARD_SECTION_RUNNING,
+# §16 board layout, keyed by the §12 *display* vocabulary only.
+#
+# Per the SPEC §12.2 ruling there is no repo-wide status migration: the
+# persisted vocabulary stays TASK_STATUSES and `agent_taskflow.status_vocab` is
+# the single place the two are bridged. This projection therefore keeps no copy
+# of that bridge — it converts persisted -> display via `to_display_status()`
+# and only decides which of the five §16 sections a display status belongs to.
+#
+# A §12 status absent from this table has no §16 section and is deliberately
+# left unsectioned rather than guessed into one of the five.
+DISPLAY_STATUS_SECTIONS: dict[str, str] = {
     "preparing": BOARD_SECTION_RUNNING,
+    "running": BOARD_SECTION_RUNNING,
     "validating": BOARD_SECTION_RUNNING,
-    "integrating": BOARD_SECTION_RUNNING,
     "ready_for_integration": BOARD_SECTION_RUNNING,
-    "ready": BOARD_SECTION_READY,
+    "integrating": BOARD_SECTION_RUNNING,
     "queued": BOARD_SECTION_READY,
+    "ready": BOARD_SECTION_READY,
     "blocked": BOARD_SECTION_BLOCKED,
     "paused": BOARD_SECTION_PAUSED,
     "needs_review": BOARD_SECTION_READY_FOR_REVIEW,
-    # existing repository vocabulary
-    "implementing": BOARD_SECTION_RUNNING,
-    "in_progress": BOARD_SECTION_RUNNING,
-    "waiting_approval": BOARD_SECTION_READY_FOR_REVIEW,
-    "waiting_for_review": BOARD_SECTION_READY_FOR_REVIEW,
-    "review": BOARD_SECTION_READY_FOR_REVIEW,
 }
+
+#: §12 display statuses that §16 gives no board section, in §12 order.
+UNSECTIONED_DISPLAY_STATUSES: tuple[str, ...] = tuple(
+    status
+    for status in DISPLAY_STATUS_SEQUENCE
+    if status not in DISPLAY_STATUS_SECTIONS
+)
 
 BOARD_NOTES: tuple[str, ...] = (
     "Read-only projection of persisted SQLite state. Mission Control renders "
     "lifecycle; it does not own it (SPEC 2.1, SPEC 44).",
-    "A Ticket in needs_decision is listed as unsectioned: SPEC 16 shows five "
-    "board sections and does not include needs_decision. Flagged, not guessed.",
+    "Statuses are persisted in the legacy TASK_STATUSES vocabulary and shown "
+    "in the SPEC 12 display vocabulary; agent_taskflow.status_vocab is the "
+    "single bridge (SPEC 12.2).",
+    "SPEC 16 shows five board sections. These display statuses have none and "
+    "are listed as unsectioned rather than guessed into a section: "
+    + ", ".join(UNSECTIONED_DISPLAY_STATUSES)
+    + ".",
     "SPEC 32.1 PR fields are read-only here and may be absent or null; the "
     "Step 2 watcher is their sole writer.",
 )
@@ -156,6 +172,20 @@ def _row_value(row: sqlite3.Row, key: str) -> Any:
     return row[key] if key in row.keys() else None
 
 
+def _display_status(persisted_status: str) -> str | None:
+    """Return the §12 display name for a persisted status, or ``None``.
+
+    `status_vocab` is total over `TASK_STATUSES`, so ``None`` only comes back
+    for a value that is not a known status at all. A render must never fail on
+    one, so it is reported as unmapped and the Ticket is left unsectioned.
+    """
+
+    try:
+        return to_display_status(persisted_status)
+    except StatusVocabularyError:
+        return None
+
+
 # -- dataclasses -----------------------------------------------------------
 
 
@@ -196,6 +226,7 @@ _TICKET_DISPLAY_FIELDS: tuple[str, ...] = (
     "repo_path",
     "priority",
     "status",
+    "display_status",
     "section",
     "branch",
     "worktree_path",
@@ -215,7 +246,10 @@ class BoardTicket:
 
     task_key: str
     repository: str
+    #: The persisted TASK_STATUSES value — the auditable truth (§44).
     status: str
+    #: The §12 display name for `status`, via status_vocab (§12.2).
+    display_status: str | None = None
     section: str | None = None
     title: str | None = None
     repo_path: str | None = None
@@ -247,6 +281,7 @@ class BoardTicket:
             "task_key": self.task_key,
             "repository": self.repository,
             "status": self.status,
+            "display_status": self.display_status,
             "section": self.section,
             "title": self.title,
             "repo_path": self.repo_path,
@@ -490,7 +525,12 @@ def _build_ticket(
     snapshot: AttemptProgressSnapshot | None,
 ) -> BoardTicket:
     status = str(row["status"])
-    section = STATUS_SECTIONS.get(status.lower())
+    display_status = _display_status(status)
+    section = (
+        DISPLAY_STATUS_SECTIONS.get(display_status)
+        if display_status is not None
+        else None
+    )
     blocker, hint = _blocker(row)
     steps = (
         snapshot.ordered_steps()
@@ -503,6 +543,7 @@ def _build_ticket(
         task_key=row["task_key"],
         repository=str(row["project"]),
         status=status,
+        display_status=display_status,
         section=section,
         title=_row_value(row, "title"),
         repo_path=_row_value(row, "repo_path"),
@@ -676,9 +717,10 @@ __all__ = [
     "BOARD_SECTION_READY_FOR_REVIEW",
     "BOARD_SECTION_RUNNING",
     "DASH",
+    "DISPLAY_STATUS_SECTIONS",
     "PR_FIELD_NAMES",
     "REALTIME_PROJECTION_SCHEMA_VERSION",
-    "STATUS_SECTIONS",
+    "UNSECTIONED_DISPLAY_STATUSES",
     "BoardProjection",
     "BoardSection",
     "BoardTicket",
