@@ -28,6 +28,7 @@ from agent_taskflow.runtime_progress_schema import (
     migrate_runtime_progress,
 )
 from agent_taskflow.store import init_db
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 
 
 #: The only tables Step 3's migration may create.
@@ -83,10 +84,13 @@ class MigrationSchemaDiffTests(SchemaDiffTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        # Fixture: the base schema as API startup builds it (which now carries
-        # Step 1's `tasks_ticket_fields`), plus the lifecycle schema an operator
-        # installs on purpose. Step 3's migration runs on top of exactly this.
+        # Fixture: a database as an operator prepares it before Step 3's
+        # migration — the base schema, Step 1's explicit Ticket-column
+        # migration (it no longer runs at startup), and the lifecycle schema.
+        # Step 3's migration runs on top of exactly this, so the diff also
+        # proves it leaves Step 1's columns and unique indexes untouched.
         init_db(self.db_path)
+        migrate_ticket_fields(self.db_path)
         migrate_task_attempt_lifecycle(self.db_path)
         self.before = schema_snapshot(self.db_path)
         migrate_runtime_progress(self.db_path)

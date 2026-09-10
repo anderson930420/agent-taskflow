@@ -2,9 +2,11 @@
 
 Branch: `task/v1-step3`
 Draft PR: https://github.com/anderson930420/agent-taskflow/pull/197
-Base: `4266c02` (`main`), with `task/v1-step1` merged in **twice** — first for
-the SPEC §12.2 status-vocabulary bridge, then for its post-review rework that
-collapsed Tickets into `tasks`. Merges only; never rebased (§4.6).
+Base: `4266c02` (`main`), with `task/v1-step1` merged in **three times** — for
+the SPEC §12.2 status-vocabulary bridge, for its post-review rework that
+collapsed Tickets into `tasks`, and for its third rework (explicit Ticket-column
+migration, fail-closed startup, 409 on a branch collision). Merges only; never
+rebased (§4.6, §4.10).
 Spec: `~/agent-taskflow-ops/v1/SPEC.md` §42 Step 3
 Instructions: `~/agent-taskflow-ops/v1/step3.md`
 
@@ -201,9 +203,10 @@ for tests; the default is unbounded.
    which was false for the app as a whole. What is true: `create_app` never runs
    Step 3's `migrate_runtime_progress`, and that migration never chains another
    (pinned by `test_startup_runs_no_step3_migration`). What is also true: the
-   lifespan calls `store.init_db()` (pre-existing on `main`, and it applies
-   Step 1's `tasks_ticket_fields`) and `ticket_store.init_db()` (Step 1). Those
-   are startup migrations in code that is not Step 3's — see §4.8. The read path
+   lifespan still calls `store.init_db()`, which is pre-existing on `main` and
+   runs its legacy `_MIGRATIONS` registry. Since Step 1's third rework it no
+   longer applies Step 1's columns, and `ticket_store.init_db()` fails closed
+   instead of migrating — see §4.8. The read path
    tolerates Step 3's tables being absent and renders an all-`pending` board.
 7. **`WORKFLOW.md` was not edited.** Repo convention gives each component a
    paragraph there, but that is outside the layers step3.md allows and CLAUDE.md
@@ -386,27 +389,30 @@ write it in the handoff note instead of proceeding"):
 executor loop, and where a Ticket's Attempt gets created so there is something
 to attach steps to. Not repaired here.
 
-### 4.8 "Nothing may run migrations at process startup" contradicts existing code — STOP CONDITION HIT
+### 4.8 "Nothing may run migrations at process startup" — PARTLY RESOLVED; still contradicts `main`
 
-For Step 3's own code the ruling now holds and is tested: the app never applies
+For Step 3's own code the rule holds and is tested: the app never applies
 `v1_step3_runtime_progress_v1`, and that migration chains nothing
 (`test_startup_runs_no_step3_migration`,
 `tests/test_runtime_progress_schema_diff.py`).
 
-For the app as a whole it does not hold, and the code that breaks it is not
-Step 3's. `create_app`'s lifespan runs:
+**Step 1's half is resolved by Step 1's third rework** (`dabc709`, merged here,
+§4.10). `tasks_ticket_fields` is gone from `store.py`'s `_MIGRATIONS` registry
+and runs only from the operator script `scripts/migrate_ticket_fields.py`.
+`ticket_store.init_db()` no longer migrates: it ensures the base schema, then
+fails closed with `TicketFieldsMigrationRequired` when Step 1's columns are
+missing. Both behaviours were observed for this handoff (§6).
 
-- `store.init_db()` — **pre-existing on `main`**. It creates the base tables and
-  applies `store.py`'s `_MIGRATIONS` registry, which Step 1 extended with
-  `tasks_ticket_fields` (ten columns and two unique indexes on `tasks`).
-- `ticket_store.init_db()` — **Step 1**. It calls the same `init_task_db`.
+**What still contradicts the rule is pre-existing on `main`.** Startup still
+calls `store.init_db()`, which creates the base tables and runs the three
+legacy migrations left in its `_MIGRATIONS` registry (`tasks_blocked_reason`,
+`tasks_executor_selection`, `task_worktrees_base_sha`), and
+`ticket_store.init_db()` calls the same `init_task_db` again before its gate.
+That is neither Step 3's code nor Step 1's rework, so it is reported, not
+repaired.
 
-Changing either would alter `main`'s startup contract and Step 1's code, both
-outside Step 3's layers, so this is reported, not repaired.
-
-**Decision needed from the human:** whether the ruling is scoped to Step 3's
-migration (satisfied) or is repo-wide, in which case `store.init_db()` and
-`ticket_store.init_db()` at startup need their own ticket.
+**Decision needed from the human:** whether the rule is repo-wide, in which
+case `store.init_db()`'s startup migrations need their own ticket.
 
 ### 4.9 Review item 3c — the reviewer's reproduction, run for real
 
@@ -433,7 +439,60 @@ they would have rendered `—`. It now prefers a `task_worktrees` record (a
 worktree that was actually prepared) and falls back to the `tasks` columns.
 Pinned by `TicketReproductionTests` in `tests/test_api_realtime.py` — five
 tests, including a `blocked_by` Ticket rendering `Waiting for <key>` from
-`tasks.blocked_by`.
+`tasks.blocked_by`. Since the third Step 1 merge its fixture runs Step 1's
+explicit migration first, as an operator must; the five tests still pass
+(§4.10).
+
+### 4.10 Third Step 1 merge (`dabc709`) and the fixture fallout
+
+Step 1 was reworked a third time: its `tasks` columns now come only from the
+operator-run `scripts/migrate_ticket_fields.py`, API startup fails closed when
+they are absent, and Ticket creation refuses a branch-name collision with 409.
+It was merged here as `533e9ab` — a merge, not a rebase, with **no
+conflicts**. Step 1's history was linear on `dcad084`, so only `dabc709` came
+in. `main.py` took Step 1's fail-closed comment beside the realtime routes, and
+`HANDOFF.md`'s appendix now carries Step 1's rewritten handoff.
+
+**Fallout, measured before touching anything.** On the merged tree, before any
+fixture change, the eight Step 3 test files ran **27 failed / 176 passed**. All
+27 were in `tests/test_api_realtime.py`, and every one entered the API lifespan
+on a database without Step 1's columns:
+
+| Fixture | Lifespan entry | Failed |
+|---|---|---|
+| `RealtimeApiTestCase.setUp` (board, ticket and SSE endpoint classes) | `TestClient(...).__enter__()` | 21 |
+| `TicketReproductionTests.setUp` (fresh database) | `TestClient(...).__enter__()` | 5 |
+| `DefaultAppWiringTests.test_startup_runs_no_step3_migration` (fresh database) | `with TestClient(...)` | 1 |
+
+**Fix: fixtures only.** Each now runs Step 1's migration before entering the
+lifespan: `TaskMirrorStore(db).init_db()` where the database is fresh (the
+migration needs the base schema and fails closed without it), then
+`migrate_ticket_fields(db)`. Test intent is unchanged — the startup test still
+asserts that startup installs none of Step 3's schema. After the fix, the same
+eight files plus Step 1's ticket suites ran **264 passed, 0 failed**.
+
+Unaffected, checked across all three lifespan entry patterns: the second app in
+the SSE update test reuses the already-migrated database, and
+`test_default_app_exposes_realtime_routes` never enters its client. The
+projection, store, schema-diff and migration-script tests never start the app.
+
+**Convention.** Fixtures call `migrate_ticket_fields()`, the function
+`scripts/migrate_ticket_fields.py` wraps. That is the convention Step 1's
+handoff sets ("Fixture convention (4a)"), where the script itself runs end to
+end as a subprocess in Step 1's own script test. The same open question
+applies here: if "run the script explicitly" means a subprocess in every
+fixture, switching is mechanical, at a noticeable cost to suite time.
+
+**Optional hardening, not fallout.** `tests/test_runtime_progress_schema_diff.py`
+did not fail, but its fixture comment claimed API startup applies Step 1's
+columns, which `dabc709` made false. The fixture now also applies
+`migrate_ticket_fields`, so it mirrors an operator-prepared database and the
+whole-schema diff proves Step 3's migration leaves Step 1's columns and unique
+indexes untouched.
+
+**Not changed, and not needed:** Step 1's code, the fail-closed startup gate,
+and `init_db()`. No Step 3 production file was touched in this round — only
+tests and this handoff.
 
 ### Not hit
 
@@ -448,6 +507,23 @@ This round's counts use `python -m unittest discover -s tests` — the repo's
 documented runner, and the one the reviewer used. Earlier rounds quoted pytest
 counts, which are not comparable to unittest's `Ran N tests`; they are kept
 below for history only.
+
+### Third Step 1 merge round (`dabc709`)
+
+| Point | Tree | Result |
+|---|---|---|
+| BEFORE the merge | `8f26d8f` | Ran 4732 tests, OK (skipped=8) |
+| AFTER the merge and the fixture fixes | `533e9ab` + the fixture fixes in the commit carrying this handoff | Ran 4776 tests, OK (skipped=8) |
+
+- Delta **+44** is entirely Step 1's: `dabc709` reports its own suite going 4529 → 4573 (+44). The fixture fixes here add no test methods; they only change `setUp` bodies and imports.
+- **No test went red** in either full run. The only reds this round were the 27 expected fixture failures, measured on the merged tree before the fix and listed in §4.10. Skips unchanged at 8.
+
+| Command | Result |
+|---|---|
+| `python -m compileall agent_taskflow scripts tests` | OK |
+| `scripts/validate_workflow_contract.py` | passed |
+| `scripts/validate_workflow_policy.py` | passed |
+| `cd mission-control && npm run build` | compiled, TypeScript clean — rerun although no `mission-control/` file changed in this round |
 
 ### Ruling 5 round (NEEDS DECISION section)
 
@@ -579,7 +655,7 @@ symlink that points outside the project root and the build fails with
 ### Manual smoke (optional)
 
 Against a **scratch** database — never the production one. This exact sequence
-was run for this handoff:
+was run for this handoff, after the third Step 1 merge:
 
 ```bash
 DB=/tmp/step3-smoke/state.db
@@ -591,18 +667,26 @@ $PY scripts/migrate_runtime_progress.py --db-path "$DB"
 # 2. Install the lifecycle schema on purpose, as the refusal instructs.
 $PY scripts/migrate_task_attempt_lifecycle.py --db-path "$DB"
 
-# 3. Now Step 3's migration installs its two tables and adds no tasks column.
+# 3. Step 3's migration now installs its two tables and adds no tasks column.
 $PY scripts/migrate_runtime_progress.py --db-path "$DB"
+
+# 4. Step 1's explicit Ticket-column migration; the API will not start without it.
+$PY scripts/migrate_ticket_fields.py --db-path "$DB"
 ```
 
-Observed: step 1 exit 2 with the operator instructions and no file created;
-step 2 exit 0; step 3 exit 0 with `task_columns_added_by_this_migration: []`
-and `lifecycle_migration_run_by_this_script: false`.
+Observed: step 1 exit 2, no file created; step 2 exit 0; step 3 exit 0 with
+`task_columns_added_by_this_migration: []`; step 4 exit 0 with
+`still_missing: []`. Entering the API lifespan against that database then
+succeeded, and `GET /api/realtime/board` returned 200 with the six sections
+`NEEDS DECISION, RUNNING, READY, BLOCKED, PAUSED, READY FOR REVIEW`. As a
+control, entering the lifespan on a fresh database without step 4 was refused
+with `TicketFieldsMigrationRequired`.
 
 Caveat: `migrate_task_attempt_lifecycle.py` has no source-package bootstrap, so
 it imports `agent_taskflow` from the venv's editable install — which points at
 the **main** checkout, not this worktree. That is harmless here because neither
-branch changes the lifecycle migration.
+branch changes the lifecycle migration. `migrate_runtime_progress.py` and
+`migrate_ticket_fields.py` both bootstrap this worktree's source.
 
 Then point the API at it and read:
 

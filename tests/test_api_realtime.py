@@ -30,6 +30,7 @@ from agent_taskflow.runtime_progress import find_progress_estimates
 from agent_taskflow.runtime_progress_store import RuntimeProgressStore
 from agent_taskflow.runtime_progress_schema import RUNTIME_PROGRESS_MIGRATION
 from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 from agent_taskflow.ticket_models import (
     DEFAULT_TICKET_PRIORITY,
     TICKET_PRIORITY_SEQUENCE,
@@ -169,6 +170,10 @@ class RealtimeApiTestCase(unittest.TestCase):
             activity="Adding frontend regression tests",
         )
 
+        # The API fails closed until Step 1's explicit migration has run
+        # (scripts/migrate_ticket_fields.py). Fixtures call the function the
+        # script wraps, per Step 1's fixture convention.
+        migrate_ticket_fields(self.db_path)
         self.app = create_app(
             self.db_path,
             realtime_options=RealtimeStreamOptions(
@@ -467,8 +472,9 @@ class TicketReproductionTests(unittest.TestCase):
     `tasks` directly: the Ticket exists only because Step 1's route wrote it,
     so this proves the board and detail endpoints read the canonical table.
 
-    Also the production shape: the app is built exactly as startup builds it,
-    with no attempt or progress migration applied.
+    Also the production shape: the database carries only what an operator
+    runs before starting the API — the base schema and Step 1's explicit
+    Ticket-column migration — and no attempt or progress migration.
     """
 
     def setUp(self) -> None:
@@ -490,6 +496,9 @@ class TicketReproductionTests(unittest.TestCase):
         self.priority = next(
             p for p in TICKET_PRIORITY_SEQUENCE if p != DEFAULT_TICKET_PRIORITY
         )
+        # The API fails closed until Step 1's explicit migration has run.
+        TaskMirrorStore(self.db_path).init_db()
+        migrate_ticket_fields(self.db_path)
         self.client_context = TestClient(
             create_app(
                 self.db_path,
@@ -587,6 +596,10 @@ class DefaultAppWiringTests(unittest.TestCase):
         # 3a — nothing may run Step 3's migration at process startup.
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "state.db"
+            # Step 1's gate needs its migration first; this test only asserts
+            # that startup then installs none of Step 3's schema.
+            TaskMirrorStore(db_path).init_db()
+            migrate_ticket_fields(db_path)
             with TestClient(create_app(db_path)):
                 pass
             with sqlite3.connect(db_path) as conn:
