@@ -17,10 +17,63 @@ Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 Status: **implementation-complete, awaiting human review.** Nothing is
 approved, merged to `main`, or finally complete.
 
-`task/v1-step1` has been merged into this branch (merge commit, not a rebase)
-to bring in `agent_taskflow/status_vocab.py` for the SPEC §12.2 ruling — see
-§3(a). This branch therefore contains Step 1 *and* Step 2; PR #196 reviews
-Step 2.
+`task/v1-step1` has been merged into this branch twice, both times as a merge
+commit and never a rebase: first (`96a6cd3`) to bring in
+`agent_taskflow/status_vocab.py` for the SPEC §12.2 ruling — see §3(a) — and
+again (`9e09ad7`) for the reworked Step 1 persistence layer — see "Merge of
+the reworked Step 1" below. This branch therefore contains Step 1 *and*
+Step 2; PR #196 reviews Step 2.
+
+---
+
+## Merge of the reworked Step 1 (`dcad084`)
+
+`task/v1-step1` was reworked after the first merge: the separate `tickets`
+table is gone, Ticket rows now live in the legacy `tasks` table, and task keys
+come from one global `AT-0001` counter. It was merged into this branch again
+as merge commit `9e09ad7` (parents `76a0cfa` and `dcad084`) — a merge, not a
+rebase, because this branch is published as draft PR #196 and §26 forbids
+force-pushing a published PR branch. No other Step 2 rework was taken on.
+
+**Conflicts: one file, resolved mechanically.**
+
+- `agent_taskflow/store.py` — both branches added a named migration in the
+  same three places (`SCHEMA_MIGRATIONS`, the migration functions, and
+  `_MIGRATIONS`). Both were kept whole: Step 1's `tasks_ticket_fields` first,
+  since it alters `tasks`, then Step 2's `v1_step2_integration_tables`, whose
+  tables reference `tasks`. The middle hunk could not be resolved by pasting
+  the two sides together: git folded the closing `"""` / `)` that both
+  functions share into a single tail, so a naive union would have left Step
+  2's migration unterminated with Step 1's code inside its SQL string. Each
+  function got its own closing lines. Checked on a fresh DB: both migrations
+  apply idempotently, Step 1's ticket columns are on `tasks`, Step 2's tables
+  exist, and no separate `tickets` table is created. The only tests that
+  inspect the migration list are set-based, so the order breaks nothing.
+- `HANDOFF.md` auto-merged. Git applied Step 1's handoff edits to the appendix
+  that carries Step 1's handoff, which is now byte-identical to
+  `task/v1-step1`'s `HANDOFF.md` at `dcad084`.
+
+**No semantic conflict with Step 2.** Step 1's `status_vocab.py` change only
+adds a `persisted_statuses_for_display` helper; no display↔persisted mapping
+moved, so Step 2's `integration_schema` status constants resolve exactly as
+before. No Step 2 module or test imported the removed `ticket_schema` or the
+Ticket store.
+
+**Test counts, before and after the merge:**
+
+| | `pytest tests -q` |
+| --- | --- |
+| Before the merge (`76a0cfa`) | `4748 passed, 8 skipped, 0 failed` |
+| After the merge (`9e09ad7`) | `4767 passed, 8 skipped, 0 failed` |
+
+The packaged `agent_taskflow.cli.local_validation` also passed after the
+merge (exit 0, every required check): its `unittest` step went from
+`Ran 4754` to `Ran 4773`, `OK (skipped=8)` — the same +19.
+
+The +19 is exactly Step 1's rework: its five test files collect 133 tests now
+against 114 at the previous merge (`764c9ff`), and it deleted no test file.
+The before count is the full run on `76a0cfa` from the previous turn — the
+identical commit this merge started from, with a clean tree.
 
 ---
 
@@ -401,9 +454,10 @@ $VENV -m agent_taskflow.cli.local_validation
 | `pytest tests -q` (Step 2, before the Step 1 merge) | `4615 passed, 8 skipped, 0 failed` in 509s |
 | `pytest tests -q` (after the Step 1 merge + §12.2 rework) | `4731 passed, 8 skipped, 0 failed` in 605s |
 | `pytest tests -q` (after Rulings 1–3) | `4748 passed, 8 skipped, 0 failed` in 522s |
+| `pytest tests -q` (after the reworked Step 1 merge) | `4767 passed, 8 skipped, 0 failed` in 697s |
 | `compileall agent_taskflow scripts tests` | exit 0 |
 | Step 2 tests only | 244 passed across 14 files |
-| Step 1 tests merged in | 114 passed across 5 files |
+| Step 1 tests merged in | 133 passed across 5 files (114 before the Step 1 rework) |
 
 The counts reconcile exactly, which is the point of listing them:
 
@@ -420,6 +474,9 @@ The counts reconcile exactly, which is the point of listing them:
           3 cleanup, 1 controller, 3 schema)
     ----
     4748  after the rulings
+     +19  Step 1 rework (its 5 test files: 114 -> 133 tests)
+    ----
+    4767  after the reworked Step 1 merge
 
 The skip count is 8 throughout — the same 8 pre-existing skips. No test was
 lost, silently skipped, or newly red at any point.
@@ -427,8 +484,8 @@ lost, silently skipped, or newly red at any point.
 A second full `pytest tests -q` run after the merge, in the foreground, gave
 the identical result: `4731 passed, 8 skipped, 0 failed` in 523s.
 
-`agent_taskflow.cli.local_validation`, run after Rulings 1–3 (exit 0) — every
-required check passed:
+`agent_taskflow.cli.local_validation`, run after the reworked Step 1 merge
+(exit 0) — every required check passed:
 
 | Check | Result |
 | --- | --- |
@@ -437,16 +494,17 @@ required check passed:
 | workflow policy validation | passed |
 | Mission Control golden path smoke | passed |
 | PiExecutor golden path smoke (fake Pi) | passed |
-| unit tests (`unittest discover -s tests -v`) | passed — `Ran 4754 tests`, `OK (skipped=8)`, 607s |
+| unit tests (`unittest discover -s tests -v`) | passed — `Ran 4773 tests`, `OK (skipped=8)`, 617s |
 | compileall | passed |
 | openspec validate | skipped — `openspec` is not on PATH (optional check, pre-existing) |
 
-`unittest` reports 4754 and `pytest` reports 4748 + 8 skipped because the two
+`unittest` reports 4773 and `pytest` reports 4767 + 8 skipped because the two
 runners collect tests differently; both report **zero failures**, and both
 report the same 8 skips as the pre-edit baseline.
 
 **No test went red at any point** — not after Step 2, not after the Step 1
-merge, not after the §12.2 rework, and not after Rulings 1–3. There was no pre-existing failure to
+merge, not after the §12.2 rework, not after Rulings 1–3, and not after the
+reworked Step 1 merge. There was no pre-existing failure to
 report.
 
 The merged Mission Control frontend is byte-identical to `task/v1-step1`'s
