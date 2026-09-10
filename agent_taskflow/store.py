@@ -72,7 +72,6 @@ SCHEMA_MIGRATIONS = (
     "tasks_blocked_reason",
     "tasks_executor_selection",
     "task_worktrees_base_sha",
-    "tasks_ticket_fields",
 )
 
 
@@ -135,49 +134,10 @@ def _migrate_task_worktrees_base_sha(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "task_worktrees", "base_sha", "TEXT")
 
 
-# V1 prompt-first Ticket fields (SPEC §10.1). `tasks` is the only canonical
-# Ticket entity, so the Python-derived Ticket metadata lives here. Legacy rows
-# leave every one of these NULL.
-TASK_TICKET_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("prompt", "TEXT"),
-    ("priority", "TEXT"),
-    ("ai_title_status", "TEXT"),
-    ("branch_slug_source", "TEXT"),
-    ("blocked_by", "TEXT"),
-    ("github_repo", "TEXT"),
-    ("base_branch", "TEXT"),
-    ("branch", "TEXT"),
-    ("worktree_path", "TEXT"),
-    ("commit_message_suggestion", "TEXT"),
-)
-
-
-def _migrate_tasks_ticket_fields(conn: sqlite3.Connection) -> None:
-    for column_name, column_sql in TASK_TICKET_COLUMNS:
-        _add_column_if_missing(conn, "tasks", column_name, column_sql)
-    # One Ticket = One Worktree (SPEC §44), enforced by storage. Partial, so
-    # legacy rows with NULL derived paths never collide.
-    conn.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_tasks_worktree_path
-        ON tasks(worktree_path)
-        WHERE worktree_path IS NOT NULL
-        """
-    )
-    conn.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_tasks_repo_branch
-        ON tasks(repo_path, branch)
-        WHERE branch IS NOT NULL
-        """
-    )
-
-
 _MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (
     ("tasks_blocked_reason", _migrate_tasks_blocked_reason),
     ("tasks_executor_selection", _migrate_tasks_executor_selection),
     ("task_worktrees_base_sha", _migrate_task_worktrees_base_sha),
-    ("tasks_ticket_fields", _migrate_tasks_ticket_fields),
 )
 
 

@@ -11,6 +11,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from agent_taskflow.api.main import create_app
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.scheduler_candidate_discovery import (
     CANDIDATE_SAFETY_FLAGS,
@@ -65,6 +66,8 @@ class SchedulerCandidatesApiTests(unittest.TestCase):
         self.store = TaskMirrorStore(self.db_path)
         self.store.init_db()
 
+        # The API fails closed until the explicit Step 1 migration has run.
+        migrate_ticket_fields(self.db_path)
         self.client_context = TestClient(create_app(self.db_path))
         self.client = self.client_context.__enter__()
 

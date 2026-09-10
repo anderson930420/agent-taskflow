@@ -12,12 +12,15 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from agent_taskflow.models import TaskEventRecord
 from agent_taskflow.status_vocab import persisted_statuses_for_display
 from agent_taskflow.ticket_ai_metadata import TicketAIMetadataAdapter
 from agent_taskflow.ticket_creation import (
+    TicketBranchCheckUnavailableError,
+    TicketBranchCollisionError,
     TicketCreationError,
     TicketCreationRequest,
     create_ticket,
@@ -104,7 +107,7 @@ def build_ticket_router(
     def create_ticket_route(
         request: CreateTicketRequest,
         store: TicketStore = Depends(get_ticket_store),
-    ) -> dict[str, object]:
+    ) -> dict[str, object] | JSONResponse:
         try:
             creation_request = TicketCreationRequest(
                 repository=request.repository,
@@ -118,6 +121,20 @@ def build_ticket_router(
                 projects_config_path=projects_config_path,
                 ai_adapter=ai_adapter,
             )
+        except TicketBranchCollisionError as exc:
+            # PR #195 ruling 4b: refuse, name the existing branch, never suffix.
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "detail": str(exc),
+                    "branch": exc.branch,
+                    "conflict_source": exc.source,
+                    "existing": exc.existing,
+                },
+            )
+        except TicketBranchCheckUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except TicketCreationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

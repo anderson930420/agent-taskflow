@@ -15,52 +15,71 @@ merged. The PR is a draft.
 
 Newest first. Each was implemented as ruled; nothing here re-argues them.
 
-1. **PR #195 review ruling.** The review verdict was accepted. Root cause:
-   Step 1 had created a separate `tickets` table, but the legacy `tasks` table
-   is the **only** canonical Ticket entity. Applied:
-   - the `tickets` and `ticket_events` tables and their migration are gone;
-   - Step 1's columns now live on `tasks`, and POST `/api/tickets` inserts
-     into `tasks`;
-   - task keys come from a **single global counter**, zero-padded to 4 digits
-     (`AT-0001`). The per-prefix counter is gone;
-   - the Create Ticket link in `TaskBoard.tsx` is reverted, since the Board is
-     Step 3 / §16 territory;
-   - §6 below is rewritten, and the handoff's earlier false claims about
-     `models.py` are corrected (see §1).
-2. **§12.2 status-vocabulary ruling.** `TASK_STATUSES` stays the persisted
-   vocabulary, the §12 names are the display vocabulary, and
+1. **Ruling 4a — Step 1's `tasks` columns move to an explicit migration.** The
+   `tasks_ticket_fields` migration — 10 columns, 2 unique indexes — is out of
+   `init_db()` and out of the startup path. Only
+   **`scripts/migrate_ticket_fields.py`**, run by hand, installs it. Startup
+   fails closed: if any of those columns or indexes is missing, the Mission
+   Control API refuses to start, and the error names that script. Neither
+   `store.init_db()` nor `TicketStore.init_db()` applies it. The pre-existing
+   legacy migrations stay inside `store.init_db()`; moving them is a recorded
+   follow-up (§10).
+2. **Ruling 4b — branch-name collision at Ticket creation.** If the derived
+   branch already exists, creation is refused with HTTP 409 naming the
+   branch. "Exists" means recorded in `tasks`, or present in the repository as
+   a local or remote-tracking branch. The name is never auto-suffixed, and a
+   refusal writes no row and no audit event. The repository check reads the
+   ref storage directly, so the §43 negative-scope tests did not change — they
+   are byte-identical to `dcad084` (verified with a diff).
+3. **PR #195 review ruling.** `tasks` is the only canonical Ticket entity. The
+   `tickets` / `ticket_events` tables are gone, Step 1's columns live on
+   `tasks`, task keys come from one global `AT-0001` counter, the Board's
+   Create Ticket link is reverted, and §6 was rewritten.
+4. **§12.2 status-vocabulary ruling.** `TASK_STATUSES` stays the persisted
+   vocabulary, the §12 names are for display only, and
    `agent_taskflow/status_vocab.py` bridges them. See §4.
 
 ---
 
 ## 1. Inventory, corrected
 
-**Corrections to earlier versions of this handoff.** Two statements were
-false, and so was the stop-conditions section (rewritten in §6):
+**Corrections to earlier versions of this handoff.** Earlier revisions said
+`agent_taskflow/models.py` was "unchanged" and that "`models.py` / `store.py` /
+`schemas.py` and the legacy `tasks` mirror are untouched". `models.py` is
+modified: the §12.2 commit adds five values to `TASK_STATUSES`. The previous
+revision also listed `store.py` as modified. After ruling 4a it is **unchanged
+again — byte-identical to base `4266c02`** — because the migration it briefly
+carried moved to `ticket_fields_schema.py`.
 
-- The inventory table listed `agent_taskflow/models.py` as "reuse,
-  unchanged". The branch modifies it — the §12.2 commit adds five values to
-  `TASK_STATUSES`.
-- A sentence claimed "`models.py` / `store.py` / `schemas.py` and the legacy
-  `tasks` mirror are untouched". `models.py` is modified, and after the PR #195
-  ruling so are `store.py` and the `tasks` table. `schemas.py` is untouched.
+Existing files, and what this branch does to each:
 
-Existing modules, and what this branch does to each:
-
-| Module | Action | What |
+| File | Action | What |
 | --- | --- | --- |
 | `agent_taskflow/models.py` | **modified, additive** | 5 values added to `TASK_STATUSES` (§12.2 ruling) |
-| `agent_taskflow/store.py` | **modified, additive** | new `tasks_ticket_fields` migration: 10 nullable columns on `tasks` and 2 partial unique indexes |
-| `agent_taskflow/api/main.py` | **extended** | import router, construct `TicketStore`, `include_router` |
-| `mission-control/components/TaskBoard.tsx` | **reverted** | byte-identical to base `4266c02` |
+| `agent_taskflow/store.py` | **unchanged** | byte-identical to `4266c02` (ruling 4a) |
+| `agent_taskflow/api/main.py` | **extended** | import router, construct `TicketStore`, `include_router`, plus a comment marking the fail-closed lifespan gate |
+| `mission-control/components/TaskBoard.tsx` | **reverted** | byte-identical to `4266c02` |
+| 12 legacy test files | **fixture change only** | before entering the API lifespan, run the Step 1 migration: `test_api`, `test_api_actions`, `test_api_evidence_readback`, `test_api_scheduler_candidates`, `test_api_scheduler_confirmations`, `test_api_scheduler_proposals`, `test_workflow_policy_read_only_api_contract`, `test_review_evidence`, `test_ui_create_dispatch_dogfood`, `test_run_scheduler_proposal_creation_hardening_smoke`, `test_run_scheduler_confirmation_preparation_hardening_smoke`, `test_api_cors` |
+| 9 smoke scripts | **fixture change only** | before `create_app(...)`, init the legacy schema and run the Step 1 migration: `run_mission_control_smoke.py`, `run_pr_handoff_golden_path_smoke.py`, `run_issue_to_prepared_workspace_smoke.py`, `run_draft_pr_fake_gh_golden_path_smoke.py`, `run_scheduler_proposal_creation_hardening_smoke.py`, `run_scheduler_confirmation_preparation_hardening_smoke.py`, `run_pi_executor_golden_path_smoke.py`, `run_runtime_chain_dogfood_smoke.py`, `run_prepared_workspace_golden_path_smoke.py` |
 | `projects.py`, `config.py`, `worktree.py`, `artifacts.py`, `tasks.py`, `_helpers.py`, `api/schemas.py`, `mission-control/lib/api.ts` | reused, unchanged | |
+
+The 21 fixture changes are the direct cost of ruling 4a: each of those tests
+and smoke scripts starts the API against a fresh database, and startup now
+refuses until the migration has run. Every change inserts the migration call
+and nothing else, and no assertion was altered. One side effect:
+`test_api.test_app_factory_uses_temp_db_path` now pre-creates its database, so
+its `db_path.exists()` assertion no longer proves the lifespan created the
+file. The new fail-closed tests cover lifespan behaviour on a fresh database.
 
 No existing column, table, index or row is altered or removed.
 
 New modules: `ticket_models.py`, `ticket_repositories.py`,
 `ticket_metadata.py`, `ticket_ai_metadata.py`, `ticket_store.py`,
-`ticket_creation.py`, `api/tickets.py`, `status_vocab.py`, plus the Mission
-Control form, the detail page and `lib/tickets.ts`.
+`ticket_creation.py`, `api/tickets.py`, `status_vocab.py`,
+**`ticket_fields_schema.py`** (4a), **`git_ref_storage.py`** (4b), plus the
+Mission Control form, the detail page and `lib/tickets.ts`.
+
+New script: **`scripts/migrate_ticket_fields.py`** (4a).
 
 Removed: `agent_taskflow/ticket_schema.py` — the `tickets` table and its
 `v1_ticket_creation_v1` migration.
@@ -71,79 +90,118 @@ Removed: `agent_taskflow/ticket_schema.py` — the `tickets` table and its
 
 **A Ticket is a `tasks` row.** Prompt-first creation inserts a normal `tasks`
 row (`project`, `board`, `title`, `status`, `repo_path`, `artifact_dir`,
-timestamps) and fills the Step 1 columns the `tasks_ticket_fields` migration
-adds: `prompt`, `priority`, `ai_title_status`, `branch_slug_source`,
-`blocked_by`, `github_repo`, `base_branch`, `branch`, `worktree_path`,
-`commit_message_suggestion`. Legacy rows leave them NULL. The creation audit
-event is a `created` row in the existing `task_events` log, with payload
-`kind: ticket_created`.
+timestamps) and fills Step 1's ten columns: `prompt`, `priority`,
+`ai_title_status`, `branch_slug_source`, `blocked_by`, `github_repo`,
+`base_branch`, `branch`, `worktree_path`, `commit_message_suggestion`. Legacy
+rows leave them NULL. The creation audit event is a `created` row in the
+existing `task_events` log, with payload `kind: ticket_created`.
 
-Key allocation, the `tasks` insert and the audit write share one
-`BEGIN IMMEDIATE` transaction.
+**Explicit migration (ruling 4a).** Only `scripts/migrate_ticket_fields.py`
+installs the ten columns and the two partial unique indexes (logic in
+`agent_taskflow/ticket_fields_schema.py`). The script:
 
-**Task keys — one global counter, `AT-0001`.** I searched for an existing
-generator before writing one, and **there isn't one**:
-`scripts/kanban_create.py` takes `--task-key` from the user and only validates
-it, and `github_issue_intake` derives `AT-GH-<issue>` from the issue number.
-The new counter follows the `AT-0001` convention those scripts' help text
-already uses. It counts every `AT-<digits>` key already in `tasks`, legacy
-ones included, so a Ticket can never reuse a key — or the
-`.worktrees/<key>` path — that an existing task owns. Other shapes
-(`AT-GH-188`, `AT-MC-SMOKE`) are ignored.
+- requires the legacy task-mirror schema (`tasks`, `schema_migrations`) and
+  never installs it. If that schema is missing it exits 2 and writes nothing;
+  a database file that doesn't exist is never created;
+- is idempotent, and prints a JSON report of exactly which columns and
+  indexes it added;
+- records `tasks_ticket_fields` in `schema_migrations`.
+
+Startup fails closed. The API lifespan calls `TicketStore.init_db()`, which
+runs the legacy `store.init_db()` and then `require_ticket_fields()`. That
+raises `TicketFieldsMigrationRequired` — naming the script, the database path
+and every missing column or index — and never applies anything. On a fresh
+database the operator flow is: start the API (the legacy schema is created,
+then startup refuses), run the script, start the API again.
+
+**Branch collision (ruling 4b).** Inside the creation `BEGIN IMMEDIATE`
+transaction, in this order: allocate the key, derive the metadata, refuse if
+the derived branch is already recorded for the same `repo_path` in `tasks`
+(the ruling) or in `task_worktrees` (added — also recorded branch data), then
+refuse if the repository already holds `refs/heads/<branch>` or
+`refs/remotes/<remote>/<branch>`, loose or packed, and only then insert.
+
+- A refusal rolls the transaction back: no row, no audit event, no key
+  consumed, no suffixed retry.
+- The API returns **409** with `{ok, detail, branch, conflict_source, existing}`.
+  `detail` names the branch, and `conflict_source` is `tasks`,
+  `task_worktrees` or `repository`.
+- The repository check (`agent_taskflow/git_ref_storage.py`) opens and stats
+  files only. It follows `.git` directories, `gitdir:` files and `commondir`
+  (linked worktrees). It spawns no process and writes nothing — a test
+  snapshots every file's mtime and size around the lookup.
+- Whatever it cannot read with certainty fails closed: the reftable backend,
+  an unreadable file, a malformed `.git` file. Creation is then refused with
+  **503** rather than guessing "no collision".
+- A `repo_path` that doesn't exist, or isn't a Git working tree, holds no
+  branches, so it cannot collide.
+
+**Task keys — one global counter, `AT-0001`.** No sequential generator existed
+in the repo: `kanban_create` takes the key from the user, and issue intake
+derives `AT-GH-<n>`. The new counter follows the `AT-0001` convention their
+help text uses, skips every legacy `AT-<digits>` key, and ignores other shapes.
 
 **Status.** §12.1's display status is persisted through `status_vocab`:
-`ready` → `created`, `blocked` → `blocked`. `queued` is never written.
+`ready` becomes `created`, and `blocked` stays `blocked`. `queued` is never
+written.
 
-**`ai_title_status`** is one of `generated` (the AI title was used),
-`fallback` (AI was attempted and failed, so the §10.1 rule applied), or
-`not_attempted` (no adapter configured, so the §10.1 rule applied).
+**`ai_title_status`** is `generated`, `fallback` or `not_attempted`.
 
-**Visibility.** Because a Ticket is a task, it appears in `/api/tasks` and on
-the existing `/tasks/<key>` page. `/api/tickets/<key>` returns the richer
-Ticket view for prompt-first rows only; legacy rows return 404 there and stay
-on `/api/tasks`.
+**Visibility.** A Ticket appears in `/api/tasks` and on `/tasks/<key>`.
+`/api/tickets/<key>` serves prompt-first rows only.
 
-**Legacy upsert safety.** `TaskMirrorStore.upsert_task` names its columns
-explicitly in `ON CONFLICT DO UPDATE SET`, so a later mirror re-sync of the
-same key cannot clobber the ticket-only columns. Shared legacy columns
-(`title`, `artifact_dir`, `status`, …) follow the existing upsert policy
-unchanged. A test pins that boundary.
+**Legacy upsert safety.** `upsert_task` names its columns explicitly, so a
+mirror re-sync cannot clobber ticket-only columns. A test pins this.
 
-**Structural invariants.** `ux_tasks_worktree_path` (unique `worktree_path`)
-and `ux_tasks_repo_branch` (unique `(repo_path, branch)`) are partial indexes
-over non-NULL values. `One Ticket = One Worktree` is enforced by storage.
+**Structural invariants.** `ux_tasks_worktree_path` and
+`ux_tasks_repo_branch` are partial unique indexes, installed by the script, and
+they keep `One Ticket = One Worktree` enforced at the storage layer.
 
-Step 1 checklist (§42): repo dropdown, prompt-first Ticket, priority, auto
-task key, AI title with deterministic fallback, auto branch, auto worktree
-path (string only), and a basic detail page (`/tickets/<task_key>`).
+Step 1 checklist (§42): repo dropdown, prompt-first Ticket, priority, auto task
+key, AI title with deterministic fallback, auto branch (collision-refusing),
+auto worktree path (string only), and a basic detail page
+(`/tickets/<task_key>`).
 
 ---
 
 ## 3. Acceptance gate
 
-133 tests across five files.
+177 tests across 8 Ticket-related files.
 
 | Gate item | Test |
 | --- | --- |
 | §43.1 create from repo/prompt/priority | `test_ticket_creation.MinimalCreationInputTests` |
 | §43.2 metadata generated automatically | `DerivedMetadataTests` |
-| §43.3 AI title failure cannot block creation | `AiTitleFallbackTests` — raise, hang past deadline, `TimeoutError`, empty, whitespace, `None` |
+| §43.3 AI title failure cannot block creation | `AiTitleFallbackTests` |
 | §43.4 unique worktree/branch derivation | `OneTicketOneWorktreeTests`, `test_ticket_store.AllocationTests` |
-| §44 One Ticket = One Worktree | storage-level uniqueness tests in `AllocationTests` |
+| §44 One Ticket = One Worktree | storage-level uniqueness in `AllocationTests` |
 | §44 all lifecycle mutations auditable | `AuditabilityTests`, `test_ticket_store.AuditTests` |
 | §12.1 / §12.2 initial status | `InitialStatusTests` |
-| negative scope: no Git command | `NegativeScopeTests.test_creation_runs_no_subprocess` |
-| negative scope: no directory created | `NegativeScopeTests.test_creation_creates_no_directory` |
-| ruling: `tasks` is the only entity | `test_ticket_store.CanonicalEntityTests`, `test_api_tickets.TicketsAreTasksTests` |
-| ruling: global `AT-0001` counter | `test_ticket_metadata.TaskKeyTests`, `AllocationTests` |
+| negative scope: no Git command, no directory | `NegativeScopeTests` — **byte-identical to `dcad084`** |
+| PR #195: `tasks` is the only entity | `CanonicalEntityTests`, `TicketsAreTasksTests` |
+| PR #195: global `AT-0001` counter | `TaskKeyTests`, `AllocationTests` |
+| 4a: fresh DB → startup refuses, names the script | `test_ticket_fields_schema.StartupGateTests` |
+| 4a: after the script → startup succeeds | `StartupGateTests.test_after_the_script_runs_startup_succeeds` (runs the real script) |
+| 4a: neither `init_db()` applies it | `NoStartupApplyTests` |
+| 4a: the script is idempotent | `MigrationTests.test_migration_is_idempotent`, `test_migrate_ticket_fields_script` |
+| 4a: schema diff is exactly Step 1's columns and indexes | `SchemaDiffTests` |
+| 4b: branch in `tasks` → 409 naming it | `test_api_tickets.BranchCollisionRouteTests`, `test_ticket_creation.BranchCollisionTests` |
+| 4b: repository branch → 409 naming it | the same, plus `test_git_ref_storage` (local, remote-tracking, packed, linked worktree) |
+| 4b: no row, no event, no directory, no subprocess | asserted in every collision test |
+| 4b: never auto-suffixed, no key consumed | `BranchCollisionTests.test_refusal_never_auto_suffixes_and_consumes_no_key` |
 
-Per file: `test_ticket_metadata` 22, `test_ticket_store` 25,
-`test_ticket_creation` 38, `test_api_tickets` 19, `test_status_vocab` 29.
+Per file: `test_ticket_metadata` 22, `test_ticket_store` 28, `test_ticket_creation` 44, `test_api_tickets` 21, `test_status_vocab` 29, `test_ticket_fields_schema` 12, `test_migrate_ticket_fields_script` 5, `test_git_ref_storage` 16.
+
+**Fixture convention (4a).** Fixtures call `migrate_ticket_fields()`, the
+function the script wraps. The script itself runs end-to-end as a subprocess
+in `test_migrate_ticket_fields_script` and in the startup-succeeds test. This
+follows Step 3's precedent: its fixtures call `migrate_runtime_progress()`, and
+`test_migrate_runtime_progress_script.py` runs the script. If "runs the script
+explicitly" meant a subprocess in every fixture, say so — it is mechanical,
+but it slows the suite noticeably.
 
 One guarantee was lost with the table. The old `ticket_events` table had
-append-only triggers, and its test is gone along with it. `task_events` is a
-legacy table with no such triggers. Adding them would change legacy behaviour
-and is outside this change — see §10.
+append-only triggers; `task_events` is a legacy table without them. See §10.
 
 ---
 
@@ -285,45 +343,47 @@ because §14.2 forbids inventing one.
 ## 6. Stop conditions
 
 **Earlier versions of this section said "None fired". That was false.** Two
-stop conditions fired, and I did not stop on either one when it did.
+stop conditions fired, and I did not stop on either one when it did:
 
-1. **The §12 vs `TASK_STATUSES` vocabulary conflict.** §12's status model
-   contradicts the persisted vocabulary already in the code. That is the
-   step1.md stop condition "a spec requirement is ambiguous or contradicts
-   existing code". Instead of stopping, I sidestepped it by building a
-   separate `tickets` table with its own §12 enum. That table is the root
-   cause the PR #195 review identified. All three Step builders reported the
-   conflict, and it took a human ruling (SPEC §12.2) to resolve.
-2. **The Task ID format ambiguity.** step1.md listed it explicitly as "flag,
-   do not guess". I guessed — `<prefix>-<NNN>`, a per-prefix counter starting
-   at 1 — and flagged it only after the fact. It took a human ruling (a single
-   global counter, `AT-0001`) to settle. That ruling is now what is
-   implemented.
+1. **The §12 vs `TASK_STATUSES` vocabulary conflict** — a spec requirement
+   contradicting existing code. Instead of stopping, I sidestepped it with a
+   separate `tickets` table, which is the root cause the PR #195 review found.
+   A human ruling resolved it (§12.2).
+2. **The Task ID format ambiguity.** step1.md said "flag, do not guess". I
+   guessed, and flagged it only afterwards. A human ruling resolved it (one
+   global `AT-0001` counter).
 
-**One further contradiction, found while applying the PR #195 ruling. Not
-repaired.** Tickets are `tasks` rows now, so the legacy task action routes can
-reach them. §44 says "Blocked Ticket cannot execute", but the existing
-dispatcher disagrees:
+**Rulings 4a and 4b: no new stop condition fired.**
 
-- verified: `dispatcher.RUNNABLE_STATUSES` is `{queued, blocked, preparing}`.
-  A Ticket created with `blocked_by` is persisted as `blocked`, so it passes
-  the dispatcher's status gate.
-- verified: a fresh `created` Ticket is not runnable. But a non-dry-run
-  `POST /api/tasks/<key>/start` calls `_block_task`, which flips the row to
-  `blocked` ("Task status is not runnable: created"), and after that it *is*
-  runnable. Legacy `blocked` means "retry after failure", while §12 `blocked`
-  means "waiting on a dependency". The §12.2 ruling maps the two to the same
-  persisted value.
-- **not verified:** the `/start` route calls `level2_direct_execution_error`
-  before dispatching. I did not trace whether that check stops Ticket rows,
-  which are inserted without Level 2 identity, exactly like the existing
-  `POST /api/tasks`. It may already close this path.
+- 4b's constraint was satisfiable. The collision check reads ref storage and
+  spawns no process, and the §43 negative-scope tests are byte-identical to
+  `dcad084`.
+- 4a fixture updates: 21 files needed the migration run explicitly (§1), which
+  is what the ruling orders. None of those tests had been failing before this
+  change.
+- **A test went red, and it was mine.** The first full-suite run after 4a/4b
+  failed with 11 errors, all in `test_api_cors.CorsMiddlewareTests`, and every
+  one was `TicketFieldsMigrationRequired` from 4a's startup gate. My sweep for
+  fixtures that enter the API lifespan missed that file's
+  `ExitStack.enter_context(TestClient(...))` pattern. The file was green at
+  `dcad084`, so this was a regression introduced by this change, not a
+  pre-existing failure. I fixed it with the same migrate-before-startup fixture
+  change. A wider sweep then found no other unmigrated lifespan entry:
+  `test_api_executor_metadata` builds a `TestClient` without entering it, so its
+  lifespan never runs. The re-run is in §8.
 
-Dispatcher eligibility is a forbidden layer for Step 1 (§20, Step 5), so I
-recorded this and did not repair it. I still pushed, because the push goes to
-a draft branch and the path only becomes live if the branch merges. The
-reviewer should decide before merge. Tell me if this should have held the push
-instead.
+**An earlier contradiction, still open and not repaired.** Tickets are `tasks`
+rows, so the legacy task routes reach them. §44 says "Blocked Ticket cannot
+execute", but:
+
+- verified: `dispatcher.RUNNABLE_STATUSES` includes `blocked`;
+- verified: a non-dry-run `/start` on a `created` Ticket flips it to `blocked`,
+  and after that it is runnable;
+- **not verified:** whether the route's `level2_direct_execution_error` check
+  already stops Ticket rows.
+
+Dispatcher eligibility is outside Step 1 (§20, Step 5). This goes to the
+reviewer before merge.
 
 Hard rules, all held: no pre-existing test went red (counts in §8). Nothing was
 approved, merged, rebased or force-pushed, and nothing was pushed to `main`. No
@@ -335,27 +395,26 @@ read or written.
 ## 7. Known ambiguity
 
 **(a) Task key format — resolved by the PR #195 ruling.** A single global
-counter, `AT-0001`. One reading needed confirming: I took "`AT-0001`, no
-per-prefix counters" literally, so the prefix is fixed at `AT` for every
-repository. A `bullet_journal` Ticket is `AT-0002`, not `BJ-0002`, and the
-registry's `task_key_prefix` is no longer read. If per-repo prefixes should
-share the one counter instead, that is a one-line change in
-`ticket_metadata.py` plus test updates.
+counter, `AT-0001`. I read "`AT-0001`, no per-prefix counters" literally, so
+the prefix is fixed at `AT` for every repository.
 
-**(b) Branch-name collision with an existing Git branch — still open.**
-Collisions *between Tickets* are impossible, because the unique task key is
-embedded in the branch name and storage enforces uniqueness. A collision with
-a branch that already exists in the repository cannot be checked here:
-reading refs means running Git, and the negative-scope test forbids that.
-Step 2 needs a policy for it.
+**(b) Branch-name collision — resolved by ruling 4b.** See §2. Residual cases
+this check does **not** cover, for the reviewer:
 
-**(c) `blocked_by` at creation.** Accepted, stored, and it drives `ready` vs
-`blocked`. The blocker must exist in `tasks`: since there is one entity, a
-legacy task is a valid blocker. Cycle validation stays in Step 5; a freshly
-created Ticket cannot be inside a cycle. Not in the Mission Control form.
+- **Directory/file ref conflicts.** An existing branch `task`, or
+  `task/AT-0001-x/sub`, would stop git from creating `task/AT-0001-x`, but it
+  isn't "the derived name already exists", so creation proceeds. Step 2's
+  worktree creation would then fail on it.
+- **Remote names that contain `/`.** Loose remote refs are matched per
+  top-level remote directory.
+- **Bare repositories** as `repo_path`: a bare repo has no `.git`, so it reads
+  as having no branches. The registry points at working trees.
+- **The reftable ref backend:** fails closed (503), never guesses.
 
-**(d) `cancelled` vs `canceled` — resolved by §12.2.** The persisted spelling
-is the legacy `canceled`.
+**(c) `blocked_by` at creation.** The blocker must exist in `tasks`; cycles are
+Step 5. It is not in the Mission Control form.
+
+**(d) `cancelled` vs `canceled` — resolved by §12.2.**
 
 ---
 
@@ -369,7 +428,7 @@ The repo's canonical validator sequence, the one that gates this handoff:
 /home/ubuntu/agent-taskflow/.venv/bin/python scripts/run_local_validation.py
 ```
 
-Observed result after the PR #195 ruling, run in the foreground (exit 0):
+Observed result after rulings 4a and 4b, run in the foreground (exit 0):
 
 ```text
 - check: Python environment dependencies    passed
@@ -377,13 +436,14 @@ Observed result after the PR #195 ruling, run in the foreground (exit 0):
 - check: workflow policy validation         passed
 - check: Mission Control golden path smoke  passed
 - check: PiExecutor golden path smoke       passed
-- check: unit tests                         passed   (Ran 4529 tests, OK, skipped=8)
+- check: unit tests                         passed   (Ran 4573 tests, OK, skipped=8)
 - check: compileall                         passed
 - check: openspec validate                  skipped  (openspec not on PATH)
 ```
 
-`cd mission-control && npm run build` also passed, and both `/tickets/new`
-and `/tickets/[taskKey]` built. No test went red at any point on this branch.
+The first run went red — 11 errors in `test_api_cors`, caused by this change.
+It was fixed before this run; see §6. The Mission Control frontend is
+unchanged by rulings 4a/4b; its last build passed.
 
 Test count history on this branch:
 
@@ -391,19 +451,28 @@ Test count history on this branch:
 | --- | --- | --- |
 | base `4266c02`, before any Step 1 edit | 4396 | OK (skipped=8) |
 | after Step 1 (`ea41f3a`) | 4485 | OK (skipped=8) |
-| after the §12.2 ruling (`764c9ff`) — **before** this change | 4510 | OK (skipped=8) |
-| after the PR #195 ruling — **after** this change | 4529 | OK (skipped=8) |
+| after the §12.2 ruling (`764c9ff`) | 4510 | OK (skipped=8) |
+| after the PR #195 ruling (`dcad084`) — **before** rulings 4a/4b | 4529 | OK (skipped=8) |
+| after rulings 4a and 4b — first run | 4573 | **FAILED (errors=11, skipped=8)** — all `test_api_cors`, caused by this change; see §6 |
+| after rulings 4a and 4b — **after**, with the `test_api_cors` fixture fixed | 4573 | OK (skipped=8) |
 
-Step 1 tests only:
+The Step 1 migration, run by an operator against a real database:
+
+```bash
+/home/ubuntu/agent-taskflow/.venv/bin/python scripts/migrate_ticket_fields.py --db-path /path/to/state.db
+```
+
+Ticket tests only:
 
 ```bash
 /home/ubuntu/agent-taskflow/.venv/bin/python -m unittest \
   tests.test_ticket_metadata tests.test_ticket_store \
   tests.test_ticket_creation tests.test_api_tickets \
-  tests.test_status_vocab -v
+  tests.test_status_vocab tests.test_ticket_fields_schema \
+  tests.test_migrate_ticket_fields_script tests.test_git_ref_storage -v
 ```
 
-Mission Control:
+Mission Control (unchanged by rulings 4a/4b):
 
 ```bash
 cd mission-control && npm ci --prefer-offline --no-audit --no-fund && npm run build
@@ -411,46 +480,58 @@ cd mission-control && npm ci --prefer-offline --no-audit --no-fund && npm run bu
 
 `.venv/bin/python` is required — the system `python3` has no `pydantic`.
 
-Manual API check against a throwaway database, never the default path:
+Manual API check, only against a throwaway database:
 
 ```bash
-/home/ubuntu/agent-taskflow/.venv/bin/python scripts/run_api.py --db-path /tmp/step1-demo.db &
-curl -s localhost:8100/api/repositories | python3 -m json.tool
+PY=/home/ubuntu/agent-taskflow/.venv/bin/python
+$PY -c 'from agent_taskflow.store import init_db; init_db("/tmp/step1-demo.db")'
+$PY scripts/migrate_ticket_fields.py --db-path /tmp/step1-demo.db
+$PY scripts/run_api.py --db-path /tmp/step1-demo.db &
 curl -s -X POST localhost:8100/api/tickets -H 'content-type: application/json' \
   -d '{"repository":"agent-taskflow","prompt":"Separate the ending page image","priority":"high"}'
-curl -s localhost:8100/api/tasks | python3 -m json.tool   # the Ticket is a task
 ```
 
 ---
 
 ## 9. Deployment note
 
-`TicketStore.init_db()` delegates to the task store's `init_db()`, which runs
-from the FastAPI lifespan. On the next API start against an existing database,
-the `tasks_ticket_fields` migration adds 10 nullable columns and 2 partial
-unique indexes to `tasks`, and records itself in `schema_migrations`. It
-creates no table. Existing rows keep NULL in the new columns, so neither index
-can conflict with them. This has not been run against the production database.
+**Startup no longer migrates anything for Step 1.** After this branch deploys,
+the Mission Control API will **refuse to start** against any database that
+lacks Step 1's columns, including production, until an operator runs:
 
-The earlier `v1_ticket_creation_v1` migration never merged. If any environment
-did run an earlier revision of this branch, it will have orphan `tickets` /
-`ticket_events` tables and a `v1_ticket_creation_v1` row in
-`schema_migrations`. This code neither creates nor reads them, and dropping
-them is a human-controlled cleanup.
+```bash
+python scripts/migrate_ticket_fields.py --db-path <path to state.db>
+```
+
+The error message names this command. On an existing database the legacy
+schema is already present, so the script adds 10 nullable columns and 2
+partial unique indexes to `tasks`, records `tasks_ticket_fields`, and changes
+nothing else. It is idempotent. It has not been run against production.
+Deployment, systemd and cron configuration are untouched, so any restart
+automation will hit the refusal until the script has been run.
+
+If any environment ran revision `dcad084`, where `init_db()` still applied the
+migration, it already has the columns and the recorded migration; the gate
+passes and the script is a reported no-op. If any environment ran an earlier
+revision, it may hold orphan `tickets` / `ticket_events` tables and a
+`v1_ticket_creation_v1` row. This code neither creates nor reads them, and
+dropping them is a human-controlled cleanup.
 
 ---
 
 ## 10. Follow-ups for the human
 
-1. Confirm the fixed `AT` prefix for every repository — §7(a).
-2. Decide the Step 2 policy for a derived branch name that already exists
-   in the repository — §7(b).
-3. Decide the dispatcher / `blocked` contradiction in §6 before merge, and
-   whether the Level 2 check already closes it.
-4. Decide whether `task_events` should become append-only, which would
-   restore what `ticket_events` had.
-5. Confirm or overrule the status-vocabulary judgement calls in §4.
-6. Step 2 owns the §32.1 PR fields; they are absent here on purpose.
-7. Decide whether `WORKFLOW.md` should describe the V1 Ticket lifecycle.
-8. The deferred repo-wide `TASK_STATUSES` migration (§12.2, after Steps 1-3
-   merge) should decide whether the legacy aliases collapse for real.
+1. **Move the pre-existing legacy migrations out of `store.init_db()`** —
+   recorded by ruling 4a as a follow-up, not done here.
+2. Decide the dispatcher / `blocked` contradiction in §6 before merge.
+3. Confirm the fixture convention in §3: function call, as in Step 3, versus a
+   subprocess in every fixture.
+4. Decide whether the residual collision cases in §7(b) — directory/file ref
+   conflicts above all — need handling in Step 2.
+5. Decide whether `task_events` should become append-only.
+6. Confirm the fixed `AT` prefix for every repository (§7(a)).
+7. Confirm or overrule the status-vocabulary judgement calls in §4.
+8. Step 2 owns the §32.1 PR fields; they are absent here on purpose.
+9. Decide whether `WORKFLOW.md` should describe the V1 Ticket lifecycle.
+10. The deferred repo-wide `TASK_STATUSES` migration (§12.2) should decide
+    whether the legacy aliases collapse for real.

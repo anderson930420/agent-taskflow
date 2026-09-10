@@ -15,10 +15,19 @@ from contextlib import closing
 from pathlib import Path
 
 from agent_taskflow import store as store_module
-from agent_taskflow.models import TaskRecord
-from agent_taskflow.store import TASK_TICKET_COLUMNS, TaskMirrorStore, connect
+from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
+from agent_taskflow.store import TaskMirrorStore, connect, init_db as init_task_db
+from agent_taskflow.ticket_fields_schema import (
+    TASK_TICKET_COLUMNS,
+    TICKET_FIELDS_MIGRATION,
+    migrate_ticket_fields,
+)
 from agent_taskflow.ticket_models import TicketRecord
-from agent_taskflow.ticket_store import TicketStore, TicketStoreError
+from agent_taskflow.ticket_store import (
+    TicketBranchExistsError,
+    TicketStore,
+    TicketStoreError,
+)
 
 
 class TicketStoreTestCase(unittest.TestCase):
@@ -27,6 +36,9 @@ class TicketStoreTestCase(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.db_path = self.root / "state.db"
         self.repo_path = self.root / "forms"
+        # Step 1's columns are installed only by the explicit migration.
+        init_task_db(self.db_path)
+        migrate_ticket_fields(self.db_path)
         self.store = TicketStore(self.db_path)
         self.store.init_db()
 
@@ -103,11 +115,14 @@ class CanonicalEntityTests(TicketStoreTestCase):
         for column in ("priority", "title", "ai_title_status", "prompt"):
             self.assertIn(column, columns)
 
-    def test_migration_is_registered_with_the_task_store(self) -> None:
-        self.assertIn("tasks_ticket_fields", store_module.SCHEMA_MIGRATIONS)
+    def test_migration_is_not_in_the_startup_registry(self) -> None:
+        # PR #195 ruling 4a: init_db() never applies Step 1's migration; only
+        # the explicit script (run in setUp) records it.
+        self.assertNotIn(TICKET_FIELDS_MIGRATION, store_module.SCHEMA_MIGRATIONS)
         with closing(connect(self.db_path)) as conn:
             recorded = conn.execute(
-                "SELECT 1 FROM schema_migrations WHERE name = 'tasks_ticket_fields'"
+                "SELECT 1 FROM schema_migrations WHERE name = ?",
+                (TICKET_FIELDS_MIGRATION,),
             ).fetchone()
         self.assertIsNotNone(recorded)
 
@@ -120,6 +135,7 @@ class CanonicalEntityTests(TicketStoreTestCase):
         self.assertIsNone(recorded)
 
     def test_migration_is_idempotent(self) -> None:
+        migrate_ticket_fields(self.db_path)
         self.store.init_db()
         TaskMirrorStore(self.db_path).init_db()
         self.create()
@@ -284,6 +300,62 @@ class ReadbackTests(TicketStoreTestCase):
     def test_list_rejects_unknown_status_filter(self) -> None:
         with self.assertRaises(ValueError):
             self.store.list_tickets(statuses=["not-a-status"])
+
+
+
+class RecordedBranchCollisionTests(TicketStoreTestCase):
+    """PR #195 ruling 4b, storage side: refuse before any write."""
+
+    def counts(self) -> tuple[int, int]:
+        with closing(connect(self.db_path)) as conn:
+            return (
+                conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"],
+                conn.execute("SELECT COUNT(*) AS n FROM task_events").fetchone()["n"],
+            )
+
+    def test_branch_recorded_in_tasks_is_refused(self) -> None:
+        first = self.create()
+        before = self.counts()
+        with self.assertRaises(TicketBranchExistsError) as ctx:
+            self.store.create_ticket(
+                build=lambda task_key: self.build(task_key, branch=first.branch),
+                actor="test",
+            )
+        self.assertEqual(ctx.exception.source, "tasks")
+        self.assertEqual(ctx.exception.existing, first.task_key)
+        self.assertEqual(ctx.exception.branch, first.branch)
+        self.assertEqual(self.counts(), before)
+
+    def test_branch_recorded_in_task_worktrees_is_refused(self) -> None:
+        self.legacy_task("AT-GH-7")
+        TaskMirrorStore(self.db_path).upsert_task_worktree(
+            TaskWorktreeRecord(
+                task_key="AT-GH-7",
+                repo_path=self.repo_path,
+                worktree_path=self.repo_path / ".worktrees" / "AT-GH-7",
+                branch="task/AT-0001-separate",
+                status="active",
+            )
+        )
+        before = self.counts()
+        with self.assertRaises(TicketBranchExistsError) as ctx:
+            self.create()
+        self.assertEqual(ctx.exception.source, "task_worktrees")
+        self.assertEqual(ctx.exception.existing, "AT-GH-7")
+        self.assertEqual(self.counts(), before)
+
+    def test_branch_guard_refusal_writes_nothing_and_consumes_no_key(self) -> None:
+        def guard(record: TicketRecord) -> None:
+            raise TicketBranchExistsError(record.branch, "repository", "refs/heads/x")
+
+        with self.assertRaises(TicketBranchExistsError):
+            self.store.create_ticket(
+                build=lambda task_key: self.build(task_key),
+                actor="test",
+                branch_guard=guard,
+            )
+        self.assertEqual(self.counts(), (0, 0))
+        self.assertEqual(self.create().task_key, "AT-0001")
 
 
 if __name__ == "__main__":  # pragma: no cover
