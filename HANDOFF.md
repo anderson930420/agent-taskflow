@@ -15,7 +15,12 @@ Re-integration, PR outcomes, Merge)
 Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 
 Status: **implementation-complete, awaiting human review.** Nothing is
-approved, merged, or finally complete.
+approved, merged to `main`, or finally complete.
+
+`task/v1-step1` has been merged into this branch (merge commit, not a rebase)
+to bring in `agent_taskflow/status_vocab.py` for the SPEC §12.2 ruling — see
+§3(a). This branch therefore contains Step 1 *and* Step 2; PR #196 reviews
+Step 2.
 
 ---
 
@@ -131,17 +136,64 @@ modified, weakened, or skipped.
 
 ### "A spec requirement is ambiguous or contradicts existing code" — 3 flagged
 
-These are reported rather than repaired, per the stop-condition rule. None of
-them blocked delivery, and each was handled in the way that preserves the most
-optionality for you.
+These were reported rather than repaired, per the stop-condition rule. None of
+them blocked delivery. **(a) has since been ruled on and implemented**; (b) and
+(c) are still open.
 
-**(a) `cancelled` vs `canceled` — spec/code spelling conflict.**
-SPEC §12 spells the cancelled state with two `l`s. `models.py` already had a
-legacy `canceled` (one `l`) used by the pre-V1 mirror. I added `cancelled` as a
-**separate, non-aliased** status alongside it, so a V1 integration cancellation
-can never be confused with a legacy one. Two spellings in one enum is a wart.
-**Your call:** keep them distinct, or migrate the legacy value once Step 1
-lands the V1 status model.
+**(a) `cancelled` vs `canceled` — spec/code spelling conflict. RESOLVED.**
+
+*Original report:* SPEC §12 spells the cancelled state with two `l`s;
+`models.py` already had a legacy `canceled`. Step 2 initially added `cancelled`
+as a separate, non-aliased status alongside it, and flagged the two-spellings
+wart for a decision.
+
+*Human ruling (SPEC §12.2):* no repo-wide migration. Legacy `TASK_STATUSES`
+stays the canonical **persisted** vocabulary; the §12 names are the Mission
+Control **display** vocabulary; `agent_taskflow/status_vocab.py` is the single
+bridge. Persisted spelling of cancelled is `canceled`.
+
+*What was done:*
+
+1. `task/v1-step1` was **merged** (not rebased) into this branch to bring in
+   `status_vocab.py`. `task/v1-step2` is published as draft PR #196 and §26
+   forbids force-pushing a published PR branch, so a merge commit is the
+   accepted cost. Two conflicts, both resolved mechanically:
+   `models.py` (took Step 1's additive §12.2 status block) and `HANDOFF.md`
+   (add/add — both handoffs combined, Step 1's preserved verbatim in an
+   appendix).
+2. `cancelled` was **removed** from `TASK_STATUSES`. So was `needs_review`:
+   it has the same problem, since `waiting_for_review` is its legacy persisted
+   spelling. Neither now coexists with its legacy sibling.
+3. `integration_schema` no longer hard-codes any §12 name. Its six constants
+   keep their §12 display names but hold the **persisted** spelling, resolved
+   at import through `status_vocab.to_persisted_status`:
+
+   | §12 display name | persisted value |
+   | --- | --- |
+   | `ready_for_integration` | `ready_for_integration` |
+   | `integrating` | `integrating` |
+   | `needs_decision` | `needs_decision` |
+   | `needs_review` | **`waiting_for_review`** |
+   | `cancelled` | **`canceled`** |
+   | `completed` | **`cleaned`** |
+
+   Four of six are identity, two are not, plus `completed`. Every task-status
+   read and write in Step 2 already went through these constants, so the
+   modules needed no other change; the tests were converted from status
+   literals to the constants so they do not re-duplicate the mapping either.
+   `tests/test_integration_schema.py` now pins the bridge in both directions
+   and asserts neither spelling pair coexists in the enum.
+
+**One consequence worth your attention.** Step 2's watcher selects Tickets by
+the persisted value `waiting_for_review`. The legacy `waiting_approval`, which
+the existing dispatcher writes and which `status_vocab` also maps to the
+`needs_review` display name, is therefore **not** picked up by the Step 2
+watcher. That is deliberate — Step 2 should only manage Tickets it integrated
+itself, not adopt every legacy task sitting at the old approval gate — but it
+does mean the display name `needs_review` covers a strictly larger set in
+Mission Control than the set Step 2 acts on. If you want the watcher to adopt
+legacy `waiting_approval` tasks too, that is a one-line change and a decision
+for you, not me.
 
 **(b) `WORKFLOW.md` Non-Goals vs Step 2's mandate.**
 The repo-owned contract lists "automatic push" and "automatic cleanup/delete"
@@ -245,25 +297,56 @@ $VENV -m agent_taskflow.cli.local_validation
 | Command | Result |
 | --- | --- |
 | Baseline `pytest tests -q` (captured **before any edit**) | `4390 passed, 8 skipped, 0 failed` |
-| `pytest tests -q` (after Step 2) | `4615 passed, 8 skipped, 0 failed` in 509s |
+| `pytest tests -q` (Step 2, before the Step 1 merge) | `4615 passed, 8 skipped, 0 failed` in 509s |
+| `pytest tests -q` (after the Step 1 merge + §12.2 rework) | `4731 passed, 8 skipped, 0 failed` in 605s |
 | `compileall agent_taskflow scripts tests` | exit 0 |
-| Step 2 tests only | 225 passed across 14 files |
+| Step 2 tests only | 227 passed across 14 files |
+| Step 1 tests merged in | 114 passed across 5 files |
 
-The delta is exactly +225 passed with the same 8 skips: every new test is a
-Step 2 test, and no pre-existing test changed state. The 8 skips are the
-pre-existing ones from the baseline, untouched.
+The counts reconcile exactly, which is the point of listing them:
 
-`agent_taskflow.cli.local_validation` — all six required checks passed:
+    4390  baseline
+    +225  Step 2 tests
+    ----
+    4615  Step 2 branch before the merge
+    +114  Step 1 tests arriving with the merge
+      +2  net new schema tests from the §12.2 rework
+          (3 added, 1 removed: the old two-`l` spelling assertion)
+    ----
+    4731  after the merge
+
+The skip count is 8 throughout — the same 8 pre-existing skips. No test was
+lost, silently skipped, or newly red at any point.
+
+A second full `pytest tests -q` run after the merge, in the foreground, gave
+the identical result: `4731 passed, 8 skipped, 0 failed` in 523s.
+
+`agent_taskflow.cli.local_validation`, run after the merge (exit 0) — every
+required check passed:
 
 | Check | Result |
 | --- | --- |
+| Python environment dependencies | passed |
 | workflow contract validation | passed |
 | workflow policy validation | passed |
 | Mission Control golden path smoke | passed |
 | PiExecutor golden path smoke (fake Pi) | passed |
-| unit tests (`unittest discover -s tests -v`) | passed, 501s |
+| unit tests (`unittest discover -s tests -v`) | passed — `Ran 4737 tests`, `OK (skipped=8)`, 513s |
 | compileall | passed |
 | openspec validate | skipped — `openspec` is not on PATH (optional check, pre-existing) |
+
+`unittest` reports 4737 and `pytest` reports 4731 + 8 skipped because the two
+runners collect tests differently; both report **zero failures**, and both
+report the same 8 skips as the pre-edit baseline.
+
+**No test went red at any point** — not after Step 2, not after the Step 1
+merge, and not after the §12.2 rework. There was no pre-existing failure to
+report.
+
+The merged Mission Control frontend is byte-identical to `task/v1-step1`'s
+(`git diff origin/task/v1-step1 HEAD -- mission-control/` is empty; Step 2
+changes no frontend code), so Step 1's own frontend build validation carries
+over unchanged.
 
 ---
 
