@@ -231,6 +231,23 @@ def integrate_task(
     pr_state = integration.get_pr_state(request.task_key)
     mode = "initial" if pr_state["pr_number"] is None else "reintegration"
 
+    pr_repo = schema.repo_from_pr_url(pr_state["pr_url"])
+    if pr_repo is not None and pr_repo != schema.normalize_repo(request.repo):
+        # §32.0 — a PR belongs to exactly one repository. Updating it from a
+        # request for another repository would write to the wrong PR.
+        return _simple_result(
+            ok=False,
+            status="blocked",
+            mode=mode,
+            request=request,
+            final_task_status=task.status,
+            summary=(
+                f"PR {pr_state['pr_url']} belongs to {pr_repo}, not "
+                f"{request.repo}; refusing to integrate it from another repository."
+            ),
+            pr_state=pr_state,
+        )
+
     if task.status != schema.READY_FOR_INTEGRATION:
         return _simple_result(
             ok=False,

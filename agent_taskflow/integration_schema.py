@@ -15,6 +15,7 @@ part of this field list and lives in Step-2-private storage.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Mapping
 
 from agent_taskflow.status_vocab import to_persisted_status
@@ -37,6 +38,9 @@ __all__ = [
     "TICKET_PR_FIELD_NAMES",
     "can_transition",
     "default_pr_state",
+    "normalize_repo",
+    "pr_url_repo_marker",
+    "repo_from_pr_url",
     "sqlite_column_type",
     "validate_pr_state",
     "validate_transition",
@@ -210,3 +214,40 @@ def validate_pr_state(values: Mapping[str, Any]) -> dict[str, Any]:
             f"§32.1 defines exactly: {', '.join(TICKET_PR_FIELD_NAMES)}"
         )
     return {name: _coerce(_FIELDS_BY_NAME[name], value) for name, value in values.items()}
+
+
+# -- §32.0 repository identity ---------------------------------------------
+#
+# A PR number is not an identity: the same number can be open in two
+# repositories at once. The repository a PR belongs to is read from its own
+# §32.1 ``pr_url``, which the controller records when it creates the PR.
+# GitHub owner and repository names are case-insensitive, so comparisons are
+# made on the lower-cased ``owner/name``.
+
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_PR_URL_RE = re.compile(
+    r"^https?://[^/]+/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/\d+/?$"
+)
+
+
+def normalize_repo(repo: str) -> str:
+    """Return a GitHub ``owner/name`` in canonical lower-case form."""
+    value = (repo or "").strip()
+    if not _REPO_RE.fullmatch(value):
+        raise ValueError(f"repo must be 'owner/name', got {repo!r}")
+    return value.lower()
+
+
+def pr_url_repo_marker(repo: str) -> str:
+    """Return the ``/owner/name/pull/`` fragment that every PR URL of ``repo`` has."""
+    return f"/{normalize_repo(repo)}/pull/"
+
+
+def repo_from_pr_url(pr_url: str | None) -> str | None:
+    """Return the canonical ``owner/name`` a PR URL belongs to, or None."""
+    if not pr_url:
+        return None
+    match = _PR_URL_RE.match(pr_url.strip())
+    if match is None:
+        return None
+    return f"{match.group(1)}/{match.group(2)}".lower()

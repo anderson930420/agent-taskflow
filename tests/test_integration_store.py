@@ -188,5 +188,60 @@ class MigrationTests(IntegrationStoreTestCase):
             self.assertIn(table, names)
 
 
+
+class OpenPrPickupScopeTests(IntegrationStoreTestCase):
+    """§32.0 — a watcher tick's pick-up set is its own repository's open PRs."""
+
+    def _ticket(self, key: str, *, pr_url: str | None, pr_number: int | None = 1,
+                pr_state: str | None = "open") -> None:
+        self.store.upsert_task(
+            TaskRecord(task_key=key, project="demo", status="waiting_for_review",
+                       repo_path=self.root / "repo")
+        )
+        fields = {"pr_state": pr_state}
+        if pr_number is not None:
+            fields["pr_number"] = pr_number
+        if pr_url is not None:
+            fields["pr_url"] = pr_url
+        self.integration.update_pr_state(key, **fields)
+
+    def test_only_this_repositorys_open_prs_are_returned(self) -> None:
+        self._ticket("AT-611", pr_url="https://github.com/owner/my_repo/pull/1")
+        self._ticket("AT-612", pr_url="https://github.com/owner/myXrepo/pull/1")
+        self._ticket("AT-613", pr_url="https://github.com/xowner/my_repo/pull/1")
+        self._ticket("AT-614", pr_url="https://github.com/owner/my_repo-b/pull/1")
+        self._ticket("AT-615", pr_url="https://github.com/owner/my_repo/pull/2", pr_state="closed")
+        self._ticket("AT-616", pr_url=None, pr_number=None)
+        self.assertEqual(
+            [s["task_key"] for s in self.integration.list_open_pr_states("owner/my_repo")],
+            ["AT-611"],
+        )
+
+    def test_the_same_pr_number_in_two_repositories_is_kept_apart(self) -> None:
+        self._ticket("AT-621", pr_url="https://github.com/owner/repo-a/pull/42")
+        self._ticket("AT-622", pr_url="https://github.com/owner/repo-b/pull/42")
+        self.assertEqual(
+            [s["task_key"] for s in self.integration.list_open_pr_states("owner/repo-a")],
+            ["AT-621"],
+        )
+        self.assertEqual(
+            [s["task_key"] for s in self.integration.list_open_pr_states("owner/repo-b")],
+            ["AT-622"],
+        )
+
+    def test_repository_comparison_is_case_insensitive_like_github(self) -> None:
+        self._ticket("AT-631", pr_url="https://github.com/Owner/My_Repo/pull/3")
+        self.assertEqual(
+            [s["task_key"] for s in self.integration.list_open_pr_states("owner/my_repo")],
+            ["AT-631"],
+        )
+
+    def test_a_malformed_tick_repository_is_rejected(self) -> None:
+        for repo in ("", "owner", "owner/", "/name", "owner/name/extra"):
+            with self.subTest(repo=repo):
+                with self.assertRaises(ValueError):
+                    self.integration.list_open_pr_states(repo)
+
+
 if __name__ == "__main__":
     unittest.main()

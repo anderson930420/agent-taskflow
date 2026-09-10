@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 import sys
 import tempfile
 import unittest
@@ -160,32 +161,37 @@ class TargetFreshnessTests(WatcherTestCase):
         self.assertEqual(private["previous_integrated_base_sha"], previous)
         self.assertEqual(private["new_target_sha"], advanced)
 
-    def test_only_needs_review_tickets_are_examined(self) -> None:
+    def test_only_needs_review_tickets_are_requeued(self) -> None:
+        """Picked up by the §32.0 condition, but needs_decision waits for a human."""
         self.make_reviewing_task("AT-201")
         self.store.update_task_status("AT-201", schema.NEEDS_DECISION, source="test")
         self.fixture.advance_target()
-        self.assertEqual(self.freshness(), [])
+        results = self.freshness()
+        self.assertEqual([(r.task_key, r.stale, r.requeued) for r in results], [("AT-201", True, False)])
         self.assertEqual(self.status_of("AT-201"), schema.NEEDS_DECISION)
-
+        self.assertEqual(queue_for_repo(self.integration, "owner/repo"), [])
     def test_freshness_polling_is_idempotent(self) -> None:
         self.make_reviewing_task("AT-201")
         self.fixture.advance_target()
         self.freshness()
-        self.assertEqual(self.freshness(), [])
+        # Still picked up (its PR is open), but now ready_for_integration, so
+        # a second tick re-queues nothing and the queue is unchanged.
+        second = self.freshness()
+        self.assertEqual([r.requeued for r in second], [False])
         self.assertEqual(
             [entry.task_key for entry in queue_for_repo(self.integration, "owner/repo")],
             ["AT-201"],
         )
-
     def test_an_in_progress_integration_is_not_interrupted(self) -> None:
-        """§25.0 — a target that advances mid-integration gets no special handling."""
+        """§25.0 — picked up but deferred: no git work, no re-queue."""
         self.make_reviewing_task("AT-201")
         self.store.update_task_status("AT-201", schema.READY_FOR_INTEGRATION, source="test")
         self.store.update_task_status("AT-201", schema.INTEGRATING, source="test")
         self.fixture.advance_target()
-        self.assertEqual(self.freshness(), [])
+        results = self.freshness()
+        self.assertEqual([(r.task_key, r.deferred) for r in results], [("AT-201", True)])
         self.assertEqual(self.status_of("AT-201"), schema.INTEGRATING)
-
+        self.assertEqual(queue_for_repo(self.integration, "owner/repo"), [])
     def test_dry_run_freshness_polling_changes_nothing(self) -> None:
         self.make_reviewing_task("AT-201")
         self.fixture.advance_target()
@@ -485,20 +491,147 @@ class PrPickupScopeTests(WatcherTestCase):
 
 
 class FreshnessScopeTests(WatcherTestCase):
-    """Target-freshness polling keeps its §25.1 needs_review scope.
+    """Freshness pick-up is the §32.0 condition; only needs_review is re-queued.
 
-    The §32 pickup ruling widens *PR-outcome* polling only. Re-integration is a
-    lifecycle action: §13 says a paused Ticket does not enter integration, and
-    a needs_decision Ticket is waiting for a human, so neither is re-queued.
+    Both ticks now pick up every Ticket of their own repository with an open
+    PR, whatever its status. Re-integration is still a lifecycle action, so
+    the freshness tick re-queues only needs_review: §13 says a paused Ticket
+    does not enter integration, and a needs_decision Ticket waits for a human.
     """
 
-    def test_a_paused_ticket_is_never_requeued_for_reintegration(self) -> None:
+    def test_a_stale_paused_ticket_is_picked_up_but_not_requeued(self) -> None:
         self.make_reviewing_task("AT-420")
         self.store.update_task_status("AT-420", schema.PAUSED, source="test")
         self.fixture.advance_target()
-        self.assertEqual(self.freshness(), [])
+        results = self.freshness()
+        self.assertEqual([(r.task_key, r.stale, r.requeued) for r in results], [("AT-420", True, False)])
         self.assertEqual(self.status_of("AT-420"), schema.PAUSED)
         self.assertEqual(queue_for_repo(self.integration, "owner/repo"), [])
+
+
+
+class CrossRepoScopeTests(unittest.TestCase):
+    """§32.0 — every watcher tick handles only its own repository.
+
+    Two repositories each have PR #42 open. Before this ruling, a tick for
+    repo A also picked up repo B's Ticket, polled PR #42 through repo A's
+    adapter, and wrote repo A's PR state onto repo B's Ticket. Each direction
+    is checked: A's tick must not read, poll, transition or queue B's Ticket,
+    and B's tick must not do so to A's.
+    """
+
+    REPOS = ("owner/repo-a", "owner/repo-b")
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "state.db"
+        self.store = TaskMirrorStore(self.db_path)
+        self.store.init_db()
+        self.integration = IntegrationStore(self.db_path)
+        self.integration.init_db()
+        self.fixtures = {repo: GitFixture(self.root / repo.split("/")[1]) for repo in self.REPOS}
+        self.keys = {"owner/repo-a": "AT-501", "owner/repo-b": "AT-502"}
+        self.worktrees: dict[str, Path] = {}
+        self.gh = {repo: FakeGhRunner(repo=repo) for repo in self.REPOS}
+        for repo in self.REPOS:
+            self._make_reviewing_ticket(repo)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _make_reviewing_ticket(self, repo: str) -> None:
+        fixture, key = self.fixtures[repo], self.keys[repo]
+        worktree = fixture.create_task_worktree(key)
+        fixture.commit_in(worktree, f"{key}.txt", "f\n", "feature")
+        git_ops.push_branch(worktree, remote="origin", branch=f"task/{key}", base_branch="main")
+        artifact_dir = self.root / "artifacts" / key
+        artifact_dir.mkdir(parents=True)
+        self.store.upsert_task(
+            TaskRecord(task_key=key, project=repo.split("/")[1], status=schema.NEEDS_REVIEW,
+                       repo_path=fixture.repo, artifact_dir=artifact_dir)
+        )
+        self.store.upsert_task_worktree(
+            TaskWorktreeRecord(task_key=key, repo_path=fixture.repo, worktree_path=worktree,
+                               branch=f"task/{key}", base_branch="main",
+                               base_sha=fixture.target_sha(), status="active")
+        )
+        head = git_ops.head_sha(worktree)
+        self.integration.update_pr_state(
+            key, pr_number=42, pr_url=f"https://github.com/{repo}/pull/42", pr_state="open",
+            pr_head_sha=head, integrated_base_sha=fixture.target_sha(),
+        )
+        self.gh[repo].set_pr(42, state="OPEN", headRefName=f"task/{key}", baseRefName="main",
+                             headRefOid=head)
+        self.worktrees[repo] = worktree
+
+    def _request(self, repo: str) -> WatcherRequest:
+        return WatcherRequest(repo=repo, repo_path=self.fixtures[repo].repo,
+                              db_path=self.db_path, confirm_poll=True)
+
+    def _snapshot(self, repo: str) -> tuple:
+        key = self.keys[repo]
+        return (
+            asdict(self.store.get_task(key)),
+            self.integration.get_pr_state(key),
+            self.integration.get_integration_state(key),
+            [(e.event_type, e.payload_json) for e in self.store.list_task_events(key)],
+            self.integration.list_review_evidence(key),
+        )
+
+    def _other(self, repo: str) -> str:
+        return next(r for r in self.REPOS if r != repo)
+
+    def _assert_pr_tick_is_isolated(self, tick_repo: str) -> None:
+        other = self._other(tick_repo)
+        before = self._snapshot(other)
+        # The tick's own PR #42 was closed unmerged. Had the tick picked up the
+        # other repository's Ticket, it would have cancelled that one too.
+        self.gh[tick_repo].set_pr(42, state="CLOSED", merged=False)
+        outcomes = poll_pr_outcomes(
+            self._request(tick_repo), store=self.store, integration_store=self.integration,
+            github=GitHubPrAdapter(tick_repo, runner=self.gh[tick_repo]),
+        )
+        self.assertEqual([o.task_key for o in outcomes], [self.keys[tick_repo]])
+        # Exactly one gh call — for the tick's own Ticket. Both Tickets are PR
+        # #42, so a call for the other Ticket would have been a second call.
+        self.assertEqual(len(self.gh[tick_repo].calls), 1)
+        self.assertEqual(self.gh[other].calls, [])
+        self.assertEqual(self._snapshot(other), before)
+        self.assertEqual(self.store.get_task(self.keys[tick_repo]).status, schema.CANCELLED)
+
+    def _assert_freshness_tick_is_isolated(self, tick_repo: str) -> None:
+        from v1_step2_fixtures import git as raw_git
+
+        other = self._other(tick_repo)
+        for fixture in self.fixtures.values():
+            fixture.advance_target()
+        other_origin_main = raw_git(self.worktrees[other], "rev-parse", "origin/main").strip()
+        before = self._snapshot(other)
+        outcomes = poll_target_freshness(
+            self._request(tick_repo), store=self.store, integration_store=self.integration
+        )
+        self.assertEqual([(o.task_key, o.requeued) for o in outcomes], [(self.keys[tick_repo], True)])
+        self.assertEqual([e.task_key for e in queue_for_repo(self.integration, tick_repo)],
+                         [self.keys[tick_repo]])
+        self.assertEqual(queue_for_repo(self.integration, other), [])
+        self.assertEqual(self._snapshot(other), before)
+        # Not even read through git: the other repository was never fetched.
+        self.assertEqual(
+            raw_git(self.worktrees[other], "rev-parse", "origin/main").strip(), other_origin_main
+        )
+
+    def test_repo_a_pr_tick_does_not_touch_repo_b_ticket(self) -> None:
+        self._assert_pr_tick_is_isolated("owner/repo-a")
+
+    def test_repo_b_pr_tick_does_not_touch_repo_a_ticket(self) -> None:
+        self._assert_pr_tick_is_isolated("owner/repo-b")
+
+    def test_repo_a_freshness_tick_does_not_touch_repo_b_ticket(self) -> None:
+        self._assert_freshness_tick_is_isolated("owner/repo-a")
+
+    def test_repo_b_freshness_tick_does_not_touch_repo_a_ticket(self) -> None:
+        self._assert_freshness_tick_is_isolated("owner/repo-b")
 
 
 if __name__ == "__main__":

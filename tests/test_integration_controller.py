@@ -563,5 +563,24 @@ class AlreadyMergedTests(ControllerTestCase):
         self.assertEqual(self.status_of("AT-101"), schema.READY_FOR_INTEGRATION)
 
 
+
+class CrossRepoGuardTests(ControllerTestCase):
+    def test_a_pr_from_another_repository_is_never_updated(self) -> None:
+        """§32.0 — a PR belongs to exactly one repository; the same number
+        open elsewhere must never be edited from this request."""
+        self.make_task("AT-101")
+        self.integration.update_pr_state(
+            "AT-101", pr_number=42, pr_url="https://github.com/other/repo/pull/42",
+            pr_state="open",
+        )
+        result = self.integrate("AT-101")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("other/repo", result.summary)
+        self.assertEqual(self.gh_runner.calls, [])
+        self.assertEqual(result.git_commands, ())
+        self.assertEqual(self.status_of("AT-101"), schema.READY_FOR_INTEGRATION)
+
+
 if __name__ == "__main__":
     unittest.main()

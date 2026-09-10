@@ -24,6 +24,9 @@ from typing import Any, Iterable, Mapping, Sequence
 from agent_taskflow.integration_schema import (
     TICKET_PR_FIELD_NAMES,
     default_pr_state,
+    normalize_repo,
+    pr_url_repo_marker,
+    repo_from_pr_url,
     validate_pr_state,
 )
 from agent_taskflow.models import utc_now_iso
@@ -167,6 +170,47 @@ class IntegrationStore:
                 """
             ).fetchall()
         return sorted(row["task_key"] for row in rows)
+
+    def list_open_pr_states(self, repo: str) -> list[dict[str, Any]]:
+        """Return the §32.0 pick-up set for one repository's watcher tick.
+
+            repo == tick repo AND pr_number IS NOT NULL AND pr_state = 'open'
+
+        Not scoped by status. A PR's repository is read from its own §32.1
+        ``pr_url``: the PR number alone is not an identity, because the same
+        number can be open in two repositories at once. The repository filter
+        runs in SQL, so another repository's rows are never loaded; each
+        returned row's URL is then parsed and compared exactly.
+        """
+        wanted = normalize_repo(repo)
+        columns = ", ".join(TICKET_PR_FIELD_NAMES)
+        with closing(connect(self.db_path)) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT task_key, {columns}
+                FROM task_pr_state
+                WHERE pr_number IS NOT NULL
+                  AND pr_state = 'open'
+                  AND pr_url IS NOT NULL
+                  AND instr(lower(pr_url), ?) > 0
+                ORDER BY task_key
+                """,
+                (pr_url_repo_marker(wanted),),
+            ).fetchall()
+
+        states: list[dict[str, Any]] = []
+        for row in rows:
+            if repo_from_pr_url(row["pr_url"]) != wanted:
+                continue
+            state = default_pr_state()
+            for name in TICKET_PR_FIELD_NAMES:
+                value = row[name]
+                if name in _BOOL_PR_FIELDS:
+                    state[name] = bool(value)
+                elif value is not None:
+                    state[name] = value
+            states.append({"task_key": row["task_key"], **state})
+        return states
 
     # -- Step-2-private integration state ---------------------------------
     def get_integration_state(self, task_key: str) -> dict[str, Any]:

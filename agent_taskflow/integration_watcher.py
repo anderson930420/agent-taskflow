@@ -3,8 +3,8 @@
 Two tick functions, both idempotent (§32) and both dry-run by default:
 
 * :func:`poll_target_freshness` — fetches the latest target, computes
-  ``behind_count`` for every ``needs_review`` Ticket, and returns a stale one
-  to ``ready_for_integration`` with the two base SHAs recorded (§25.1).
+  ``behind_count`` for the Tickets its §32.0 pick-up selects, and returns
+  a stale ``needs_review`` one to ``ready_for_integration`` with the two base SHAs recorded (§25.1).
 * :func:`poll_pr_outcomes` — reads every *open* PR, whatever its Ticket's
   status, and applies the §33/§35 outcomes:
   ``CHANGES_REQUESTED`` to ``needs_decision`` with the review persisted as
@@ -24,7 +24,7 @@ Deliberate non-behaviours:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -87,11 +87,14 @@ class TargetFreshnessOutcome:
     """One Ticket's freshness against the latest target."""
 
     task_key: str
-    behind_count: int
+    behind_count: int | None
     stale: bool
     previous_integrated_base_sha: str | None
     new_target_sha: str | None
     requeued: bool = False
+    task_status: str | None = None
+    # True for an in-flight integration: picked up, but no git work (§25.0).
+    deferred: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,35 +116,51 @@ class PrOutcome:
     deferred: bool = False
 
 
-def _tasks_with_status(
-    store: TaskMirrorStore, status: str, task_keys: Sequence[str] | None
-) -> list[Any]:
-    if task_keys is not None:
-        tasks = [store.get_task(key) for key in task_keys]
-        return [task for task in tasks if task is not None and task.status == status]
-    return list(store.list_tasks(status=status))
-
-
 def poll_target_freshness(
     request: WatcherRequest,
     *,
     store: TaskMirrorStore | None = None,
     integration_store: IntegrationStore | None = None,
 ) -> list[TargetFreshnessOutcome]:
-    """Detect stale ``needs_review`` Tickets and return them for re-integration."""
+    """Detect stale PR branches in this tick's repository (§25.1).
+
+    Pick-up is the §32.0 condition — repo == tick repo AND pr_number IS NOT
+    NULL AND pr_state = 'open' — and is not scoped by status. What happens to
+    a picked-up Ticket is gated:
+
+    * only a ``needs_review`` Ticket is re-queued, because that is the §25.1
+      transition; a paused Ticket does not enter integration (§13) and a
+      needs_decision Ticket is waiting for a human;
+    * an ``integrating`` Ticket is deferred with no git work at all (§25.0),
+      so this tick never fetches underneath a live integration.
+
+    Re-queued Tickets go only into this tick's own repository queue.
+    """
     task_store = store or TaskMirrorStore(request.db_path)
     task_store.init_db()
     integration = integration_store or IntegrationStore(store=task_store)
-
-    candidates = _tasks_with_status(task_store, schema.NEEDS_REVIEW, request.task_keys)
-    if not candidates:
-        return []
 
     log = GitCommandLog()
     target_ref = f"{request.remote}/{request.target_branch}"
     outcomes: list[TargetFreshnessOutcome] = []
 
-    for task in candidates:
+    for task, pr_state in _open_pr_candidates(
+        task_store, integration, request.repo, request.task_keys
+    ):
+        if task.status == schema.INTEGRATING:
+            outcomes.append(
+                TargetFreshnessOutcome(
+                    task_key=task.task_key,
+                    behind_count=None,
+                    stale=False,
+                    previous_integrated_base_sha=pr_state["integrated_base_sha"],
+                    new_target_sha=None,
+                    task_status=task.status,
+                    deferred=True,
+                )
+            )
+            continue
+
         worktree = task_store.get_task_worktree(task.task_key)
         if worktree is None or not worktree.worktree_path.is_dir():
             continue
@@ -158,34 +177,19 @@ def poll_target_freshness(
             # A repo that cannot be read is not evidence of staleness.
             continue
 
-        pr_state = integration.get_pr_state(task.task_key)
-        stale = behind > 0
-        if not stale:
-            outcomes.append(
-                TargetFreshnessOutcome(
-                    task_key=task.task_key,
-                    behind_count=behind,
-                    stale=False,
-                    previous_integrated_base_sha=pr_state["integrated_base_sha"],
-                    new_target_sha=target_sha,
-                )
-            )
-            continue
-
-        if not request.confirm_poll:
-            outcomes.append(
-                TargetFreshnessOutcome(
-                    task_key=task.task_key,
-                    behind_count=behind,
-                    stale=True,
-                    previous_integrated_base_sha=pr_state["integrated_base_sha"],
-                    new_target_sha=target_sha,
-                    requeued=False,
-                )
-            )
-            continue
-
         previous_base = pr_state["integrated_base_sha"]
+        outcome = TargetFreshnessOutcome(
+            task_key=task.task_key,
+            behind_count=behind,
+            stale=behind > 0,
+            previous_integrated_base_sha=previous_base,
+            new_target_sha=target_sha,
+            task_status=task.status,
+        )
+        if not outcome.stale or task.status != schema.NEEDS_REVIEW or not request.confirm_poll:
+            outcomes.append(outcome)
+            continue
+
         integration.update_pr_state(task.task_key, reintegration_required=True)
         integration.update_integration_state(
             task.task_key,
@@ -224,16 +228,7 @@ def poll_target_freshness(
             message="Queued for re-integration",
             payload={"repo": request.repo},
         )
-        outcomes.append(
-            TargetFreshnessOutcome(
-                task_key=task.task_key,
-                behind_count=behind,
-                stale=True,
-                previous_integrated_base_sha=previous_base,
-                new_target_sha=target_sha,
-                requeued=True,
-            )
-        )
+        outcomes.append(replace(outcome, requeued=True))
 
     return outcomes
 
@@ -241,25 +236,24 @@ def poll_target_freshness(
 def _open_pr_candidates(
     task_store: TaskMirrorStore,
     integration: IntegrationStore,
+    repo: str,
     task_keys: Sequence[str] | None,
 ) -> list[tuple[Any, dict[str, Any]]]:
-    """Select every Ticket with an open PR, whatever its status (§32).
+    """Select the §32.0 pick-up set for one repository's tick.
 
-    Human ruling on §32 pickup scope: the condition is
+        repo == tick repo AND pr_number IS NOT NULL AND pr_state = 'open'
 
-        pr_number IS NOT NULL AND pr_state = 'open'
-
-    and it is deliberately **not** scoped by status. A human can merge a PR on
-    GitHub while its Ticket sits in needs_decision or paused. A watcher scoped
-    to needs_review would never see that merge, so the Ticket would never reach
-    completed and its dependents would never be released. §32 says "all active
-    PR Tickets", and this is what that means.
+    Human rulings: the condition is not scoped by status — a human can merge
+    a PR on GitHub while its Ticket sits in needs_decision or paused, and a
+    watcher scoped to needs_review would never see it — and every tick is
+    scoped to its own repository, because the same PR number can be open in
+    two repositories at once. The repository filter runs in SQL
+    (:meth:`IntegrationStore.list_open_pr_states`), so another repository's
+    Tickets are never loaded, polled, transitioned or queued.
     """
     wanted = set(task_keys) if task_keys is not None else None
     selected: list[tuple[Any, dict[str, Any]]] = []
-    for state in sorted(integration.list_pr_states(), key=lambda s: s["task_key"]):
-        if state["pr_number"] is None or state["pr_state"] != "open":
-            continue
+    for state in integration.list_open_pr_states(repo):
         if wanted is not None and state["task_key"] not in wanted:
             continue
         task = task_store.get_task(state["task_key"])
@@ -287,7 +281,9 @@ def poll_pr_outcomes(
 
     outcomes: list[PrOutcome] = []
 
-    for task, pr_state in _open_pr_candidates(task_store, integration, request.task_keys):
+    for task, pr_state in _open_pr_candidates(
+        task_store, integration, request.repo, request.task_keys
+    ):
         pr_number = int(pr_state["pr_number"])
 
         if task.status == schema.INTEGRATING:
