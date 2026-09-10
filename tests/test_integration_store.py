@@ -26,7 +26,7 @@ class IntegrationStoreTestCase(unittest.TestCase):
             TaskRecord(
                 task_key="AT-501",
                 project="demo",
-                status="ready_for_integration",
+                status=schema.READY_FOR_INTEGRATION,
                 repo_path=self.root / "repo",
             )
         )

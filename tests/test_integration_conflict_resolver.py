@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_taskflow import integration_schema as schema
 from agent_taskflow.integration_conflict_resolver import (
     ConflictResolutionOutcome,
     ConflictResolutionRequest,
@@ -45,7 +46,7 @@ class ConflictResolverTestCase(unittest.TestCase):
             TaskRecord(
                 task_key="AT-801",
                 project="demo",
-                status="integrating",
+                status=schema.INTEGRATING,
                 repo_path=self.root / "repo",
             )
         )

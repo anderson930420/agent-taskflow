@@ -36,14 +36,20 @@ TASK_STATUSES = {
     "canceled",
     # Operator-confirmed evidence-only / superseded task archive terminal state.
     "archived",
-    # V1 Master Spec §12 statuses owned by the Step 2 integration controller.
-    # "cancelled" is the spec spelling and is distinct from the legacy
-    # "canceled" value above; the two are deliberately not aliased.
+    # SPEC §12 display-vocabulary names that had no legacy spelling. Added
+    # additively by the §12.2 ruling so every display name has a persisted
+    # counterpart in agent_taskflow.status_vocab. Nothing above is renamed,
+    # removed or repurposed, and `blocked` already existed.
+    #
+    # Deliberately absent: `needs_review` and `cancelled`. Both §12 display
+    # names already have a legacy persisted spelling (`waiting_for_review`
+    # and `canceled`), and §12.2 forbids two spellings of one idea coexisting
+    # in this enum. Step 2 reaches them through status_vocab.
+    "paused",
+    "needs_decision",
     "ready_for_integration",
     "integrating",
-    "needs_review",
-    "needs_decision",
-    "cancelled",
+    "failed",
     # Common external Kanban/Hermes-style mirror values.
     "backlog",
     "todo",

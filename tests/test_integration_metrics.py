@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_taskflow import integration_schema as schema
 from agent_taskflow.integration_metrics import compute_integration_metrics
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.models import TaskRecord
@@ -25,7 +26,7 @@ class MetricsTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _task(self, key: str, *, status: str = "needs_review") -> None:
+    def _task(self, key: str, *, status: str = schema.NEEDS_REVIEW) -> None:
         self.store.upsert_task(
             TaskRecord(
                 task_key=key, project="demo", status=status, repo_path=self.root / "repo"
@@ -59,7 +60,7 @@ class ReIntegrationMetricsTests(MetricsTestCase):
         self.assertAlmostEqual(self._metrics().reintegration_rate, 0.5)
 
     def test_tickets_that_never_reached_a_pr_are_excluded(self) -> None:
-        self._task("AT-1", status="ready_for_integration")
+        self._task("AT-1", status=schema.READY_FOR_INTEGRATION)
         self._task("AT-2")
         self.integration.update_pr_state("AT-2", pr_number=1, reintegration_count=1)
         self.assertAlmostEqual(self._metrics().reintegration_rate, 1.0)

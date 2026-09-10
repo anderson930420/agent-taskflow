@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from agent_taskflow import integration_schema as schema
 from agent_taskflow import integration_git as git_ops
 from agent_taskflow.github_pr_adapter import GitHubPrAdapter
 from agent_taskflow.integration_cleanup import (
@@ -74,7 +75,7 @@ class AcceptanceTestCase(unittest.TestCase):
         self.tmp.cleanup()
 
     # -- helpers -----------------------------------------------------------
-    def make_task(self, task_key: str, *, status: str = "ready_for_integration") -> Path:
+    def make_task(self, task_key: str, *, status: str = schema.READY_FOR_INTEGRATION) -> Path:
         worktree = self.fixture.create_task_worktree(task_key)
         self.fixture.commit_in(worktree, f"{task_key}.txt", "feature\n", f"{task_key} feature")
         artifact_dir = self.artifacts / task_key
@@ -192,7 +193,7 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         # 15/16 — validators gate, then a PR exists and the ticket is reviewable.
         self.assertTrue(result.validators_passed)
         self.assertIsNotNone(result.pr_number)
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
 
         # 18/19 — the target is polled while the PR waits and staleness detected.
         second = self.fixture.advance_target("second.txt")
@@ -201,7 +202,7 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         self.assertTrue(freshness[0].stale)
 
         # 20 — the stale ticket is re-integrated automatically.
-        self.assertEqual(self.status_of("AT-101"), "ready_for_integration")
+        self.assertEqual(self.status_of("AT-101"), schema.READY_FOR_INTEGRATION)
         reintegration = self.integrate("AT-101")
 
         # 21/22 — same PR, no force push, validators re-run.
@@ -209,7 +210,7 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         self.assertIs(reintegration.force_pushed, False)
         self.assertTrue(reintegration.validators_passed)
         self.assertEqual(reintegration.integrated_base_sha, second)
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
 
         # 28/29 — a human merges on GitHub; Taskflow only polls.
         merge_sha = self.fixture.merge_branch_into_target("task/AT-101")
@@ -230,7 +231,7 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         self.assertFalse(worktree.exists())
 
         # 33 — the ticket reaches completed.
-        self.assertEqual(self.status_of("AT-101"), "completed")
+        self.assertEqual(self.status_of("AT-101"), schema.COMPLETED)
 
         # 35 — metrics are available for the run.
         metrics = compute_integration_metrics(self.integration, store=self.store)
@@ -242,21 +243,21 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         self.make_task("AT-102")
         self.integrate("AT-101")
         self.integrate("AT-102")
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
-        self.assertEqual(self.status_of("AT-102"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
+        self.assertEqual(self.status_of("AT-102"), schema.NEEDS_REVIEW)
         self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
 
     def test_item_15_red_validators_never_reach_needs_review(self) -> None:
         self.make_task("AT-101")
         self.integrate("AT-101", validator_specs=RED)
-        self.assertEqual(self.status_of("AT-101"), "needs_decision")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
 
     def test_item_17_multiple_same_repo_prs_stay_in_needs_review(self) -> None:
         for key in ("AT-101", "AT-102", "AT-103"):
             self.make_task(key)
             self.integrate(key)
         for key in ("AT-101", "AT-102", "AT-103"):
-            self.assertEqual(self.status_of(key), "needs_review")
+            self.assertEqual(self.status_of(key), schema.NEEDS_REVIEW)
 
     def test_item_23_and_24_changes_requested_and_retry_context(self) -> None:
         self.make_task("AT-101")
@@ -275,7 +276,7 @@ class EndToEndJourneyTests(AcceptanceTestCase):
             ],
         )
         self.pr_outcomes()
-        self.assertEqual(self.status_of("AT-101"), "needs_decision")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
         evidence = self.integration.list_review_evidence("AT-101")[0]
         self.assertEqual(evidence["reviewer"], "octocat")
         self.assertEqual(evidence["reviewed_at"], "2026-09-10T03:00:00Z")
@@ -288,7 +289,7 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         self.integrate("AT-101")
         self.sync_pr("AT-101", state="CLOSED", merged=False)
         self.pr_outcomes()
-        self.assertEqual(self.status_of("AT-101"), "cancelled")
+        self.assertEqual(self.status_of("AT-101"), schema.CANCELLED)
         self.assertTrue(worktree.is_dir())
         self.assertIn("task/AT-101", raw_git(self.fixture.repo, "branch", "--list", "task/AT-101"))
         self.assertTrue((self.artifacts / "AT-101").is_dir())
@@ -299,7 +300,7 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         self.integrate("AT-101")
         self.sync_pr("AT-101", statusCheckRollup=[{"state": "FAILURE"}])
         self.pr_outcomes()
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
         self.assertEqual(self.integration.get_pr_state("AT-101")["ci_status"], "failure")
 
     def test_item_29_polling_is_idempotent(self) -> None:
@@ -312,7 +313,7 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         self.assertTrue(first[0].merged)
         self.assertEqual(self.integration.get_pr_state("AT-101")["merge_commit_sha"], merge_sha)
         self.assertEqual([o.merged for o in second], [True])
-        self.assertNotEqual(self.status_of("AT-101"), "completed")
+        self.assertNotEqual(self.status_of("AT-101"), schema.COMPLETED)
 
     def test_item_31_every_github_merge_method_is_supported(self) -> None:
         for index, method in enumerate(("merge", "squash", "rebase")):
@@ -327,14 +328,14 @@ class EndToEndJourneyTests(AcceptanceTestCase):
                 )
                 cleanup = self.cleanup(key)
                 self.assertTrue(cleanup.merge_verified, cleanup.summary)
-                self.assertEqual(self.status_of(key), "completed")
+                self.assertEqual(self.status_of(key), schema.COMPLETED)
                 self.assertNotEqual(merge_sha, task_sha)
 
     def test_item_34_dependents_are_not_released_before_completed(self) -> None:
         """Step 2 half of §43.34: nothing here releases a dependent early."""
         self.make_task("AT-101")
         self.integrate("AT-101")
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
         events = [event.event_type for event in self.store.list_task_events("AT-101")]
         for forbidden in ("dependency_released", "blocked_by_cleared"):
             self.assertNotIn(forbidden, events)
@@ -346,7 +347,7 @@ class SafetyInvariantTests(AcceptanceTestCase):
     def test_integration_lock_does_not_wait_for_human_review(self) -> None:
         self.make_task("AT-101")
         self.integrate("AT-101")
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
         self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
 
     def test_every_integration_uses_the_latest_available_target(self) -> None:
@@ -371,7 +372,7 @@ class SafetyInvariantTests(AcceptanceTestCase):
     def test_taskflow_validator_failure_stops_for_decision(self) -> None:
         self.make_task("AT-101")
         self.integrate("AT-101", validator_specs=RED)
-        self.assertEqual(self.status_of("AT-101"), "needs_decision")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
 
     def test_ai_cannot_self_approve(self) -> None:
         self.make_task("AT-101")
@@ -522,7 +523,7 @@ class NegativeScopeTests(AcceptanceTestCase):
         self.assertEqual(
             self.integrate("AT-101", dry_run=True, confirm_integration=False).status, "dry_run"
         )
-        self.assertEqual(self.status_of("AT-101"), "ready_for_integration")
+        self.assertEqual(self.status_of("AT-101"), schema.READY_FOR_INTEGRATION)
         self.assertEqual(self.gh_runner.calls, [])
         self.assertTrue(worktree.is_dir())
 

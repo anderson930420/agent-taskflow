@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from agent_taskflow import integration_schema as schema
 from agent_taskflow import integration_git as git_ops
 from agent_taskflow.integration_conflict_resolver import (
     ConflictResolutionOutcome,
@@ -79,7 +80,7 @@ class ControllerTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def make_task(self, task_key: str, *, status: str = "ready_for_integration") -> Path:
+    def make_task(self, task_key: str, *, status: str = schema.READY_FOR_INTEGRATION) -> Path:
         worktree = self.fixture.create_task_worktree(task_key)
         artifact_dir = self.artifacts / task_key
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -135,11 +136,11 @@ class ControllerTestCase(unittest.TestCase):
 
 class EntryGuardTests(ControllerTestCase):
     def test_only_ready_for_integration_tickets_are_integrated(self) -> None:
-        self.make_task("AT-101", status="needs_review")
+        self.make_task("AT-101", status=schema.NEEDS_REVIEW)
         result = self.integrate("AT-101")
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "blocked")
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
 
     def test_dry_run_mutates_nothing(self) -> None:
         worktree = self.make_task("AT-101")
@@ -147,7 +148,7 @@ class EntryGuardTests(ControllerTestCase):
         result = self.integrate("AT-101", dry_run=True, confirm_integration=False)
         self.assertEqual(result.status, "dry_run")
         self.assertTrue(result.confirmation_required)
-        self.assertEqual(self.status_of("AT-101"), "ready_for_integration")
+        self.assertEqual(self.status_of("AT-101"), schema.READY_FOR_INTEGRATION)
         self.assertEqual(self.gh_runner.calls, [])
         self.assertIsNone(self.integration.get_pr_state("AT-101")["pr_number"])
 
@@ -165,7 +166,7 @@ class InitialIntegrationTests(ControllerTestCase):
         result = self.integrate("AT-101")
         self.assertTrue(result.ok, result.summary)
         self.assertEqual(result.mode, "initial")
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
         self.assertEqual(result.pr_number, 42)
         self.assertEqual(self.integration.get_pr_state("AT-101")["pr_number"], 42)
         self.assertEqual(self.integration.get_pr_state("AT-101")["pr_state"], "open")
@@ -216,7 +217,7 @@ class InitialIntegrationTests(ControllerTestCase):
             for event in self.store.list_task_events("AT-101")
             if event.event_type == "status_changed"
         ]
-        self.assertEqual(statuses[-2:], ["integrating", "needs_review"])
+        self.assertEqual(statuses[-2:], [schema.INTEGRATING, schema.NEEDS_REVIEW])
 
 
 class ValidatorGateTests(ControllerTestCase):
@@ -225,7 +226,7 @@ class ValidatorGateTests(ControllerTestCase):
         self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
         result = self.integrate("AT-101", validator_specs=RED)
         self.assertEqual(result.status, "needs_decision")
-        self.assertEqual(self.status_of("AT-101"), "needs_decision")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
         self.assertFalse(result.validators_passed)
 
     def test_red_validators_do_not_push_or_create_a_pr(self) -> None:
@@ -262,7 +263,7 @@ class LockAndQueueTests(ControllerTestCase):
         worktree = self.make_task("AT-101")
         self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
         result = self.integrate("AT-101")
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
         self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
         self.assertIs(result.lock_held_after_return, False)
 
@@ -271,8 +272,8 @@ class LockAndQueueTests(ControllerTestCase):
             worktree = self.make_task(key)
             self.fixture.commit_in(worktree, f"{key}.txt", "f\n", "feature")
             self.integrate(key)
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
-        self.assertEqual(self.status_of("AT-102"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
+        self.assertEqual(self.status_of("AT-102"), schema.NEEDS_REVIEW)
         self.assertNotEqual(
             self.integration.get_pr_state("AT-101")["pr_number"],
             self.integration.get_pr_state("AT-102")["pr_number"],
@@ -285,7 +286,7 @@ class LockAndQueueTests(ControllerTestCase):
         with IntegrationLock(self.integration, "owner/repo", owner="other-runtime"):
             result = self.integrate("AT-101")
         self.assertEqual(result.status, "lock_unavailable")
-        self.assertEqual(self.status_of("AT-101"), "ready_for_integration")
+        self.assertEqual(self.status_of("AT-101"), schema.READY_FOR_INTEGRATION)
         self.assertEqual(self.gh_runner.calls, [])
 
     def test_a_different_repo_lock_does_not_block(self) -> None:
@@ -294,7 +295,7 @@ class LockAndQueueTests(ControllerTestCase):
         with IntegrationLock(self.integration, "owner/other", owner="other-runtime"):
             result = self.integrate("AT-101")
         self.assertTrue(result.ok, result.summary)
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
 
     def test_the_lock_is_released_when_integration_fails(self) -> None:
         worktree = self.make_task("AT-101")
@@ -320,7 +321,7 @@ class ReIntegrationTests(ControllerTestCase):
         return worktree
 
     def _requeue(self, task_key: str = "AT-101") -> None:
-        self.store.update_task_status(task_key, "ready_for_integration", source="test")
+        self.store.update_task_status(task_key, schema.READY_FOR_INTEGRATION, source="test")
         self.integration.update_pr_state(task_key, reintegration_required=True)
 
     def test_reintegration_updates_the_same_pr_number(self) -> None:
@@ -382,7 +383,7 @@ class ReIntegrationTests(ControllerTestCase):
         self.fixture.advance_target()
         self._requeue()
         result = self.integrate("AT-101", validator_specs=RED)
-        self.assertEqual(self.status_of("AT-101"), "needs_decision")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
         self.assertFalse(result.validators_passed)
 
     def test_reintegration_records_the_base_shas_and_clears_the_flag(self) -> None:
@@ -419,7 +420,7 @@ class ReIntegrationTests(ControllerTestCase):
             row["integration_run_id"] for row in self.integration.list_validator_evidence("AT-101")
         }
         self.assertEqual(len(runs), 2)
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
 
     def test_a_no_op_reintegration_does_not_push_by_default(self) -> None:
         self._published()
@@ -445,7 +446,7 @@ class ConflictTests(ControllerTestCase):
         self._conflicting()
         result = self.integrate("AT-101", conflict_resolver=None)
         self.assertEqual(result.status, "needs_decision")
-        self.assertEqual(self.status_of("AT-101"), "needs_decision")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
         self.assertEqual(self.gh_runner.calls, [])
 
     def test_unresolvable_conflict_persists_hunks_and_explanation(self) -> None:
@@ -471,7 +472,7 @@ class ConflictTests(ControllerTestCase):
         self._conflicting()
         result = self.integrate("AT-101", conflict_resolver=TakeBothSidesResolver())
         self.assertTrue(result.ok, result.summary)
-        self.assertEqual(self.status_of("AT-101"), "needs_review")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
         self.assertTrue(result.conflict_resolved)
         self.assertTrue(result.validators_passed)
 
@@ -486,7 +487,7 @@ class ConflictTests(ControllerTestCase):
         result = self.integrate(
             "AT-101", conflict_resolver=TakeBothSidesResolver(), validator_specs=RED
         )
-        self.assertEqual(self.status_of("AT-101"), "needs_decision")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
         self.assertTrue(result.conflict_resolved)
         self.assertFalse(result.validators_passed)
 
@@ -530,8 +531,8 @@ class NegativeScopeTests(ControllerTestCase):
         worktree = self.make_task("AT-101")
         self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
         result = self.integrate("AT-101")
-        self.assertNotEqual(result.final_task_status, "completed")
-        self.assertNotEqual(self.status_of("AT-101"), "completed")
+        self.assertNotEqual(result.final_task_status, schema.COMPLETED)
+        self.assertNotEqual(self.status_of("AT-101"), schema.COMPLETED)
 
     def test_the_worktree_survives_integration(self) -> None:
         worktree = self.make_task("AT-101")

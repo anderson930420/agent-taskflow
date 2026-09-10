@@ -326,6 +326,9 @@ export function TaskBoard({
             <Link className="ghost-button" href="/tasks/new">
               Create Task
             </Link>
+            <Link className="ghost-button" href="/tickets/new">
+              Create Ticket
+            </Link>
           </div>
         </header>
 

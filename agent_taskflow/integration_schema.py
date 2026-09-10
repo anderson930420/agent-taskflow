@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from agent_taskflow.status_vocab import to_persisted_status
+
 
 __all__ = [
     "CANCELLED",
@@ -41,16 +43,22 @@ __all__ = [
 
 # -- §12 statuses owned by the integration controller ----------------------
 #
-# The spec spells the cancelled state with two "l"s. The pre-V1 local mirror
-# uses the separate legacy value "canceled"; the two are deliberately kept
-# distinct rather than aliased, so a V1 integration transition can never be
-# confused with a legacy cancellation.
-READY_FOR_INTEGRATION = "ready_for_integration"
-INTEGRATING = "integrating"
-NEEDS_REVIEW = "needs_review"
-NEEDS_DECISION = "needs_decision"
-CANCELLED = "cancelled"
-COMPLETED = "completed"
+# SPEC §12.2 ruling: §12 names are the Mission Control *display* vocabulary and
+# the persisted canonical vocabulary stays `TASK_STATUSES`. These constants are
+# named for the §12 display concept but hold the **persisted** spelling, which
+# is resolved through `status_vocab` rather than duplicated here.
+#
+# Four of the six are not identity:
+#     needs_review -> waiting_for_review
+#     cancelled    -> canceled
+#     completed    -> cleaned
+# so nothing in Step 2 may compare a task status against a §12 name directly.
+READY_FOR_INTEGRATION = to_persisted_status("ready_for_integration")
+INTEGRATING = to_persisted_status("integrating")
+NEEDS_REVIEW = to_persisted_status("needs_review")
+NEEDS_DECISION = to_persisted_status("needs_decision")
+CANCELLED = to_persisted_status("cancelled")
+COMPLETED = to_persisted_status("completed")
 
 INTEGRATION_OWNED_STATUSES = frozenset(
     {

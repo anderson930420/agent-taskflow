@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_taskflow import integration_schema as schema
 from agent_taskflow.integration_queue import (
     IntegrationLock,
     IntegrationLockUnavailable,
@@ -32,7 +33,7 @@ class QueueTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _task(self, key: str, *, status: str = "ready_for_integration") -> None:
+    def _task(self, key: str, *, status: str = schema.READY_FOR_INTEGRATION) -> None:
         self.store.upsert_task(
             TaskRecord(
                 task_key=key,

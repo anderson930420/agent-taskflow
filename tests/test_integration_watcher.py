@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from agent_taskflow import integration_schema as schema
 from agent_taskflow import integration_git as git_ops
 from agent_taskflow.github_pr_adapter import GitHubPrAdapter
 from agent_taskflow.integration_queue import queue_for_repo
@@ -53,7 +54,7 @@ class WatcherTestCase(unittest.TestCase):
             TaskRecord(
                 task_key=task_key,
                 project="demo",
-                status="needs_review",
+                status=schema.NEEDS_REVIEW,
                 repo_path=self.fixture.repo,
                 artifact_dir=artifact_dir,
             )
@@ -121,7 +122,7 @@ class TargetFreshnessTests(WatcherTestCase):
         results = self.freshness()
         self.assertEqual(results[0].behind_count, 0)
         self.assertFalse(results[0].stale)
-        self.assertEqual(self.status_of("AT-201"), "needs_review")
+        self.assertEqual(self.status_of("AT-201"), schema.NEEDS_REVIEW)
 
     def test_an_advanced_target_makes_the_pr_stale(self) -> None:
         self.make_reviewing_task("AT-201")
@@ -134,7 +135,7 @@ class TargetFreshnessTests(WatcherTestCase):
         self.make_reviewing_task("AT-201")
         self.fixture.advance_target()
         self.freshness()
-        self.assertEqual(self.status_of("AT-201"), "ready_for_integration")
+        self.assertEqual(self.status_of("AT-201"), schema.READY_FOR_INTEGRATION)
         self.assertIs(self.integration.get_pr_state("AT-201")["reintegration_required"], True)
 
     def test_a_stale_pr_is_requeued_for_its_repo(self) -> None:
@@ -157,10 +158,10 @@ class TargetFreshnessTests(WatcherTestCase):
 
     def test_only_needs_review_tickets_are_examined(self) -> None:
         self.make_reviewing_task("AT-201")
-        self.store.update_task_status("AT-201", "needs_decision", source="test")
+        self.store.update_task_status("AT-201", schema.NEEDS_DECISION, source="test")
         self.fixture.advance_target()
         self.assertEqual(self.freshness(), [])
-        self.assertEqual(self.status_of("AT-201"), "needs_decision")
+        self.assertEqual(self.status_of("AT-201"), schema.NEEDS_DECISION)
 
     def test_freshness_polling_is_idempotent(self) -> None:
         self.make_reviewing_task("AT-201")
@@ -175,11 +176,11 @@ class TargetFreshnessTests(WatcherTestCase):
     def test_an_in_progress_integration_is_not_interrupted(self) -> None:
         """§25.0 — a target that advances mid-integration gets no special handling."""
         self.make_reviewing_task("AT-201")
-        self.store.update_task_status("AT-201", "ready_for_integration", source="test")
-        self.store.update_task_status("AT-201", "integrating", source="test")
+        self.store.update_task_status("AT-201", schema.READY_FOR_INTEGRATION, source="test")
+        self.store.update_task_status("AT-201", schema.INTEGRATING, source="test")
         self.fixture.advance_target()
         self.assertEqual(self.freshness(), [])
-        self.assertEqual(self.status_of("AT-201"), "integrating")
+        self.assertEqual(self.status_of("AT-201"), schema.INTEGRATING)
 
     def test_dry_run_freshness_polling_changes_nothing(self) -> None:
         self.make_reviewing_task("AT-201")
@@ -187,7 +188,7 @@ class TargetFreshnessTests(WatcherTestCase):
         results = self.freshness(confirm_poll=False)
         self.assertTrue(results[0].stale)
         self.assertFalse(results[0].requeued)
-        self.assertEqual(self.status_of("AT-201"), "needs_review")
+        self.assertEqual(self.status_of("AT-201"), schema.NEEDS_REVIEW)
 
 
 class PrOutcomeTests(WatcherTestCase):
@@ -205,14 +206,14 @@ class PrOutcomeTests(WatcherTestCase):
         self.make_reviewing_task("AT-201")
         self.gh_runner.set_pr(42, reviewDecision="APPROVED")
         self.outcomes()
-        self.assertEqual(self.status_of("AT-201"), "needs_review")
+        self.assertEqual(self.status_of("AT-201"), schema.NEEDS_REVIEW)
 
     def test_red_ci_never_mutates_the_lifecycle(self) -> None:
         """§30 — GitHub CI is not a Taskflow lifecycle authority."""
         self.make_reviewing_task("AT-201")
         self.gh_runner.set_pr(42, statusCheckRollup=[{"state": "FAILURE"}])
         self.outcomes()
-        self.assertEqual(self.status_of("AT-201"), "needs_review")
+        self.assertEqual(self.status_of("AT-201"), schema.NEEDS_REVIEW)
         self.assertEqual(self.integration.get_pr_state("AT-201")["ci_status"], "failure")
 
     def test_changes_requested_moves_to_needs_decision(self) -> None:
@@ -230,7 +231,7 @@ class PrOutcomeTests(WatcherTestCase):
             ],
         )
         self.outcomes()
-        self.assertEqual(self.status_of("AT-201"), "needs_decision")
+        self.assertEqual(self.status_of("AT-201"), schema.NEEDS_DECISION)
 
     def test_changes_requested_persists_retry_context(self) -> None:
         self.make_reviewing_task("AT-201")
@@ -261,13 +262,13 @@ class PrOutcomeTests(WatcherTestCase):
         self.outcomes()
         self.gh_runner.set_pr(42, reviewDecision="APPROVED")
         self.outcomes()
-        self.assertEqual(self.status_of("AT-201"), "needs_decision")
+        self.assertEqual(self.status_of("AT-201"), schema.NEEDS_DECISION)
 
     def test_pr_closed_unmerged_cancels_the_ticket(self) -> None:
         self.make_reviewing_task("AT-201")
         self.gh_runner.set_pr(42, state="CLOSED", merged=False)
         self.outcomes()
-        self.assertEqual(self.status_of("AT-201"), "cancelled")
+        self.assertEqual(self.status_of("AT-201"), schema.CANCELLED)
 
     def test_pr_closed_unmerged_retains_the_workspace_and_evidence(self) -> None:
         worktree = self.make_reviewing_task("AT-201")
@@ -302,7 +303,7 @@ class PrOutcomeTests(WatcherTestCase):
             42, state="MERGED", merged=True, mergedAt="x", mergeCommit={"oid": merge_sha}
         )
         self.outcomes()
-        self.assertNotEqual(self.status_of("AT-201"), "completed")
+        self.assertNotEqual(self.status_of("AT-201"), schema.COMPLETED)
         self.assertTrue(worktree.is_dir())
 
     def test_pr_polling_is_idempotent(self) -> None:
@@ -327,8 +328,8 @@ class PrOutcomeTests(WatcherTestCase):
         self.make_reviewing_task("AT-201")
         self.gh_runner.set_pr(42, state="CLOSED", merged=False)
         results = self.outcomes(confirm_poll=False)
-        self.assertEqual(results[0].proposed_transition, "cancelled")
-        self.assertEqual(self.status_of("AT-201"), "needs_review")
+        self.assertEqual(results[0].proposed_transition, schema.CANCELLED)
+        self.assertEqual(self.status_of("AT-201"), schema.NEEDS_REVIEW)
         self.assertIsNone(self.integration.get_pr_state("AT-201")["pr_last_polled_at"])
 
     def test_tickets_without_a_pr_are_skipped(self) -> None:

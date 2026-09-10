@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_taskflow import integration_schema as schema
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.integration_validators import (
     IntegrationValidatorSpec,
@@ -33,7 +34,7 @@ class IntegrationValidatorTestCase(unittest.TestCase):
             TaskRecord(
                 task_key="AT-701",
                 project="demo",
-                status="integrating",
+                status=schema.INTEGRATING,
                 repo_path=self.root / "repo",
                 artifact_dir=self.artifact_dir,
             )

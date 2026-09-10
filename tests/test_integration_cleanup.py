@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from agent_taskflow import integration_schema as schema
 from agent_taskflow import integration_git as git_ops
 from agent_taskflow.integration_cleanup import (
     IntegrationCleanupRequest,
@@ -50,7 +51,7 @@ class CleanupTestCase(unittest.TestCase):
             TaskRecord(
                 task_key=task_key,
                 project="demo",
-                status="needs_review",
+                status=schema.NEEDS_REVIEW,
                 repo_path=self.fixture.repo,
                 artifact_dir=artifact_dir,
             )
@@ -115,7 +116,7 @@ class MergeVerifiedCleanupTests(CleanupTestCase):
         self.assertTrue(result.ok, result.summary)
         self.assertTrue(result.merge_verified)
         self.assertFalse(self.worktree.exists())
-        self.assertEqual(self.status_of("AT-301"), "completed")
+        self.assertEqual(self.status_of("AT-301"), schema.COMPLETED)
 
     def test_cleanup_supports_squash_and_rebase_merges(self) -> None:
         for method in ("squash", "rebase"):
@@ -126,7 +127,7 @@ class MergeVerifiedCleanupTests(CleanupTestCase):
                 result = self.cleanup(task_key)
                 self.assertTrue(result.ok, result.summary)
                 self.assertFalse(worktree.exists())
-                self.assertEqual(self.status_of(task_key), "completed")
+                self.assertEqual(self.status_of(task_key), schema.COMPLETED)
 
     def test_the_local_branch_is_safe_deleted(self) -> None:
         self._merge()
@@ -162,7 +163,7 @@ class CleanupGateTests(CleanupTestCase):
         self.assertFalse(result.ok)
         self.assertFalse(result.merge_verified)
         self.assertTrue(self.worktree.is_dir())
-        self.assertNotEqual(self.status_of("AT-301"), "completed")
+        self.assertNotEqual(self.status_of("AT-301"), schema.COMPLETED)
 
     def test_cleanup_is_refused_when_the_merge_sha_is_not_in_target_history(self) -> None:
         self.integration.update_pr_state(
@@ -177,7 +178,7 @@ class CleanupGateTests(CleanupTestCase):
         result = self.cleanup(confirm_cleanup=False)
         self.assertEqual(result.status, "dry_run")
         self.assertTrue(self.worktree.is_dir())
-        self.assertNotEqual(self.status_of("AT-301"), "completed")
+        self.assertNotEqual(self.status_of("AT-301"), schema.COMPLETED)
 
     def test_completed_is_never_reached_without_a_verified_merge(self) -> None:
         for setup in (
@@ -187,13 +188,13 @@ class CleanupGateTests(CleanupTestCase):
         ):
             setup()
             self.cleanup()
-            self.assertNotEqual(self.status_of("AT-301"), "completed")
+            self.assertNotEqual(self.status_of("AT-301"), schema.COMPLETED)
 
 
 class ClosedUnmergedTests(CleanupTestCase):
     def _cancel(self) -> None:
         self.integration.update_pr_state("AT-301", pr_state="closed", pr_merged=False)
-        self.store.update_task_status("AT-301", "cancelled", source="test")
+        self.store.update_task_status("AT-301", schema.CANCELLED, source="test")
 
     def test_cancelled_work_is_not_destroyed_by_the_merged_path(self) -> None:
         self._cancel()
@@ -218,7 +219,7 @@ class ClosedUnmergedTests(CleanupTestCase):
     def test_cancelled_cleanup_never_marks_the_ticket_completed(self) -> None:
         self._cancel()
         self.cleanup(confirm_cleanup=True, confirm_cancelled_cleanup=True)
-        self.assertEqual(self.status_of("AT-301"), "cancelled")
+        self.assertEqual(self.status_of("AT-301"), schema.CANCELLED)
 
     def test_the_cancelled_flag_does_not_bypass_the_merge_gate_for_open_prs(self) -> None:
         result = self.cleanup(confirm_cleanup=True, confirm_cancelled_cleanup=True)

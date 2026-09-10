@@ -6,6 +6,7 @@ import unittest
 
 from agent_taskflow import integration_schema as schema
 from agent_taskflow.models import TASK_STATUSES
+from agent_taskflow.status_vocab import to_display_status, to_persisted_status
 
 
 class TicketPrFieldListTests(unittest.TestCase):
@@ -98,8 +99,35 @@ class LifecycleStatusTests(unittest.TestCase):
         ):
             self.assertIn(status, TASK_STATUSES)
 
-    def test_spec_spelling_is_cancelled_with_two_l(self) -> None:
-        self.assertEqual(schema.CANCELLED, "cancelled")
+    def test_step2_constants_hold_the_persisted_spelling(self) -> None:
+        """§12.2 — §12 names are display; TASK_STATUSES stays canonical."""
+        self.assertEqual(schema.READY_FOR_INTEGRATION, "ready_for_integration")
+        self.assertEqual(schema.INTEGRATING, "integrating")
+        self.assertEqual(schema.NEEDS_DECISION, "needs_decision")
+        # The four that are deliberately not identity.
+        self.assertEqual(schema.NEEDS_REVIEW, "waiting_for_review")
+        self.assertEqual(schema.CANCELLED, "canceled")
+        self.assertEqual(schema.COMPLETED, "cleaned")
+
+    def test_the_two_cancelled_spellings_never_coexist_in_the_enum(self) -> None:
+        """§12.2 — one persisted spelling per idea."""
+        self.assertIn("canceled", TASK_STATUSES)
+        self.assertNotIn("cancelled", TASK_STATUSES)
+        self.assertIn("waiting_for_review", TASK_STATUSES)
+        self.assertNotIn("needs_review", TASK_STATUSES)
+
+    def test_constants_are_resolved_through_status_vocab_not_duplicated(self) -> None:
+        for display, constant in (
+            ("ready_for_integration", schema.READY_FOR_INTEGRATION),
+            ("integrating", schema.INTEGRATING),
+            ("needs_review", schema.NEEDS_REVIEW),
+            ("needs_decision", schema.NEEDS_DECISION),
+            ("cancelled", schema.CANCELLED),
+            ("completed", schema.COMPLETED),
+        ):
+            with self.subTest(display=display):
+                self.assertEqual(to_persisted_status(display), constant)
+                self.assertEqual(to_display_status(constant), display)
 
     def test_allowed_integration_transitions(self) -> None:
         allowed = [
