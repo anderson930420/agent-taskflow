@@ -155,6 +155,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store.init_db()
+        # Fails closed, naming scripts/migrate_ticket_fields.py, when the
+        # Step 1 Ticket columns are missing. It never applies them.
         ticket_store.init_db()
         yield
 

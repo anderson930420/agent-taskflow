@@ -7,15 +7,21 @@ canonical `tasks` table; there is no separate Ticket table.
 This service creates *state only*. It runs no Git command, creates no
 worktree, no branch and no directory: worktree paths and branch names are
 derived strings that Step 2 will later act on.
+
+A derived branch name that already exists — recorded in the store, or present
+in the repository as a local or remote-tracking branch — refuses creation. It
+is never auto-suffixed. The repository check reads the ref storage directly
+(:mod:`agent_taskflow.git_ref_storage`): no Git command, no write.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agent_taskflow._helpers import require_non_empty
+from agent_taskflow.git_ref_storage import GitRefStorageError, find_existing_branch_refs
 from agent_taskflow.status_vocab import to_display_status, to_persisted_status
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.ticket_ai_metadata import (
@@ -38,7 +44,11 @@ from agent_taskflow.ticket_repositories import (
     TicketRepositoryError,
     resolve_ticket_repository,
 )
-from agent_taskflow.ticket_store import TicketStore, TicketStoreError
+from agent_taskflow.ticket_store import (
+    TicketBranchExistsError,
+    TicketStore,
+    TicketStoreError,
+)
 
 
 # `kind` recorded in the `created` task_events payload for this path.
@@ -58,6 +68,35 @@ CREATION_SAFETY_FLAGS: dict[str, bool] = {
 
 class TicketCreationError(ValueError):
     """Raised when a Ticket creation request is invalid or cannot persist."""
+
+
+_COLLISION_WHERE = {
+    "tasks": "recorded in tasks by {existing}",
+    "task_worktrees": "recorded as the worktree branch of {existing}",
+    "repository": "present in the repository as {existing}",
+}
+
+
+class TicketBranchCollisionError(TicketCreationError):
+    """The derived branch already exists. Refused; never auto-suffixed."""
+
+    def __init__(self, branch: str, source: str, existing: str) -> None:
+        self.branch = branch
+        self.source = source
+        self.existing = existing
+        where = _COLLISION_WHERE.get(source, "{existing}").format(existing=existing)
+        super().__init__(
+            f"Branch {branch!r} already exists ({where}). Refusing to create the "
+            "Ticket; branch names are never auto-suffixed."
+        )
+
+
+class TicketBranchCheckUnavailableError(TicketCreationError):
+    """The repository's refs could not be read, so a collision can't be ruled out."""
+
+
+# Read-only lookup of existing refs for (repo_path, branch).
+BranchLookup = Callable[[Path, str], tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -128,6 +167,7 @@ def create_ticket(
     ai_adapter: TicketAIMetadataAdapter | None = None,
     ai_timeout_seconds: float | None = DEFAULT_AI_METADATA_TIMEOUT_SECONDS,
     actor: str = DEFAULT_TICKET_ACTOR,
+    branch_lookup: BranchLookup = find_existing_branch_refs,
 ) -> TicketCreationResult:
     """Create one Ticket from repository / prompt / priority."""
     if repository is None:
@@ -180,6 +220,15 @@ def create_ticket(
             commit_message_suggestion=metadata.commit_message_suggestion,
         )
 
+    def reject_repository_branch(record: TicketRecord) -> None:
+        existing = branch_lookup(record.repo_path, record.branch)
+        if existing:
+            raise TicketBranchExistsError(
+                record.branch,
+                "repository",
+                ", ".join(existing),
+            )
+
     store.init_db()
     try:
         ticket = store.create_ticket(
@@ -194,7 +243,15 @@ def create_ticket(
                 display_status,
             ),
             blocked_by=request.blocked_by,
+            branch_guard=reject_repository_branch,
         )
+    except TicketBranchExistsError as exc:
+        raise TicketBranchCollisionError(exc.branch, exc.source, exc.existing) from exc
+    except GitRefStorageError as exc:
+        raise TicketBranchCheckUnavailableError(
+            "Cannot verify that the derived branch does not already exist in "
+            f"{repository.repo_path}: {exc}. Refusing to create the Ticket."
+        ) from exc
     except (TicketStoreError, ValueError) as exc:
         raise TicketCreationError(str(exc)) from exc
 
@@ -255,9 +312,12 @@ def ticket_to_dict(ticket: TicketRecord) -> dict[str, Any]:
 
 
 __all__ = [
+    "BranchLookup",
     "CREATION_SAFETY_FLAGS",
     "DEFAULT_TICKET_ACTOR",
     "TICKET_CREATED_EVENT",
+    "TicketBranchCheckUnavailableError",
+    "TicketBranchCollisionError",
     "TicketCreationError",
     "TicketCreationRequest",
     "TicketCreationResult",

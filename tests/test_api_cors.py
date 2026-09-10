@@ -10,6 +10,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from agent_taskflow.api.main import create_app
+from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 
 
 class CorsMiddlewareTests(unittest.TestCase):
@@ -23,6 +25,9 @@ class CorsMiddlewareTests(unittest.TestCase):
         self.addCleanup(self._exit_stack.close)
 
         self.db_path = Path(self._tmpdir.name) / "cors-test.db"
+        # The API fails closed until the explicit Step 1 migration has run.
+        TaskMirrorStore(self.db_path).init_db()
+        migrate_ticket_fields(self.db_path)
         self.app = create_app(db_path=self.db_path)
         self.client = self._exit_stack.enter_context(TestClient(self.app))
 
