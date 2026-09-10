@@ -373,15 +373,18 @@ $PY scripts/validate_workflow_policy.py
 
 ### Mission Control build
 
-`node_modules` is not committed. If the worktree has none, copy it from the main
-checkout — a symlink will not work, Turbopack rejects one that points outside
-the project root:
+`node_modules` is not committed. A fresh worktree has none; restore it offline
+(~8s), then build:
 
 ```bash
-cp -a /home/ubuntu/agent-taskflow/mission-control/node_modules \
-      mission-control/node_modules
-cd mission-control && npm run build
+cd mission-control
+npm ci --prefer-offline
+npm run build
 ```
+
+Do **not** symlink `node_modules` to another checkout — Turbopack rejects a
+symlink that points outside the project root and the build fails with
+`Symlink [project]/node_modules is invalid`.
 
 ### Manual smoke (optional, read-only)
 
