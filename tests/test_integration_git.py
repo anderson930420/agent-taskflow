@@ -201,18 +201,34 @@ class ResolutionVerificationTests(IntegrationGitTestCase):
         self.assertEqual(verification.failed, ())
         self.assertEqual([c.name for c in verification.checks], list(git_ops.RESOLUTION_CHECKS))
 
-    def test_check_a_merge_head_or_rebase_head_fails_only_check_a(self) -> None:
-        directory = git_ops.git_dir(self.worktree)
-        for marker in ("MERGE_HEAD", "REBASE_HEAD"):
-            with self.subTest(marker=marker):
-                path = directory / marker
-                path.write_text(self.target_sha + "\n", encoding="utf-8")
-                try:
-                    self.assertEqual(
-                        self.verify().failed, (git_ops.CHECK_NO_OPERATION_IN_PROGRESS,)
-                    )
-                finally:
-                    path.unlink()
+    def test_check_a_merge_head_fails_only_check_a(self) -> None:
+        path = git_ops.git_dir(self.worktree) / "MERGE_HEAD"
+        path.write_text(self.target_sha + "\n", encoding="utf-8")
+        try:
+            self.assertEqual(self.verify().failed, (git_ops.CHECK_NO_OPERATION_IN_PROGRESS,))
+        finally:
+            path.unlink()
+
+    def test_check_a_a_leftover_rebase_head_alone_does_not_fail_check_a(self) -> None:
+        """Amended check (a): git 2.43 leaves REBASE_HEAD behind after a
+        successful ``rebase --continue``; on its own it is not in progress."""
+        path = git_ops.git_dir(self.worktree) / "REBASE_HEAD"
+        path.write_text(self.target_sha + "\n", encoding="utf-8")
+        try:
+            self.assertIsNone(git_ops.in_progress_operation(self.worktree))
+            self.assertTrue(self.verify().passed)
+        finally:
+            path.unlink()
+
+    def test_check_a_a_stopped_rebase_fails_check_a(self) -> None:
+        """A real rebase stopped on a conflict has rebase-merge/, so it is caught."""
+        self.fixture.commit_in(self.worktree, "shared.txt", "task-side\n", "task edits shared")
+        self.fixture.advance_target("shared.txt", "target-side\n")
+        git_ops.fetch(self.worktree, remote="origin")
+        self.assertTrue(git_ops.rebase_onto_target(self.worktree, "origin/main").conflicted)
+        self.assertTrue((git_ops.git_dir(self.worktree) / "rebase-merge").is_dir())
+        self.assertEqual(git_ops.in_progress_operation(self.worktree), "rebase")
+        self.assertIn(git_ops.CHECK_NO_OPERATION_IN_PROGRESS, self.verify().failed)
 
     def test_check_a_rebase_directories_count_as_an_operation_in_progress(self) -> None:
         directory = git_ops.git_dir(self.worktree)

@@ -352,17 +352,24 @@ def git_dir(cwd: Path) -> Path:
 def in_progress_operation(cwd: Path) -> str | None:
     """Return the name of an in-flight merge/rebase, or None if there is none.
 
-    Checks MERGE_HEAD, REBASE_HEAD, and the rebase-merge/ and rebase-apply/
-    directories (review blocker B2, check a).
+    Review blocker B2, check (a), as amended by the human ruling:
+
+    * a merge is in progress when ``MERGE_HEAD`` exists;
+    * a rebase is in progress when ``rebase-merge/`` or ``rebase-apply/``
+      exists in the git dir. ``REBASE_HEAD`` counts only alongside one of
+      them.
+
+    These directories are how git itself tracks an in-progress rebase, so a
+    half-finished rebase cannot pass. ``REBASE_HEAD`` on its own is not
+    evidence of anything: git 2.43 leaves it behind after a *successful*
+    ``git rebase --continue``, and counting it flagged every correctly
+    completed rebase as still running.
     """
     directory = git_dir(cwd)
     if (directory / "MERGE_HEAD").exists():
         return "merge"
-    if (directory / "REBASE_HEAD").exists():
+    if (directory / "rebase-merge").exists() or (directory / "rebase-apply").exists():
         return "rebase"
-    for marker in ("rebase-merge", "rebase-apply"):
-        if (directory / marker).exists():
-            return "rebase"
     return None
 
 

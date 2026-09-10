@@ -643,6 +643,24 @@ class AbandoningResolver:
         )
 
 
+class ClaimOnlyResolver:
+    """Claims success but never touches the tree: the rebase stays stopped."""
+
+    name = "claim-only"
+
+    def __init__(self) -> None:
+        self.rebase_dir_present: bool | None = None
+
+    def resolve(self, request: ConflictResolutionRequest) -> ConflictResolutionOutcome:
+        directory = git_ops.git_dir(Path(request.worktree_path))
+        self.rebase_dir_present = (directory / "rebase-merge").exists() or (
+            directory / "rebase-apply"
+        ).exists()
+        return ConflictResolutionOutcome(
+            resolver=self.name, resolved=True, explanation="claimed resolved, did nothing"
+        )
+
+
 class ResolutionVerificationTests(ControllerTestCase):
     """Review blocker B2 — after ANY AI conflict resolution, and before
     validators run, the control plane verifies five deterministic checks. Any
@@ -727,6 +745,20 @@ class ResolutionVerificationTests(ControllerTestCase):
         result = self.integrate("AT-101", conflict_resolver=AbandoningResolver())
         self.assert_stopped_by(result, git_ops.CHECK_TARGET_IS_ANCESTOR)
         self.assertEqual(result.resolution_checks_failed, (git_ops.CHECK_TARGET_IS_ANCESTOR,))
+
+
+    def test_a_stopped_rebase_still_fails_check_a_under_the_amended_rule(self) -> None:
+        """Amended check (a): REBASE_HEAD alone no longer counts, but a rebase
+        that stopped on a conflict and was never continued still has
+        rebase-merge/, so it is still caught — needs_decision, nothing pushed,
+        no integrated_base_sha."""
+        worktree = self._conflicting()
+        resolver = ClaimOnlyResolver()
+        result = self.integrate("AT-101", conflict_resolver=resolver)
+        self.assertTrue(resolver.rebase_dir_present)
+        self.assert_stopped_by(result, git_ops.CHECK_NO_OPERATION_IN_PROGRESS)
+        self.assertIsNone(self.integration.get_pr_state("AT-101")["integrated_base_sha"])
+        self.assertIsNone(git_ops.in_progress_operation(worktree))
 
 
 if __name__ == "__main__":
