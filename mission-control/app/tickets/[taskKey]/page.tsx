@@ -11,14 +11,20 @@ function valueOrDash(value?: string | number | null): string {
   return String(value);
 }
 
+const AI_TITLE_LABELS: Record<string, string> = {
+  generated: "AI generated",
+  fallback: "Fallback (AI metadata failed)",
+  not_attempted: "Fallback (AI metadata not configured)"
+};
+
 export default async function TicketDetailPage({
   params
 }: {
-  params: Promise<{ ticketId: string }>;
+  params: Promise<{ taskKey: string }>;
 }) {
-  const { ticketId } = await params;
-  const decodedTicketId = decodeURIComponent(ticketId);
-  const result = await getTicketDetail(decodedTicketId);
+  const { taskKey } = await params;
+  const decodedTaskKey = decodeURIComponent(taskKey);
+  const result = await getTicketDetail(decodedTaskKey);
 
   if (!result.ok) {
     return (
@@ -27,7 +33,7 @@ export default async function TicketDetailPage({
           <p>
             <Link href="/tickets/new">← Create another Ticket</Link>
           </p>
-          <h1>Ticket {decodedTicketId}</h1>
+          <h1>Ticket {decodedTaskKey}</h1>
           <p className="muted">
             API base URL: <span className="mono">{API_BASE_URL}</span>
           </p>
@@ -46,8 +52,14 @@ export default async function TicketDetailPage({
         <p>
           <Link href="/tickets/new">← Create another Ticket</Link>
         </p>
-        <h1>{ticket.ticket_id}</h1>
+        <h1>{ticket.task_key}</h1>
         <p>{ticket.title}</p>
+        <p className="muted">
+          Also available as a task:{" "}
+          <Link href={`/tasks/${encodeURIComponent(ticket.task_key)}`}>
+            /tasks/{ticket.task_key}
+          </Link>
+        </p>
         <p className="muted">
           API base URL: <span className="mono">{API_BASE_URL}</span>
         </p>
@@ -68,15 +80,23 @@ export default async function TicketDetailPage({
               </tr>
               <tr>
                 <th>Status</th>
-                <td className="mono">{ticket.status}</td>
+                <td>
+                  <span className="mono">{ticket.display_status}</span>
+                  <span className="muted"> (stored as </span>
+                  <span className="mono muted">{ticket.status}</span>
+                  <span className="muted">)</span>
+                </td>
               </tr>
               <tr>
                 <th>Blocked by</th>
                 <td className="mono">{valueOrDash(ticket.blocked_by)}</td>
               </tr>
               <tr>
-                <th>Title source</th>
-                <td>{ticket.title_source}</td>
+                <th>Title</th>
+                <td>
+                  {AI_TITLE_LABELS[ticket.ai_title_status] ??
+                    ticket.ai_title_status}
+                </td>
               </tr>
               <tr>
                 <th>Created</th>
@@ -143,16 +163,16 @@ export default async function TicketDetailPage({
             <thead>
               <tr>
                 <th>Event</th>
-                <th>Actor</th>
+                <th>Source</th>
                 <th>Recorded</th>
                 <th>Message</th>
               </tr>
             </thead>
             <tbody>
-              {events.map((event) => (
-                <tr key={event.event_id}>
+              {events.map((event, index) => (
+                <tr key={`${event.created_at ?? ""}-${index}`}>
                   <td className="mono">{event.event_type}</td>
-                  <td>{event.actor}</td>
+                  <td>{event.source}</td>
                   <td className="mono">{valueOrDash(event.created_at)}</td>
                   <td>{valueOrDash(event.message)}</td>
                 </tr>

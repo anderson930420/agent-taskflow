@@ -160,6 +160,21 @@ def canonical_persisted_status(persisted_status: str) -> str:
     return to_persisted_status(to_display_status(persisted_status))
 
 
+def persisted_statuses_for_display(display_status: str) -> frozenset[str]:
+    """Return every persisted value that displays as `display_status`.
+
+    Use this, not :func:`to_persisted_status`, to *filter* stored rows by a
+    display name: a `needs_review` filter must also match `waiting_approval`
+    and `accepted` rows, not only the canonical `waiting_for_review`.
+    """
+    display = to_display_status(to_persisted_status(display_status))
+    return frozenset(
+        persisted
+        for persisted, mapped in PERSISTED_TO_DISPLAY.items()
+        if mapped == display
+    )
+
+
 def is_alias_status(persisted_status: str) -> bool:
     """Return True when a persisted value is a non-canonical spelling."""
     return persisted_status in PERSISTED_ALIASES
@@ -185,6 +200,7 @@ __all__ = [
     "StatusVocabularyError",
     "canonical_persisted_status",
     "is_alias_status",
+    "persisted_statuses_for_display",
     "to_display_status",
     "to_persisted_status",
     "unmapped_persisted_statuses",

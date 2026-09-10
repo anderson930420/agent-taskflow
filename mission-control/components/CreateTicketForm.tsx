@@ -27,9 +27,9 @@ const PRIORITY_LABELS: Record<TicketPriority, string> = {
 };
 
 /**
- * SPEC §10: the user fills in Repository, Task and Priority. Task ID, branch,
- * worktree path and artifact directory are derived by the backend and are
- * deliberately absent from this form.
+ * SPEC §10: the user fills in Repository, Task and Priority. The task key,
+ * branch, worktree path and artifact directory are derived by the backend and
+ * are deliberately absent from this form.
  */
 export function CreateTicketForm({
   repositories
@@ -71,13 +71,13 @@ export function CreateTicketForm({
         return;
       }
 
-      const ticketId = response.data.ticket_id;
-      if (!ticketId) {
+      const taskKey = response.data.task_key;
+      if (!taskKey) {
         setError(response.data.message);
         return;
       }
 
-      router.push(`/tickets/${encodeURIComponent(ticketId)}`);
+      router.push(`/tickets/${encodeURIComponent(taskKey)}`);
       router.refresh();
     } finally {
       setSubmitting(false);
@@ -117,8 +117,7 @@ export function CreateTicketForm({
         {selected ? (
           <span className="field-hint">
             Base branch <span className="mono">{selected.base_branch}</span> ·
-            branches <span className="mono">{selected.branch_prefix}</span> ·
-            task IDs <span className="mono">{selected.ticket_prefix}-…</span>
+            branches <span className="mono">{selected.branch_prefix}</span>
           </span>
         ) : null}
       </label>

@@ -22,6 +22,9 @@ from agent_taskflow.ticket_metadata import (
     slugify_branch_component,
 )
 from agent_taskflow.ticket_models import (
+    AI_TITLE_FALLBACK,
+    AI_TITLE_GENERATED,
+    AI_TITLE_NOT_ATTEMPTED,
     METADATA_SOURCE_AI,
     METADATA_SOURCE_FALLBACK,
 )
@@ -65,7 +68,7 @@ class ResolvedTicketMetadata:
     """Resolved human-facing metadata plus provenance for the audit record."""
 
     title: str
-    title_source: str
+    ai_title_status: str
     branch_slug: str
     branch_slug_source: str
     commit_message_suggestion: str | None
@@ -74,7 +77,7 @@ class ResolvedTicketMetadata:
 
     def to_audit_payload(self) -> dict[str, Any]:
         return {
-            "title_source": self.title_source,
+            "ai_title_status": self.ai_title_status,
             "branch_slug_source": self.branch_slug_source,
             "ai_attempted": self.ai_attempted,
             "ai_error": self.ai_error,
@@ -147,7 +150,7 @@ def resolve_ticket_metadata(
     if adapter is None:
         return ResolvedTicketMetadata(
             title=fallback_title,
-            title_source=METADATA_SOURCE_FALLBACK,
+            ai_title_status=AI_TITLE_NOT_ATTEMPTED,
             branch_slug=fallback_slug,
             branch_slug_source=METADATA_SOURCE_FALLBACK,
             commit_message_suggestion=None,
@@ -190,9 +193,7 @@ def resolve_ticket_metadata(
     )
     return ResolvedTicketMetadata(
         title=title or fallback_title,
-        title_source=(
-            METADATA_SOURCE_AI if title else METADATA_SOURCE_FALLBACK
-        ),
+        ai_title_status=AI_TITLE_GENERATED if title else AI_TITLE_FALLBACK,
         branch_slug=suggested_slug or fallback_slug,
         branch_slug_source=(
             METADATA_SOURCE_AI if suggested_slug else METADATA_SOURCE_FALLBACK

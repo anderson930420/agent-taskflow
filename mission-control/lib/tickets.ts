@@ -6,8 +6,8 @@ export const TICKET_PRIORITIES = ["critical", "high", "normal", "low"] as const;
 
 export type TicketPriority = (typeof TICKET_PRIORITIES)[number];
 
-/** SPEC §12. V1 never writes `queued`. */
-export type TicketStatus =
+/** SPEC §12 display vocabulary (§12.2). V1 never writes `queued`. */
+export type TicketDisplayStatus =
   | "queued"
   | "ready"
   | "blocked"
@@ -24,7 +24,9 @@ export type TicketStatus =
   | "cancelled"
   | string;
 
-export type TicketMetadataSource = "ai" | "fallback";
+export type AiTitleStatus = "generated" | "fallback" | "not_attempted";
+
+export type BranchSlugSource = "ai" | "fallback";
 
 /** SPEC §11: one entry of the read-only repository registry. */
 export interface TicketRepository {
@@ -34,38 +36,40 @@ export interface TicketRepository {
   artifacts_root: string;
   base_branch: string;
   branch_prefix: string;
-  ticket_prefix: string;
   github_repo?: string | null;
 }
 
+/**
+ * A prompt-first row of the canonical `tasks` table. `status` is the
+ * persisted TASK_STATUSES value; `display_status` is its §12 name.
+ */
 export interface Ticket {
-  ticket_id: string;
+  task_key: string;
   repository: string;
   prompt: string;
   title: string;
-  title_source: TicketMetadataSource;
+  ai_title_status: AiTitleStatus;
   priority: TicketPriority;
-  status: TicketStatus;
+  status: string;
+  display_status: TicketDisplayStatus;
   blocked_by?: string | null;
   repo_path: string;
   github_repo?: string | null;
   base_branch: string;
   branch: string;
-  branch_slug_source: TicketMetadataSource;
+  branch_slug_source: BranchSlugSource;
   worktree_path: string;
   artifact_dir: string;
   commit_message_suggestion?: string | null;
-  ticket_prefix: string;
-  ticket_sequence: number;
   created_at?: string | null;
   updated_at?: string | null;
 }
 
+/** One `task_events` audit record. */
 export interface TicketEvent {
-  event_id: number;
-  ticket_id: string;
+  task_key: string;
   event_type: string;
-  actor: string;
+  source: string;
   message?: string | null;
   payload_json?: string | null;
   created_at?: string | null;
@@ -85,8 +89,9 @@ export interface CreateTicketRequest {
 
 export interface TicketResponse {
   ok: boolean;
-  ticket_id?: string | null;
-  status?: TicketStatus | null;
+  task_key?: string | null;
+  status?: string | null;
+  display_status?: TicketDisplayStatus | null;
   message: string;
   item?: Ticket | null;
 }
@@ -101,9 +106,10 @@ export async function getRepositories(): Promise<
   return { ok: true, data: result.data.items };
 }
 
+/** `status` is a §12 display name; it matches every persisted alias. */
 export async function getTickets(params?: {
   repository?: string;
-  status?: string;
+  status?: TicketDisplayStatus;
   priority?: string;
 }): Promise<ApiResult<Ticket[]>> {
   const search = new URLSearchParams();
@@ -120,10 +126,10 @@ export async function getTickets(params?: {
 }
 
 export async function getTicketDetail(
-  ticketId: string
+  taskKey: string
 ): Promise<ApiResult<TicketDetail>> {
   return requestJson<TicketDetail>(
-    `/api/tickets/${encodeURIComponent(ticketId)}`
+    `/api/tickets/${encodeURIComponent(taskKey)}`
   );
 }
 
