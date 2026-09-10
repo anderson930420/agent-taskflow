@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import os
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -168,6 +170,113 @@ class DiffContextTests(IntegrationGitTestCase):
         context = git_ops.diff_context(self.worktree, "origin/main")
         self.assertIn("feature.txt", context)
         self.assertIn("feature.txt", git_ops.changed_files(self.worktree, "origin/main"))
+
+
+
+class ResolutionVerificationTests(IntegrationGitTestCase):
+    """Review blocker B2 — the five deterministic post-resolution checks.
+
+    Each test builds a state in which exactly one check fails and asserts it
+    is the only failure reported, so each check is shown to work on its own.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.target_sha = self.fixture.target_sha()
+        self.head_before = git_ops.head_sha(self.worktree)
+        self.fixture.commit_in(self.worktree, "feature.txt", "resolved\n", "resolution")
+
+    def verify(self, **overrides):
+        kwargs = dict(
+            head_before=self.head_before,
+            target_sha=self.target_sha,
+            conflicted_files=("feature.txt",),
+        )
+        kwargs.update(overrides)
+        return git_ops.verify_conflict_resolution(self.worktree, **kwargs)
+
+    def test_a_clean_committed_resolution_passes_all_five_checks(self) -> None:
+        verification = self.verify()
+        self.assertTrue(verification.passed)
+        self.assertEqual(verification.failed, ())
+        self.assertEqual([c.name for c in verification.checks], list(git_ops.RESOLUTION_CHECKS))
+
+    def test_check_a_merge_head_or_rebase_head_fails_only_check_a(self) -> None:
+        directory = git_ops.git_dir(self.worktree)
+        for marker in ("MERGE_HEAD", "REBASE_HEAD"):
+            with self.subTest(marker=marker):
+                path = directory / marker
+                path.write_text(self.target_sha + "\n", encoding="utf-8")
+                try:
+                    self.assertEqual(
+                        self.verify().failed, (git_ops.CHECK_NO_OPERATION_IN_PROGRESS,)
+                    )
+                finally:
+                    path.unlink()
+
+    def test_check_a_rebase_directories_count_as_an_operation_in_progress(self) -> None:
+        directory = git_ops.git_dir(self.worktree)
+        for marker in ("rebase-merge", "rebase-apply"):
+            with self.subTest(marker=marker):
+                (directory / marker).mkdir()
+                try:
+                    self.assertEqual(git_ops.in_progress_operation(self.worktree), "rebase")
+                finally:
+                    (directory / marker).rmdir()
+
+    def test_check_b_an_untracked_file_fails_only_check_b(self) -> None:
+        (self.worktree / "resolver-notes.orig").write_text("left behind\n", encoding="utf-8")
+        self.assertEqual(self.verify().failed, (git_ops.CHECK_WORKTREE_CLEAN,))
+
+    def test_check_c_committed_conflict_markers_fail_only_check_c(self) -> None:
+        self.fixture.commit_in(
+            self.worktree,
+            "feature.txt",
+            "<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n",
+            "committed with markers",
+        )
+        self.assertEqual(self.verify().failed, (git_ops.CHECK_NO_CONFLICT_MARKERS,))
+
+    def test_check_c_a_lone_separator_counts_only_in_a_conflicted_file(self) -> None:
+        self.fixture.commit_in(self.worktree, "doc.txt", "Title\n=======\n", "setext heading")
+        self.assertEqual(
+            self.verify(conflicted_files=("doc.txt",)).failed,
+            (git_ops.CHECK_NO_CONFLICT_MARKERS,),
+        )
+        self.assertTrue(self.verify(conflicted_files=("feature.txt",)).passed)
+
+    def test_check_d_an_unchanged_head_fails_only_check_d(self) -> None:
+        verification = self.verify(head_before=git_ops.head_sha(self.worktree))
+        self.assertEqual(verification.failed, (git_ops.CHECK_HEAD_IS_NEW_COMMIT,))
+
+    def test_check_e_a_target_missing_from_head_fails_only_check_e(self) -> None:
+        advanced = self.fixture.advance_target("other.txt")
+        git_ops.fetch(self.worktree, remote="origin")
+        self.assertEqual(
+            self.verify(target_sha=advanced).failed, (git_ops.CHECK_TARGET_IS_ANCESTOR,)
+        )
+
+
+
+class NonInteractiveGitTests(IntegrationGitTestCase):
+    def test_a_conflicted_rebase_is_continued_without_an_editor(self) -> None:
+        """Regression found by review blocker B2's check (a).
+
+        With no TTY, `git rebase --continue` failed on the editor and silently
+        left the rebase in progress. The control plane now forces a
+        non-interactive editor, so this passes even when the environment
+        names an editor that always fails.
+        """
+        self.fixture.commit_in(self.worktree, "shared.txt", "task-side\n", "task edits shared")
+        self.fixture.advance_target("shared.txt", "target-side\n")
+        git_ops.fetch(self.worktree, remote="origin")
+        self.assertTrue(git_ops.rebase_onto_target(self.worktree, "origin/main").conflicted)
+        (self.worktree / "shared.txt").write_text("resolved\n", encoding="utf-8")
+        git_ops.stage_all(self.worktree)
+        with mock.patch.dict(os.environ, {"GIT_EDITOR": "false", "EDITOR": "false"}):
+            result = git_ops.commit_conflict_resolution(self.worktree, "resolve")
+        self.assertTrue(result.ok, result.combined)
+        self.assertIsNone(git_ops.in_progress_operation(self.worktree))
 
 
 if __name__ == "__main__":

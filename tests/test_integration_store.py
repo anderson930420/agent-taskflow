@@ -161,6 +161,24 @@ class EvidenceTests(IntegrationStoreTestCase):
         self.assertIs(rows[0]["resolved"], False)
 
 
+class ConflictVerificationTests(IntegrationStoreTestCase):
+    def test_verification_is_attached_to_its_conflict_run(self) -> None:
+        self.integration.record_conflict_evidence(
+            "AT-501", integration_run_id="run-1", resolver="ai", resolved=True,
+            conflict_hunks=[{"path": "shared.txt", "hunk": "<<<<<<< HEAD"}],
+            explanation="took both sides",
+        )
+        self.assertIsNone(self.integration.list_conflict_evidence("AT-501")[0]["verification"])
+        checks = [{"name": "worktree_clean", "passed": False, "detail": "?? stray.orig"}]
+        self.integration.record_conflict_verification(
+            "AT-501", integration_run_id="run-1", checks=checks
+        )
+        row = self.integration.list_conflict_evidence("AT-501")[0]
+        self.assertEqual(row["verification"], checks)
+        # The resolver's claim is kept as-is next to the control plane's verdict.
+        self.assertIs(row["resolved"], True)
+
+
 class MigrationTests(IntegrationStoreTestCase):
     def test_init_db_is_idempotent(self) -> None:
         self.integration.init_db()

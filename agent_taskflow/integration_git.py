@@ -42,6 +42,11 @@ __all__ = [
     "fetch",
     "head_sha",
     "in_progress_operation",
+    "git_dir",
+    "verify_conflict_resolution",
+    "ResolutionCheck",
+    "ResolutionVerification",
+    "RESOLUTION_CHECKS",
     "merge_target_into_branch",
     "push_branch",
     "rebase_onto_target",
@@ -76,6 +81,8 @@ ALLOWED_SUBCOMMANDS = frozenset(
         "commit",
         "ls-files",
         "show",
+        # Read-only: scans tracked files for leftover conflict markers.
+        "grep",
         # Cleanup operations, so integration_cleanup never has to bypass this
         # guard to remove a merged worktree or delete a task branch.
         "worktree",
@@ -192,6 +199,10 @@ def _default_runner(argv: Sequence[str], cwd: Path) -> CompletedProcessLike:
     # Never let an interactive prompt or a pager wedge an integration run.
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     env["GIT_PAGER"] = "cat"
+    # Never open an editor either. With no TTY, `git rebase --continue` fails
+    # on the editor and silently leaves the rebase in progress, which review
+    # blocker B2's check (a) caught. `true` accepts the prepared message as-is.
+    env["GIT_EDITOR"] = "true"
     return subprocess.run(
         list(argv),
         cwd=cwd,
@@ -322,21 +333,188 @@ def conflict_hunks(cwd: Path, **kwargs) -> list[dict[str, str]]:
     return hunks
 
 
-def in_progress_operation(cwd: Path) -> str | None:
-    """Return the name of an in-flight merge/rebase, or None if the tree is clean."""
-    git_dir = Path(cwd) / ".git"
-    if git_dir.is_file():
-        # Worktrees store a gitdir pointer file rather than a directory.
-        pointer = git_dir.read_text(encoding="utf-8").strip()
+def git_dir(cwd: Path) -> Path:
+    """Return the per-worktree git directory for ``cwd``.
+
+    A linked worktree stores a ``gitdir:`` pointer file in place of ``.git``;
+    in-progress merge and rebase state lives in the directory it points to.
+    """
+    path = Path(cwd) / ".git"
+    if path.is_file():
+        pointer = path.read_text(encoding="utf-8").strip()
         prefix = "gitdir:"
         if pointer.startswith(prefix):
-            git_dir = Path(pointer[len(prefix) :].strip())
-    if (git_dir / "MERGE_HEAD").exists():
+            target = Path(pointer[len(prefix) :].strip())
+            return target if target.is_absolute() else (Path(cwd) / target).resolve()
+    return path
+
+
+def in_progress_operation(cwd: Path) -> str | None:
+    """Return the name of an in-flight merge/rebase, or None if there is none.
+
+    Checks MERGE_HEAD, REBASE_HEAD, and the rebase-merge/ and rebase-apply/
+    directories (review blocker B2, check a).
+    """
+    directory = git_dir(cwd)
+    if (directory / "MERGE_HEAD").exists():
         return "merge"
+    if (directory / "REBASE_HEAD").exists():
+        return "rebase"
     for marker in ("rebase-merge", "rebase-apply"):
-        if (git_dir / marker).exists():
+        if (directory / marker).exists():
             return "rebase"
     return None
+
+
+# -- post-resolution verification (§27.2.1, review blocker B2) -------------
+#
+# After ANY AI conflict resolution, and before validators run, the control
+# plane verifies all five checks below. The resolver's own claim that it
+# "resolved" the conflict is never enough on its own.
+
+CHECK_NO_OPERATION_IN_PROGRESS = "no_operation_in_progress"   # (a)
+CHECK_WORKTREE_CLEAN = "worktree_clean"                       # (b)
+CHECK_NO_CONFLICT_MARKERS = "no_conflict_markers"             # (c)
+CHECK_HEAD_IS_NEW_COMMIT = "head_is_new_commit"               # (d)
+CHECK_TARGET_IS_ANCESTOR = "target_is_ancestor_of_head"       # (e)
+
+RESOLUTION_CHECKS: tuple[str, ...] = (
+    CHECK_NO_OPERATION_IN_PROGRESS,
+    CHECK_WORKTREE_CLEAN,
+    CHECK_NO_CONFLICT_MARKERS,
+    CHECK_HEAD_IS_NEW_COMMIT,
+    CHECK_TARGET_IS_ANCESTOR,
+)
+
+# `<<<<<<<`, `>>>>>>>` and the diff3 `|||||||` are unambiguous in any tracked
+# file. A lone `=======` is also a valid setext heading underline, so it is
+# only treated as a marker in a file that actually conflicted.
+_UNAMBIGUOUS_MARKER_RE = r"^(<{7}|>{7}|[|]{7})( |$)"
+_SEPARATOR_MARKER_RE = r"^={7}$"
+
+_MAX_DETAIL_LINES = 20
+
+
+@dataclass(frozen=True)
+class ResolutionCheck:
+    name: str
+    passed: bool
+    detail: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {"name": self.name, "passed": self.passed, "detail": self.detail}
+
+
+@dataclass(frozen=True)
+class ResolutionVerification:
+    checks: tuple[ResolutionCheck, ...]
+
+    @property
+    def passed(self) -> bool:
+        return all(check.passed for check in self.checks)
+
+    @property
+    def failed(self) -> tuple[str, ...]:
+        return tuple(check.name for check in self.checks if not check.passed)
+
+    def to_list(self) -> list[dict[str, object]]:
+        return [check.to_dict() for check in self.checks]
+
+
+def _first_lines(text: str) -> str:
+    lines = [line for line in text.splitlines() if line.strip()]
+    kept = lines[:_MAX_DETAIL_LINES]
+    suffix = f"\n... {len(lines) - len(kept)} more" if len(lines) > len(kept) else ""
+    return "\n".join(kept) + suffix
+
+
+def _marker_scan(cwd: Path, pattern: str, paths: Sequence[str], **kwargs) -> tuple[bool, str]:
+    """Return (clean, detail) for a ``git grep`` over tracked files.
+
+    git grep exits 1 when nothing matches, 0 when something does, and >1 on
+    error. An error is treated as a failure: a check that cannot run has not
+    passed.
+    """
+    args = ["grep", "-n", "-I", "-E", "-e", pattern]
+    if paths:
+        args.extend(["--", *paths])
+    result = run_git(cwd, args, **kwargs)
+    if result.returncode == 1:
+        return True, ""
+    if result.returncode == 0:
+        return False, _first_lines(result.stdout)
+    return False, f"git grep failed: {result.combined}"
+
+
+def verify_conflict_resolution(
+    cwd: Path,
+    *,
+    head_before: str,
+    target_sha: str,
+    conflicted_files: Sequence[str] = (),
+    **kwargs,
+) -> ResolutionVerification:
+    """Run the five deterministic checks after an AI conflict resolution.
+
+    a. no rebase or merge is in progress
+    b. the worktree is clean (untracked files count)
+    c. no conflict markers are left in tracked files
+    d. HEAD is a new commit, different from HEAD before resolution began
+    e. the latest target SHA is an ancestor of HEAD
+    """
+    checks: list[ResolutionCheck] = []
+
+    operation = in_progress_operation(cwd)
+    checks.append(
+        ResolutionCheck(
+            CHECK_NO_OPERATION_IN_PROGRESS,
+            operation is None,
+            "" if operation is None else f"a {operation} is still in progress",
+        )
+    )
+
+    status = run_git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"], **kwargs)
+    clean = status.ok and not status.stdout.strip()
+    checks.append(
+        ResolutionCheck(
+            CHECK_WORKTREE_CLEAN,
+            clean,
+            "" if clean else (_first_lines(status.stdout) or f"git status failed: {status.combined}"),
+        )
+    )
+
+    markers_clean, detail = _marker_scan(cwd, _UNAMBIGUOUS_MARKER_RE, (), **kwargs)
+    if markers_clean and conflicted_files:
+        markers_clean, detail = _marker_scan(
+            cwd, _SEPARATOR_MARKER_RE, tuple(conflicted_files), **kwargs
+        )
+    checks.append(ResolutionCheck(CHECK_NO_CONFLICT_MARKERS, markers_clean, detail))
+
+    try:
+        head_after = head_sha(cwd, **kwargs)
+    except IntegrationGitError as exc:
+        head_after = None
+        head_detail = f"HEAD could not be resolved: {exc}"
+    else:
+        head_detail = "" if head_after != head_before else f"HEAD is still {head_before}"
+    checks.append(
+        ResolutionCheck(
+            CHECK_HEAD_IS_NEW_COMMIT,
+            head_after is not None and head_after != head_before,
+            head_detail,
+        )
+    )
+
+    contained = commit_in_history(cwd, target_sha, "HEAD", **kwargs)
+    checks.append(
+        ResolutionCheck(
+            CHECK_TARGET_IS_ANCESTOR,
+            contained,
+            "" if contained else f"target {target_sha} is not an ancestor of HEAD",
+        )
+    )
+
+    return ResolutionVerification(tuple(checks))
 
 
 # -- write operations ------------------------------------------------------

@@ -120,7 +120,10 @@ def compute_integration_metrics(
             runs.add(run)
             runs_per_task.setdefault(key, set()).add(row["integration_run_id"])
             conflicted_runs.add(run)
-            if row["resolved"]:
+            # Success means a conflict-free tree the control plane verified, not
+            # merely the resolver's claim (§27.2.1, review blocker B2).
+            verification = row.get("verification") or []
+            if row["resolved"] and all(check.get("passed") for check in verification):
                 resolved_runs.add(run)
 
     # §39.3 — of the conflicts an AI resolver attempted, how many produced a

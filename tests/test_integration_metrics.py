@@ -104,6 +104,16 @@ class ConflictMetricsTests(MetricsTestCase):
             self._conflict(key, run=f"{key}-run", resolved=resolved)
         self.assertAlmostEqual(self._metrics().ai_conflict_resolution_success_rate, 0.5)
 
+    def test_a_resolution_that_failed_verification_is_not_a_success(self) -> None:
+        """§39.3 success means a verified conflict-free tree, not a claim."""
+        self._task("AT-1")
+        self._conflict("AT-1", run="AT-1-run", resolved=True)
+        self.integration.record_conflict_verification(
+            "AT-1", integration_run_id="AT-1-run",
+            checks=[{"name": "worktree_clean", "passed": False, "detail": ""}],
+        )
+        self.assertEqual(self._metrics().ai_conflict_resolution_success_rate, 0.0)
+
     def test_post_resolution_validator_failure_rate(self) -> None:
         for key, resolved, status in (
             ("AT-1", True, "failed"),

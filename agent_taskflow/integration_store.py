@@ -482,6 +482,29 @@ class IntegrationStore:
                 ),
             )
 
+    def record_conflict_verification(
+        self,
+        task_key: str,
+        *,
+        integration_run_id: str,
+        checks: Iterable[Mapping[str, Any]],
+    ) -> None:
+        """Attach the control plane's post-resolution checks to a conflict run.
+
+        ``resolved`` on the evidence row is the resolver's *claim*; this is the
+        deterministic verdict on it (§27.2.1, review blocker B2).
+        """
+        key = normalize_task_key(task_key)
+        with closing(connect(self.db_path)) as conn, conn:
+            conn.execute(
+                """
+                UPDATE integration_conflict_evidence
+                SET verification_json = ?
+                WHERE task_key = ? AND integration_run_id = ?
+                """,
+                (json.dumps([dict(check) for check in checks]), key, integration_run_id),
+            )
+
     def list_conflict_evidence(self, task_key: str) -> list[dict[str, Any]]:
         key = normalize_task_key(task_key)
         with closing(connect(self.db_path)) as conn:
@@ -496,6 +519,7 @@ class IntegrationStore:
         for row in rows:
             entry = dict(row)
             entry["conflict_hunks"] = _loads(entry.pop("conflict_hunks_json"), [])
+            entry["verification"] = _loads(entry.pop("verification_json", None), None)
             entry["resolved"] = bool(entry["resolved"])
             results.append(entry)
         return results

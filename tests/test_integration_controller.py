@@ -582,5 +582,152 @@ class CrossRepoGuardTests(ControllerTestCase):
         self.assertEqual(self.status_of("AT-101"), schema.READY_FOR_INTEGRATION)
 
 
+
+class StageOnlyResolver:
+    """Resolves and stages the conflict but never commits or continues."""
+
+    name = "stage-only"
+
+    def resolve(self, request: ConflictResolutionRequest) -> ConflictResolutionOutcome:
+        worktree = Path(request.worktree_path)
+        for entry in request.conflict_hunks:
+            (worktree / entry["path"]).write_text("resolved\n", encoding="utf-8")
+        git_ops.stage_all(worktree)
+        return ConflictResolutionOutcome(
+            resolver=self.name, resolved=True, explanation="staged but not committed"
+        )
+
+
+class StrayFileResolver(TakeBothSidesResolver):
+    """Resolves and commits correctly, then leaves an untracked backup file."""
+
+    name = "stray-file"
+
+    def resolve(self, request: ConflictResolutionRequest) -> ConflictResolutionOutcome:
+        super().resolve(request)
+        (Path(request.worktree_path) / "resolver-notes.orig").write_text(
+            "left behind\n", encoding="utf-8"
+        )
+        return ConflictResolutionOutcome(
+            resolver=self.name, resolved=True, explanation="resolved, left a backup file"
+        )
+
+
+class MarkerKeepingResolver:
+    """Commits the conflicted files exactly as they are, markers included."""
+
+    name = "marker-keeping"
+
+    def resolve(self, request: ConflictResolutionRequest) -> ConflictResolutionOutcome:
+        worktree = Path(request.worktree_path)
+        git_ops.stage_all(worktree)
+        git_ops.commit_conflict_resolution(worktree, "resolve conflict")
+        return ConflictResolutionOutcome(
+            resolver=self.name, resolved=True, explanation="committed as-is"
+        )
+
+
+class AbandoningResolver:
+    """Claims success but aborts the update instead of resolving it."""
+
+    name = "abandoning"
+
+    def resolve(self, request: ConflictResolutionRequest) -> ConflictResolutionOutcome:
+        worktree = Path(request.worktree_path)
+        if git_ops.in_progress_operation(worktree) == "merge":
+            git_ops.abort_merge(worktree)
+        else:
+            git_ops.abort_rebase(worktree)
+        return ConflictResolutionOutcome(
+            resolver=self.name, resolved=True, explanation="abandoned the update"
+        )
+
+
+class ResolutionVerificationTests(ControllerTestCase):
+    """Review blocker B2 — after ANY AI conflict resolution, and before
+    validators run, the control plane verifies five deterministic checks. Any
+    failure stops at needs_decision (§27.2.1): the conflict hunks, the AI's
+    explanation and the failed checks are persisted, nothing is pushed, and
+    integrated_base_sha is not recorded. No auto retry.
+    """
+
+    def _conflicting(self) -> Path:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "shared.txt", "task-side\n", "task edits shared")
+        self.fixture.advance_target("shared.txt", "target-side\n")
+        return worktree
+
+    def assert_stopped_by(self, result, check: str, *, gh_calls_before: int = 0,
+                          base_before: str | None = None) -> None:
+        self.assertEqual(result.status, "needs_decision", result.summary)
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
+        self.assertIn(check, result.resolution_checks_failed)
+        self.assertTrue(result.conflict_detected)
+        self.assertFalse(result.validators_passed)
+        # Nothing pushed, no PR touched, integrated_base_sha not recorded.
+        self.assertEqual([c for c in result.git_commands if c[:2] == ("git", "push")], [])
+        self.assertEqual(len(self.gh_runner.calls), gh_calls_before)
+        self.assertEqual(
+            self.integration.get_pr_state("AT-101")["integrated_base_sha"], base_before
+        )
+        # Validators never ran for this run.
+        self.assertEqual(
+            [r for r in self.integration.list_validator_evidence("AT-101")
+             if r["integration_run_id"] == result.integration_run_id],
+            [],
+        )
+        # Hunks, the AI's explanation and the failed check are all persisted.
+        evidence = self.integration.list_conflict_evidence("AT-101")[-1]
+        self.assertEqual(evidence["integration_run_id"], result.integration_run_id)
+        self.assertTrue(evidence["conflict_hunks"])
+        self.assertTrue(evidence["explanation"])
+        self.assertIn(check, [c["name"] for c in evidence["verification"] if not c["passed"]])
+        self.assertNotIn("ai_conflict_resolution", [hint.code for hint in result.hints])
+
+    def test_a_resolver_that_stages_but_does_not_commit_ends_in_needs_decision(self) -> None:
+        worktree = self._conflicting()
+        result = self.integrate("AT-101", conflict_resolver=StageOnlyResolver())
+        self.assertNotEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
+        self.assert_stopped_by(result, git_ops.CHECK_NO_OPERATION_IN_PROGRESS)
+        # The half-finished rebase is aborted so the worktree is left usable.
+        self.assertIsNone(git_ops.in_progress_operation(worktree))
+
+    def test_check_b_a_stray_file_left_by_the_resolver_stops_integration(self) -> None:
+        self._conflicting()
+        result = self.integrate("AT-101", conflict_resolver=StrayFileResolver())
+        self.assert_stopped_by(result, git_ops.CHECK_WORKTREE_CLEAN)
+        self.assertEqual(result.resolution_checks_failed, (git_ops.CHECK_WORKTREE_CLEAN,))
+
+    def test_check_c_committed_conflict_markers_stop_integration(self) -> None:
+        self._conflicting()
+        result = self.integrate("AT-101", conflict_resolver=MarkerKeepingResolver())
+        self.assert_stopped_by(result, git_ops.CHECK_NO_CONFLICT_MARKERS)
+        self.assertEqual(result.resolution_checks_failed, (git_ops.CHECK_NO_CONFLICT_MARKERS,))
+
+    def test_check_d_a_resolution_that_leaves_head_unchanged_stops_integration(self) -> None:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "shared.txt", "task-side\n", "task edits shared")
+        self.integrate("AT-101")
+        base = self.integration.get_pr_state("AT-101")["integrated_base_sha"]
+        self.fixture.advance_target("shared.txt", "target-side\n")
+        self.store.update_task_status("AT-101", schema.READY_FOR_INTEGRATION, source="test")
+        self.integration.update_pr_state("AT-101", reintegration_required=True)
+        calls_before = len(self.gh_runner.calls)
+        # Re-integration merges; aborting that merge leaves HEAD where it was.
+        result = self.integrate("AT-101", conflict_resolver=AbandoningResolver())
+        self.assert_stopped_by(
+            result, git_ops.CHECK_HEAD_IS_NEW_COMMIT,
+            gh_calls_before=calls_before, base_before=base,
+        )
+
+    def test_check_e_a_resolution_that_drops_the_target_stops_integration(self) -> None:
+        self._conflicting()
+        # Aborting the initial rebase restores the old tip: HEAD is a different
+        # commit from the conflict point, but the latest target is not in it.
+        result = self.integrate("AT-101", conflict_resolver=AbandoningResolver())
+        self.assert_stopped_by(result, git_ops.CHECK_TARGET_IS_ANCESTOR)
+        self.assertEqual(result.resolution_checks_failed, (git_ops.CHECK_TARGET_IS_ANCESTOR,))
+
+
 if __name__ == "__main__":
     unittest.main()

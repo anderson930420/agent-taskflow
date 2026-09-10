@@ -148,6 +148,8 @@ class IntegrationResult:
     validation_report: IntegrationValidationReport | None = None
     conflict_detected: bool = False
     conflict_resolved: bool = False
+    # Names of the post-resolution checks that failed (review blocker B2).
+    resolution_checks_failed: tuple[str, ...] = ()
     hints: tuple[ReviewerHint, ...] = ()
 
     # Safety facts, always reported so evidence readers never have to infer them.
@@ -184,6 +186,7 @@ class IntegrationResult:
             "conflict": {
                 "detected": self.conflict_detected,
                 "resolved": self.conflict_resolved,
+                "failed_checks": list(self.resolution_checks_failed),
             },
             "hints": [{"code": h.code, "message": h.message} for h in self.hints],
             "git_commands": [list(command) for command in self.git_commands],
@@ -377,7 +380,12 @@ def _integrate_under_lock(
             "integration_blocked",
             SOURCE,
             message=summary,
-            payload={"integration_run_id": run_id, "mode": mode, "reason": summary},
+            payload={
+                "integration_run_id": run_id,
+                "mode": mode,
+                "reason": summary,
+                "failed_checks": list(extra.get("resolution_checks_failed", ())),
+            },
         )
         integration.update_integration_state(
             request.task_key, last_integration_status="needs_decision"
@@ -436,6 +444,7 @@ def _integrate_under_lock(
 
         conflict_detected = True
         hunks = tuple(git_ops.conflict_hunks(worktree_path, log=log))
+        head_before_resolution = git_ops.head_sha(worktree_path, log=log)
         resolution = resolve_conflicts(
             ConflictResolutionRequest(
                 task_key=request.task_key,
@@ -452,15 +461,44 @@ def _integrate_under_lock(
         )
         conflict_resolved = resolution.resolved
 
-        still_conflicted = bool(git_ops.conflicted_paths(worktree_path, log=log))
-        if not conflict_resolved or still_conflicted:
-            # §27.2.1 — no conflict-free tree, so stop. No auto retry.
-            abort(worktree_path, log=log)
+        if not conflict_resolved:
+            # §27.2.1 — the resolver could not produce a tree. No auto retry.
+            if git_ops.in_progress_operation(worktree_path):
+                abort(worktree_path, log=log)
             return stop_for_decision(
                 "Integration conflict could not be resolved into a conflict-free "
                 f"tree: {resolution.explanation}",
                 conflict_detected=True,
                 conflict_resolved=False,
+                behind_count=behind,
+            )
+
+        # Review blocker B2 — a resolver's claim is never trusted on its own.
+        # Before validators run, the control plane verifies the tree: nothing
+        # in progress, a clean worktree, no conflict markers, a new HEAD, and
+        # the latest target in HEAD's history. Any failure stops here: nothing
+        # is pushed and integrated_base_sha is not recorded.
+        verification = git_ops.verify_conflict_resolution(
+            worktree_path,
+            head_before=head_before_resolution,
+            target_sha=target_sha,
+            conflicted_files=conflicted_paths,
+            log=log,
+        )
+        integration.record_conflict_verification(
+            request.task_key,
+            integration_run_id=run_id,
+            checks=verification.to_list(),
+        )
+        if not verification.passed:
+            if git_ops.in_progress_operation(worktree_path):
+                abort(worktree_path, log=log)
+            return stop_for_decision(
+                "AI conflict resolution failed deterministic verification "
+                f"({', '.join(verification.failed)}): {resolution.explanation}",
+                conflict_detected=True,
+                conflict_resolved=False,
+                resolution_checks_failed=verification.failed,
                 behind_count=behind,
             )
 
@@ -698,6 +736,7 @@ def _finish(
     validation_report: IntegrationValidationReport | None = None,
     conflict_detected: bool = False,
     conflict_resolved: bool = False,
+    resolution_checks_failed: Sequence[str] = (),
     behind_count: int = 0,
     already_up_to_date: bool = False,
     hints: Sequence[ReviewerHint] = (),
@@ -723,6 +762,7 @@ def _finish(
         validation_report=validation_report,
         conflict_detected=conflict_detected,
         conflict_resolved=conflict_resolved,
+        resolution_checks_failed=tuple(resolution_checks_failed),
         hints=tuple(hints),
         git_commands=log.as_tuple(),
         integration_run_id=run_id,

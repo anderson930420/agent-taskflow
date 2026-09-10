@@ -74,6 +74,7 @@ SCHEMA_MIGRATIONS = (
     "task_worktrees_base_sha",
     "tasks_ticket_fields",
     "v1_step2_integration_tables",
+    "v1_step2_conflict_verification",
 )
 
 
@@ -278,12 +279,24 @@ def _migrate_v1_step2_integration_tables(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v1_step2_conflict_verification(conn: sqlite3.Connection) -> None:
+    """Record which post-resolution checks failed (§27.2.1, review blocker B2).
+
+    Additive and Step-2-private: one nullable column on the conflict evidence
+    table, holding the control plane's verdict alongside the resolver's claim.
+    """
+    _add_column_if_missing(
+        conn, "integration_conflict_evidence", "verification_json", "TEXT"
+    )
+
+
 _MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (
     ("tasks_blocked_reason", _migrate_tasks_blocked_reason),
     ("tasks_executor_selection", _migrate_tasks_executor_selection),
     ("task_worktrees_base_sha", _migrate_task_worktrees_base_sha),
     ("tasks_ticket_fields", _migrate_tasks_ticket_fields),
     ("v1_step2_integration_tables", _migrate_v1_step2_integration_tables),
+    ("v1_step2_conflict_verification", _migrate_v1_step2_conflict_verification),
 )
 
 
