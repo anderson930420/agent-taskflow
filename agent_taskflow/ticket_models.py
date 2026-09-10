@@ -1,12 +1,15 @@
-"""Ticket domain model for the V1 master spec (SPEC §7, §12, §12.1).
+"""Ticket domain vocabulary for the V1 master spec (SPEC §7, §12, §12.1).
 
-A Ticket is the V1 unit of work: repository + prompt + priority in, one
-isolated worktree identity out. It is deliberately a separate record from the
-legacy ``TaskRecord`` mirror in :mod:`agent_taskflow.models`, which mirrors
-Hermes/Kanban state and uses a different status vocabulary.
+A Ticket is a row in the canonical `tasks` table that was created through the
+prompt-first path. There is no separate Ticket table: :class:`TicketRecord`
+is a typed view over the Step 1 columns of `tasks`.
 
-This module is domain vocabulary only. It performs no persistence, no Git,
-and no scheduling.
+Persisted status uses the legacy `TASK_STATUSES` vocabulary. The §12 names
+below are the Mission Control *display* vocabulary (SPEC §12.2) and are
+bridged to persisted values by :mod:`agent_taskflow.status_vocab`.
+
+This module is vocabulary only. It performs no persistence, no Git, and no
+scheduling.
 """
 
 from __future__ import annotations
@@ -15,11 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_taskflow._helpers import require_non_empty
-from agent_taskflow.models import require_absolute_path
+from agent_taskflow.models import require_absolute_path, validate_task_status
 from agent_taskflow.tasks import normalize_task_key
 
 
-# SPEC §12. Ordered for stable display; membership checks use TICKET_STATUSES.
+# SPEC §12 display vocabulary. Ordered for stable display.
 TICKET_STATUS_SEQUENCE: tuple[str, ...] = (
     "queued",
     "ready",
@@ -39,7 +42,7 @@ TICKET_STATUS_SEQUENCE: tuple[str, ...] = (
 TICKET_STATUSES = frozenset(TICKET_STATUS_SEQUENCE)
 
 # SPEC §12.1: `queued` is reserved for future admission control. V1 never
-# writes it, so it is a valid enum member that the creation service refuses.
+# writes it, so it is a valid display name that the creation service refuses.
 RESERVED_INITIAL_TICKET_STATUS = "queued"
 READY_TICKET_STATUS = "ready"
 BLOCKED_TICKET_STATUS = "blocked"
@@ -49,17 +52,23 @@ TICKET_PRIORITY_SEQUENCE: tuple[str, ...] = ("critical", "high", "normal", "low"
 TICKET_PRIORITIES = frozenset(TICKET_PRIORITY_SEQUENCE)
 DEFAULT_TICKET_PRIORITY = "normal"
 
-TICKET_EVENT_TYPES = frozenset({"ticket_created"})
+# What happened to the AI title (SPEC §10.1). Only `generated` means the
+# stored title came from AI; the other two mean the deterministic fallback.
+AI_TITLE_GENERATED = "generated"
+AI_TITLE_FALLBACK = "fallback"
+AI_TITLE_NOT_ATTEMPTED = "not_attempted"
+AI_TITLE_STATUSES = frozenset(
+    {AI_TITLE_GENERATED, AI_TITLE_FALLBACK, AI_TITLE_NOT_ATTEMPTED}
+)
 
-# Whether a human-facing metadata field came from the AI adapter or from the
-# deterministic fallback (SPEC §10.1).
+# Whether the branch slug came from the AI adapter or the fallback.
 METADATA_SOURCE_AI = "ai"
 METADATA_SOURCE_FALLBACK = "fallback"
 METADATA_SOURCES = frozenset({METADATA_SOURCE_AI, METADATA_SOURCE_FALLBACK})
 
 
 def validate_ticket_status(status: str) -> str:
-    """Return a normalized Ticket status or raise ValueError."""
+    """Return a normalized §12 display status or raise ValueError."""
     normalized = require_non_empty(status, "status")
     if normalized not in TICKET_STATUSES:
         raise ValueError(f"Invalid ticket status: {status!r}")
@@ -77,6 +86,14 @@ def validate_ticket_priority(priority: str) -> str:
     return normalized
 
 
+def validate_ai_title_status(status: str) -> str:
+    """Return a normalized AI-title status or raise ValueError."""
+    normalized = require_non_empty(status, "ai_title_status")
+    if normalized not in AI_TITLE_STATUSES:
+        raise ValueError(f"Invalid ai_title_status: {status!r}")
+    return normalized
+
+
 def validate_metadata_source(source: str) -> str:
     """Return a normalized metadata-source marker or raise ValueError."""
     normalized = require_non_empty(source, "metadata source")
@@ -85,19 +102,11 @@ def validate_metadata_source(source: str) -> str:
     return normalized
 
 
-def validate_ticket_event_type(event_type: str) -> str:
-    """Return a normalized Ticket event type or raise ValueError."""
-    normalized = require_non_empty(event_type, "event_type")
-    if normalized not in TICKET_EVENT_TYPES:
-        raise ValueError(f"Invalid ticket event type: {event_type!r}")
-    return normalized
-
-
 def initial_ticket_status(blocked_by: str | None) -> str:
-    """Return the SPEC §12.1 initial status for a newly created Ticket.
+    """Return the SPEC §12.1 initial *display* status for a new Ticket.
 
     `ready`, or `blocked` when the Ticket already carries a `blocked_by` at
-    creation. Never `queued`.
+    creation. Never `queued`. Callers persist it via status_vocab.
     """
     if blocked_by is not None and blocked_by.strip():
         return BLOCKED_TICKET_STATUS
@@ -106,9 +115,12 @@ def initial_ticket_status(blocked_by: str | None) -> str:
 
 @dataclass(frozen=True)
 class TicketRecord:
-    """One Ticket and its Python-derived metadata (SPEC §10.1, §12)."""
+    """A prompt-first `tasks` row and its Python-derived metadata.
 
-    ticket_id: str
+    `status` is the persisted `TASK_STATUSES` value, not a display name.
+    """
+
+    task_key: str
     repository: str
     prompt: str
     title: str
@@ -119,9 +131,7 @@ class TicketRecord:
     branch: str
     worktree_path: Path
     artifact_dir: Path
-    ticket_prefix: str
-    ticket_sequence: int
-    title_source: str = METADATA_SOURCE_FALLBACK
+    ai_title_status: str = AI_TITLE_NOT_ATTEMPTED
     branch_slug_source: str = METADATA_SOURCE_FALLBACK
     github_repo: str | None = None
     blocked_by: str | None = None
@@ -130,7 +140,7 @@ class TicketRecord:
     updated_at: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "ticket_id", normalize_task_key(self.ticket_id))
+        object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
         object.__setattr__(
             self,
             "repository",
@@ -139,7 +149,7 @@ class TicketRecord:
         object.__setattr__(self, "prompt", require_non_empty(self.prompt, "prompt"))
         object.__setattr__(self, "title", require_non_empty(self.title, "title"))
         object.__setattr__(self, "priority", validate_ticket_priority(self.priority))
-        object.__setattr__(self, "status", validate_ticket_status(self.status))
+        object.__setattr__(self, "status", validate_task_status(self.status))
         object.__setattr__(
             self,
             "repo_path",
@@ -163,15 +173,8 @@ class TicketRecord:
         )
         object.__setattr__(
             self,
-            "ticket_prefix",
-            require_non_empty(self.ticket_prefix, "ticket_prefix"),
-        )
-        if self.ticket_sequence < 1:
-            raise ValueError("ticket_sequence must be >= 1")
-        object.__setattr__(
-            self,
-            "title_source",
-            validate_metadata_source(self.title_source),
+            "ai_title_status",
+            validate_ai_title_status(self.ai_title_status),
         )
         object.__setattr__(
             self,
@@ -180,34 +183,16 @@ class TicketRecord:
         )
         if self.blocked_by is not None:
             blocked_by = normalize_task_key(self.blocked_by)
-            if blocked_by == self.ticket_id:
+            if blocked_by == self.task_key:
                 raise ValueError("A ticket cannot block itself")
             object.__setattr__(self, "blocked_by", blocked_by)
 
 
-@dataclass(frozen=True)
-class TicketEventRecord:
-    """One append-only audit record for a Ticket (SPEC §44 auditability)."""
-
-    ticket_id: str
-    event_type: str
-    actor: str
-    message: str | None = None
-    payload_json: str | None = None
-    created_at: str | None = None
-    event_id: int | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "ticket_id", normalize_task_key(self.ticket_id))
-        object.__setattr__(
-            self,
-            "event_type",
-            validate_ticket_event_type(self.event_type),
-        )
-        object.__setattr__(self, "actor", require_non_empty(self.actor, "actor"))
-
-
 __all__ = [
+    "AI_TITLE_FALLBACK",
+    "AI_TITLE_GENERATED",
+    "AI_TITLE_NOT_ATTEMPTED",
+    "AI_TITLE_STATUSES",
     "BLOCKED_TICKET_STATUS",
     "DEFAULT_TICKET_PRIORITY",
     "METADATA_SOURCES",
@@ -215,16 +200,14 @@ __all__ = [
     "METADATA_SOURCE_FALLBACK",
     "READY_TICKET_STATUS",
     "RESERVED_INITIAL_TICKET_STATUS",
-    "TICKET_EVENT_TYPES",
     "TICKET_PRIORITIES",
     "TICKET_PRIORITY_SEQUENCE",
     "TICKET_STATUSES",
     "TICKET_STATUS_SEQUENCE",
-    "TicketEventRecord",
     "TicketRecord",
     "initial_ticket_status",
+    "validate_ai_title_status",
     "validate_metadata_source",
-    "validate_ticket_event_type",
     "validate_ticket_priority",
     "validate_ticket_status",
 ]
