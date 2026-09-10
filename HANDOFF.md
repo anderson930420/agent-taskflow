@@ -24,6 +24,110 @@ Step 2.
 
 ---
 
+## Human rulings applied on this branch
+
+All three items previously left as "your call" have now been ruled on. Each is
+implemented below; §3 marks the matching open item as resolved.
+
+### Ruling 1 — §32 watcher pickup scope: code changed
+
+**Ruling.** The PR-outcome watcher picks up Tickets by
+
+    pr_number IS NOT NULL AND pr_state = 'open'
+
+and is **not** scoped by status. A human can merge a PR on GitHub while its
+Ticket sits in `needs_decision` or `paused`. A watcher scoped to `needs_review`
+would never see that merge, so the Ticket would never reach `completed` and its
+dependents would never be released. §32 says "all active PR Tickets", and this
+is what that means.
+
+**Required tests, all present** — `tests/test_integration_watcher.py`,
+`PrPickupScopeTests`, whose docstring carries the rationale:
+
+- a `needs_decision` Ticket whose open PR GitHub reports merged is picked up,
+  verified, and reaches `completed`
+- the same for a `paused` Ticket
+- a Ticket with `pr_number` NULL is not picked up
+- a Ticket whose `pr_state` is `closed` is not picked up
+
+**What else had to change for that to work**, each with its own test:
+
+- *Cleanup* completed a Ticket only from `needs_review`, so the two required
+  completion tests could not pass without changing it. Which statuses a
+  verified merge may complete now comes from the transition table via
+  `integration_schema.can_transition`, which is now the runtime source of
+  truth (before, only tests read it). `needs_decision`, `paused` and
+  `ready_for_integration` can reach `completed` and `cancelled`;
+  `integrating` still cannot.
+- *In-flight integrations are picked up but deferred.* An `integrating` Ticket
+  matches the condition, but nothing is polled, recorded or transitioned for
+  it (§25.0), so the watcher never races the controller. Its `pr_state` stays
+  `open`, so the next tick sees it again.
+- *Changes requested* moves only `needs_review → needs_decision`, as §33.2
+  describes. On a `paused` Ticket the review is still kept as retry context,
+  but the pause stands (§13).
+- *PR closed unmerged* cancels from any status with a `cancelled` edge (§33.5
+  is unconditional) and removes the Ticket from the integration queue.
+  Worktree, branch and evidence are retained, as before.
+- *The controller* refuses to re-integrate a Ticket whose PR is already
+  recorded as merged. The wider pickup makes that state reachable, and
+  integrating it would only push to a dead branch.
+- *Cleanup evidence* gets its own file per attempt (`cleanup-<id>.json`).
+  Before, a refused re-run could overwrite the record of the cleanup that
+  actually happened; the wider pickup makes re-runs more likely.
+
+**Deliberately unchanged: target-freshness polling keeps its §25.1
+`needs_review` scope.** The ruling governs PR-outcome pickup. Re-integration
+is a lifecycle action: auto-re-integrating a `paused` Ticket would violate §13,
+and a `needs_decision` one would bypass the human. `FreshnessScopeTests` pins
+this.
+
+**One acceptance assertion changed meaning.**
+`test_item_29_polling_is_idempotent` expected a second poll to return the
+merged PR again. Under the ruled condition a merged PR is recorded `closed`,
+so it leaves the pickup set and a second poll returns nothing. The test now
+asserts that, plus exactly one `merge_detected` event — a stronger idempotency
+check than before.
+
+**Flagged, not fixed — merged with no merge SHA.** If GitHub ever reports
+`merged=true` with an empty `mergeCommit`, the first poll records
+`pr_state=closed` with `merge_commit_sha` NULL. The Ticket then leaves the
+pickup set and cleanup correctly refuses it (§36 needs the SHA), so it waits
+for a human. I have not seen GitHub do this and the ruled condition is
+explicit, so I have not widened the pickup. If it ever happens, the fix is to
+keep such a Ticket in the pickup set until the SHA arrives.
+
+### Ruling 2 — WORKFLOW.md Non-Goals: doc changed, no code
+
+**Ruling.** There was no real conflict. The old Non-Goal said "automatic
+merge", and Step 2 does automated integration up to a PR; the document failed
+to distinguish the two. In one small, separate docs-only commit, the
+Non-Goals section now states both:
+
+- Automated integration up to a draft PR is **in scope**.
+- Automated merge remains a **non-goal**: Taskflow never merges a pull request
+  and never pushes the target branch.
+
+The bare "automatic push" entry is narrowed to "automatic push of anything
+other than a task branch". Left as it was, it would have contradicted the new
+in-scope statement, since integrating means pushing the task branch.
+"automatic cleanup/delete" is untouched: Step 2 cleanup always requires an
+explicit operator confirmation.
+
+### Ruling 3 — the two ambiguity flags: conservative defaults kept, no code
+
+No default and no code changed. The reasoning is recorded here so it is not
+lost; both are to be revisited after real usage.
+
+- **`IntegrationCleanupRequest.delete_remote_branch = False`.** SPEC §37
+  already calls remote branch cleanup optional, and GitHub's repository
+  setting can auto-delete branches on merge. Taskflow does not need to do it.
+- **`IntegrationRequest.push_no_op_reintegration = False`.** If a
+  re-integration produced no new commit, there is nothing to push. Validators
+  still re-run on every re-integration, no-op or not (§44).
+
+---
+
 ## 1. What was implemented
 
 ### Extended (additive only — no existing module rewritten)
@@ -137,8 +241,8 @@ modified, weakened, or skipped.
 ### "A spec requirement is ambiguous or contradicts existing code" — 3 flagged
 
 These were reported rather than repaired, per the stop-condition rule. None of
-them blocked delivery. **(a) has since been ruled on and implemented**; (b) and
-(c) are still open.
+them blocked delivery. **(a) and (b) have since been ruled on and
+implemented**; (c) is still open.
 
 **(a) `cancelled` vs `canceled` — spec/code spelling conflict. RESOLVED.**
 
@@ -184,18 +288,15 @@ bridge. Persisted spelling of cancelled is `canceled`.
    `tests/test_integration_schema.py` now pins the bridge in both directions
    and asserts neither spelling pair coexists in the enum.
 
-**One consequence worth your attention.** Step 2's watcher selects Tickets by
-the persisted value `waiting_for_review`. The legacy `waiting_approval`, which
-the existing dispatcher writes and which `status_vocab` also maps to the
-`needs_review` display name, is therefore **not** picked up by the Step 2
-watcher. That is deliberate — Step 2 should only manage Tickets it integrated
-itself, not adopt every legacy task sitting at the old approval gate — but it
-does mean the display name `needs_review` covers a strictly larger set in
-Mission Control than the set Step 2 acts on. If you want the watcher to adopt
-legacy `waiting_approval` tasks too, that is a one-line change and a decision
-for you, not me.
+**Watcher scope — superseded by Ruling 1.** This paragraph originally flagged
+that the watcher selected Tickets by status. The §32 pickup ruling replaced
+status-based selection with `pr_number IS NOT NULL AND pr_state = 'open'`
+for PR-outcome polling, so the question no longer arises there. Legacy
+`waiting_approval` tasks are still not adopted: they have no Step 2 PR row,
+so they can never match the pickup condition.
 
-**(b) `WORKFLOW.md` Non-Goals vs Step 2's mandate.**
+**(b) `WORKFLOW.md` Non-Goals vs Step 2's mandate. RESOLVED — see Ruling 2
+above.**
 The repo-owned contract lists "automatic push" and "automatic cleanup/delete"
 as things agent-taskflow should not provide. V1 Step 2 requires exactly those.
 I did not edit the Non-Goals list. Instead every Step 2 entry point is
@@ -207,7 +308,7 @@ supersedes that Non-Goals line, or Step 2 stays operator-triggered forever.
 **(c) §42 checklist vs step2.md Allowed layers on "Retry → new Attempt".**
 Described in §2.1 above. I followed step2.md, which overrides.
 
-### "You need a decision the spec assigns to the human" — 2 parameterised, not guessed
+### "You need a decision the spec assigns to the human" — 2 parameterised, not guessed — RESOLVED, see Ruling 3 above
 
 These are the two items on step2.md's own **ambiguity watchlist**. Both are
 exposed as explicit flags with a conservative default, and neither is baked in.
@@ -299,8 +400,9 @@ $VENV -m agent_taskflow.cli.local_validation
 | Baseline `pytest tests -q` (captured **before any edit**) | `4390 passed, 8 skipped, 0 failed` |
 | `pytest tests -q` (Step 2, before the Step 1 merge) | `4615 passed, 8 skipped, 0 failed` in 509s |
 | `pytest tests -q` (after the Step 1 merge + §12.2 rework) | `4731 passed, 8 skipped, 0 failed` in 605s |
+| `pytest tests -q` (after Rulings 1–3) | `4748 passed, 8 skipped, 0 failed` in 522s |
 | `compileall agent_taskflow scripts tests` | exit 0 |
-| Step 2 tests only | 227 passed across 14 files |
+| Step 2 tests only | 244 passed across 14 files |
 | Step 1 tests merged in | 114 passed across 5 files |
 
 The counts reconcile exactly, which is the point of listing them:
@@ -314,6 +416,10 @@ The counts reconcile exactly, which is the point of listing them:
           (3 added, 1 removed: the old two-`l` spelling assertion)
     ----
     4731  after the merge
+     +17  Ruling 1 tests (9 pickup-scope, 1 freshness-scope,
+          3 cleanup, 1 controller, 3 schema)
+    ----
+    4748  after the rulings
 
 The skip count is 8 throughout — the same 8 pre-existing skips. No test was
 lost, silently skipped, or newly red at any point.
@@ -321,7 +427,7 @@ lost, silently skipped, or newly red at any point.
 A second full `pytest tests -q` run after the merge, in the foreground, gave
 the identical result: `4731 passed, 8 skipped, 0 failed` in 523s.
 
-`agent_taskflow.cli.local_validation`, run after the merge (exit 0) — every
+`agent_taskflow.cli.local_validation`, run after Rulings 1–3 (exit 0) — every
 required check passed:
 
 | Check | Result |
@@ -331,16 +437,16 @@ required check passed:
 | workflow policy validation | passed |
 | Mission Control golden path smoke | passed |
 | PiExecutor golden path smoke (fake Pi) | passed |
-| unit tests (`unittest discover -s tests -v`) | passed — `Ran 4737 tests`, `OK (skipped=8)`, 513s |
+| unit tests (`unittest discover -s tests -v`) | passed — `Ran 4754 tests`, `OK (skipped=8)`, 607s |
 | compileall | passed |
 | openspec validate | skipped — `openspec` is not on PATH (optional check, pre-existing) |
 
-`unittest` reports 4737 and `pytest` reports 4731 + 8 skipped because the two
+`unittest` reports 4754 and `pytest` reports 4748 + 8 skipped because the two
 runners collect tests differently; both report **zero failures**, and both
 report the same 8 skips as the pre-edit baseline.
 
 **No test went red at any point** — not after Step 2, not after the Step 1
-merge, and not after the §12.2 rework. There was no pre-existing failure to
+merge, not after the §12.2 rework, and not after Rulings 1–3. There was no pre-existing failure to
 report.
 
 The merged Mission Control frontend is byte-identical to `task/v1-step1`'s
