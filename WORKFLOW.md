@@ -320,12 +320,20 @@ agent-taskflow should not provide:
 - self-selected tasks
 - self-validation
 - self-approval
-- automatic merge
-- automatic push
+- automatic merge: automated merge remains a **non-goal**. Taskflow never
+  merges a pull request and never pushes the target branch; every merge is a
+  human action on GitHub
+- automatic push of anything other than a task branch
 - automatic cleanup/delete
 - production GitHub issue sync yet
 - remote worker pools yet
 - multi-host scheduling yet
+
+Automated integration up to a draft PR is **in scope**, and is not covered by
+the "automatic merge" or "automatic push" entries above. The V1 Step 2
+Integration Controller may fetch, update the task branch against the latest
+target, run validators, push the task branch with a normal (never forced) push,
+and create or update a draft PR. It stops there: merging stays with a human.
 
 ## Future Machine-Readable Contract
 
