@@ -7,7 +7,8 @@ writes nothing at all — no Ticket status, no Attempt status, no schema.
 Two shapes are produced:
 
 ``BoardProjection``
-    the §16 live board — RUNNING / READY / BLOCKED / PAUSED / READY FOR REVIEW.
+    the live board — NEEDS DECISION (human ruling 5), then the five §16
+    sections RUNNING / READY / BLOCKED / PAUSED / READY FOR REVIEW.
 
 ``TicketProjection``
     the §17 live Ticket page — repository, priority, status, branch, worktree,
@@ -63,14 +64,19 @@ DASH = "—"
 
 # -- §16 board sections ----------------------------------------------------
 
+#: Human ruling 5 (resolving HANDOFF §4.3): a sixth section, above the five
+#: §16 shows, for every Ticket waiting on a human decision.
+BOARD_SECTION_NEEDS_DECISION = "NEEDS DECISION"
 BOARD_SECTION_RUNNING = "RUNNING"
 BOARD_SECTION_READY = "READY"
 BOARD_SECTION_BLOCKED = "BLOCKED"
 BOARD_SECTION_PAUSED = "PAUSED"
 BOARD_SECTION_READY_FOR_REVIEW = "READY FOR REVIEW"
 
-#: Exactly the five sections §16 shows, in the order it shows them.
+#: NEEDS DECISION on top by human ruling, then the five sections §16 shows, in
+#: the order it shows them.
 BOARD_SECTIONS: tuple[str, ...] = (
+    BOARD_SECTION_NEEDS_DECISION,
     BOARD_SECTION_RUNNING,
     BOARD_SECTION_READY,
     BOARD_SECTION_BLOCKED,
@@ -84,11 +90,17 @@ BOARD_SECTIONS: tuple[str, ...] = (
 # persisted vocabulary stays TASK_STATUSES and `agent_taskflow.status_vocab` is
 # the single place the two are bridged. This projection therefore keeps no copy
 # of that bridge — it converts persisted -> display via `to_display_status()`
-# and only decides which of the five §16 sections a display status belongs to.
+# and only decides which board section a display status belongs to.
 #
-# A §12 status absent from this table has no §16 section and is deliberately
-# left unsectioned rather than guessed into one of the five.
+# `needs_decision` is keyed by its display name like every other entry, so each
+# persisted value status_vocab resolves to it — the canonical `needs_decision`
+# and its legacy aliases alike — lands in NEEDS DECISION without this module
+# naming any of them.
+#
+# A §12 status absent from this table has no board section and is deliberately
+# left unsectioned rather than guessed into one.
 DISPLAY_STATUS_SECTIONS: dict[str, str] = {
+    "needs_decision": BOARD_SECTION_NEEDS_DECISION,
     "preparing": BOARD_SECTION_RUNNING,
     "running": BOARD_SECTION_RUNNING,
     "validating": BOARD_SECTION_RUNNING,
@@ -114,8 +126,9 @@ BOARD_NOTES: tuple[str, ...] = (
     "Statuses are persisted in the legacy TASK_STATUSES vocabulary and shown "
     "in the SPEC 12 display vocabulary; agent_taskflow.status_vocab is the "
     "single bridge (SPEC 12.2).",
-    "SPEC 16 shows five board sections. These display statuses have none and "
-    "are listed as unsectioned rather than guessed into a section: "
+    "SPEC 16 shows five board sections; a sixth, NEEDS DECISION, sits above "
+    "them by human ruling. These display statuses have no section and are "
+    "listed as unsectioned rather than guessed into one: "
     + ", ".join(UNSECTIONED_DISPLAY_STATUSES)
     + ".",
     "SPEC 32.1 PR fields are read-only here and may be absent or null; the "
@@ -282,6 +295,7 @@ class BoardTicket:
     blocked: bool = False
     paused: bool = False
     awaiting_review: bool = False
+    awaiting_decision: bool = False
     blocker: str | None = None
     blocker_hint: str | None = None
     attempt_id: str | None = None
@@ -314,6 +328,7 @@ class BoardTicket:
             "blocked": self.blocked,
             "paused": self.paused,
             "awaiting_review": self.awaiting_review,
+            "awaiting_decision": self.awaiting_decision,
             "blocker": self.blocker,
             "blocker_hint": self.blocker_hint,
             "attempt_id": self.attempt_id,
@@ -332,12 +347,19 @@ class BoardSection:
     key: str
     title: str
     tickets: tuple[BoardTicket, ...] = field(default_factory=tuple)
+    #: Every section is read-only and offers no actions: Mission Control
+    #: renders lifecycle, it does not own it (§2.1). Serialised so a client
+    #: can check the contract rather than assume it.
+    read_only: bool = True
+    actions: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "key": self.key,
             "title": self.title,
             "count": len(self.tickets),
+            "read_only": self.read_only,
+            "actions": list(self.actions),
             "tickets": [ticket.to_dict() for ticket in self.tickets],
         }
 
@@ -576,6 +598,7 @@ def _build_ticket(
         blocked=section == BOARD_SECTION_BLOCKED,
         paused=section == BOARD_SECTION_PAUSED,
         awaiting_review=section == BOARD_SECTION_READY_FOR_REVIEW,
+        awaiting_decision=section == BOARD_SECTION_NEEDS_DECISION,
         blocker=blocker,
         blocker_hint=hint,
         attempt_id=snapshot.attempt_id if snapshot is not None else None,
@@ -733,6 +756,7 @@ __all__ = [
     "BOARD_NOTES",
     "BOARD_SECTIONS",
     "BOARD_SECTION_BLOCKED",
+    "BOARD_SECTION_NEEDS_DECISION",
     "BOARD_SECTION_PAUSED",
     "BOARD_SECTION_READY",
     "BOARD_SECTION_READY_FOR_REVIEW",

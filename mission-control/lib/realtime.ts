@@ -14,8 +14,12 @@ import type { BoardProjection, BoardTicket, RuntimeObservedStep } from "./types"
 /** Rendered in place of any null or missing value. */
 export const DASH = "—";
 
-/** SPEC §16 board sections, in the order the spec lists them. */
+/**
+ * Board sections: NEEDS DECISION on top by human ruling 5, then the five
+ * SPEC §16 sections in the order the spec lists them.
+ */
 export const BOARD_SECTIONS = [
+  "NEEDS DECISION",
   "RUNNING",
   "READY",
   "BLOCKED",
@@ -25,7 +29,11 @@ export const BOARD_SECTIONS = [
 
 export type BoardSectionKey = (typeof BOARD_SECTIONS)[number];
 
+/** The read-only section for Tickets waiting on a human decision. */
+export const NEEDS_DECISION_SECTION: BoardSectionKey = "NEEDS DECISION";
+
 export const SECTION_EMPTY_TEXT: Record<string, string> = {
+  "NEEDS DECISION": "No Ticket is waiting on a human decision.",
   RUNNING: "No Ticket is executing.",
   READY: "No Ticket is waiting for an executor slot.",
   BLOCKED: "No Ticket is blocked.",
@@ -82,6 +90,7 @@ export const STEP_COLORS: Record<string, string> = {
 };
 
 export const SECTION_COLORS: Record<string, string> = {
+  "NEEDS DECISION": "var(--purple)",
   RUNNING: "var(--blue)",
   READY: "var(--muted)",
   BLOCKED: "var(--red)",
@@ -131,6 +140,7 @@ export function sectionTickets(
  * the current activity. Nothing here ever claims how much work is left.
  */
 export function ticketSubtitle(ticket: BoardTicket): string {
+  if (ticket.awaiting_decision) return "Awaiting a human decision";
   if (ticket.blocked || ticket.paused) {
     return valueOrDash(ticket.blocker_hint);
   }

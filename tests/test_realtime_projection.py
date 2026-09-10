@@ -23,6 +23,7 @@ from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.realtime_projection import (
     BOARD_SECTIONS,
     BOARD_SECTION_BLOCKED,
+    BOARD_SECTION_NEEDS_DECISION,
     BOARD_SECTION_PAUSED,
     BOARD_SECTION_READY,
     BOARD_SECTION_READY_FOR_REVIEW,
@@ -130,9 +131,9 @@ class ProjectionTestCase(unittest.TestCase):
 
 
 class BoardSectionTests(ProjectionTestCase):
-    """§16 — RUNNING / READY / BLOCKED / PAUSED / READY FOR REVIEW."""
+    """NEEDS DECISION (ruling 5), then §16 RUNNING / READY / BLOCKED / PAUSED / READY FOR REVIEW."""
 
-    def test_board_exposes_exactly_the_five_spec_sections_in_order(self) -> None:
+    def test_board_exposes_the_sections_in_order(self) -> None:
         projection = build_board_projection(self.db_path)
         self.assertEqual(
             tuple(section.key for section in projection.sections), BOARD_SECTIONS
@@ -140,6 +141,7 @@ class BoardSectionTests(ProjectionTestCase):
         self.assertEqual(
             BOARD_SECTIONS,
             (
+                "NEEDS DECISION",
                 "RUNNING",
                 "READY",
                 "BLOCKED",
@@ -160,7 +162,7 @@ class BoardSectionTests(ProjectionTestCase):
         self.assertEqual(sections[BOARD_SECTION_BLOCKED], ["AT-112"])
         self.assertEqual(sections[BOARD_SECTION_READY_FOR_REVIEW], ["AT-098"])
 
-    def test_terminal_tickets_are_not_placed_in_the_five_sections(self) -> None:
+    def test_terminal_tickets_are_not_placed_in_any_section(self) -> None:
         self.add_task("AT-001", "completed")
         self.add_task("AT-002", "canceled")
         projection = build_board_projection(self.db_path)
@@ -172,29 +174,97 @@ class BoardSectionTests(ProjectionTestCase):
             ["AT-001", "AT-002"],
         )
 
-    def test_needs_decision_is_unsectioned_and_flagged_as_ambiguous(self) -> None:
-        # Known ambiguity watchlist: §16 shows five sections and does not
-        # include needs_decision. Step 3 flags rather than guessing, and the
-        # note travels with every board payload.
-        projection = build_board_projection(self.db_path)
-        self.assertTrue(
-            any("needs_decision" in note for note in projection.notes),
-            projection.notes,
-        )
 
-    def test_needs_decision_ticket_is_not_placed_in_the_five_sections(self) -> None:
+class NeedsDecisionSectionTests(ProjectionTestCase):
+    """Human ruling 5 — a NEEDS DECISION section sits on top of the board.
+
+    Replaces two tests that pinned the old behaviour this ruling reverses
+    (`needs_decision` listed as unsectioned and flagged as ambiguous).
+    """
+
+    def test_section_order_starts_with_needs_decision(self) -> None:
+        self.assertEqual(BOARD_SECTIONS[0], BOARD_SECTION_NEEDS_DECISION)
+        projection = build_board_projection(self.db_path)
+        self.assertEqual(projection.sections[0].key, BOARD_SECTION_NEEDS_DECISION)
+
+    def test_needs_decision_ticket_appears_there_and_nowhere_else(self) -> None:
         self.add_task("AT-200", "needs_decision")
         projection = build_board_projection(self.db_path)
         for section in projection.sections:
+            expected = (
+                ["AT-200"] if section.key == BOARD_SECTION_NEEDS_DECISION else []
+            )
             with self.subTest(section=section.key):
-                self.assertEqual(section.tickets, ())
-        self.assertEqual(
-            [ticket.task_key for ticket in projection.unsectioned], ["AT-200"]
+                self.assertEqual(
+                    [ticket.task_key for ticket in section.tickets], expected
+                )
+        self.assertEqual(projection.unsectioned, ())
+
+    def test_every_persisted_alias_of_needs_decision_lands_there(self) -> None:
+        # Which persisted values count is status_vocab's answer — not this
+        # test's, and not the projection's.
+        persisted = sorted(
+            status
+            for status, display in PERSISTED_TO_DISPLAY.items()
+            if display == "needs_decision"
         )
-        ticket = projection.find("AT-200")
+        self.assertGreater(len(persisted), 1, "canonical value plus aliases")
+        for index, status in enumerate(persisted):
+            self.add_task(f"AT-{900 + index}", status)
+        sections = self.sections(build_board_projection(self.db_path))
+        self.assertEqual(
+            sections[BOARD_SECTION_NEEDS_DECISION],
+            [f"AT-{900 + index}" for index in range(len(persisted))],
+        )
+        for key, keys in sections.items():
+            if key != BOARD_SECTION_NEEDS_DECISION:
+                with self.subTest(section=key):
+                    self.assertEqual(keys, [])
+
+    def test_needs_decision_ticket_is_never_running_eligible_blocked_or_paused(
+        self,
+    ) -> None:
+        self.add_task("AT-200", "needs_decision")
+        ticket = build_board_projection(self.db_path).find("AT-200")
         assert ticket is not None
-        self.assertFalse(ticket.running)
-        self.assertFalse(ticket.eligible_for_execution)
+        self.assertEqual(ticket.section, BOARD_SECTION_NEEDS_DECISION)
+        self.assertEqual(ticket.display_status, "needs_decision")
+        self.assertTrue(ticket.awaiting_decision)
+        for flag in (
+            "running",
+            "eligible_for_execution",
+            "blocked",
+            "paused",
+            "awaiting_review",
+        ):
+            with self.subTest(flag=flag):
+                self.assertFalse(getattr(ticket, flag))
+
+    def test_section_is_read_only_and_offers_no_actions(self) -> None:
+        self.add_task("AT-200", "needs_decision")
+        section = build_board_projection(self.db_path).sections[0]
+        self.assertEqual(section.key, BOARD_SECTION_NEEDS_DECISION)
+        self.assertTrue(section.read_only)
+        self.assertEqual(section.actions, ())
+        payload = section.to_dict()
+        self.assertTrue(payload["read_only"])
+        self.assertEqual(payload["actions"], [])
+
+    def test_no_board_section_offers_actions(self) -> None:
+        for section in build_board_projection(self.db_path).sections:
+            with self.subTest(section=section.key):
+                self.assertTrue(section.read_only)
+                self.assertEqual(section.actions, ())
+
+    def test_needs_decision_is_no_longer_listed_as_unsectioned(self) -> None:
+        self.assertNotIn("needs_decision", UNSECTIONED_DISPLAY_STATUSES)
+        unsectioned_note = next(
+            note
+            for note in build_board_projection(self.db_path).notes
+            if "unsectioned" in note
+        )
+        self.assertIn(BOARD_SECTION_NEEDS_DECISION, unsectioned_note)
+        self.assertNotIn("needs_decision", unsectioned_note)
 
 
 class StatusVocabularyBridgeTests(ProjectionTestCase):

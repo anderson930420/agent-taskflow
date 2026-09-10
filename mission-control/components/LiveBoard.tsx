@@ -5,6 +5,7 @@ import Link from "next/link";
 import { realtimeStreamUrl } from "../lib/api";
 import {
   BOARD_SECTIONS,
+  NEEDS_DECISION_SECTION,
   sectionColor,
   sectionEmptyText,
   sectionTickets,
@@ -33,6 +34,11 @@ function TicketCard({ ticket }: { ticket: BoardTicket }) {
         {ticket.eligible_for_execution ? (
           <span style={{ fontSize: "0.66rem", color: "var(--muted-2)" }}>
             awaiting a slot
+          </span>
+        ) : null}
+        {ticket.awaiting_decision ? (
+          <span style={{ fontSize: "0.66rem", color: "var(--purple)" }}>
+            awaiting a human decision
           </span>
         ) : null}
         {ticket.pr.pr_number ? (
@@ -123,6 +129,15 @@ export function LiveBoard({ initial }: { initial: BoardProjection | null }) {
                 <span className="column-count">{tickets.length}</span>
               </div>
 
+              {key === NEEDS_DECISION_SECTION ? (
+                <p
+                  className="muted"
+                  style={{ fontSize: "0.7rem", margin: "0 12px 8px" }}
+                >
+                  Read-only · Mission Control offers no decision actions here.
+                </p>
+              ) : null}
+
               <div className="task-card-list">
                 {tickets.length === 0 ? (
                   <div className="empty">{sectionEmptyText(key)}</div>
@@ -141,8 +156,8 @@ export function LiveBoard({ initial }: { initial: BoardProjection | null }) {
         <section className="panel">
           <h2>Not on the board</h2>
           <p className="muted">
-            These Tickets are outside the five SPEC §16 board sections — closed
-            work, and any state the spec does not place on the board.
+            These Tickets are in none of the board sections — closed work, and
+            any status the projection could not map.
           </p>
           <div className="table-wrap">
             <table>

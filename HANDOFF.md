@@ -110,9 +110,11 @@ Ticket per poll.
 
 ### Read-only projection — `agent_taskflow/realtime_projection.py`
 
-- `build_board_projection()` — the §16 board: exactly
-  `RUNNING / READY / BLOCKED / PAUSED / READY FOR REVIEW`, in spec order, plus
-  an `unsectioned` bucket for everything the spec does not place on the board.
+- `build_board_projection()` — the live board: `NEEDS DECISION` on top (human
+  ruling 5, §4.3), then the five §16 sections
+  `RUNNING / READY / BLOCKED / PAUSED / READY FOR REVIEW` in spec order, plus an
+  `unsectioned` bucket for closed work and anything the projection cannot map.
+  Every section serialises `read_only: true, actions: []`.
 - `build_ticket_projection()` — the §17 Ticket page: repository, priority,
   status, branch, worktree, execution steps, current activity, artifact links,
   plus the §31 read-only review surface (PR identity, Taskflow validator
@@ -184,8 +186,8 @@ for tests; the default is unbounded.
 1. **Runtime call-site wiring — reclassified.** Earlier rounds filed this here
    as a deliberate skip. The review is right that it is a **stop condition that
    was hit**, not a skip. It now lives in §4.7.
-2. **No board section for `needs_decision`** — this is the flagged watchlist
-   item; see §4.3 below.
+2. ~~No board section for `needs_decision`~~ — **resolved by human ruling 5**:
+   it now has its own read-only section at the top of the board. See §4.3.
 3. **No progress percentage, ETA, or completion estimate** (§14.2), **no DAG
    visualization** (§16/§41). Both are forbidden and both are enforced by
    negative-scope tests over the Python modules *and* the frontend templates.
@@ -276,14 +278,49 @@ The §14.2 UI sample renders `... Implement, Validate, Integrate, Review` —
 Review last. Step 3 uses the **§14.1 order** for storage (`step_order`) and for
 rendering, everywhere. Flagged rather than guessed at a second ordering.
 
-### 4.3 `needs_decision` has no §16 board section (the flagged watchlist item)
+### 4.3 `needs_decision` board section — RESOLVED by human ruling 5
 
-Handled without guessing: a `needs_decision` Ticket is placed in `unsectioned`,
-is never `running` and never `eligible_for_execution`, and every board payload
-carries a note saying §16 shows five sections and does not include it. Covered
-by `test_needs_decision_ticket_is_not_placed_in_the_five_sections`.
+**Originally reported as the flagged watchlist item:** §16 shows five sections
+and none of them holds `needs_decision`, so those Tickets were listed as
+unsectioned and the question went to the human.
 
-**Decision needed from the human:** whether §16 should grow a sixth section.
+**Ruling 5:** add a `needs_decision` section at the **top** of the board, above
+RUNNING, resolved through `status_vocab`, read-only, offering no actions.
+
+**What changed:**
+
+- `realtime_projection.py` — `BOARD_SECTION_NEEDS_DECISION = "NEEDS DECISION"`
+  is first in `BOARD_SECTIONS`. `DISPLAY_STATUS_SECTIONS` gains
+  `"needs_decision"`, keyed by the §12 display name like every other entry. The
+  projection names no persisted value: whatever `status_vocab` resolves to
+  `needs_decision` — today the canonical `needs_decision` plus the legacy
+  aliases `rejected` and `unknown` — lands there. Tickets carry a new
+  `awaiting_decision` flag, and are never `running`, `eligible_for_execution`,
+  `blocked`, `paused` or `awaiting_review`.
+- Every `BoardSection` now serialises `read_only: true` and `actions: []`, so
+  "offers no actions" is a checked API contract rather than an assumption.
+- `UNSECTIONED_DISPLAY_STATUSES` is still derived. It drops `needs_decision`
+  and now reads `completed, failed, cancelled`; the board note says so.
+- `LiveBoard.tsx` renders the section first, with a read-only note ("Mission
+  Control offers no decision actions here") and an "awaiting a human decision"
+  badge on each card. The card stays a link to the read-only Ticket page —
+  navigation, not an action. The file has no button, form, or click handler.
+
+**Tests rewritten because the ruling reverses what they pinned** (these are
+this branch's own tests, not pre-existing failures):
+`test_needs_decision_is_unsectioned_and_flagged_as_ambiguous` and
+`test_needs_decision_ticket_is_not_placed_in_the_five_sections` are replaced by
+`NeedsDecisionSectionTests`, and the five-section order assertions in the
+projection, API and frontend-source tests now expect six sections with NEEDS
+DECISION first.
+
+**New coverage:** the Ticket appears in that section and in no other; every
+persisted alias `status_vocab` maps to `needs_decision` lands there (the test
+asks `status_vocab` which values those are rather than listing them); the
+section is first; it and every other section is read-only with no actions; and
+the same holds end to end through `GET /api/realtime/board`.
+
+**No decision outstanding.**
 
 ### 4.4 `ready_for_integration` / `integrating` are not named by §16 (ambiguity)
 
@@ -412,7 +449,26 @@ documented runner, and the one the reviewer used. Earlier rounds quoted pytest
 counts, which are not comparable to unittest's `Ran N tests`; they are kept
 below for history only.
 
-### This round (post-review)
+### Ruling 5 round (NEEDS DECISION section)
+
+| Point | Tree | Result |
+|---|---|---|
+| BEFORE | `e0c2583` | Ran 4722 tests, OK (skipped=8) |
+| AFTER | `e0c2583` + the ruling 5 change in the commit carrying this handoff | Ran 4732 tests, OK (skipped=8) |
+
+- Delta **+10** is exactly the test change: `test_realtime_projection.py` replaces two tests with the seven in `NeedsDecisionSectionTests` (+5), `test_api_realtime.py` gains one (+1), and `test_mission_control_realtime_frontend.py` gains four (+4).
+- **No test went red.** Skips unchanged at 8.
+
+| Command | Result |
+|---|---|
+| `python -m compileall agent_taskflow scripts tests` | OK |
+| `scripts/validate_workflow_contract.py` | passed |
+| `scripts/validate_workflow_policy.py` | passed |
+| `cd mission-control && npm run build` | compiled, TypeScript clean; `/live` still listed |
+
+No `task/v1-step1` merge in this round, by instruction.
+
+### Post-review round
 
 | Point | Tree | Result |
 |---|---|---|
@@ -488,6 +544,7 @@ Mapping to the acceptance gate:
 | Negative: no percentage / ETA / estimate | `test_realtime_negative_scope.py::NoProgressEstimateAnywhereTests` |
 | Negative: no lifecycle status write | `test_runtime_progress_schema_diff.py` (authoritative: whole-schema diff), `test_realtime_negative_scope.py::NoLifecycleWriteInStep3CodeTests` (source scan, not sufficient alone) |
 | Review 3c: board and detail read `tasks` | `test_api_realtime.py::TicketReproductionTests` |
+| Ruling 5: NEEDS DECISION section on top, read-only | `test_realtime_projection.py::NeedsDecisionSectionTests`, `test_api_realtime.py::RealtimeBoardEndpointTests::test_needs_decision_ticket_is_on_top_read_only`, `test_mission_control_realtime_frontend.py::LiveBoardTests` |
 | Review 3a: fail closed, never chain a lifecycle migration | `test_runtime_progress_schema_diff.py::FailClosedPreconditionTests`, `test_migrate_runtime_progress_script.py::FailClosedTests` |
 | Negative: no Git / GitHub call | `test_realtime_negative_scope.py::NoGitOrGithubCallInStep3CodeTests` |
 

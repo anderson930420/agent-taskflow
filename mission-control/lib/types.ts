@@ -498,6 +498,7 @@ export interface BoardTicket {
   blocked: boolean;
   paused: boolean;
   awaiting_review: boolean;
+  awaiting_decision: boolean;
   blocker?: string | null;
   blocker_hint?: string | null;
   attempt_id?: string | null;
@@ -514,6 +515,9 @@ export interface BoardSection {
   key: string;
   title: string;
   count: number;
+  /** Every board section is read-only and offers no actions. */
+  read_only: boolean;
+  actions: string[];
   tickets: BoardTicket[];
 }
 

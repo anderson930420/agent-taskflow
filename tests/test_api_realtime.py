@@ -184,13 +184,21 @@ class RealtimeApiTestCase(unittest.TestCase):
 
 
 class RealtimeBoardEndpointTests(RealtimeApiTestCase):
-    def test_board_endpoint_returns_the_five_sections(self) -> None:
+    def test_board_endpoint_returns_the_board_sections(self) -> None:
         response = self.client.get("/api/realtime/board")
         self.assertEqual(response.status_code, 200)
         payload = response.json()["item"]
         keys = [section["key"] for section in payload["sections"]]
         self.assertEqual(
-            keys, ["RUNNING", "READY", "BLOCKED", "PAUSED", "READY FOR REVIEW"]
+            keys,
+            [
+                "NEEDS DECISION",
+                "RUNNING",
+                "READY",
+                "BLOCKED",
+                "PAUSED",
+                "READY FOR REVIEW",
+            ],
         )
 
     def test_board_endpoint_reflects_runtime_state(self) -> None:
@@ -220,6 +228,32 @@ class RealtimeBoardEndpointTests(RealtimeApiTestCase):
         self.assertEqual(ticket["blocker_hint"], "Waiting for AT-101")
         self.assertFalse(ticket["running"])
         self.assertFalse(ticket["eligible_for_execution"])
+
+    def test_needs_decision_ticket_is_on_top_read_only(self) -> None:
+        # Human ruling 5, end to end through the API.
+        self.tasks.upsert_task(
+            TaskRecord(
+                task_key="AT-200",
+                project="forms",
+                status="needs_decision",
+                repo_path=self.repo_path,
+            )
+        )
+        sections = self.client.get("/api/realtime/board").json()["item"]["sections"]
+        top = sections[0]
+        self.assertEqual(top["key"], "NEEDS DECISION")
+        self.assertEqual([t["task_key"] for t in top["tickets"]], ["AT-200"])
+        self.assertTrue(top["read_only"])
+        self.assertEqual(top["actions"], [])
+        ticket = top["tickets"][0]
+        self.assertTrue(ticket["awaiting_decision"])
+        self.assertFalse(ticket["eligible_for_execution"])
+        self.assertFalse(ticket["running"])
+        for section in sections[1:]:
+            with self.subTest(section=section["key"]):
+                self.assertNotIn(
+                    "AT-200", [t["task_key"] for t in section["tickets"]]
+                )
 
     def test_board_response_has_no_percentage_or_eta(self) -> None:
         payload = self.client.get("/api/realtime/board").json()
@@ -316,7 +350,15 @@ class SseStreamEndpointTests(RealtimeApiTestCase):
         )
         keys = [section["key"] for section in snapshot["sections"]]
         self.assertEqual(
-            keys, ["RUNNING", "READY", "BLOCKED", "PAUSED", "READY FOR REVIEW"]
+            keys,
+            [
+                "NEEDS DECISION",
+                "RUNNING",
+                "READY",
+                "BLOCKED",
+                "PAUSED",
+                "READY FOR REVIEW",
+            ],
         )
 
     def test_stream_delivers_an_update_when_state_changes(self) -> None:

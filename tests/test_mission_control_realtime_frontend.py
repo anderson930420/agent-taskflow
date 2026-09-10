@@ -2,7 +2,7 @@
 
 Acceptance gate for the UI half of §43.11, §43.5, §43.15/§43.16:
 
-* the live board renders the five §16 sections
+* the live board renders NEEDS DECISION (ruling 5) above the five §16 sections
 * the live Ticket page renders the §17 fields
 * BLOCKED / PAUSED render in their own sections with their blocker and are
   never presented as running or actionable-as-executable
@@ -70,15 +70,29 @@ class RealtimeFrontendTests(unittest.TestCase):
 
 
 class LiveBoardTests(RealtimeFrontendTests):
-    def test_board_renders_the_five_spec_sections(self) -> None:
-        for label in ("RUNNING", "READY", "BLOCKED", "PAUSED", "READY FOR REVIEW"):
+    def test_board_renders_every_section(self) -> None:
+        for label in (
+            "NEEDS DECISION",
+            "RUNNING",
+            "READY",
+            "BLOCKED",
+            "PAUSED",
+            "READY FOR REVIEW",
+        ):
             with self.subTest(label=label):
                 self.assertIn(label, self.realtime_lib)
 
     def test_board_section_order_matches_spec_section_16(self) -> None:
         order = [
             self.realtime_lib.index(f'"{label}"')
-            for label in ("RUNNING", "READY", "BLOCKED", "PAUSED", "READY FOR REVIEW")
+            for label in (
+            "NEEDS DECISION",
+            "RUNNING",
+            "READY",
+            "BLOCKED",
+            "PAUSED",
+            "READY FOR REVIEW",
+        )
         ]
         self.assertEqual(order, sorted(order))
 
@@ -97,6 +111,29 @@ class LiveBoardTests(RealtimeFrontendTests):
         for label in ("Start", "Dispatch", "Run now", "Retry", "Approve", "Merge"):
             with self.subTest(label=label):
                 self.assertNotIn(f">{label}<", self.new_surface)
+
+    def test_needs_decision_section_leads_the_board(self) -> None:
+        self.assertIn("NEEDS_DECISION_SECTION", self.live_board)
+        self.assertLess(
+            self.realtime_lib.index('"NEEDS DECISION"'),
+            self.realtime_lib.index('"RUNNING"'),
+        )
+
+    def test_needs_decision_section_is_read_only_with_no_actions(self) -> None:
+        self.assertIn("offers no decision actions", self.live_board)
+        code = strip_comments(self.live_board)
+        for token in ("<button", "<form", "onClick", "onSubmit", "method:"):
+            with self.subTest(token=token):
+                self.assertNotIn(token, code)
+
+    def test_board_card_marks_tickets_awaiting_a_decision(self) -> None:
+        self.assertIn("ticket.awaiting_decision", self.live_board)
+        self.assertIn("ticket.awaiting_decision", self.realtime_lib)
+
+    def test_types_carry_the_decision_flag_and_section_contract(self) -> None:
+        self.assertIn("awaiting_decision: boolean", self.types)
+        self.assertIn("read_only: boolean", self.types)
+        self.assertIn("actions: string[]", self.types)
 
     def test_live_page_mounts_the_live_board(self) -> None:
         self.assertIn("LiveBoard", self.live_page)
