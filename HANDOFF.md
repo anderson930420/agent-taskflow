@@ -109,6 +109,115 @@ after and asserts it is unchanged.
 
 ---
 
+## 3b. Status vocabulary bridge (SPEC §12.2 ruling)
+
+Added after the human ruling on the §12-vs-`TASK_STATUSES` conflict that all
+three Step builders reported.
+
+**Ruling as implemented.** No repo-wide migration. `TASK_STATUSES` stays the
+canonical *persisted* vocabulary. The §12 names are the Mission Control
+*display* vocabulary. `agent_taskflow/status_vocab.py` is the single bridge.
+
+The Ticket work from Step 1 is unaffected: `tickets.status` was already a
+separate column with its own §12 enum, and the legacy `tasks` mirror keeps its
+own spelling. The bridge is what lets a future Mission Control surface show
+both under one vocabulary.
+
+### Shape
+
+`DISPLAY_TO_PERSISTED` is **injective** — 14 §12 names, 14 distinct persisted
+values — so every display name round-trips exactly.
+
+`PERSISTED_TO_DISPLAY` is **total but not injective**. The legacy vocabulary is
+larger (25 values after the additive change) and carries several spellings of
+the same idea. Those extra spellings are declared in `PERSISTED_ALIASES` and
+round-trip to their canonical sibling, not to themselves. `canonical_persisted_status()`
+performs that collapse and is idempotent.
+
+Fixed by the ruling: `ready→created`, `running→implementing`,
+`needs_review→waiting_for_review`, `completed→cleaned`, `cancelled→canceled`.
+
+### Additive change to `TASK_STATUSES`
+
+Added: `paused`, `needs_decision`, `ready_for_integration`, `integrating`,
+`failed`. `blocked` was on the ruling's list but **already existed**, so it is
+untouched and mapped as identity.
+
+Nothing was removed, renamed or repurposed; a test pins the pre-ruling set of
+20 values as a subset and asserts the delta is exactly those five. `TASK_STATUSES`
+is consumed only by `validate_task_status`; `lifecycle_control` keeps its own
+independent transition graph, so widening the enum does not widen any
+lifecycle gate.
+
+### The two values the ruling asked me to derive from the code
+
+**`waiting_approval` → `needs_review`.** Written by `dispatcher.py` once the
+executor *and* the validators have passed
+("waiting for human approval"). It is then *required* by `pr_handoff`,
+`pr_preparation_pipeline`, `branch_push_confirm`, `draft_pr_confirm`,
+`post_merge_cleanup_recommendation` and `task_closeout_confirm` before any of
+them will act. So it is this repo's human review gate — validated work, parked
+for a human — which is §12 `needs_review`.
+
+Note what it is *not*: it is not `ready_for_integration`. The instruction
+states `ready_for_integration` has no legacy equivalent, and the code agrees —
+`waiting_approval` is a human gate, not a queue position.
+
+**`accepted` → `needs_review`.** Written by the API approve route after
+`record_approval_decision(..., "accepted")`, only from `waiting_approval`. Per
+`WORKFLOW.md`, approval implies no merge, no push and no cleanup; the
+scheduler watcher preview treats it as no-further-action. SPEC §33.1 is
+explicit that an approved-but-unmerged Ticket **stays** `needs_review`. So
+`accepted` displays as `needs_review` rather than as `completed`.
+
+### Every other legacy value, and why
+
+| Persisted | Display | Kind | Reasoning |
+| --- | --- | --- | --- |
+| `queued` | `queued` | canonical | Same idea in both vocabularies. |
+| `created` | `ready` | canonical | Ruling. |
+| `preparing` | `preparing` | canonical | Identity. |
+| `implementing` | `running` | canonical | Ruling. |
+| `validating` | `validating` | canonical | Identity. |
+| `blocked` | `blocked` | canonical | Already existed; identity. |
+| `waiting_for_review` | `needs_review` | canonical | Ruling. |
+| `cleaned` | `completed` | canonical | Ruling. |
+| `canceled` | `cancelled` | canonical | Ruling; persisted keeps the legacy single-l spelling. |
+| `paused` / `needs_decision` / `ready_for_integration` / `integrating` / `failed` | same | canonical | Newly added; identity. |
+| `waiting_approval` | `needs_review` | alias | See above. |
+| `accepted` | `needs_review` | alias | See above. |
+| `rejected` | `needs_decision` | alias | Human said no; someone must now choose retry / cancel / rework. §33.2 routes exactly that to `needs_decision`. |
+| `unknown` | `needs_decision` | alias | **No clean §12 equivalent.** A mirror value meaning the local state is not trustworthy. Mapped to `needs_decision` so it routes to a human instead of implying progress it cannot justify. Mapping it to `queued` or `ready` would have been a quiet lie. |
+| `completed` | `completed` | alias | **No clean §12 equivalent, because the ruling gave the `completed` display name to `cleaned`.** In this repo legacy `completed` is the task-closeout terminal (`task_closeout_confirm.DEFAULT_TARGET_STATUS`), while cleanup is a separate later phase. §12 has no "done but not yet cleaned up" state, so both collapse to `completed`, canonicalizing on `cleaned`. |
+| `archived` | `cancelled` | alias | Operator-confirmed evidence-only / superseded terminal. Work abandoned, evidence retained — which is §12 `cancelled` (§33.5, §37.1). |
+| `backlog` | `queued` | alias | External Kanban mirror; not yet admitted. |
+| `todo` | `ready` | alias | External Kanban mirror; admitted, not started. |
+| `in_progress` | `running` | alias | External Kanban mirror. |
+| `review` | `needs_review` | alias | External Kanban mirror. |
+| `done` | `completed` | alias | External Kanban mirror; terminal success. |
+
+**One tension worth the reviewer's attention.** The instruction says
+`needs_decision` has "no legacy equivalent", and I still map two legacy values
+(`rejected`, `unknown`) onto it as display aliases. I read that instruction as
+governing which names had to be *added to `TASK_STATUSES`* — it is already
+loose in the same way for `blocked`, which existed. Nothing is repurposed:
+`needs_decision`'s canonical persisted value is the newly added
+`needs_decision`. If the intent was that no legacy value may display as one of
+those six names, say so and I will change `rejected` and `unknown`. There is no
+better §12 name for either.
+
+### Tests
+
+`tests/test_status_vocab.py`, 25 tests. Every §12 name round-trips exactly;
+every one of the 25 `TASK_STATUSES` values maps to a valid display name and
+canonicalizes into a real persisted value; canonicalization is idempotent; the
+alias table is asserted as an exact dict; aliases and canonicals partition the
+persisted vocabulary with no overlap and no gap; `unmapped_persisted_statuses()`
+is empty, so a future addition to `TASK_STATUSES` that forgets this module
+fails the suite instead of raising a `KeyError` in Mission Control.
+
+---
+
 ## 4. Deliberately skipped, and why
 
 Each is a **forbidden layer** in `step1.md`:
@@ -187,8 +296,12 @@ separate enums on separate tables; no conversion exists yet.
 None fired.
 
 - No pre-existing test went red. Baseline before any edit:
-  `Ran 4396 tests ... OK (skipped=8)`. After:
-  `Ran 4485 tests ... OK (skipped=8)`.
+  `Ran 4396 tests ... OK (skipped=8)`. After Step 1:
+  `Ran 4485 tests ... OK (skipped=8)`. After the §12.2 status-vocabulary
+  ruling: `Ran 4510 tests ... OK (skipped=8)`.
+- Adding five values to `TASK_STATUSES` broke nothing. `TASK_STATUSES` is read
+  only by `validate_task_status`, and no test asserted its exact contents;
+  `tests/test_status_vocab.py` now does, so a future edit to it is deliberate.
 - No spec requirement contradicted existing code. The V1 Ticket model is
   additive: the legacy `tasks` mirror, its API and its UI are unchanged, and a
   test asserts Tickets are not mirrored into `/api/tasks`.
@@ -217,7 +330,7 @@ Observed result (exit 0):
 - check: workflow policy validation         passed
 - check: Mission Control golden path smoke  passed
 - check: PiExecutor golden path smoke       passed
-- check: unit tests                         passed   (Ran 4485 tests, OK, skipped=8)
+- check: unit tests                         passed   (Ran 4510 tests, OK, skipped=8)
 - check: compileall                         passed
 - check: openspec validate                  skipped  (openspec not on PATH)
 ```
@@ -227,7 +340,8 @@ Step 1 tests only:
 ```bash
 /home/ubuntu/agent-taskflow/.venv/bin/python -m unittest \
   tests.test_ticket_metadata tests.test_ticket_store \
-  tests.test_ticket_creation tests.test_api_tickets -v
+  tests.test_ticket_creation tests.test_api_tickets \
+  tests.test_status_vocab -v
 ```
 
 Full Python suite and compile check:
@@ -275,3 +389,12 @@ production database.
 2. Decide the Step 2 policy for a derived branch name that already exists.
 3. Decide whether `WORKFLOW.md` should describe the V1 Ticket lifecycle.
 4. Step 2 owns the §32.1 PR fields; they are absent here on purpose.
+5. Confirm or overrule the two status-vocabulary judgement calls in §3b —
+   `waiting_approval → needs_review` and `accepted → needs_review` — and the
+   `rejected` / `unknown → needs_decision` aliases.
+6. Nothing yet *uses* `status_vocab` at a boundary. It is the bridge the
+   ruling asked for, with the mapping pinned by tests; wiring it into the API
+   serializers and Mission Control is a separate change, and Steps 2 and 3
+   rebase onto it.
+7. The deferred repo-wide `TASK_STATUSES` migration (§12.2, after Steps 1-3
+   merge) should decide whether the legacy aliases collapse for real.
