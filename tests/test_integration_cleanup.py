@@ -149,13 +149,30 @@ class MergeVerifiedCleanupTests(CleanupTestCase):
             "task/AT-301", raw_git(self.fixture.origin, "branch", "--list", "task/AT-301")
         )
 
-    def test_remote_branch_cleanup_runs_only_when_requested(self) -> None:
+    def test_requesting_remote_branch_cleanup_is_refused_up_front_in_v1(self) -> None:
+        """Human decision: SPEC §37's optional remote-branch cleanup is off in
+        V1. `git push --delete` is outside the push allowlist, and a request
+        for it is refused before anything at all is removed."""
         self._merge()
         result = self.cleanup(delete_remote_branch=True)
-        self.assertIs(result.remote_branch_deleted, True)
-        self.assertEqual(
-            raw_git(self.fixture.origin, "branch", "--list", "task/AT-301").strip(), ""
-        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertIs(result.remote_branch_deleted, False)
+        self.assertIs(result.worktree_removed, False)
+        self.assertEqual(result.git_commands, ())
+        self.assertTrue(self.worktree.is_dir())
+        self.assertIn("task/AT-301", raw_git(self.fixture.repo, "branch", "--list", "task/AT-301"))
+        self.assertIn("task/AT-301", raw_git(self.fixture.origin, "branch", "--list", "task/AT-301"))
+        self.assertEqual(self.status_of("AT-301"), schema.NEEDS_REVIEW)
+
+    def test_the_remote_delete_form_is_refused_by_the_push_allowlist(self) -> None:
+        """The known consequence of Ruling 3, pinned: no exception exists."""
+        with self.assertRaises(git_ops.IntegrationGitError):
+            git_ops.assert_push_allowed(
+                ["git", "push", "origin", "--delete", "task/AT-301"],
+                task_branch="task/AT-301",
+                base_branch="main",
+            )
 
 
 class CleanupGateTests(CleanupTestCase):
@@ -233,19 +250,19 @@ class ClosedUnmergedTests(CleanupTestCase):
         self.assertTrue((self.artifacts / "AT-301" / "evidence.json").is_file())
 
 
-class NeverMergesTests(CleanupTestCase):
-    def test_cleanup_never_invokes_a_merge_command(self) -> None:
+class CleanupArgvTests(CleanupTestCase):
+    def test_a_verified_merge_cleanup_runs_no_merge_argv(self) -> None:
         self._merge()
         result = self.cleanup()
         for command in result.git_commands:
             self.assertNotIn("merge", command[:2])
             self.assertNotEqual(command[:2], ("gh", "pr"))
 
-    def test_cleanup_never_force_pushes(self) -> None:
+    def test_a_verified_merge_cleanup_runs_no_push_at_all(self) -> None:
         self._merge()
-        result = self.cleanup(delete_remote_branch=True)
-        for command in result.git_commands:
-            self.assertFalse({"--force", "-f", "--force-with-lease"} & set(command))
+        result = self.cleanup()
+        self.assertTrue(result.ok, result.summary)
+        self.assertEqual([c for c in result.git_commands if "push" in c[:2]], [])
 
 
 

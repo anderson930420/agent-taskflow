@@ -186,14 +186,19 @@ polling, merge verification, and cleanup.
 
 Its safety boundary is deliberately narrow:
 
-- It never force pushes. Every git argv passes a force-push denylist, and
-  published PR branches are updated by merge plus a normal push.
+- It never force pushes. The only push it may make is
+  `git push origin <task-branch>` (optional `-u`); every other push form is
+  refused by an allowlist, and published PR branches are updated by merge
+  plus that normal push.
 - It never merges. The `gh` adapter rejects any merge subcommand, and the git
   layer refuses to push the target or a protected branch. Human GitHub merge
   remains the only way the target branch advances.
 - It never removes a worktree, branch, or artifact unless the GitHub merge
   result SHA is verified present in the target branch history, or an operator
   passes the explicit closed-unmerged cleanup confirmation.
+- It never deletes a remote branch: SPEC §37's optional remote-branch cleanup
+  is off in V1, and remote task branches are left to GitHub's automatic
+  head-branch deletion or to manual deletion.
 - Every entry point is dry-run by default and requires an explicit
   confirmation flag before it touches git, GitHub, or the filesystem. Nothing
   in Step 2 runs itself; a scheduler or an operator drives each tick.

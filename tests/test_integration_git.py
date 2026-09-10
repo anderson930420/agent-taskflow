@@ -108,6 +108,8 @@ class MergeTargetIntoBranchTests(IntegrationGitTestCase):
 
 
 class PushSafetyTests(IntegrationGitTestCase):
+    """Review Ruling 3 — the push guard is an allowlist."""
+
     def test_normal_push_publishes_the_task_branch(self) -> None:
         self.fixture.commit_in(self.worktree, "feature.txt", "feature\n", "feature")
         result = git_ops.push_branch(self.worktree, remote="origin", branch=self.branch, base_branch="main")
@@ -115,19 +117,71 @@ class PushSafetyTests(IntegrationGitTestCase):
         self.assertFalse(result.force_pushed)
         self.assertIn(self.branch, git(self.fixture.origin, "branch", "--list", self.branch))
 
-    def test_push_argv_never_contains_a_force_flag(self) -> None:
-        argv = git_ops.build_push_command(remote="origin", branch=self.branch, base_branch="main")
-        for flag in ("--force", "-f", "--force-with-lease", "--force-if-includes"):
-            self.assertNotIn(flag, argv)
+    def test_built_push_argv_is_exactly_git_push_origin_task_branch(self) -> None:
+        self.assertEqual(
+            git_ops.build_push_command(remote="origin", branch=self.branch, base_branch="main"),
+            ("git", "push", "origin", self.branch),
+        )
+        self.assertEqual(
+            git_ops.build_push_command(
+                remote="origin", branch=self.branch, base_branch="main", set_upstream=True
+            ),
+            ("git", "push", "-u", "origin", self.branch),
+        )
 
-    def test_force_flags_are_rejected_at_the_guard(self) -> None:
-        for flag in ("--force", "-f", "--force-with-lease"):
-            with self.assertRaises(IntegrationGitError):
-                git_ops.assert_no_force_push(["git", "push", flag, "origin", self.branch])
+    def test_the_allowlist_accepts_exactly_the_two_permitted_forms(self) -> None:
+        for argv in (
+            ["git", "push", "origin", self.branch],
+            ["git", "push", "-u", "origin", self.branch],
+        ):
+            with self.subTest(argv=argv):
+                git_ops.assert_push_allowed(argv, task_branch=self.branch, base_branch="main")
 
-    def test_plus_refspec_force_form_is_rejected(self) -> None:
-        with self.assertRaises(IntegrationGitError):
-            git_ops.assert_no_force_push(["git", "push", "origin", f"+{self.branch}"])
+    def test_the_push_allowlist_refuses_each_listed_form(self) -> None:
+        b = self.branch
+        refused = (
+            ["git", "push", "--force", "origin", b],
+            ["git", "push", "-f", "origin", b],
+            ["git", "push", "--force-with-lease", "origin", b],
+            ["git", "push", f"--force-with-lease={b}", "origin", b],
+            ["git", "push", "--force-if-includes", "origin", b],
+            ["git", "push", "--mirror", "origin"],
+            ["git", "push", "--all", "origin"],
+            ["git", "push", "--tags", "origin"],
+            ["git", "push", "origin", "--delete", b],
+            ["git", "push", "--delete", "origin", b],
+            ["git", "push", "origin", f"{b}:{b}"],
+            ["git", "push", "origin", f"HEAD:{b}"],
+            ["git", "push", "origin", "HEAD:main"],
+            ["git", "push", "-vf", "origin", b],
+            ["git", "push", "-uf", "origin", b],
+            ["git", "push", "origin", f"+{b}"],
+            ["git", "push", "--set-upstream", "origin", b],
+            ["git", "push", "upstream", b],
+            ["git", "push", "origin", "task/another-ticket"],
+            ["git", "push", "origin", b, "task/another-ticket"],
+            ["git", "push", "origin"],
+            ["git", "push"],
+            ["git", "push", "origin", "main"],
+            ["git", "push", "-u", "origin", "main"],
+        )
+        for argv in refused:
+            with self.subTest(argv=argv):
+                with self.assertRaises(IntegrationGitError):
+                    git_ops.assert_push_allowed(argv, task_branch=b, base_branch="main")
+
+    def test_the_task_branch_itself_may_not_be_main_protected_or_the_base_branch(self) -> None:
+        for branch, base in (
+            ("main", "main"),
+            ("master", "develop"),
+            ("trunk", "develop"),
+            ("develop", "develop"),
+        ):
+            with self.subTest(branch=branch, base=base):
+                with self.assertRaises(IntegrationGitError):
+                    git_ops.assert_push_allowed(
+                        ["git", "push", "origin", branch], task_branch=branch, base_branch=base
+                    )
 
     def test_pushing_the_target_branch_is_refused(self) -> None:
         with self.assertRaises(IntegrationGitError):
@@ -138,7 +192,11 @@ class PushSafetyTests(IntegrationGitTestCase):
             with self.assertRaises(IntegrationGitError):
                 git_ops.build_push_command(remote="origin", branch=protected, base_branch="develop")
 
-    def test_arbitrary_git_subcommands_are_not_reachable(self) -> None:
+    def test_run_git_refuses_a_push_that_declares_no_task_branch(self) -> None:
+        with self.assertRaises(IntegrationGitError):
+            git_ops.run_git(self.worktree, ["push", "origin", self.branch])
+
+    def test_run_git_refuses_reset_and_a_forced_push_to_main(self) -> None:
         with self.assertRaises(IntegrationGitError):
             git_ops.run_git(self.worktree, ["reset", "--hard", "origin/main"])
         with self.assertRaises(IntegrationGitError):

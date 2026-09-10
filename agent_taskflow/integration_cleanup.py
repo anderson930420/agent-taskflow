@@ -11,9 +11,10 @@ twice over:
   closed without merging does not mean the work is safe to discard (§33.5).
   This route never sets ``completed``.
 
-Remote branch deletion is off by default (see the HANDOFF ambiguity note): §37
-calls it "optional", and deleting a remote branch is the least reversible
-action available here.
+Remote branch deletion is OFF in V1 (human decision): §37 calls it
+"optional", ``git push --delete`` is outside the push allowlist, and remote
+task branches are left to GitHub's automatic head-branch deletion or manual
+deletion. A request that asks for it is refused before anything is removed.
 """
 
 from __future__ import annotations
@@ -74,7 +75,9 @@ class IntegrationCleanupRequest:
     # §37.1 — a second, separate confirmation for closed-unmerged work.
     confirm_cancelled_cleanup: bool = False
 
-    # §37 "optional remote branch cleanup". Off by default; see HANDOFF.md.
+    # SPEC §37 "optional remote branch cleanup" is OFF in V1 (human decision).
+    # Setting this to True is refused up front: `git push --delete` is outside
+    # the push allowlist, and no exception is made for it.
     delete_remote_branch: bool = False
     archive_evidence: bool = True
 
@@ -209,6 +212,20 @@ def run_integration_cleanup(
     # After the §32 pickup ruling that includes needs_decision, paused and
     # ready_for_integration, because a human can merge while a Ticket waits in
     # any of them. It never includes an in-flight integration.
+    if request.delete_remote_branch:
+        # Refused before anything is removed, so a request for remote-branch
+        # cleanup can never leave a half-done cleanup behind.
+        return result(
+            ok=False,
+            status="blocked",
+            summary=(
+                "Cleanup refused: remote-branch cleanup (SPEC §37, optional) is off "
+                "in V1 — `git push --delete` is outside the push allowlist. Remote "
+                "task branches are left to GitHub's automatic head-branch deletion "
+                "or manual deletion. Re-run without delete_remote_branch."
+            ),
+        )
+
     if not cancelled_route and not schema.can_transition(task.status, schema.COMPLETED):
         if task.status == schema.INTEGRATING:
             reason = "an integration is in progress; cleanup waits for it to finish (§25.0)"
@@ -319,9 +336,8 @@ def _perform_cleanup(
 ) -> IntegrationCleanupResult:
     worktree_removed = _remove_worktree(request, worktree, log=log)
     local_branch_deleted = _delete_local_branch(request, worktree, log=log)
+    # SPEC §37 optional remote-branch cleanup is off in V1 (human decision).
     remote_branch_deleted = False
-    if request.delete_remote_branch:
-        remote_branch_deleted = _delete_remote_branch(request, worktree, log=log)
 
     # "Archive evidence" (§37) means retain and index it, never delete it.
     evidence_archived = bool(request.archive_evidence and task.artifact_dir)
@@ -439,25 +455,6 @@ def _delete_local_branch(
     # branch is often not an ancestor of the target, so -d would refuse even
     # though §36 verification has already proved the work landed.
     return git_ops.run_git(request.repo_path, ["branch", "-D", branch], log=log).ok
-
-
-def _delete_remote_branch(
-    request: IntegrationCleanupRequest,
-    worktree: TaskWorktreeRecord,
-    *,
-    log: GitCommandLog,
-) -> bool:
-    branch = worktree.branch
-    if branch in git_ops.PROTECTED_BRANCHES or branch == request.target_branch:
-        return False
-    # Routed through run_git so the force-push denylist and the
-    # protected/target branch check both apply to the delete refspec too.
-    return git_ops.run_git(
-        request.repo_path,
-        ["push", request.remote, "--delete", branch],
-        log=log,
-        base_branch=request.target_branch,
-    ).ok
 
 
 def _finish(

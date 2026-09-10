@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 import json
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Protocol, Sequence
 
 
@@ -48,13 +48,15 @@ PR_VIEW_FIELDS = (
     "body",
 )
 
-# argv shapes that would merge a pull request or advance the target branch.
-_FORBIDDEN_ARGV_PATTERNS = (
-    re.compile(r"^gh\s+pr\s+merge\b"),
-    re.compile(r"^gh\s+api\b.*\bpulls/\d+/merge\b"),
-    re.compile(r"^git\s+merge\b"),
-    re.compile(r"^git\s+push\b.*:(main|master|trunk)\b"),
+# The merge guard parses argv rather than pattern-matching a rendered string
+# (review Ruling 3): the executable is found by basename, whatever its path,
+# and global flags before the subcommand are skipped with their values.
+_GH_GLOBAL_VALUE_FLAGS = frozenset({"-R", "--repo", "--hostname"})
+_GIT_GLOBAL_VALUE_FLAGS = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+     "--exec-path", "--super-prefix"}
 )
+_API_PR_MERGE_RE = re.compile(r"(^|/)pulls/\d+/merge/?$")
 
 _CI_FAILURE_STATES = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
 _CI_PENDING_STATES = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "EXPECTED", ""}
@@ -74,15 +76,68 @@ class CompletedProcessLike(Protocol):
 Runner = Callable[..., CompletedProcessLike]
 
 
+def _executable_index(tokens: Sequence[str], name: str) -> int | None:
+    """Index of the first token whose basename is ``name`` (``/usr/bin/gh``, ``./gh``)."""
+    for index, token in enumerate(tokens):
+        if PurePosixPath(token).name == name:
+            return index
+    return None
+
+
+def _positionals(tokens: Sequence[str], value_flags: frozenset[str]) -> list[str]:
+    """Non-flag tokens, skipping each separate-valued flag together with its value."""
+    positionals: list[str] = []
+    skip_next = False
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in value_flags:
+            skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        positionals.append(token)
+    return positionals
+
+
+def _refuse_merge(rendered: str) -> None:
+    raise GitHubPrError(
+        "Taskflow must never merge: refusing to run "
+        f"{rendered!r}. Every merge requires a human on GitHub (§34)."
+    )
+
+
 def assert_not_a_merge_command(argv: Sequence[str]) -> None:
-    """Reject any argv that would merge a PR or advance the target branch."""
-    rendered = " ".join(str(part) for part in argv)
-    for pattern in _FORBIDDEN_ARGV_PATTERNS:
-        if pattern.search(rendered):
-            raise GitHubPrError(
-                "Taskflow must never merge: refusing to run "
-                f"{rendered!r}. Every merge requires a human on GitHub (§34)."
-            )
+    """Reject any argv that would merge a PR or advance the target branch.
+
+    Matches *parsed* argv (review Ruling 3): ``gh ... pr merge`` is rejected
+    whatever the executable path (``/usr/bin/gh``, ``./gh``, ``env gh``) and
+    whatever global flags precede the subcommand (``gh --repo o/r pr merge``).
+    Also rejected: the REST merge endpoint through ``gh api``, and ``git
+    merge`` or a ``git push`` with a ``:`` refspec — this adapter never needs
+    either.
+    """
+    tokens = [str(part) for part in argv]
+    rendered = " ".join(tokens)
+
+    gh = _executable_index(tokens, "gh")
+    if gh is not None:
+        positionals = _positionals(tokens[gh + 1 :], _GH_GLOBAL_VALUE_FLAGS)
+        if any(positionals[i : i + 2] == ["pr", "merge"] for i in range(len(positionals) - 1)):
+            _refuse_merge(rendered)
+        if positionals[:1] == ["api"] and any(
+            _API_PR_MERGE_RE.search(token) for token in tokens[gh + 1 :]
+        ):
+            _refuse_merge(rendered)
+
+    git = _executable_index(tokens, "git")
+    if git is not None:
+        positionals = _positionals(tokens[git + 1 :], _GIT_GLOBAL_VALUE_FLAGS)
+        if positionals[:1] == ["merge"]:
+            _refuse_merge(rendered)
+        if positionals[:1] == ["push"] and any(":" in token for token in positionals[1:]):
+            _refuse_merge(rendered)
 
 
 @dataclass(frozen=True)

@@ -1,13 +1,16 @@
 """Deterministic git operations for the Step 2 integration controller.
 
 Every git invocation goes through :func:`run_git`, which enforces a
-subcommand allowlist and a force-push denylist. Nothing here can rewrite
-published history or advance the target branch:
+subcommand allowlist and, for pushes, a push allowlist (review Ruling 3).
+Nothing here can rewrite published history or advance the target branch:
 
-* ``--force`` / ``-f`` / ``--force-with-lease`` / ``--force-if-includes`` and
-  the ``+refspec`` form are rejected before a push is built or run (§26, §44).
-* Pushing the base or a protected branch is rejected, so the target branch can
-  never be advanced from here — only a human merging on GitHub advances it
+* The only permitted push is ``git push origin <task-branch>`` (optional
+  ``-u``), where ``<task-branch>`` is the Ticket's own branch. Every other push
+  form — any force flag, ``--mirror``, ``--all``, ``--tags``, ``--delete``, any
+  refspec containing ``:`` or starting with ``+``, another remote or branch —
+  is refused before it is run (§26, §44).
+* main, other protected branches and the base branch can never be the pushed
+  branch, so the target can only be advanced by a human merging on GitHub
   (§34).
 
 ``git merge <target> `` *into a task branch* is allowed and required by §26.
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
@@ -31,7 +35,7 @@ __all__ = [
     "RebaseOutcome",
     "abort_merge",
     "abort_rebase",
-    "assert_no_force_push",
+    "assert_push_allowed",
     "behind_count",
     "build_push_command",
     "changed_files",
@@ -59,9 +63,14 @@ __all__ = [
 
 PROTECTED_BRANCHES = frozenset({"main", "master", "trunk"})
 
-FORBIDDEN_PUSH_FLAGS = frozenset(
-    {"--force", "-f", "--force-with-lease", "--force-if-includes"}
-)
+# The only remote a Step 2 push may target (review Ruling 3).
+ALLOWED_PUSH_REMOTE = "origin"
+
+# Force-style flags refused on every non-push command, as defence in depth.
+# Pushes are governed by the stricter allowlist in `assert_push_allowed`.
+_FORCE_FLAGS = frozenset({"--force", "-f", "--force-with-lease", "--force-if-includes"})
+
+_TASK_BRANCH_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
 
 # Subcommands the integration controller is allowed to reach for. Anything
 # that could rewrite or discard work (``reset``, ``clean``, ``filter-branch``,
@@ -160,37 +169,61 @@ class PushOutcome:
     force_pushed: bool = False
 
 
-def assert_no_force_push(argv: Sequence[str]) -> None:
-    """Reject any argv that would force-push (§26 no-force-push invariant)."""
-    parts = list(argv)
-    forbidden = FORBIDDEN_PUSH_FLAGS & set(parts)
-    if forbidden:
+def assert_push_allowed(
+    argv: Sequence[str],
+    *,
+    task_branch: str | None,
+    base_branch: str | None = None,
+) -> None:
+    """Refuse every push except ``git push origin <task-branch>`` (optional -u).
+
+    Review Ruling 3: the push guard is an allowlist. The only push Step 2 may
+    make publishes the Ticket's own task branch to ``origin`` as a normal push,
+    optionally setting upstream with ``-u``. Everything else is refused,
+    including force flags in any spelling (``--force``, ``-f``,
+    ``--force-with-lease`` and ``--force-with-lease=<ref>``, combined short
+    flags such as ``-vf``), ``--mirror``, ``--all``, ``--tags``, ``--delete``,
+    any refspec containing ``:`` (so ``HEAD:<anything>``) or starting with
+    ``+``, any other remote or branch, and main or the base branch.
+    """
+    parts = [str(part) for part in argv]
+    rendered = " ".join(parts)
+    if parts[:2] != ["git", "push"]:
+        raise IntegrationGitError(f"Not a git push: {rendered!r}")
+
+    branch = (task_branch or "").strip()
+    if not branch:
         raise IntegrationGitError(
-            f"Force push is not allowed in V1: {', '.join(sorted(forbidden))}"
+            f"Push refused: no task branch was declared for {rendered!r}. The only "
+            f"permitted push is `git push {ALLOWED_PUSH_REMOTE} <task-branch>`."
         )
-    if "push" in parts:
-        for part in parts[parts.index("push") + 1 :]:
-            if part.startswith("+"):
-                raise IntegrationGitError(
-                    f"Force push refspec is not allowed in V1: {part}"
-                )
-
-
-def _assert_push_target_is_safe(argv: Sequence[str], *, base_branch: str | None) -> None:
-    parts = list(argv)
-    if "push" not in parts:
-        return
+    if not _TASK_BRANCH_RE.fullmatch(branch) or ".." in branch:
+        raise IntegrationGitError(f"Push refused: {branch!r} is not a simple task branch")
     protected = set(PROTECTED_BRANCHES)
-    if base_branch:
+    if base_branch and base_branch.strip():
         protected.add(base_branch.strip())
-    for part in parts[parts.index("push") + 1 :]:
-        if part.startswith("-"):
-            continue
-        candidate = part.split(":")[-1]
-        if candidate in protected:
+    if branch in protected:
+        raise IntegrationGitError(
+            f"Push refused: {branch!r} is the target or a protected branch. Only a "
+            "human merging on GitHub may advance it."
+        )
+
+    rest = parts[2:]
+    if rest[:1] == ["-u"]:
+        rest = rest[1:]
+    if rest != [ALLOWED_PUSH_REMOTE, branch]:
+        raise IntegrationGitError(
+            f"Push refused: {rendered!r}. The only permitted push is "
+            f"`git push {ALLOWED_PUSH_REMOTE} {branch}` (optional -u)."
+        )
+
+
+def _reject_force_flags(argv: Sequence[str]) -> None:
+    """Refuse force-style flags on any non-push command (defence in depth)."""
+    for part in argv:
+        if part in _FORCE_FLAGS or str(part).startswith("--force-with-lease="):
             raise IntegrationGitError(
-                f"Refusing to push the target/protected branch: {candidate}. "
-                "Only a human merging on GitHub may advance it."
+                f"Force flag {part!r} is not allowed: {' '.join(map(str, argv))!r}"
             )
 
 
@@ -223,6 +256,7 @@ def run_git(
     log: GitCommandLog | None = None,
     check: bool = False,
     base_branch: str | None = None,
+    task_branch: str | None = None,
 ) -> GitRunResult:
     """Run one allowlisted git command and return its result."""
     parts = list(args)
@@ -235,8 +269,10 @@ def run_git(
         )
 
     argv = ["git", *parts]
-    assert_no_force_push(argv)
-    _assert_push_target_is_safe(argv, base_branch=base_branch)
+    if subcommand == "push":
+        assert_push_allowed(argv, task_branch=task_branch, base_branch=base_branch)
+    else:
+        _reject_force_flags(argv)
 
     if log is not None:
         log.record(argv)
@@ -576,15 +612,21 @@ def commit_conflict_resolution(cwd: Path, message: str, **kwargs) -> GitRunResul
 
 
 def build_push_command(
-    *, remote: str, branch: str, base_branch: str | None = None
+    *,
+    remote: str,
+    branch: str,
+    base_branch: str | None = None,
+    set_upstream: bool = False,
 ) -> tuple[str, ...]:
-    """Build a normal (never forced) push argv for a task branch."""
-    normalized = branch.strip()
-    if not normalized or normalized.startswith("-") or any(c.isspace() for c in normalized):
-        raise IntegrationGitError(f"Not a simple branch name: {branch!r}")
-    argv = ("git", "push", remote, normalized)
-    assert_no_force_push(argv)
-    _assert_push_target_is_safe(argv, base_branch=base_branch)
+    """Build the one permitted push: ``git push [-u] origin <task-branch>``."""
+    argv = (
+        "git",
+        "push",
+        *(("-u",) if set_upstream else ()),
+        remote.strip(),
+        branch.strip(),
+    )
+    assert_push_allowed(argv, task_branch=branch, base_branch=base_branch)
     return argv
 
 
@@ -596,9 +638,11 @@ def push_branch(
     base_branch: str | None = None,
     **kwargs,
 ) -> PushOutcome:
-    """Publish or update a task branch with a normal push (§26)."""
+    """Publish or update the Ticket's own task branch with a normal push (§26)."""
     argv = build_push_command(remote=remote, branch=branch, base_branch=base_branch)
-    result = run_git(cwd, list(argv[1:]), base_branch=base_branch, **kwargs)
+    result = run_git(
+        cwd, list(argv[1:]), base_branch=base_branch, task_branch=branch, **kwargs
+    )
     if not result.ok:
         raise IntegrationGitError(f"git push failed: {result.combined}")
     return PushOutcome(ok=True, argv=argv, output=result.combined, force_pushed=False)

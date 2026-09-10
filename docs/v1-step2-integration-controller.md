@@ -54,10 +54,12 @@ evidence, conflict evidence) lives in separate Step-2-private tables.
 
 ## Safety boundary
 
-- No code path can force-push: push argv construction rejects `--force`,
-  `-f`, `--force-with-lease`, and `+refspec` forms.
-- No code path can merge: the `gh` adapter rejects the `merge` subcommand and
-  the git layer rejects pushes that target the base/protected branch.
+- No code path can force-push: the only push allowed is
+  `git push origin <task-branch>` (optional `-u`); every other push form is
+  refused by an allowlist (review Ruling 3).
+- No code path can merge: the `gh` adapter rejects `gh ... pr merge` by parsed
+  argv, whatever the executable path or global flags, and main or the base
+  branch can never be the pushed branch.
 - No worktree, branch, or artifact is removed unless merge is verified per §36
   or the caller passes the explicit cancelled-cleanup confirmation flag (§37.1).
 - Every entry point is dry-run by default and requires an explicit confirmation

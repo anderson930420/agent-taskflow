@@ -359,7 +359,7 @@ class SafetyInvariantTests(AcceptanceTestCase):
         self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
         self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
 
-    def test_every_integration_uses_the_latest_available_target(self) -> None:
+    def test_initial_and_re_integration_both_use_the_latest_target(self) -> None:
         self.make_task("AT-101")
         first = self.fixture.advance_target("a.txt")
         self.assertEqual(self.integrate("AT-101").integrated_base_sha, first)
@@ -429,12 +429,12 @@ class SafetyInvariantTests(AcceptanceTestCase):
 class NegativeScopeTests(AcceptanceTestCase):
     """Required negative-scope tests: no force push, no merge, no silent cleanup."""
 
-    def test_git_and_gh_execution_is_confined_to_the_guarded_chokepoints(self) -> None:
+    def test_only_the_chokepoint_modules_import_subprocess(self) -> None:
         """No Step 2 module may shell out to git/gh around the guards.
 
         ``integration_git`` is the only module that executes git, and
-        ``github_pr_adapter`` the only one that executes gh; both apply the
-        force-push and merge denylists to every argv. ``integration_validators``
+        ``github_pr_adapter`` the only one that executes gh; they apply the
+        push allowlist and the parsed-argv merge guard to every argv. ``integration_validators``
         runs caller-supplied validator commands, which is its whole job. Any
         other module reaching for ``subprocess`` would be a bypass.
         """
@@ -458,23 +458,30 @@ class NegativeScopeTests(AcceptanceTestCase):
                     offenders.append(f"{name}.py:{node.lineno} imports subprocess")
         self.assertEqual(offenders, [])
 
-    def test_the_force_push_guard_rejects_every_force_form(self) -> None:
-        from agent_taskflow.integration_git import (
-            IntegrationGitError,
-            assert_no_force_push,
-        )
+    def test_push_allowlist_refuses_each_form_listed_in_ruling_3(self) -> None:
+        from agent_taskflow.integration_git import IntegrationGitError, assert_push_allowed
 
+        branch = "task/AT-101"
         for argv in (
-            ["git", "push", "--force", "origin", "task/AT-101"],
-            ["git", "push", "-f", "origin", "task/AT-101"],
-            ["git", "push", "--force-with-lease", "origin", "task/AT-101"],
-            ["git", "push", "--force-if-includes", "origin", "task/AT-101"],
-            ["git", "push", "origin", "+task/AT-101"],
-            ["git", "push", "origin", "+task/AT-101:task/AT-101"],
+            ["git", "push", "--force", "origin", branch],
+            ["git", "push", "-f", "origin", branch],
+            ["git", "push", "--force-with-lease", "origin", branch],
+            ["git", "push", f"--force-with-lease={branch}", "origin", branch],
+            ["git", "push", "--mirror", "origin"],
+            ["git", "push", "--all", "origin"],
+            ["git", "push", "--tags", "origin"],
+            ["git", "push", "origin", "--delete", branch],
+            ["git", "push", "origin", f"{branch}:{branch}"],
+            ["git", "push", "origin", f"HEAD:{branch}"],
+            ["git", "push", "-vf", "origin", branch],
+            ["git", "push", "origin", "main"],
         ):
             with self.subTest(argv=argv):
                 with self.assertRaises(IntegrationGitError):
-                    assert_no_force_push(argv)
+                    assert_push_allowed(argv, task_branch=branch, base_branch="main")
+        # And the one permitted form, with and without -u, is accepted.
+        assert_push_allowed(["git", "push", "origin", branch], task_branch=branch, base_branch="main")
+        assert_push_allowed(["git", "push", "-u", "origin", branch], task_branch=branch, base_branch="main")
 
     def test_the_git_allowlist_excludes_history_rewriting_subcommands(self) -> None:
         from agent_taskflow.integration_git import ALLOWED_SUBCOMMANDS
@@ -492,7 +499,7 @@ class NegativeScopeTests(AcceptanceTestCase):
         ):
             self.assertNotIn(subcommand, ALLOWED_SUBCOMMANDS)
 
-    def test_every_step2_git_call_is_routed_through_run_git(self) -> None:
+    def test_run_git_refuses_each_listed_unallowlisted_subcommand(self) -> None:
         """Unallowlisted subcommands are unreachable, not merely unused."""
         worktree = self.make_task("AT-101")
         for args in (
@@ -505,7 +512,7 @@ class NegativeScopeTests(AcceptanceTestCase):
                 with self.assertRaises(git_ops.IntegrationGitError):
                     git_ops.run_git(worktree, args)
 
-    def test_a_merge_argv_is_rejected_everywhere_it_could_be_built(self) -> None:
+    def test_gh_pr_merge_is_rejected_for_each_listed_merge_method_flag(self) -> None:
         from agent_taskflow.github_pr_adapter import GitHubPrError, assert_not_a_merge_command
 
         for argv in (
@@ -513,8 +520,23 @@ class NegativeScopeTests(AcceptanceTestCase):
             ["gh", "pr", "merge", "42", "--rebase"],
             ["gh", "pr", "merge", "42", "--merge"],
         ):
-            with self.assertRaises(GitHubPrError):
-                assert_not_a_merge_command(argv)
+            with self.subTest(argv=argv):
+                with self.assertRaises(GitHubPrError):
+                    assert_not_a_merge_command(argv)
+
+    def test_gh_pr_merge_is_rejected_behind_each_listed_path_and_global_flag(self) -> None:
+        from agent_taskflow.github_pr_adapter import GitHubPrError, assert_not_a_merge_command
+
+        for argv in (
+            ["/usr/bin/gh", "pr", "merge", "42"],
+            ["./gh", "pr", "merge", "42"],
+            ["gh", "--repo", "o/r", "pr", "merge", "42"],
+            ["gh", "-R", "o/r", "pr", "merge", "42"],
+            ["env", "gh", "pr", "merge", "42"],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaises(GitHubPrError):
+                    assert_not_a_merge_command(argv)
 
     def test_cancelled_cleanup_without_the_flag_removes_nothing(self) -> None:
         worktree = self.make_task("AT-101")
@@ -536,7 +558,7 @@ class NegativeScopeTests(AcceptanceTestCase):
         self.assertEqual(self.gh_runner.calls, [])
         self.assertTrue(worktree.is_dir())
 
-    def test_step2_never_touches_the_default_state_database(self) -> None:
+    def test_each_step2_request_type_accepts_an_explicit_db_path(self) -> None:
         """Every Step 2 entry point must accept an explicit db_path."""
         import inspect
 

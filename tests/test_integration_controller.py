@@ -346,16 +346,14 @@ class ReIntegrationTests(ControllerTestCase):
         self.integrate("AT-101")
         self.assertIn(published_sha, git_ops.rev_list(worktree, "HEAD"))
 
-    def test_reintegration_never_force_pushes(self) -> None:
+    def test_a_reintegration_pushes_only_the_allowlisted_form(self) -> None:
         self._published()
         self.fixture.advance_target()
         self._requeue()
         result = self.integrate("AT-101")
         self.assertIs(result.force_pushed, False)
-        for command in result.git_commands:
-            self.assertNotIn("--force", command)
-            self.assertNotIn("-f", command)
-            self.assertNotIn("--force-with-lease", command)
+        pushes = [cmd for cmd in result.git_commands if cmd[:2] == ("git", "push")]
+        self.assertEqual(pushes, [("git", "push", "origin", "task/AT-101")])
 
     def test_reintegration_increments_the_counter(self) -> None:
         self._published()
@@ -493,17 +491,14 @@ class ConflictTests(ControllerTestCase):
 
 
 class NegativeScopeTests(ControllerTestCase):
-    def test_no_git_command_is_ever_a_force_push(self) -> None:
+    def test_an_initial_integration_pushes_only_the_allowlisted_form(self) -> None:
         worktree = self.make_task("AT-101")
         self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
         result = self.integrate("AT-101")
         pushes = [cmd for cmd in result.git_commands if cmd[:2] == ("git", "push")]
-        self.assertTrue(pushes)
-        for cmd in pushes:
-            self.assertFalse({"--force", "-f", "--force-with-lease"} & set(cmd))
-            self.assertFalse([part for part in cmd if part.startswith("+")])
+        self.assertEqual(pushes, [("git", "push", "origin", "task/AT-101")])
 
-    def test_no_git_command_pushes_the_target_branch(self) -> None:
+    def test_an_initial_integration_does_not_push_the_target_branch(self) -> None:
         worktree = self.make_task("AT-101")
         self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
         result = self.integrate("AT-101")
@@ -512,7 +507,7 @@ class NegativeScopeTests(ControllerTestCase):
                 self.assertNotIn("main", cmd)
                 self.assertFalse([part for part in cmd if part.endswith(":main")])
 
-    def test_no_gh_command_merges(self) -> None:
+    def test_an_initial_integration_issues_no_gh_merge(self) -> None:
         worktree = self.make_task("AT-101")
         self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
         self.integrate("AT-101")

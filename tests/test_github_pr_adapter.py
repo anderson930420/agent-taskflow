@@ -140,7 +140,7 @@ class MergeIsForbiddenTests(unittest.TestCase):
         public = [name for name in dir(GitHubPrAdapter) if not name.startswith("_")]
         self.assertEqual([name for name in public if "merge" in name.lower()], [])
 
-    def test_merge_subcommand_is_rejected_by_the_guard(self) -> None:
+    def test_merge_guard_rejects_each_listed_merge_argv(self) -> None:
         for argv in (
             ["gh", "pr", "merge", "42"],
             ["gh", "pr", "merge", "42", "--squash"],
@@ -151,18 +151,47 @@ class MergeIsForbiddenTests(unittest.TestCase):
             with self.assertRaises(GitHubPrError):
                 assert_not_a_merge_command(argv)
 
-    def test_ordinary_pr_commands_pass_the_guard(self) -> None:
+    def test_merge_guard_allows_each_listed_non_merge_pr_command(self) -> None:
         for argv in (
             ["gh", "pr", "create", "--draft"],
             ["gh", "pr", "edit", "42", "--body", "x"],
             ["gh", "pr", "view", "42", "--json", "state"],
+            ["gh", "pr", "view", "42", "--json", "merged,mergedAt,mergeCommit"],
+            ["gh", "pr", "comment", "42", "--body", "merge"],
+            ["/usr/bin/gh", "--repo", "o/r", "pr", "view", "42"],
+            ["gh", "api", "repos/o/r/pulls/42"],
         ):
-            assert_not_a_merge_command(argv)
+            with self.subTest(argv=argv):
+                assert_not_a_merge_command(argv)
+
+    def test_merge_guard_rejects_pr_merge_behind_each_listed_path_and_global_flag(self) -> None:
+        """Review Ruling 3: the guard matches parsed argv, not a string prefix."""
+        for argv in (
+            ["/usr/bin/gh", "pr", "merge", "42"],
+            ["./gh", "pr", "merge", "42"],
+            ["gh", "--repo", "o/r", "pr", "merge", "42"],
+            ["gh", "-R", "o/r", "pr", "merge", "42", "--squash"],
+            ["gh", "--repo=o/r", "pr", "merge", "42"],
+            ["gh", "--hostname", "github.example.com", "pr", "merge", "42"],
+            ["/usr/local/bin/gh", "-R", "o/r", "pr", "merge", "--rebase", "42"],
+            ["env", "gh", "pr", "merge", "42"],
+            ["gh", "api", "-X", "PUT", "repos/o/r/pulls/42/merge"],
+            ["/usr/bin/gh", "api", "--method", "PUT", "repos/o/r/pulls/42/merge"],
+            ["/usr/bin/git", "-C", "/tmp/x", "merge", "origin/main"],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaises(GitHubPrError):
+                    assert_not_a_merge_command(argv)
 
     def test_adapter_refuses_to_run_a_merge_argv(self) -> None:
         adapter = GitHubPrAdapter("owner/repo", runner=FakeGhRunner())
-        with self.assertRaises(GitHubPrError):
-            adapter.run(["gh", "pr", "merge", "42"], cwd=Path("/tmp"))
+        for argv in (
+            ["gh", "pr", "merge", "42"],
+            ["/usr/bin/gh", "--repo", "owner/repo", "pr", "merge", "42"],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaises(GitHubPrError):
+                    adapter.run(argv, cwd=Path("/tmp"))
 
 
 if __name__ == "__main__":
