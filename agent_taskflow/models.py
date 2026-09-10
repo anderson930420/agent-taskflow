@@ -36,6 +36,15 @@ TASK_STATUSES = {
     "canceled",
     # Operator-confirmed evidence-only / superseded task archive terminal state.
     "archived",
+    # SPEC §12 display-vocabulary names that had no legacy spelling. Added
+    # additively by the §12.2 ruling so every display name has a persisted
+    # counterpart in agent_taskflow.status_vocab. Nothing above is renamed,
+    # removed or repurposed, and `blocked` already existed.
+    "paused",
+    "needs_decision",
+    "ready_for_integration",
+    "integrating",
+    "failed",
     # Common external Kanban/Hermes-style mirror values.
     "backlog",
     "todo",

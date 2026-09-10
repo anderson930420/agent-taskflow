@@ -83,8 +83,12 @@ from agent_taskflow.level2_execution_authority import (
     Level2ExecutionAuthorityError,
     level2_direct_execution_error,
 )
+from agent_taskflow.api.tickets import build_ticket_router
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_ai_metadata import TicketAIMetadataAdapter
+from agent_taskflow.ticket_repositories import DEFAULT_PROJECTS_CONFIG_PATH
+from agent_taskflow.ticket_store import TicketStore
 from agent_taskflow.workspace_manager import (
     WorkspacePreparationRequest,
     prepare_task_workspace,
@@ -129,6 +133,8 @@ def create_app(
     *,
     dispatcher_factory: DispatcherFactory | None = None,
     realtime_options: RealtimeStreamOptions | None = None,
+    projects_config_path: str | Path = DEFAULT_PROJECTS_CONFIG_PATH,
+    ticket_ai_adapter: TicketAIMetadataAdapter | None = None,
 ) -> FastAPI:
     """Create the Mission Control API app.
 
@@ -138,13 +144,18 @@ def create_app(
 
     realtime_options tunes the SPEC 15 SSE stream; the default is an unbounded
     stream that runs until the client disconnects.
+
+    projects_config_path and ticket_ai_adapter configure the V1 Ticket routes
+    (SPEC §10, §11). Ticket creation writes local state only.
     """
     store = TaskMirrorStore(db_path)
     stream_options = realtime_options or RealtimeStreamOptions()
+    ticket_store = TicketStore(db_path)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store.init_db()
+        ticket_store.init_db()
         yield
 
     app = FastAPI(title="Agent Taskflow Mission Control API", lifespan=lifespan)
@@ -895,7 +906,7 @@ def create_app(
         )
 
     @app.get("/api/tasks/{task_key}/attempts")
-    def list_ticket_attempts(
+    def list_task_attempts(
         task_key: str,
         current_store: TaskMirrorStore = Depends(get_store),
     ) -> dict[str, object]:
@@ -909,6 +920,13 @@ def create_app(
         )
         return list_response(items)
 
+    app.include_router(
+        build_ticket_router(
+            ticket_store,
+            projects_config_path=projects_config_path,
+            ai_adapter=ticket_ai_adapter,
+        )
+    )
 
     return app
 
