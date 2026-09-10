@@ -14,8 +14,9 @@ Spec: `~/agent-taskflow-ops/v1/SPEC.md` §42 Step 2 (Integration Controller,
 Re-integration, PR outcomes, Merge)
 Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 
-Status: **STOPPED at Ruling 2 of the re-review rulings — awaiting a human
-decision.** See "Review re-review rulings" below. Nothing is approved,
+Status: **implementation-complete, awaiting human re-review of PR #196.**
+All three re-review rulings are implemented, Ruling 2 as amended by the
+human decision on its stop. No stop condition is open. Nothing is approved,
 merged to `main`, or finally complete.
 
 `task/v1-step1` has been merged into this branch twice, both times as a merge
@@ -27,7 +28,7 @@ Step 2; PR #196 reviews Step 2.
 
 ---
 
-## Review re-review rulings (B1, B2, guards) — STOPPED at Ruling 2
+## Review re-review rulings (B1, B2, guards) — all three implemented
 
 The independent re-review of PR #196 failed it on blockers B1 and B2 plus
 guard gaps. Three rulings followed, to be implemented in order, each only
@@ -36,13 +37,14 @@ after the previous one's tests were green.
 | Ruling | State | Commit |
 | --- | --- | --- |
 | 1 — B1, every watcher tick scoped to its own repo | **done, tests green** | `9c0e425` |
-| 2 — B2, deterministic post-resolution verification | implemented; **stopped** — 6 tests red, one proven cause | `742822e` |
-| 3 — push allowlist, parsed merge guard, guard-test renames | **not started** — its prerequisite (Ruling 2 green) is not met | — |
+| 2 — B2, deterministic post-resolution verification | **done** — stopped on check (a), then amended by human decision (Option 2) | `742822e`, amendment `d2e9d4d` |
+| 3 — push allowlist, parsed merge guard, guard-test renames | **done, tests green** | `6f47160` |
 
-**Nothing from this turn has been pushed.** The branch carries these commits
-locally; PR #196 still points at `a0f5728`.
+The Ruling 1 and Ruling 2 commits were held locally while Ruling 2 was
+stopped. They are published to PR #196 together with the amendment, Ruling 3
+and this HANDOFF update, in one normal push.
 
-### Stop condition hit — Ruling 2 check (a) contradicts git's behaviour
+### Stop condition hit — Ruling 2 check (a) contradicts git's behaviour — RESOLVED (Option 2)
 
 Ruling 2 check (a): *"no rebase or merge in progress: no REBASE_HEAD, no
 MERGE_HEAD (and no rebase-merge/ or rebase-apply/ directory)"*.
@@ -96,6 +98,28 @@ file was changed by that diagnostic.
 
 My recommendation is **2**, but it changes the ruling's wording, so it is
 yours to make.
+
+**Resolution — human decision: Option 2** (`d2e9d4d`). Check (a) now reads: a
+merge is in progress when `MERGE_HEAD` exists; a rebase is in progress when
+`rebase-merge/` or `rebase-apply/` exists in the git dir; `REBASE_HEAD` counts
+only alongside one of them. Checks (b)–(e) and the `GIT_EDITOR=true` fix are
+unchanged.
+
+- **The six tests above now pass with that change alone, and none of them
+  was edited** — each one's source is byte-identical to `56a345b`
+  (compared function by function).
+- One unit test from the stop turn, `test_check_a_merge_head_or_rebase_head_fails_only_check_a`,
+  asserted that `REBASE_HEAD` *alone* fails check (a) — exactly the
+  semantics the ruling reverses. It is not one of the six. It was replaced
+  by three: `test_check_a_merge_head_fails_only_check_a`,
+  `test_check_a_a_leftover_rebase_head_alone_does_not_fail_check_a`, and
+  `test_check_a_a_stopped_rebase_fails_check_a` (a real conflict, not a
+  faked marker).
+- **Required test added:** `test_a_stopped_rebase_still_fails_check_a_under_the_amended_rule`.
+  A rebase stopped on a conflict and never continued — the resolver records
+  that `rebase-merge/` existed when it returned — still fails check (a) and
+  ends in `needs_decision`, with nothing pushed and no `integrated_base_sha`
+  recorded.
 
 ### Found and fixed while implementing Ruling 2 — `rebase --continue` failed silently
 
@@ -214,35 +238,150 @@ Its last line then raises, because it runs `git rev-list` against
 with `git ls-remote`: the reproduction's origin has only `main`. **B2's
 stage-only case reproduced as fixed.**
 
-### Ruling 3 — guards: not started
+### Ruling 3 — guards: done (`6f47160`)
 
-Its prerequisite, Ruling 2 green, is not met, so no part of it was done: no
-push allowlist, no parsed-argv merge guard, no guard-test renames. The ruling's
-known consequence — the §37 optional remote-branch cleanup
-(`integration_cleanup.py`, `git push <remote> --delete <branch>`) becoming
-unreachable under the allowlist — has therefore **not happened yet**. It will
-when Ruling 3 lands, and will be recorded then as a stop condition, as
-instructed. `delete_remote_branch` is still `False` by default.
+**Push allowlist.** `integration_git.assert_push_allowed` replaces the
+force-push denylist. The only permitted push is `git push origin <task-branch>`
+(optional `-u`), where `<task-branch>` is the Ticket's own branch and may not be
+main, another protected branch, or the base branch. Everything else is refused:
+`--force`, `-f`, `--force-with-lease`, `--force-with-lease=<ref>`,
+`--force-if-includes`, `--mirror`, `--all`, `--tags`, `--delete`, any refspec
+containing `:` (so `HEAD:<anything>`) or starting with `+`, combined short
+flags such as `-vf` and `-uf`, `--set-upstream` (the ruling permits `-u`), any
+other remote, any other branch, extra refspecs, and main or the base branch as
+the target. `run_git` refuses any push that does not declare its task branch,
+so nothing can push through the generic runner by accident. Non-push commands
+keep the old force-flag rejection as defence in depth.
 
-### Test counts this turn
+One literal consequence worth knowing: because the ruling names `origin`, an
+integration request configured with any other remote name is now refused at
+push time. Every current caller and fixture uses `origin`.
+
+**Merge guard.** `github_pr_adapter.assert_not_a_merge_command` matches parsed
+argv. It finds `gh` by basename whatever its path (`/usr/bin/gh`, `./gh`,
+`env gh`), skips global flags before the subcommand together with their values
+(`-R`, `--repo`, `--hostname`; the `--repo=o/r` form too), and rejects the
+`pr merge` positional pair. Through the adapter it also still rejects the REST
+merge endpoint via `gh api`, `git merge`, and a `git push` with a `:` refspec.
+
+**Guard tests renamed to what they prove** (old → new):
+
+- `test_integration_git.py`: `test_push_argv_never_contains_a_force_flag` →
+  `test_built_push_argv_is_exactly_git_push_origin_task_branch`;
+  `test_force_flags_are_rejected_at_the_guard` and
+  `test_plus_refspec_force_form_is_rejected` →
+  `test_the_push_allowlist_refuses_each_listed_form` (24 enumerated forms);
+  `test_arbitrary_git_subcommands_are_not_reachable` →
+  `test_run_git_refuses_reset_and_a_forced_push_to_main`. New:
+  `test_the_allowlist_accepts_exactly_the_two_permitted_forms`,
+  `test_the_task_branch_itself_may_not_be_main_protected_or_the_base_branch`,
+  `test_run_git_refuses_a_push_that_declares_no_task_branch`.
+- `test_github_pr_adapter.py`: `test_merge_subcommand_is_rejected_by_the_guard`
+  → `test_merge_guard_rejects_each_listed_merge_argv`;
+  `test_ordinary_pr_commands_pass_the_guard` →
+  `test_merge_guard_allows_each_listed_non_merge_pr_command` (now includes
+  `gh pr comment 42 --body merge`). New:
+  `test_merge_guard_rejects_pr_merge_behind_each_listed_path_and_global_flag`
+  (11 enumerated argv). `test_adapter_refuses_to_run_a_merge_argv` now also
+  covers a pathed `gh` with `--repo`.
+- `test_v1_step2_acceptance.py`:
+  `test_git_and_gh_execution_is_confined_to_the_guarded_chokepoints` →
+  `test_only_the_chokepoint_modules_import_subprocess`;
+  `test_the_force_push_guard_rejects_every_force_form` →
+  `test_push_allowlist_refuses_each_form_listed_in_ruling_3`;
+  `test_every_step2_git_call_is_routed_through_run_git` →
+  `test_run_git_refuses_each_listed_unallowlisted_subcommand`;
+  `test_a_merge_argv_is_rejected_everywhere_it_could_be_built` →
+  `test_gh_pr_merge_is_rejected_for_each_listed_merge_method_flag`, plus new
+  `test_gh_pr_merge_is_rejected_behind_each_listed_path_and_global_flag`;
+  `test_every_integration_uses_the_latest_available_target` →
+  `test_initial_and_re_integration_both_use_the_latest_target`;
+  `test_step2_never_touches_the_default_state_database` →
+  `test_each_step2_request_type_accepts_an_explicit_db_path`.
+- `test_integration_controller.py`: `test_reintegration_never_force_pushes` →
+  `test_a_reintegration_pushes_only_the_allowlisted_form`;
+  `test_no_git_command_is_ever_a_force_push` →
+  `test_an_initial_integration_pushes_only_the_allowlisted_form` (both now
+  assert the exact allowlisted argv); `test_no_git_command_pushes_the_target_branch`
+  → `test_an_initial_integration_does_not_push_the_target_branch`;
+  `test_no_gh_command_merges` → `test_an_initial_integration_issues_no_gh_merge`.
+- `test_integration_cleanup.py`: class `NeverMergesTests` → `CleanupArgvTests`;
+  `test_cleanup_never_invokes_a_merge_command` →
+  `test_a_verified_merge_cleanup_runs_no_merge_argv`;
+  `test_cleanup_never_force_pushes` →
+  `test_a_verified_merge_cleanup_runs_no_push_at_all`;
+  `test_remote_branch_cleanup_runs_only_when_requested` →
+  `test_requesting_remote_branch_cleanup_is_refused_up_front_in_v1`. New:
+  `test_the_remote_delete_form_is_refused_by_the_push_allowlist`.
+
+Five remaining Step 2 test names contain "every":
+`test_validator_evidence_records_every_spec_field`,
+`test_evidence_persists_every_spec_29_field`,
+`test_item_31_every_github_merge_method_is_supported`,
+`test_reintegration_count_total_sums_every_ticket`,
+`test_markdown_rendering_lists_every_hint`. Each enumerates what it names (the
+§29 fields, the three GitHub merge methods, the fixture's tickets, the rendered
+hints) and none is a guard test, so they were left as they are.
+
+**Known consequence — decided, no longer an open stop condition.** Under the
+allowlist, `git push <remote> --delete <branch>`, which Step 2's optional
+remote-branch cleanup built, is refused. **Human decision: SPEC §37's
+"optional remote branch cleanup" stays off in V1.** No exception was added to
+the allowlist and `delete_remote_branch` stays `False`. Remote task branches
+are left to GitHub's automatic head-branch deletion or to manual deletion.
+
+In code: a cleanup request with `delete_remote_branch=True` is refused up
+front, before anything is removed. Without that, the allowlist would have
+raised mid-cleanup, after the worktree was already gone. The now-unreachable
+remote-delete path was removed rather than left as dead code. Pinned by
+`test_requesting_remote_branch_cleanup_is_refused_up_front_in_v1` and
+`test_the_remote_delete_form_is_refused_by_the_push_allowlist`.
+
+Out of Step 2's scope, noted for completeness: the legacy pre-V1 operator gate
+`agent_taskflow/remote_branch_cleanup_confirm.py` still exists and can delete a
+remote branch after explicit operator confirmation. It is one of the "manual
+deletion" routes and was not touched.
+
+`WORKFLOW.md` and `docs/v1-step2-integration-controller.md` were updated: both
+still described the old denylist.
+
+### Test counts
 
 | | `pytest tests -q` |
 | --- | --- |
-| Before this turn (`a0f5728`) | `4767 passed, 8 skipped, 0 failed` |
-| At the stop (`742822e`) | `4786 passed, 6 failed, 8 skipped` |
+| Before the re-review rulings (`a0f5728`) | `4767 passed, 8 skipped, 0 failed` |
+| At the Ruling 2 stop (`742822e`) | `4786 passed, 6 failed, 8 skipped` |
+| After the amendment and Ruling 3 (`6f47160`) | `4800 passed, 8 skipped, 0 failed` |
 
-The six failures are exactly the six listed under the stop condition; nothing
-else in the repository went red. The count reconciles:
+**No test is red.** The six tests that were red at the stop now pass, with
+none of them edited. The count reconciles:
 
-    4767  passed before this turn
-     +25  tests added this turn (Ruling 1: 9, Ruling 2: 16)
+    4786  passed at the stop
+      +6  the six previously red tests, now passing
+      +8  tests added this turn
+          (amendment: +3 — one check (a) unit test replaced by three, plus
+           the required stopped-rebase test; Ruling 3: +5 — git push
+           allowlist +2, adapter merge guard +1, acceptance +1, cleanup +1)
     ----
-    4792  = 4786 passed + 6 failed
-          (3 of the red tests pre-date this turn; 3 are new)
+    4800  passed, 0 failed
 
-`compileall agent_taskflow scripts tests`: exit 0. The packaged
-`agent_taskflow.cli.local_validation` was **not** run at the stop: its
-`unittest` step would fail on the same six tests and would add nothing.
+At the Ruling 2 stop, the six failures were exactly the six listed under the
+stop condition; nothing else in the repository was red. That count reconciled
+as 4767 + 25 tests added (Ruling 1: 9, Ruling 2: 16) = 4792 = 4786 passed +
+6 failed.
+
+`agent_taskflow.cli.local_validation` after the amendment and Ruling 3: exit 0,
+every required check passed — Python environment dependencies, workflow
+contract validation, workflow policy validation, Mission Control golden path
+smoke, PiExecutor golden path smoke (fake Pi), unit tests (`Ran 4806 tests`,
+`OK (skipped=8)`), compileall. `openspec validate` skipped: `openspec` is not on
+PATH (optional check, pre-existing). The `unittest` count is 33 above the last
+one recorded (`Ran 4773` at `a0f5728`), matching the 25 tests added by Rulings
+1–2 and the 8 added this turn.
+
+`origin/main` advanced from `4266c02` to `975a3b0` while these rulings were
+being implemented. Not by this branch — nothing in Step 2 pushes `main`. As
+instructed, neither `main` nor `task/v1-step1` was merged in this turn.
 
 ---
 
