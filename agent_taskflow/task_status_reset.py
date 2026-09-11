@@ -25,6 +25,10 @@ from agent_taskflow.reset_lineage import (
 )
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_dependencies import (
+    unreleased_dependency,
+    unreleased_dependency_message,
+)
 from agent_taskflow.ticket_lifecycle import is_ticket
 from agent_taskflow.ticket_retry import (
     TICKET_RETRY_FROM_STATUSES,
@@ -214,6 +218,14 @@ def reset_task_status(
 
     current_store = store or TaskMirrorStore(request.db_path)
     ticket = is_ticket(current_store.db_path, request.task_key)
+    if ticket:
+        # Ruling 32c: a reset never turns a Ticket with an unreleased
+        # dependency runnable, whatever its blocked_reason says.
+        unreleased = unreleased_dependency(current_store.db_path, request.task_key)
+        if unreleased is not None:
+            raise TaskStatusResetError(
+                unreleased_dependency_message(request.task_key, *unreleased)
+            )
     if request.from_status in TICKET_RETRY_FROM_STATUSES:
         if not ticket:
             raise TaskStatusResetError(

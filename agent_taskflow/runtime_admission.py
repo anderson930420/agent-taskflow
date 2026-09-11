@@ -32,6 +32,10 @@ from agent_taskflow.runtime_admission_schema import (
 )
 from agent_taskflow.store import connect, default_db_path
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_dependencies import (
+    unreleased_dependency_in_connection,
+    unreleased_dependency_message,
+)
 from agent_taskflow.ticket_lifecycle import is_ticket_in_connection
 
 __all__ = [
@@ -43,6 +47,8 @@ __all__ = [
     "RuntimeAdmissionStore",
     "RuntimeCapacityExceededError",
     "RuntimeClaim",
+    "RuntimeDependencyUnreleasedError",
+    "assert_dependency_released",
     "RuntimeLeaseRecord",
     "assert_runtime_capacity_available",
     "migrate_runtime_admission",
@@ -81,6 +87,40 @@ def assert_runtime_capacity_available(conn: sqlite3.Connection) -> None:
         raise RuntimeCapacityExceededError(
             max_concurrent_tasks=setting.max_concurrent_tasks,
             active_executor_leases=active,
+        )
+
+
+class RuntimeDependencyUnreleasedError(RuntimeAdmissionError):
+    """Raised when a Ticket's ``blocked_by`` blocker has not completed (ruling 32)."""
+
+    reason_code = "runtime_dependency_unreleased"
+
+    def __init__(self, *, task_key: str, blocker: str, blocker_status: str | None) -> None:
+        self.task_key = task_key
+        self.blocker = blocker
+        self.blocker_status = blocker_status
+        super().__init__(
+            f"{self.reason_code}: "
+            + unreleased_dependency_message(task_key, blocker, blocker_status)
+        )
+
+
+def assert_dependency_released(conn: sqlite3.Connection, task_key: str) -> None:
+    """Refuse a claim while the task's blocker is not completed (V1 Step 5, ruling 32).
+
+    SPEC §44 "Dependency releases only after blocker completed" is enforced at
+    admission, so every path that starts a Ticket is gated, not only the
+    scheduler's selection. Called inside the claim transaction after the
+    capacity and claimable-status checks and before any write, so a refusal
+    rolls back and leaves the row, Attempts, leases and events untouched.
+    """
+    unreleased = unreleased_dependency_in_connection(conn, task_key)
+    if unreleased is not None:
+        blocker, blocker_status = unreleased
+        raise RuntimeDependencyUnreleasedError(
+            task_key=normalize_task_key(task_key),
+            blocker=blocker,
+            blocker_status=blocker_status,
         )
 
 
@@ -339,6 +379,10 @@ class RuntimeAdmissionStore:
                 raise RuntimeAdmissionError(
                     f"Task {normalized_key} is not claimable from status {task['status']}"
                 )
+            # Ruling 32: after the capacity and claimable-status checks, before
+            # any write. SPEC §44: a dependency releases only after its blocker
+            # completed.
+            assert_dependency_released(conn, normalized_key)
             active = conn.execute(
                 """
                 SELECT attempt_id FROM attempts

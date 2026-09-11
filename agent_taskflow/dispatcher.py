@@ -42,6 +42,10 @@ from agent_taskflow.runtime_progress_recorder import (
 )
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_dependencies import (
+    unreleased_dependency,
+    unreleased_dependency_message,
+)
 from agent_taskflow.ticket_lifecycle import (
     FAILURE_EXECUTOR,
     FAILURE_GOVERNANCE,
@@ -223,6 +227,18 @@ class Dispatcher:
             )
 
         if ticket:
+            # Ruling 32 (SPEC §44): a dependency releases only after its blocker
+            # completed. The claim transaction enforces it for every path; this
+            # earlier check refuses before worktree preparation, writing nothing.
+            unreleased = unreleased_dependency(self.store.db_path, task.task_key)
+            if unreleased is not None:
+                reason = unreleased_dependency_message(task.task_key, *unreleased)
+                return DispatcherResult(
+                    task_key=task.task_key,
+                    status="blocked",
+                    summary=reason,
+                    blocked_reason=reason,
+                )
             refusal = self._prepare_ticket_worktree(task, dry_run=dry_run)
             if refusal is not None:
                 return refusal

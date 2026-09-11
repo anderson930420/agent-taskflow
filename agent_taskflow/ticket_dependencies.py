@@ -532,6 +532,58 @@ def maintain_dependencies(db_path: str | Path, *, actor: str) -> DependencyMaint
     )
 
 
+def unreleased_dependency_in_connection(
+    conn: sqlite3.Connection,
+    task_key: str,
+) -> tuple[str, str | None] | None:
+    """Return ``(blocker, blocker_status)`` when ``task_key`` may not start yet.
+
+    SPEC §5.3 / §44: a dependency is released only by a blocker in a §12
+    ``completed`` status. ``blocker_status`` is None for a blocker that does not
+    exist, which is refused too. Returns None when the row has no
+    ``blocked_by`` (or the schema has no such column). Read-only; the runtime
+    admission claim calls it inside its transaction (ruling 32).
+    """
+    if not any(r[1] == "blocked_by" for r in conn.execute("PRAGMA table_info(tasks)")):
+        return None
+    row = conn.execute(
+        "SELECT blocked_by FROM tasks WHERE task_key = ?", (normalize_task_key(task_key),)
+    ).fetchone()
+    blocker = row[0] if row is not None else None
+    if not blocker:
+        return None
+    blocker_row = conn.execute("SELECT status FROM tasks WHERE task_key = ?", (blocker,)).fetchone()
+    if blocker_row is None:
+        return str(blocker), None
+    if blocker_row[0] in COMPLETED_BLOCKER_STATUSES:
+        return None
+    return str(blocker), str(blocker_row[0])
+
+
+def unreleased_dependency_message(task_key: str, blocker: str, blocker_status: str | None) -> str:
+    """Operator-facing refusal text, naming the D6 CLI."""
+    state = (
+        "does not exist" if blocker_status is None else f"is {blocker_status!r}, not completed"
+    )
+    return (
+        f"{normalize_task_key(task_key)} is blocked_by {blocker}, which {state}; a dependency "
+        "releases only when its blocker is completed (SPEC §5.3). Remove or replace the "
+        "dependency with scripts/ticket_dependency.py first."
+    )
+
+
+def unreleased_dependency(db_path: str | Path, task_key: str) -> tuple[str, str | None] | None:
+    """Read-only :func:`unreleased_dependency_in_connection` on a database path."""
+    path = require_absolute_path(db_path, "db_path")
+    if not path.is_file():
+        return None
+    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if "tasks" not in tables:
+            return None
+        return unreleased_dependency_in_connection(conn, task_key)
+
+
 def unreleased_blocker(conn: sqlite3.Connection, blocked_by: str | None) -> bool:
     """True when ``blocked_by`` names a blocker that has not completed."""
     if not blocked_by:
@@ -558,5 +610,8 @@ __all__ = [
     "remove_blocked_by",
     "set_blocked_by",
     "unreleased_blocker",
+    "unreleased_dependency",
+    "unreleased_dependency_in_connection",
+    "unreleased_dependency_message",
     "validate_blocked_by",
 ]

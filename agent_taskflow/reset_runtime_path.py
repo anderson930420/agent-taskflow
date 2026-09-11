@@ -30,6 +30,7 @@ from agent_taskflow.runtime_admission import (
     ActiveAttemptExistsError,
     RuntimeAdmissionError,
     RuntimeClaim,
+    assert_dependency_released,
     assert_runtime_capacity_available,
 )
 from agent_taskflow.store import connect
@@ -137,6 +138,9 @@ class ResetAwareRuntimeAdmissionStore(canonical_path.CanonicalRuntimeAdmissionSt
                 normalized,
                 connection=conn,
             )
+            # Ruling 32: adopting a reserved retry Attempt starts the task as
+            # surely as a fresh claim, so it is gated the same way.
+            assert_dependency_released(conn, normalized)
 
             active_lease = conn.execute(
                 """
