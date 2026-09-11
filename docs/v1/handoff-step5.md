@@ -434,7 +434,8 @@ sed -n 24p agent_taskflow/task_status_reset.py
 
 ## 9. Governance
 
-- **Git.** Two commits on `task/v1-step5`: this file, then its PR link. Both touch only this file. Only that
+- **Git.** Three commits on `task/v1-step5`: this file, its PR link, and the
+  §10 re-verification. All three touch only this file. Only that
   branch was pushed, with a normal push, and the PR is a draft against `main`.
   Nothing was pushed to or merged into `main`, nothing was force-pushed, and
   nothing was rebased.
@@ -446,6 +447,40 @@ sed -n 24p agent_taskflow/task_status_reset.py
   do, and ran no executor or validator.
 - **Approvals.** Nothing was approved, closed, cleaned up or deleted, and no
   config, cron or deployment file was touched.
+
+---
+
+## 10. Re-verification by a second builder run (2026-09-11, HEAD `f339d54`)
+
+A second builder session was launched with the same prompt and the same
+`step5.md`. No ruling after ruling 25 settles D1-D6, and `step5.md` has not
+changed since this handoff was written, so the stop still stands. The session
+checked S1 and S2 against the code itself instead of trusting §3. It
+implemented nothing and changed no file other than this one.
+
+- **S1 still holds.** `attempt_resources_schema.py:31,33` still declares
+  `branch_name` and `worktree_path` `NOT NULL UNIQUE`, and `:79` still defines
+  the `attempt_resources_immutable_paths` trigger. `attempt_resources.py:282-283`
+  still derives the branch and worktree from the Attempt. `:415-417` still
+  refuses a dirty reused worktree, and `:471-481` still overwrites
+  `task_worktrees` with the Attempt's path. `test_attempt_resources.py:166-168`
+  still asserts `assertNotEqual` on branch, worktree and artifact root. The
+  "Fresh retry contract" in `docs/attempt-scoped-runtime-resources.md:78` is
+  unchanged.
+- **S2 still holds.** `runtime_admission.py:742-757` still writes
+  `status = 'blocked'` inside `expire_stale_leases`, and `runtime_reaper.py:101`
+  still calls it. The seven `test_dispatcher` tests in §3.2 still assert
+  `blocked`, and `test_runtime_admission.py:309-310` still asserts `blocked`
+  with `runtime_lease_expired`. `task_status_reset.py:24` still accepts
+  `blocked` only.
+- **Commands run** (with `HOME` set to a fresh `mktemp -d`, which was empty
+  afterwards):
+  - the pinned-test command in §8 printed `Ran 36 tests in 13.742s`, `OK`
+  - `python -m compileall -q agent_taskflow scripts tests` exited 0
+  - `scripts/validate_workflow_contract.py` exited 0
+  - `scripts/validate_workflow_policy.py` exited 0
+- **Not re-run:** the full suite and the Appendix A probe. The only change
+  since §7 is to this file, so neither result can have changed.
 
 ---
 
