@@ -15,7 +15,9 @@ Re-integration, PR outcomes, Merge)
 Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 
 Status: **implementation-complete, awaiting independent review.** The branch
-is up to date with `main` (merge `5b362bc`). All three re-review rulings are
+carries `main` as of `b870b84` (merge `5b362bc`). `main` has since gained
+Step 3 (#197, `4552f4e`), which is **not** merged here — see "`main`
+advanced during this turn" below. All three re-review rulings are
 implemented, Ruling 2 as amended. No stop condition is open. Nothing is
 approved, merged to `main`, or finally complete.
 
@@ -108,6 +110,32 @@ Step 1's new V1 schema out of startup into an operator-run script. That is
 consistent with the rule as written but not with its direction. As
 instructed, Step 2's schema handling was not changed in this turn. Whether V1
 wants one policy for both steps is for the human to decide.
+
+### `main` advanced during this turn — Step 3 (#197) not merged
+
+After the fetch that this merge used, `main` gained one more commit:
+`4552f4e` — *V1 Step 3: realtime progress (SPEC 14, 15, 16, 17) (#197)*,
+25 files and about 7,400 lines, including its own explicit migration script
+`scripts/migrate_runtime_progress.py`. It is **not** merged into this branch.
+The branch carries `main` as of `b870b84`.
+
+It was deliberately left out, for the human to decide:
+
+- This turn's scope named `main` as #195 plus #198.
+- A merge commit cannot be undone on this branch without a force-push, which
+  is forbidden.
+- It is a real cross-step integration, not a side-by-side change. No file
+  that Step 2 changed is touched by Step 3, so a merge would be textually
+  clean. But Step 3's `realtime_projection.py` reads Step 2's §32.1 public PR
+  fields by name (`pr_number`, `pr_state`, `reintegration_count`,
+  `reintegration_required`, …). Step 3's schema-diff test calls `init_db()`
+  and diffs the schema around Step 3's own migration; that looks compatible
+  with Step 2's `init_db()` tables, but it has not been run together with
+  Step 2.
+
+If it should be merged, a follow-up turn under the same rules — merge only,
+never rebase, suite in parts, Step 3's explicit-migration fixture convention —
+would do it.
 
 ### Test counts for this merge
 
