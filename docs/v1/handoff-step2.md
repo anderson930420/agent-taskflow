@@ -16,7 +16,9 @@ Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 
 Status: **implementation-complete, awaiting independent review.** The branch
 is up to date with `main` as of `79e568d` (merge `ff86d9a`), which carries
-Step 1 (#195), Step 3 (#197) and F1 (#199). The independent review's
+Step 1 (#195), Step 3 (#197) and F1 (#199). `main` has since gained Step 4
+(#200, `a5fa8e2`), which is not merged — see "`main` advanced again"
+below. The independent review's
 blocking item is fixed (Ruling 18), Ruling 19 is implemented, and the
 review's four other fixes are made. No stop condition is open. Nothing is
 approved, merged to `main`, or finally complete.
@@ -183,6 +185,26 @@ Step 2's §32.1 public PR fields only when `task_pr_state` exists (it checks
 `sqlite_master` first). After this merge the table exists, so the two steps
 run together for the first time. Every Step 3 test passes, including its
 schema-diff gate.
+
+### `main` advanced again — Step 4 (#200) not merged
+
+After this round's instruction named `main` as `79e568d`, `main` gained one
+more commit: `a5fa8e2` — *V1 Step 4: concurrency readiness (SPEC §19, §42
+Step 4) (#200)*, 27 files and about 5,500 lines. It is **not** merged here;
+the branch contains exactly the `79e568d` named. Reasons:
+
+- The instruction named `79e568d`.
+- A merge commit cannot be undone on this branch without a force-push, which
+  is forbidden.
+- Unlike Step 3, it overlaps Step 2 in one file, `agent_taskflow/store.py`.
+  Step 4 changes `connect()` so that it opens connections through
+  `sqlite_contention.ContentionObservingConnection`, plus one import. Step 2's
+  changes in that file are its two migrations, in different hunks, so a merge
+  will probably be textually clean. But every Step 2 read and write goes
+  through `connect()`, so Step 2 would run on Step 4's connection factory for
+  the first time. That needs the full suite, not an assumption.
+
+A follow-up merge under the same rules would bring it in.
 
 ### Test counts for this merge
 
