@@ -30,7 +30,7 @@ from typing import Any, Sequence
 
 from agent_taskflow import integration_git as git_ops
 from agent_taskflow import integration_schema as schema
-from agent_taskflow.github_pr_adapter import GitHubPrAdapter, GitHubPrError, PrSnapshot
+from agent_taskflow.github_pr_adapter import GitHubPrAdapter, PrSnapshot
 from agent_taskflow.integration_git import GitCommandLog, IntegrationGitError
 from agent_taskflow.integration_queue import (
     enqueue_for_integration,
@@ -114,6 +114,8 @@ class PrOutcome:
     task_status: str | None = None
     # True for an in-flight integration: picked up, but not polled (§25.0).
     deferred: bool = False
+    # Set when the poll itself failed: "<ExceptionType>: <message>".
+    poll_error: str | None = None
 
 
 def poll_target_freshness(
@@ -312,7 +314,19 @@ def poll_pr_outcomes(
         )
         try:
             snapshot = adapter.poll_pr(pr_number=pr_number, cwd=cwd)
-        except GitHubPrError:
+        except Exception as exc:  # noqa: BLE001 - every failure is audited
+            # Review round 4, Ruling 29e: a failed poll is never skipped
+            # silently. A skipped poll is a watcher that has gone blind.
+            outcomes.append(
+                _poll_failed(
+                    task_store,
+                    integration,
+                    task,
+                    pr_state,
+                    exc,
+                    confirm=request.confirm_poll,
+                )
+            )
             continue
 
         transition = _proposed_transition(snapshot, task.status)
@@ -354,6 +368,70 @@ def poll_pr_outcomes(
         outcomes.append(_outcome(task.task_key, snapshot, transition, applied, task.status))
 
     return outcomes
+
+
+def _poll_failed(
+    task_store: TaskMirrorStore,
+    integration: IntegrationStore,
+    task: Any,
+    pr_state: dict[str, Any],
+    exc: BaseException,
+    *,
+    confirm: bool,
+) -> PrOutcome:
+    """Audit a failed PR poll and stop the Ticket for a decision (§27.2.1).
+
+    The event names the original exception type and message. A Ticket in
+    ``needs_review`` moves to ``needs_decision``. A Ticket the transition table
+    does not let integration move there — ``ready_for_integration``, ``paused``
+    or one already in ``needs_decision`` — keeps its status and gets the event;
+    a queued Ticket's own integration run reaches ``needs_decision`` when its
+    ``gh`` call fails. Nothing in §32.1 is recorded from a poll that failed.
+    """
+    pr_number = int(pr_state["pr_number"])
+    error = f"{type(exc).__name__}: {exc}"
+    target = (
+        schema.NEEDS_DECISION
+        if schema.can_transition(task.status, schema.NEEDS_DECISION)
+        else None
+    )
+    applied: str | None = None
+    if confirm:
+        message = f"Polling PR #{pr_number} failed: {error}"
+        task_store.record_task_event(
+            task.task_key,
+            "pr_poll_failed",
+            SOURCE,
+            message=message,
+            payload={
+                "pr_number": pr_number,
+                "task_status": task.status,
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+                "transition": target,
+            },
+        )
+        if target is not None:
+            task_store.update_task_status(
+                task.task_key,
+                target,
+                source=SOURCE,
+                message=message,
+                expected_current_status=task.status,
+            )
+            applied = target
+    return PrOutcome(
+        task_key=task.task_key,
+        pr_number=pr_number,
+        pr_state=pr_state["pr_state"],
+        merged=bool(pr_state["pr_merged"]),
+        review_decision=pr_state["review_decision"],
+        ci_status=pr_state["ci_status"],
+        proposed_transition=target,
+        applied_transition=applied,
+        task_status=task.status,
+        poll_error=error,
+    )
 
 
 def _proposed_transition(snapshot: PrSnapshot, task_status: str) -> str | None:

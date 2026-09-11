@@ -354,6 +354,55 @@ class NonInteractiveGitTests(IntegrationGitTestCase):
 
 
 
+class HeadOnTaskBranchTests(IntegrationGitTestCase):
+    """Review round 4, Ruling 30 — assert_head_on_task_branch."""
+
+    def test_head_on_the_task_branch_returns_its_tip(self) -> None:
+        tip = git_ops.assert_head_on_task_branch(self.worktree, self.branch)
+        self.assertEqual(tip, git_ops.head_sha(self.worktree))
+
+    def test_a_recorded_refs_heads_name_is_accepted(self) -> None:
+        tip = git_ops.assert_head_on_task_branch(self.worktree, f"refs/heads/{self.branch}")
+        self.assertEqual(tip, git_ops.head_sha(self.worktree))
+
+    def test_a_detached_head_is_refused(self) -> None:
+        git(self.worktree, "checkout", "-q", "--detach")
+        with self.assertRaisesRegex(IntegrationGitError, "detached"):
+            git_ops.assert_head_on_task_branch(self.worktree, self.branch)
+
+    def test_head_on_another_branch_is_refused(self) -> None:
+        git(self.worktree, "checkout", "-q", "-b", "task/other")
+        with self.assertRaisesRegex(IntegrationGitError, "refs/heads/task/other"):
+            git_ops.assert_head_on_task_branch(self.worktree, self.branch)
+
+    def test_a_branch_that_moved_off_the_validated_commit_is_refused(self) -> None:
+        validated = git_ops.head_sha(self.worktree)
+        self.fixture.commit_in(self.worktree, "later.txt", "x\n", "moved after validation")
+        with self.assertRaisesRegex(IntegrationGitError, "moved"):
+            git_ops.assert_head_on_task_branch(
+                self.worktree, self.branch, expected_sha=validated
+            )
+
+    def test_the_check_is_read_only(self) -> None:
+        log = git_ops.GitCommandLog()
+        git_ops.assert_head_on_task_branch(self.worktree, self.branch, log=log)
+        self.assertEqual({argv[1] for argv in log.commands}, {"rev-parse"})
+
+
+class OutputDecodingTests(IntegrationGitTestCase):
+    """Ruling 31b — git output that is not UTF-8 is decoded with replacement."""
+
+    def test_non_utf8_git_output_does_not_raise(self) -> None:
+        # `git show <blob>` prints the stored bytes verbatim; \xe9 alone is not
+        # valid UTF-8, so strict decoding would raise UnicodeDecodeError.
+        (self.worktree / "latin1.txt").write_bytes(b"caf\xe9 latin-1 content\n")
+        git(self.worktree, "add", "latin1.txt")
+        git(self.worktree, "commit", "-q", "-m", "add a latin-1 file")
+        result = git_ops.run_git(self.worktree, ["show", "HEAD:latin1.txt"])
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stdout, "caf\ufffd latin-1 content\n")
+
+
 class BranchNormalizationTests(IntegrationGitTestCase):
     """Review Ruling 18 — branch names are compared only after normalization."""
 

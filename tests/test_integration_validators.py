@@ -135,5 +135,16 @@ class ValidatorEvidenceTests(IntegrationValidatorTestCase):
         self.assertIn("hello-from-validator", report.outcomes[0].output)
 
 
+
+class ValidatorOutputDecodingTests(IntegrationValidatorTestCase):
+    """Ruling 31b — a validator's non-UTF-8 output never raises."""
+
+    def test_non_utf8_validator_output_is_decoded_with_replacement(self) -> None:
+        spec = IntegrationValidatorSpec(name="bytes", command=("sh", "-c", "printf 'caf\\351\\n'"))
+        report = self._run((spec,))
+        self.assertTrue(report.passed, report.summary)
+        self.assertIn("caf\ufffd", report.outcomes[0].output)
+
+
 if __name__ == "__main__":
     unittest.main()

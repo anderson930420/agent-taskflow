@@ -367,7 +367,9 @@ def _integrate_under_lock(
         trigger_task_key=request.trigger,
     )
 
-    def stop_for_decision(summary: str, **extra: Any) -> IntegrationResult:
+    def stop_for_decision(
+        summary: str, *, audit: dict[str, Any] | None = None, **extra: Any
+    ) -> IntegrationResult:
         task_store.update_task_status(
             request.task_key,
             schema.NEEDS_DECISION,
@@ -385,6 +387,7 @@ def _integrate_under_lock(
                 "mode": mode,
                 "reason": summary,
                 "failed_checks": list(extra.get("resolution_checks_failed", ())),
+                **(audit or {}),
             },
         )
         integration.update_integration_state(
@@ -418,6 +421,23 @@ def _integrate_under_lock(
     except IntegrationGitError as exc:
         return stop_for_decision(
             f"Refusing to integrate before running any git command: {exc}"
+        )
+
+    def refuse_unvalidated_branch(
+        exc: IntegrationGitError, *, stage: str, **extra: Any
+    ) -> IntegrationResult:
+        # Ruling 30b — refused before the push: nothing is pushed and
+        # integrated_base_sha is not recorded.
+        return stop_for_decision(
+            f"Refusing to publish {worktree.branch}: it is not the tree "
+            f"integration validated ({exc})",
+            audit={
+                "check": "head_on_task_branch",
+                "stage": stage,
+                "task_branch": worktree.branch,
+                "mismatch": str(exc),
+            },
+            **extra,
         )
 
     def git_phase() -> IntegrationResult:
@@ -517,8 +537,18 @@ def _integrate_under_lock(
                     behind_count=behind,
                 )
 
+        # -- the branch the push will publish is the tree we validate ---------
+        # Review round 4, Ruling 30: the push names the branch, so HEAD must be
+        # on the Ticket's branch and the branch must be HEAD. A detached HEAD
+        # would otherwise validate a rebased commit and publish the old branch.
+        try:
+            branch_sha = git_ops.assert_head_on_task_branch(
+                worktree_path, worktree.branch, log=log
+            )
+        except IntegrationGitError as exc:
+            return refuse_unvalidated_branch(exc, stage="before_validators")
+
         # -- validators (§29) — every integration, including re-integration ----
-        branch_sha = git_ops.head_sha(worktree_path, log=log)
         diff_context = git_ops.diff_context(worktree_path, target_ref, log=log)
         changed = git_ops.changed_files(worktree_path, target_ref, log=log)
 
@@ -565,6 +595,23 @@ def _integrate_under_lock(
         title = request.title or (task.title or request.task_key)
 
         # -- push and publish --------------------------------------------------
+        # Ruling 30 again, now against the validated commit: a validator must
+        # not have moved the branch or HEAD. Checked whether or not this run
+        # pushes, because integrated_base_sha is recorded either way.
+        try:
+            git_ops.assert_head_on_task_branch(
+                worktree_path, worktree.branch, expected_sha=branch_sha, log=log
+            )
+        except IntegrationGitError as exc:
+            return refuse_unvalidated_branch(
+                exc,
+                stage="before_push",
+                validation_report=report,
+                conflict_detected=conflict_detected,
+                conflict_resolved=conflict_resolved,
+                behind_count=behind,
+            )
+
         should_push = not (mode == "reintegration" and already_up_to_date) or (
             request.push_no_op_reintegration
         )
@@ -590,6 +637,17 @@ def _integrate_under_lock(
                     body=body,
                     cwd=worktree_path,
                     draft=request.draft,
+                )
+                # Review round 4, Ruling 29d: the PR now exists on GitHub.
+                # Record its identity before anything else can fail, so no real
+                # PR is ever orphaned and a retry updates it instead of opening
+                # a second one. integrated_base_sha is recorded only below.
+                integration.update_pr_state(
+                    request.task_key,
+                    pr_number=snapshot.number,
+                    pr_url=snapshot.url,
+                    pr_state="open",
+                    pr_head_sha=branch_sha,
                 )
             else:
                 snapshot = adapter.update_pr(
@@ -670,24 +728,42 @@ def _integrate_under_lock(
             hints=hints,
         )
 
-    # Review Ruling 19 — no git failure may leave the Ticket in `integrating`.
-    # Every git call in the phase above either handles its own failure or
-    # lands here, and ends in needs_decision via §27.2.1 with an audited
-    # integration_blocked event. Remapping infrastructure failures to §29.2
-    # `failed` is Step 5's job; see docs/v1/handoff-step2.md.
+    # Review Rulings 19 and 31 — no failure of any kind may leave the Ticket in
+    # `integrating`. Every call in the phase above either handles its own
+    # failure or lands here — a git error, an undecodable byte, a missing `gh`
+    # or `git` binary, anything — and ends in needs_decision via §27.2.1 with
+    # an audited integration_blocked event naming the original exception.
+    # Remapping infrastructure failures to §29.2 `failed` is Step 5's job; see
+    # docs/v1/handoff-step2.md.
     try:
         return git_phase()
-    except IntegrationGitError as exc:
-        operation = git_ops.in_progress_operation(worktree_path)
-        if operation is not None:
-            abort_operation = (
-                git_ops.abort_merge if operation == "merge" else git_ops.abort_rebase
-            )
-            try:
+    except Exception as exc:  # noqa: BLE001 - the integration boundary
+        current = task_store.get_task(request.task_key)
+        if current is None or current.status != schema.INTEGRATING:
+            # The Ticket already left `integrating` (the failure came after the
+            # hand-off to review, or from inside a stop). It is not stuck, and
+            # rewriting its status here would be a guess; surface the error.
+            raise
+        try:
+            operation = git_ops.in_progress_operation(worktree_path)
+            if operation is not None:
+                abort_operation = (
+                    git_ops.abort_merge if operation == "merge" else git_ops.abort_rebase
+                )
                 abort_operation(worktree_path, log=log)
-            except IntegrationGitError:
-                pass  # the stop below is recorded either way
-        return stop_for_decision(f"A git operation failed during integration: {exc}")
+        except Exception:  # noqa: BLE001 - the stop below is recorded either way
+            pass
+        if isinstance(exc, IntegrationGitError):
+            summary = f"A git operation failed during integration: {exc}"
+        else:
+            summary = f"Integration failed with {type(exc).__name__}: {exc}"
+        return stop_for_decision(
+            summary,
+            audit={
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+            },
+        )
 
 
 def _pr_body(

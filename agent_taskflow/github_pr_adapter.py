@@ -30,12 +30,15 @@ __all__ = [
 ]
 
 
+# Every name here must be a field real `gh pr view --json` accepts. gh 2.45.0
+# has no `merged` field — asking for one fails every poll with
+# `Unknown JSON field: "merged"` (review round 4, Ruling 29) — so the merge
+# outcome is derived from `state`, `mergedAt` and `mergeCommit` instead.
 PR_VIEW_FIELDS = (
     "number",
     "url",
     "state",
     "isDraft",
-    "merged",
     "mergedAt",
     "mergeCommit",
     "headRefName",
@@ -205,6 +208,9 @@ class GitHubPrAdapter:
             shell=False,
             check=False,
             text=True,
+            # Non-UTF-8 output must never raise (Ruling 31b).
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -229,7 +235,14 @@ class GitHubPrAdapter:
         cwd: Path,
         draft: bool = True,
     ) -> PrSnapshot:
-        """Create a pull request and return its verified state (§24, §31)."""
+        """Create a pull request and return its identity (§24, §31).
+
+        The identity — number and URL — comes from `gh pr create`'s own output.
+        There is deliberately no follow-up poll: if one raised, a PR that
+        really exists on GitHub would be left unrecorded and a retry would open
+        a second one (review round 4, Ruling 29d). The caller records this
+        identity before doing anything else.
+        """
         argv = [self._gh_bin, "pr", "create", "--repo", self.repo]
         if draft:
             argv.append("--draft")
@@ -237,8 +250,15 @@ class GitHubPrAdapter:
             ["--base", base, "--head", head, "--title", title, "--body", body]
         )
         stdout = self._run_checked(argv, cwd=cwd, action="gh pr create")
-        number = self._extract_pr_number(stdout)
-        return self.poll_pr(pr_number=number, cwd=cwd)
+        return PrSnapshot(
+            number=self._extract_pr_number(stdout),
+            url=self._extract_pr_url(stdout),
+            state="open",
+            merged=False,
+            head_ref=head,
+            base_ref=base,
+            is_draft=draft,
+        )
 
     def update_pr(
         self,
@@ -277,17 +297,19 @@ class GitHubPrAdapter:
     # -- normalization -----------------------------------------------------
     def _snapshot(self, payload: dict[str, Any], *, fallback_number: int) -> PrSnapshot:
         number = payload.get("number")
-        merged = bool(payload.get("merged"))
         merge_commit = payload.get("mergeCommit") or {}
+        merge_commit_sha = (
+            merge_commit.get("oid") if isinstance(merge_commit, dict) else None
+        ) or None
+        merged_at = payload.get("mergedAt") or None
+        merged = self._is_merged(payload.get("state"), merged_at, merge_commit_sha)
         return PrSnapshot(
             number=number if isinstance(number, int) else fallback_number,
             url=payload.get("url"),
             state=self._normalize_state(payload.get("state"), merged=merged),
             merged=merged,
-            merged_at=payload.get("mergedAt"),
-            merge_commit_sha=(
-                merge_commit.get("oid") if isinstance(merge_commit, dict) else None
-            ),
+            merged_at=merged_at,
+            merge_commit_sha=merge_commit_sha,
             head_sha=payload.get("headRefOid") or None,
             head_ref=payload.get("headRefName") or None,
             base_ref=payload.get("baseRefName") or None,
@@ -298,6 +320,20 @@ class GitHubPrAdapter:
             body=payload.get("body"),
             reviews=self._normalize_reviews(payload.get("reviews")),
         )
+
+    @staticmethod
+    def _is_merged(state: Any, merged_at: Any, merge_commit_sha: Any) -> bool:
+        """Derive the merge outcome from fields real gh supports (Ruling 29a).
+
+        A PR is merged when gh reports ``state == "MERGED"``, or carries a
+        ``mergedAt`` time or a ``mergeCommit``. Deriving it matters: dropping
+        the non-existent ``merged`` field without this would make a merged PR
+        read as closed-unmerged, and the watcher would cancel a merged Ticket.
+        §35/§36 verification is still driven by the merge commit itself.
+        """
+        if isinstance(state, str) and state.strip().upper() == "MERGED":
+            return True
+        return bool(merged_at) or bool(merge_commit_sha)
 
     @staticmethod
     def _normalize_state(raw: Any, *, merged: bool) -> str | None:
@@ -377,6 +413,11 @@ class GitHubPrAdapter:
                 }
             )
         return tuple(reviews)
+
+    @staticmethod
+    def _extract_pr_url(stdout: str) -> str | None:
+        match = re.search(r"https?://\S+/pull/\d+", stdout or "")
+        return match.group(0) if match else None
 
     @staticmethod
     def _extract_pr_number(stdout: str) -> int:

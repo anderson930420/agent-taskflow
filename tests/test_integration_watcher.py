@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 import sys
 import tempfile
 import unittest
@@ -276,13 +277,13 @@ class PrOutcomeTests(WatcherTestCase):
 
     def test_pr_closed_unmerged_cancels_the_ticket(self) -> None:
         self.make_reviewing_task("AT-201")
-        self.gh_runner.set_pr(42, state="CLOSED", merged=False)
+        self.gh_runner.set_pr(42, state="CLOSED")
         self.outcomes()
         self.assertEqual(self.status_of("AT-201"), schema.CANCELLED)
 
     def test_pr_closed_unmerged_retains_the_workspace_and_evidence(self) -> None:
         worktree = self.make_reviewing_task("AT-201")
-        self.gh_runner.set_pr(42, state="CLOSED", merged=False)
+        self.gh_runner.set_pr(42, state="CLOSED")
         result = self.outcomes()[0]
         self.assertTrue(worktree.is_dir())
         self.assertIs(result.cleanup_performed, False)
@@ -296,7 +297,6 @@ class PrOutcomeTests(WatcherTestCase):
         self.gh_runner.set_pr(
             42,
             state="MERGED",
-            merged=True,
             mergedAt="2026-09-10T04:00:00Z",
             mergeCommit={"oid": merge_sha},
         )
@@ -310,7 +310,7 @@ class PrOutcomeTests(WatcherTestCase):
         worktree = self.make_reviewing_task("AT-201")
         merge_sha = self.fixture.merge_branch_into_target("task/AT-201")
         self.gh_runner.set_pr(
-            42, state="MERGED", merged=True, mergedAt="x", mergeCommit={"oid": merge_sha}
+            42, state="MERGED", mergedAt="x", mergeCommit={"oid": merge_sha}
         )
         self.outcomes()
         self.assertNotEqual(self.status_of("AT-201"), schema.COMPLETED)
@@ -336,7 +336,7 @@ class PrOutcomeTests(WatcherTestCase):
 
     def test_dry_run_pr_polling_changes_nothing(self) -> None:
         self.make_reviewing_task("AT-201")
-        self.gh_runner.set_pr(42, state="CLOSED", merged=False)
+        self.gh_runner.set_pr(42, state="CLOSED")
         results = self.outcomes(confirm_poll=False)
         self.assertEqual(results[0].proposed_transition, schema.CANCELLED)
         self.assertEqual(self.status_of("AT-201"), schema.NEEDS_REVIEW)
@@ -347,6 +347,110 @@ class PrOutcomeTests(WatcherTestCase):
         self.integration.update_pr_state("AT-201", pr_number=None)
         self.assertEqual(self.outcomes(), [])
 
+
+
+class PollFailureTests(WatcherTestCase):
+    """Review round 4, Ruling 29e — a failed poll is never swallowed. It is
+    audited with the original exception and stops the Ticket for a decision
+    (§27.2.1) wherever the transition table lets integration move it there."""
+
+    def fail_polls_with(self, exc: BaseException) -> None:
+        def runner(args, **kwargs):
+            raise exc
+
+        self.github = GitHubPrAdapter("owner/repo", runner=runner)
+
+    def failed_events(self, task_key: str) -> list[dict]:
+        return [
+            json.loads(e.payload_json)
+            for e in self.store.list_task_events(task_key)
+            if e.event_type == "pr_poll_failed"
+        ]
+
+    def test_a_gh_error_stops_a_reviewing_ticket_for_decision(self) -> None:
+        self.make_reviewing_task("AT-801")
+        self.gh_runner.pulls.pop(42)  # gh now answers "no such PR", rc=1
+        [outcome] = self.outcomes()
+        self.assertEqual(outcome.applied_transition, schema.NEEDS_DECISION)
+        self.assertIn("GitHubPrError", outcome.poll_error)
+        self.assertEqual(self.status_of("AT-801"), schema.NEEDS_DECISION)
+        [event] = self.failed_events("AT-801")
+        self.assertEqual(event["exception_type"], "GitHubPrError")
+        self.assertIn("no such PR", event["exception_message"])
+        self.assertEqual(event["pr_number"], 42)
+
+    def test_the_old_unknown_field_failure_is_no_longer_silent(self) -> None:
+        # What real gh did to every poll before Ruling 29a.
+        self.make_reviewing_task("AT-801")
+
+        def runner(args, **kwargs):
+            from v1_step2_fixtures import FakeCompletedProcess, unknown_gh_json_field_error
+
+            return FakeCompletedProcess(returncode=1, stderr=unknown_gh_json_field_error("merged"))
+
+        self.github = GitHubPrAdapter("owner/repo", runner=runner)
+        [outcome] = self.outcomes()
+        self.assertEqual(self.status_of("AT-801"), schema.NEEDS_DECISION)
+        self.assertIn('Unknown JSON field: "merged"', self.failed_events("AT-801")[0]["exception_message"])
+
+    def test_a_missing_gh_binary_stops_the_ticket_for_decision(self) -> None:
+        self.make_reviewing_task("AT-801")
+        self.fail_polls_with(FileNotFoundError(2, "No such file or directory", "gh"))
+        [outcome] = self.outcomes()
+        self.assertEqual(self.status_of("AT-801"), schema.NEEDS_DECISION)
+        self.assertEqual(self.failed_events("AT-801")[0]["exception_type"], "FileNotFoundError")
+
+    def test_an_undecodable_response_stops_the_ticket_for_decision(self) -> None:
+        self.make_reviewing_task("AT-801")
+        self.fail_polls_with(UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"))
+        self.outcomes()
+        self.assertEqual(self.status_of("AT-801"), schema.NEEDS_DECISION)
+        self.assertEqual(self.failed_events("AT-801")[0]["exception_type"], "UnicodeDecodeError")
+
+    def test_a_failed_poll_records_no_pr_fields(self) -> None:
+        self.make_reviewing_task("AT-801")
+        before = self.integration.get_pr_state("AT-801")
+        self.fail_polls_with(RuntimeError("simulated"))
+        self.outcomes()
+        after = self.integration.get_pr_state("AT-801")
+        self.assertEqual(after["pr_state"], "open")
+        self.assertEqual(after["pr_last_polled_at"], before["pr_last_polled_at"])
+
+    def test_a_paused_ticket_stays_paused_but_the_failure_is_audited(self) -> None:
+        self.make_reviewing_task("AT-801")
+        self.store.update_task_status("AT-801", schema.PAUSED, source="test")
+        self.fail_polls_with(RuntimeError("simulated"))
+        [outcome] = self.outcomes()
+        self.assertIsNone(outcome.applied_transition)
+        self.assertEqual(self.status_of("AT-801"), schema.PAUSED)
+        self.assertEqual(len(self.failed_events("AT-801")), 1)
+
+    def test_a_queued_ticket_keeps_its_queue_slot_but_the_failure_is_audited(self) -> None:
+        self.make_reviewing_task("AT-801")
+        self.store.update_task_status("AT-801", schema.READY_FOR_INTEGRATION, source="test")
+        self.fail_polls_with(RuntimeError("simulated"))
+        self.outcomes()
+        self.assertEqual(self.status_of("AT-801"), schema.READY_FOR_INTEGRATION)
+        self.assertEqual(len(self.failed_events("AT-801")), 1)
+
+    def test_an_unconfirmed_poll_reports_the_failure_but_writes_nothing(self) -> None:
+        self.make_reviewing_task("AT-801")
+        self.fail_polls_with(RuntimeError("simulated"))
+        [outcome] = self.outcomes(confirm_poll=False)
+        self.assertEqual(outcome.poll_error, "RuntimeError: simulated")
+        self.assertEqual(outcome.proposed_transition, schema.NEEDS_DECISION)
+        self.assertIsNone(outcome.applied_transition)
+        self.assertEqual(self.status_of("AT-801"), schema.NEEDS_REVIEW)
+        self.assertEqual(self.failed_events("AT-801"), [])
+
+    def test_one_failing_poll_does_not_stop_the_others(self) -> None:
+        self.make_reviewing_task("AT-801", pr_number=42)
+        self.make_reviewing_task("AT-802", pr_number=43)
+        self.gh_runner.pulls.pop(42)
+        self.outcomes()
+        self.assertEqual(self.status_of("AT-801"), schema.NEEDS_DECISION)
+        self.assertEqual(self.status_of("AT-802"), schema.NEEDS_REVIEW)
+        self.assertEqual(self.failed_events("AT-802"), [])
 
 
 class PrPickupScopeTests(WatcherTestCase):
@@ -380,7 +484,6 @@ class PrPickupScopeTests(WatcherTestCase):
         self.gh_runner.set_pr(
             pr_number,
             state="MERGED",
-            merged=True,
             mergedAt="2026-09-10T05:00:00Z",
             mergeCommit={"oid": merge_sha},
         )
@@ -422,7 +525,7 @@ class PrPickupScopeTests(WatcherTestCase):
     def test_a_ticket_whose_pr_state_is_closed_is_not_picked_up(self) -> None:
         self.make_reviewing_task("AT-404")
         self.integration.update_pr_state("AT-404", pr_state="closed")
-        self.gh_runner.set_pr(42, state="MERGED", merged=True, mergeCommit={"oid": "x"})
+        self.gh_runner.set_pr(42, state="MERGED", mergeCommit={"oid": "x"})
         self.assertEqual(self.outcomes(), [])
         self.assertEqual(self.gh_runner.calls, [])
         self.assertEqual(self.status_of("AT-404"), schema.NEEDS_REVIEW)
@@ -475,7 +578,7 @@ class PrPickupScopeTests(WatcherTestCase):
         """§33.5 applies whatever status the Ticket was waiting in."""
         worktree = self.make_reviewing_task("AT-407")
         self.store.update_task_status("AT-407", schema.NEEDS_DECISION, source="test")
-        self.gh_runner.set_pr(42, state="CLOSED", merged=False)
+        self.gh_runner.set_pr(42, state="CLOSED")
         self.outcomes()
         self.assertEqual(self.status_of("AT-407"), schema.CANCELLED)
         self.assertTrue(worktree.is_dir())
@@ -484,7 +587,7 @@ class PrPickupScopeTests(WatcherTestCase):
         self.make_reviewing_task("AT-408")
         self.store.update_task_status("AT-408", schema.READY_FOR_INTEGRATION, source="test")
         enqueue_for_integration(self.integration, "AT-408", repo="owner/repo")
-        self.gh_runner.set_pr(42, state="CLOSED", merged=False)
+        self.gh_runner.set_pr(42, state="CLOSED")
         self.outcomes()
         self.assertEqual(self.status_of("AT-408"), schema.CANCELLED)
         self.assertEqual(queue_for_repo(self.integration, "owner/repo"), [])
@@ -587,7 +690,7 @@ class CrossRepoScopeTests(unittest.TestCase):
         before = self._snapshot(other)
         # The tick's own PR #42 was closed unmerged. Had the tick picked up the
         # other repository's Ticket, it would have cancelled that one too.
-        self.gh[tick_repo].set_pr(42, state="CLOSED", merged=False)
+        self.gh[tick_repo].set_pr(42, state="CLOSED")
         outcomes = poll_pr_outcomes(
             self._request(tick_repo), store=self.store, integration_store=self.integration,
             github=GitHubPrAdapter(tick_repo, runner=self.gh[tick_repo]),

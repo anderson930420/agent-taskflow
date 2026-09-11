@@ -217,7 +217,6 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         self.sync_pr(
             "AT-101",
             state="MERGED",
-            merged=True,
             mergedAt="2026-09-10T05:00:00Z",
             mergeCommit={"oid": merge_sha},
         )
@@ -287,7 +286,7 @@ class EndToEndJourneyTests(AcceptanceTestCase):
     def test_item_25_and_26_closed_unmerged_cancels_and_retains(self) -> None:
         worktree = self.make_task("AT-101")
         self.integrate("AT-101")
-        self.sync_pr("AT-101", state="CLOSED", merged=False)
+        self.sync_pr("AT-101", state="CLOSED")
         self.pr_outcomes()
         self.assertEqual(self.status_of("AT-101"), schema.CANCELLED)
         self.assertTrue(worktree.is_dir())
@@ -307,7 +306,7 @@ class EndToEndJourneyTests(AcceptanceTestCase):
         self.make_task("AT-101")
         self.integrate("AT-101")
         merge_sha = self.fixture.merge_branch_into_target("task/AT-101")
-        self.sync_pr("AT-101", state="MERGED", merged=True, mergedAt="t", mergeCommit={"oid": merge_sha})
+        self.sync_pr("AT-101", state="MERGED", mergedAt="t", mergeCommit={"oid": merge_sha})
         first = self.pr_outcomes()
         second = self.pr_outcomes()
         self.assertTrue(first[0].merged)
@@ -410,7 +409,7 @@ class SafetyInvariantTests(AcceptanceTestCase):
     def test_closed_unmerged_work_is_not_automatically_destroyed(self) -> None:
         worktree = self.make_task("AT-101")
         self.integrate("AT-101")
-        self.sync_pr("AT-101", state="CLOSED", merged=False)
+        self.sync_pr("AT-101", state="CLOSED")
         self.pr_outcomes()
         self.cleanup("AT-101")
         self.assertTrue(worktree.is_dir())
@@ -553,7 +552,7 @@ class NegativeScopeTests(AcceptanceTestCase):
     def test_cancelled_cleanup_without_the_flag_removes_nothing(self) -> None:
         worktree = self.make_task("AT-101")
         self.integrate("AT-101")
-        self.sync_pr("AT-101", state="CLOSED", merged=False)
+        self.sync_pr("AT-101", state="CLOSED")
         self.pr_outcomes()
         result = self.cleanup("AT-101", confirm_cleanup=True, confirm_cancelled_cleanup=False)
         self.assertFalse(result.ok)

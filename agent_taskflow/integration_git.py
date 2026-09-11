@@ -37,6 +37,7 @@ __all__ = [
     "abort_rebase",
     "assert_push_allowed",
     "assert_task_branch_pushable",
+    "assert_head_on_task_branch",
     "normalize_branch_ref",
     "behind_count",
     "build_push_command",
@@ -301,6 +302,11 @@ def _default_runner(argv: Sequence[str], cwd: Path) -> CompletedProcessLike:
         shell=False,
         check=False,
         text=True,
+        # git can print non-UTF-8 bytes (a Latin-1 path in a conflict, say).
+        # Decoding must never raise, or a Ticket could be left in
+        # `integrating` (review round 4, Ruling 31b).
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -617,6 +623,53 @@ def verify_conflict_resolution(
     )
 
     return ResolutionVerification(tuple(checks))
+
+
+def assert_head_on_task_branch(
+    cwd: Path,
+    task_branch: str,
+    *,
+    expected_sha: str | None = None,
+    **kwargs,
+) -> str:
+    """Refuse unless HEAD is on the Ticket's branch at the validated commit.
+
+    Review round 4, Ruling 30: the push publishes the branch *by name*, so the
+    control plane must first prove that the name points at what it validated.
+    It checks that HEAD resolves to ``refs/heads/<task-branch>`` (not detached,
+    not another branch), that the branch ref points at HEAD, and — when
+    ``expected_sha`` is given — that the branch ref is exactly that commit.
+    Uses only ``rev-parse``, which is read-only. Returns the branch tip.
+    """
+    branch = normalize_branch_ref(task_branch)
+    expected_ref = f"refs/heads/{branch}"
+    symbolic = run_git(cwd, ["rev-parse", "--symbolic-full-name", "HEAD"], **kwargs)
+    current = symbolic.stdout.strip()
+    if not symbolic.ok or not current:
+        raise IntegrationGitError(f"could not resolve HEAD: {symbolic.combined}")
+    if current == "HEAD":
+        raise IntegrationGitError(
+            f"HEAD is detached; it must be on the Ticket's branch {expected_ref}"
+        )
+    if current != expected_ref:
+        raise IntegrationGitError(
+            f"HEAD is on {current}, not the Ticket's branch {expected_ref}"
+        )
+    tip_result = run_git(cwd, ["rev-parse", "--verify", "--quiet", expected_ref], **kwargs)
+    tip = tip_result.stdout.strip()
+    if not tip_result.ok or not tip:
+        raise IntegrationGitError(f"branch {expected_ref} does not resolve")
+    head = head_sha(cwd, **kwargs)
+    if tip != head:
+        raise IntegrationGitError(
+            f"branch {expected_ref} is at {tip}, but HEAD is at {head}"
+        )
+    if expected_sha is not None and tip != expected_sha:
+        raise IntegrationGitError(
+            f"branch {expected_ref} moved: it is at {tip}, but {expected_sha} "
+            "was the commit validated"
+        )
+    return tip
 
 
 # -- write operations ------------------------------------------------------

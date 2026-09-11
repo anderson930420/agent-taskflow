@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from agent_taskflow import github_pr_adapter
 from agent_taskflow.github_pr_adapter import (
+    PR_VIEW_FIELDS,
     GitHubPrAdapter,
     GitHubPrError,
     assert_not_a_merge_command,
 )
-from v1_step2_fixtures import FakeGhRunner  # noqa: E402
+from v1_step2_fixtures import (  # noqa: E402
+    GH_PR_VIEW_JSON_FIELDS,
+    FakeCompletedProcess,
+    FakeGhRunner,
+)
 
 
 class CreateAndUpdateTests(unittest.TestCase):
@@ -57,6 +65,166 @@ class CreateAndUpdateTests(unittest.TestCase):
             self.adapter.create_pr(base="main", head="h", title="t", body="b", cwd=Path("/tmp"))
 
 
+class RealGhFieldContractTests(unittest.TestCase):
+    """Review round 4, Ruling 29c — the adapter may ask only for fields real
+    `gh pr view --json` has. The fake knows exactly gh 2.45.0's list, so any
+    field real gh would reject fails here too."""
+
+    def setUp(self) -> None:
+        self.runner = FakeGhRunner()
+        self.adapter = GitHubPrAdapter("owner/repo", runner=self.runner)
+        self.runner.set_pr(42, state="OPEN")
+
+    def test_every_requested_field_is_one_real_gh_accepts(self) -> None:
+        unknown = [name for name in PR_VIEW_FIELDS if name not in GH_PR_VIEW_JSON_FIELDS]
+        self.assertEqual(unknown, [])
+        self.assertNotIn("merged", PR_VIEW_FIELDS)
+
+    def test_the_fake_rejects_an_unknown_field_as_real_gh_does(self) -> None:
+        completed = self.runner(
+            ["gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "number,merged"]
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn('Unknown JSON field: "merged"', completed.stderr)
+        self.assertIn("Available fields:", completed.stderr)
+
+    def test_a_field_list_real_gh_rejects_fails_the_poll(self) -> None:
+        with mock.patch.object(
+            github_pr_adapter, "PR_VIEW_FIELDS", PR_VIEW_FIELDS + ("merged",)
+        ):
+            with self.assertRaises(GitHubPrError) as caught:
+                self.adapter.poll_pr(pr_number=42, cwd=Path("/tmp"))
+        self.assertIn("Unknown JSON field", str(caught.exception))
+
+    def test_the_fake_cannot_be_scripted_with_a_field_real_gh_lacks(self) -> None:
+        with self.assertRaises(AssertionError):
+            self.runner.set_pr(42, merged=True)
+
+
+class RealGhPayloadTests(unittest.TestCase):
+    """The values real gh 2.45.0 returned for the adapter's field list on this
+    repository — #196 open, #200 merged — with title, body and the check
+    rollup abbreviated. Pins that the real shapes parse as intended."""
+
+    OPEN = {
+        "number": 196, "url": "https://github.com/anderson930420/agent-taskflow/pull/196",
+        "state": "OPEN", "isDraft": True, "mergedAt": None, "mergeCommit": None,
+        "headRefName": "task/v1-step2", "baseRefName": "main",
+        "headRefOid": "25143529eea66560138feef2e4326b436b28c6ab", "reviewDecision": "",
+        "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+        "reviews": [], "title": "V1 Step 2", "body": "",
+    }
+    MERGED = {
+        "number": 200, "url": "https://github.com/anderson930420/agent-taskflow/pull/200",
+        "state": "MERGED", "isDraft": False, "mergedAt": "2026-09-11T09:54:01Z",
+        "mergeCommit": {"oid": "a5fa8e2daee56d026ad11068122e99eb5fc78281"},
+        "headRefName": "task/v1-step4", "baseRefName": "main",
+        "headRefOid": "4f3bdb87350d12c536ec92f900de6ab856e66469", "reviewDecision": "",
+        "statusCheckRollup": [], "reviews": [], "title": "V1 Step 4", "body": "",
+    }
+
+    def poll(self, payload: dict) -> "github_pr_adapter.PrSnapshot":
+        self.assertEqual(set(payload), set(PR_VIEW_FIELDS))
+
+        def runner(args, **kwargs):
+            return FakeCompletedProcess(returncode=0, stdout=json.dumps(payload))
+
+        adapter = GitHubPrAdapter("anderson930420/agent-taskflow", runner=runner)
+        return adapter.poll_pr(pr_number=payload["number"], cwd=Path("/tmp"))
+
+    def test_an_open_real_pr_reads_as_open_and_unmerged(self) -> None:
+        snapshot = self.poll(self.OPEN)
+        self.assertEqual(snapshot.state, "open")
+        self.assertIs(snapshot.merged, False)
+        self.assertIsNone(snapshot.merge_commit_sha)
+
+    def test_a_merged_real_pr_reads_as_merged_with_its_merge_commit(self) -> None:
+        snapshot = self.poll(self.MERGED)
+        self.assertEqual(snapshot.state, "closed")
+        self.assertIs(snapshot.merged, True)
+        self.assertEqual(snapshot.merge_commit_sha, "a5fa8e2daee56d026ad11068122e99eb5fc78281")
+        self.assertEqual(snapshot.merged_at, "2026-09-11T09:54:01Z")
+
+
+class MergeDerivationTests(unittest.TestCase):
+    """Ruling 29a — merged is derived from state, mergedAt and mergeCommit."""
+
+    def setUp(self) -> None:
+        self.runner = FakeGhRunner()
+        self.adapter = GitHubPrAdapter("owner/repo", runner=self.runner)
+
+    def snapshot(self, **fields):
+        self.runner.set_pr(42, **fields)
+        return self.adapter.poll_pr(pr_number=42, cwd=Path("/tmp"))
+
+    def test_state_merged_alone_means_merged(self) -> None:
+        snapshot = self.snapshot(state="MERGED")
+        self.assertIs(snapshot.merged, True)
+        self.assertEqual(snapshot.state, "closed")
+
+    def test_a_merged_at_time_means_merged(self) -> None:
+        self.assertIs(self.snapshot(state="CLOSED", mergedAt="2026-09-10T00:00:00Z").merged, True)
+
+    def test_a_merge_commit_means_merged(self) -> None:
+        self.assertIs(self.snapshot(state="CLOSED", mergeCommit={"oid": "abc"}).merged, True)
+
+    def test_closed_without_merge_evidence_is_closed_unmerged(self) -> None:
+        snapshot = self.snapshot(state="CLOSED")
+        self.assertIs(snapshot.merged, False)
+        self.assertEqual(snapshot.state, "closed")
+
+    def test_open_is_not_merged(self) -> None:
+        snapshot = self.snapshot(state="OPEN")
+        self.assertIs(snapshot.merged, False)
+        self.assertEqual(snapshot.state, "open")
+
+
+class CreateIdentityTests(unittest.TestCase):
+    """Ruling 29d — create_pr returns the identity gh printed; it never polls."""
+
+    def test_create_pr_does_not_poll(self) -> None:
+        runner = FakeGhRunner()
+        adapter = GitHubPrAdapter("owner/repo", runner=runner)
+        snapshot = adapter.create_pr(
+            base="main", head="task/AT-101", title="t", body="b", cwd=Path("/tmp")
+        )
+        self.assertEqual([call[:3] for call in runner.calls], [["gh", "pr", "create"]])
+        self.assertEqual(snapshot.number, 42)
+        self.assertEqual(snapshot.url, "https://github.com/owner/repo/pull/42")
+        self.assertEqual(snapshot.head_ref, "task/AT-101")
+        self.assertEqual(snapshot.base_ref, "main")
+        self.assertIs(snapshot.is_draft, True)
+
+    def test_create_pr_succeeds_even_when_a_poll_would_fail(self) -> None:
+        def runner(args, **kwargs):
+            if args[:3] == ["gh", "pr", "create"]:
+                return FakeCompletedProcess(
+                    returncode=0, stdout="https://github.com/owner/repo/pull/7\n"
+                )
+            return FakeCompletedProcess(returncode=1, stderr='Unknown JSON field: "merged"')
+
+        snapshot = GitHubPrAdapter("owner/repo", runner=runner).create_pr(
+            base="main", head="task/AT-101", title="t", body="b", cwd=Path("/tmp")
+        )
+        self.assertEqual(snapshot.number, 7)
+        self.assertEqual(snapshot.url, "https://github.com/owner/repo/pull/7")
+
+
+class DecodingTests(unittest.TestCase):
+    """Ruling 31b — gh output is decoded with replacement, never raising."""
+
+    def test_gh_is_run_with_replacement_decoding(self) -> None:
+        seen: list[dict] = []
+
+        def runner(args, **kwargs):
+            seen.append(kwargs)
+            return FakeCompletedProcess(returncode=0, stdout="{}")
+
+        GitHubPrAdapter("owner/repo", runner=runner).run(["gh", "pr", "view", "1"], cwd=Path("/tmp"))
+        self.assertEqual(seen[0]["errors"], "replace")
+        self.assertEqual(seen[0]["encoding"], "utf-8")
+
+
 class PollTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = FakeGhRunner()
@@ -64,7 +232,6 @@ class PollTests(unittest.TestCase):
         self.runner.set_pr(
             42,
             state="OPEN",
-            merged=False,
             headRefOid="head1",
             baseRefName="main",
             headRefName="task/AT-101",
@@ -99,7 +266,6 @@ class PollTests(unittest.TestCase):
         self.runner.set_pr(
             42,
             state="MERGED",
-            merged=True,
             mergedAt="2026-09-10T04:00:00Z",
             mergeCommit={"oid": "mergesha"},
         )

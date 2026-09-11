@@ -88,6 +88,7 @@ TASK_EVENT_TYPES = {
     "integration_blocked",
     "reintegration_required",
     "pr_state_polled",
+    "pr_poll_failed",
     "pr_review_changes_requested",
     "pr_closed_unmerged",
     "merge_detected",

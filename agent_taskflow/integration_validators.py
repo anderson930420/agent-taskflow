@@ -146,6 +146,9 @@ def _default_runner(argv: Sequence[str], cwd: Path, timeout: int | None) -> Comp
         shell=False,
         check=False,
         text=True,
+        # A validator's non-UTF-8 output must never raise (Ruling 31b).
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,

@@ -857,5 +857,288 @@ class GitFailureGuardTests(ControllerTestCase):
         self.assertIsNone(git_ops.in_progress_operation(worktree))
 
 
+
+def _origin_branch_sha(fixture: GitFixture, branch: str) -> str | None:
+    from v1_step2_fixtures import git as raw_git
+
+    listed = raw_git(fixture.origin, "branch", "--list", branch).strip()
+    return raw_git(fixture.origin, "rev-parse", branch).strip() if listed else None
+
+
+class UnvalidatedBranchRefusalTests(ControllerTestCase):
+    """Review round 4, Ruling 30 — never publish a branch that is not what
+    was validated. The push publishes the branch by name, so HEAD must be on
+    the Ticket's branch and the branch must be the validated commit, both
+    before validators and before the push. A refusal pushes nothing, records
+    no integrated_base_sha, and ends in needs_decision with an audited event
+    naming the mismatch."""
+
+    def assert_refused(self, result, *, stage: str, mismatch: str) -> None:
+        self.assertEqual(result.status, "needs_decision", result.summary)
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
+        self.assertNotEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
+        self.assertEqual([c for c in result.git_commands if c[:2] == ("git", "push")], [])
+        self.assertIsNone(_origin_branch_sha(self.fixture, "task/AT-101"))
+        self.assertEqual(self.gh_runner.calls, [])
+        pr_state = self.integration.get_pr_state("AT-101")
+        self.assertIsNone(pr_state["integrated_base_sha"])
+        self.assertIsNone(pr_state["pr_number"])
+        self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
+        blocked = [
+            e for e in self.store.list_task_events("AT-101")
+            if e.event_type == "integration_blocked"
+        ]
+        self.assertEqual(len(blocked), 1)
+        payload = json.loads(blocked[0].payload_json)
+        self.assertEqual(payload["check"], "head_on_task_branch")
+        self.assertEqual(payload["stage"], stage)
+        self.assertEqual(payload["task_branch"], "task/AT-101")
+        self.assertIn(mismatch, payload["mismatch"])
+
+    def test_a_detached_head_without_a_conflict_never_reaches_review(self) -> None:
+        # The reviewer's scenario: the rebase succeeds on a detached HEAD, so
+        # HEAD holds the target but the branch the push would publish does not.
+        from v1_step2_fixtures import git as raw_git
+
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
+        target = self.fixture.advance_target()
+        raw_git(worktree, "checkout", "-q", "--detach")
+        result = self.integrate("AT-101")
+        self.assert_refused(result, stage="before_validators", mismatch="detached")
+        # Validators never ran against the unpublishable tree.
+        self.assertEqual(self.integration.list_validator_evidence("AT-101"), [])
+        # And the branch that would have been published lacks the target.
+        self.assertFalse(
+            git_ops.commit_in_history(worktree, target, "refs/heads/task/AT-101")
+        )
+
+    def test_head_on_another_branch_is_refused(self) -> None:
+        from v1_step2_fixtures import git as raw_git
+
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
+        raw_git(worktree, "checkout", "-q", "-b", "task/other")
+        result = self.integrate("AT-101")
+        self.assert_refused(
+            result, stage="before_validators", mismatch="refs/heads/task/other"
+        )
+
+    def test_a_validator_that_moves_the_branch_is_refused_before_the_push(self) -> None:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
+        mover = IntegrationValidatorSpec(
+            name="mover",
+            command=(
+                "git", "-c", "user.name=v", "-c", "user.email=v@example.invalid",
+                "commit", "-q", "--allow-empty", "-m", "moved by a validator",
+            ),
+        )
+        result = self.integrate("AT-101", validator_specs=GREEN + (mover,))
+        self.assertTrue(result.validators_passed)
+        self.assert_refused(result, stage="before_push", mismatch="moved")
+
+    def test_a_validator_that_detaches_head_is_refused_before_the_push(self) -> None:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
+        detacher = IntegrationValidatorSpec(
+            name="detacher", command=("git", "checkout", "-q", "--detach")
+        )
+        result = self.integrate("AT-101", validator_specs=GREEN + (detacher,))
+        self.assert_refused(result, stage="before_push", mismatch="detached")
+
+    def test_a_detached_head_on_reintegration_is_refused(self) -> None:
+        from v1_step2_fixtures import git as raw_git
+
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
+        self.integrate("AT-101")
+        published = _origin_branch_sha(self.fixture, "task/AT-101")
+        first_base = self.integration.get_pr_state("AT-101")["integrated_base_sha"]
+        self.store.update_task_status("AT-101", schema.READY_FOR_INTEGRATION, source="test")
+        self.integration.update_pr_state("AT-101", reintegration_required=True)
+        self.fixture.advance_target()
+        raw_git(worktree, "checkout", "-q", "--detach")
+        calls_before = len(self.gh_runner.calls)
+
+        result = self.integrate("AT-101")
+        self.assertEqual(result.status, "needs_decision", result.summary)
+        self.assertEqual([c for c in result.git_commands if c[:2] == ("git", "push")], [])
+        self.assertEqual(_origin_branch_sha(self.fixture, "task/AT-101"), published)
+        self.assertEqual(len(self.gh_runner.calls), calls_before)
+        # integrated_base_sha still names what the published branch contains.
+        self.assertEqual(
+            self.integration.get_pr_state("AT-101")["integrated_base_sha"], first_base
+        )
+
+    def test_the_published_branch_always_contains_the_recorded_target(self) -> None:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
+        self.fixture.advance_target()
+        result = self.integrate("AT-101")
+        self.assertTrue(result.ok, result.summary)
+        pr_state = self.integration.get_pr_state("AT-101")
+        published = _origin_branch_sha(self.fixture, "task/AT-101")
+        self.assertEqual(published, pr_state["pr_head_sha"])
+        self.assertTrue(
+            git_ops.commit_in_history(worktree, pr_state["integrated_base_sha"], published)
+        )
+
+
+class PrIdentityTests(ControllerTestCase):
+    """Review round 4, Ruling 29d — the PR's identity is recorded the moment
+    `gh pr create` returns, before any poll, so no real PR is ever orphaned."""
+
+    def test_initial_integration_never_polls_after_create(self) -> None:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
+        result = self.integrate("AT-101")
+        self.assertTrue(result.ok, result.summary)
+        self.assertEqual([c[:3] for c in self.gh_runner.calls], [["gh", "pr", "create"]])
+
+    def test_the_identity_survives_a_failure_right_after_create(self) -> None:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
+        real_update = self.integration.update_pr_state
+
+        def failing_update(task_key, **fields):
+            if "integrated_base_sha" in fields:
+                raise RuntimeError("simulated failure after gh pr create")
+            return real_update(task_key, **fields)
+
+        with mock.patch.object(self.integration, "update_pr_state", side_effect=failing_update):
+            result = self.integrate("AT-101")
+
+        self.assertEqual(result.status, "needs_decision", result.summary)
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
+        pr_state = self.integration.get_pr_state("AT-101")
+        self.assertEqual(pr_state["pr_number"], 42)
+        self.assertEqual(pr_state["pr_url"], "https://github.com/owner/repo/pull/42")
+        self.assertEqual(pr_state["pr_state"], "open")
+        self.assertEqual(pr_state["pr_head_sha"], _origin_branch_sha(self.fixture, "task/AT-101"))
+        self.assertIsNone(pr_state["integrated_base_sha"])
+
+
+class IntegrationBoundaryTests(ControllerTestCase):
+    """Review round 4, Ruling 31 — the integration boundary catches every
+    exception, not just IntegrationGitError. No Ticket stays `integrating`;
+    the audited event records the original exception type and message."""
+
+    def assert_stopped(self, result, exception_type: str, message: str) -> dict:
+        self.assertEqual(result.status, "needs_decision", result.summary)
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
+        self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
+        self.assertIsNone(self.integration.get_pr_state("AT-101")["integrated_base_sha"])
+        blocked = [
+            e for e in self.store.list_task_events("AT-101")
+            if e.event_type == "integration_blocked"
+        ]
+        self.assertEqual(len(blocked), 1)
+        payload = json.loads(blocked[0].payload_json)
+        self.assertEqual(payload["exception_type"], exception_type)
+        self.assertIn(message, payload["exception_message"])
+        self.assertIn(exception_type, blocked[0].message)
+        return payload
+
+    def _ready(self) -> Path:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
+        return worktree
+
+    def test_a_unicode_decode_error_ends_in_needs_decision(self) -> None:
+        self._ready()
+        error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        with mock.patch.object(git_ops, "diff_context", side_effect=error):
+            result = self.integrate("AT-101")
+        self.assert_stopped(result, "UnicodeDecodeError", "invalid start byte")
+        self.assertEqual([c for c in result.git_commands if c[:2] == ("git", "push")], [])
+        self.assertEqual(self.gh_runner.calls, [])
+
+    def test_a_missing_git_binary_ends_in_needs_decision(self) -> None:
+        self._ready()
+        error = FileNotFoundError(2, "No such file or directory", "git")
+        with mock.patch.object(git_ops, "fetch", side_effect=error):
+            result = self.integrate("AT-101")
+        self.assert_stopped(result, "FileNotFoundError", "No such file or directory")
+
+    def test_a_runtime_error_ends_in_needs_decision(self) -> None:
+        self._ready()
+        with mock.patch(
+            "agent_taskflow.integration_controller.build_reviewer_hints",
+            side_effect=RuntimeError("simulated hint failure"),
+        ):
+            result = self.integrate("AT-101")
+        self.assert_stopped(result, "RuntimeError", "simulated hint failure")
+        self.assertEqual(self.gh_runner.calls, [])
+
+    def test_a_missing_gh_after_the_push_ends_in_needs_decision(self) -> None:
+        self._ready()
+
+        def no_gh(args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "gh")
+
+        self.github = GitHubPrAdapter("owner/repo", runner=no_gh)
+        result = self.integrate("AT-101")
+        self.assert_stopped(result, "FileNotFoundError", "No such file or directory")
+        # The branch was already pushed; no PR exists and nothing claims one.
+        self.assertIsNotNone(_origin_branch_sha(self.fixture, "task/AT-101"))
+        self.assertIsNone(self.integration.get_pr_state("AT-101")["pr_number"])
+
+    def test_an_in_progress_rebase_is_aborted_on_a_non_git_failure(self) -> None:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "shared.txt", "task-side\n", "task edits shared")
+        self.fixture.advance_target("shared.txt", "target-side\n")
+        with mock.patch.object(
+            git_ops, "conflict_hunks", side_effect=RuntimeError("simulated failure mid-rebase")
+        ):
+            result = self.integrate("AT-101")
+        self.assert_stopped(result, "RuntimeError", "simulated failure mid-rebase")
+        self.assertIsNone(git_ops.in_progress_operation(worktree))
+
+    def test_the_reviewers_latin1_filename_conflict_never_leaves_integrating(self) -> None:
+        # The round-4 repro, unmocked: a rebase conflict on a file whose name
+        # is Latin-1, not UTF-8. git prints the raw name, which used to raise
+        # UnicodeDecodeError past the IntegrationGitError-only guard.
+        import os
+
+        from v1_step2_fixtures import git as raw_git
+
+        name = os.fsdecode(b"caf\xe9.txt")
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, name, "task-side\n", "task edits a latin-1 file")
+        # Advance the target by hand: the fixture helper names its staging
+        # clone and commit after the file, and decodes git's output strictly.
+        staging = self.root / "staging-latin1"
+        raw_git(self.root, "clone", "-q", str(self.fixture.origin), str(staging))
+        (staging / name).write_text("target-side\n", encoding="utf-8")
+        raw_git(staging, "add", "-A")
+        raw_git(staging, "commit", "-q", "-m", "target edits the latin-1 file")
+        raw_git(staging, "push", "-q", "origin", "main")
+        result = self.integrate("AT-101")
+        self.assertEqual(result.status, "needs_decision", result.summary)
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
+        self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
+        self.assertIsNone(self.integration.get_pr_state("AT-101")["integrated_base_sha"])
+        self.assertEqual([c for c in result.git_commands if c[:2] == ("git", "push")], [])
+        self.assertIsNone(git_ops.in_progress_operation(worktree))
+
+    def test_a_failure_after_the_review_hand_off_is_raised_not_rewritten(self) -> None:
+        # The Ticket already left `integrating`, so it is not stuck; the guard
+        # surfaces the error rather than guessing a new status.
+        self._ready()
+        real_record = self.store.record_task_event
+
+        def failing_record(task_key, event_type, *args, **kwargs):
+            if event_type == "integration_completed":
+                raise RuntimeError("simulated failure after hand-off")
+            return real_record(task_key, event_type, *args, **kwargs)
+
+        with mock.patch.object(self.store, "record_task_event", side_effect=failing_record):
+            with self.assertRaises(RuntimeError):
+                self.integrate("AT-101")
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
+        self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
+
+
 if __name__ == "__main__":
     unittest.main()

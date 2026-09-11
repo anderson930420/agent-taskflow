@@ -151,6 +151,32 @@ class GitFixture:
         return git(staging, "rev-parse", "HEAD").strip()
 
 
+# The fields real `gh pr view --json` accepts, copied verbatim from gh 2.45.0 on
+# the box that runs Taskflow (`gh pr view 196 --json zz_not_a_field` prints this
+# list). The fake rejects anything else exactly as real gh does, so a test can
+# never pass against a field the real binary does not have (review round 4,
+# Ruling 29c: the fake once answered `merged`, which real gh rejects).
+GH_PR_VIEW_JSON_FIELDS = frozenset(
+    {
+        "additions", "assignees", "author", "autoMergeRequest", "baseRefName",
+        "body", "changedFiles", "closed", "closedAt", "comments", "commits",
+        "createdAt", "deletions", "files", "headRefName", "headRefOid",
+        "headRepository", "headRepositoryOwner", "id", "isCrossRepository",
+        "isDraft", "labels", "latestReviews", "maintainerCanModify",
+        "mergeCommit", "mergeStateStatus", "mergeable", "mergedAt", "mergedBy",
+        "milestone", "number", "potentialMergeCommit", "projectCards",
+        "projectItems", "reactionGroups", "reviewDecision", "reviewRequests",
+        "reviews", "state", "statusCheckRollup", "title", "updatedAt", "url",
+    }
+)
+
+
+def unknown_gh_json_field_error(field: str) -> str:
+    """The stderr real gh 2.45.0 prints for an unknown ``--json`` field."""
+    listing = "\n".join(f"  {name}" for name in sorted(GH_PR_VIEW_JSON_FIELDS))
+    return f'Unknown JSON field: "{field}"\nAvailable fields:\n{listing}\n'
+
+
 @dataclass
 class FakeCompletedProcess:
     returncode: int
@@ -164,6 +190,10 @@ class FakeGhRunner:
     It refuses to implement ``gh pr merge`` at all: if production code ever
     reaches for it the call surfaces as an explicit failure rather than a
     silently successful merge.
+
+    Like real gh it knows only the fields in ``GH_PR_VIEW_JSON_FIELDS``: a
+    ``--json`` request naming any other field fails with gh's own error, and
+    ``set_pr`` refuses to script one.
     """
 
     def __init__(self, *, repo: str = "owner/repo", start_number: int = 41) -> None:
@@ -176,6 +206,9 @@ class FakeGhRunner:
 
     # -- scripting helpers -------------------------------------------------
     def set_pr(self, number: int, **fields: Any) -> dict[str, Any]:
+        unknown = sorted(set(fields) - GH_PR_VIEW_JSON_FIELDS)
+        if unknown:
+            raise AssertionError(f"real gh has no PR field(s) {unknown}")
         payload = self.pulls.setdefault(number, self._blank_pr(number))
         payload.update(fields)
         return payload
@@ -186,7 +219,6 @@ class FakeGhRunner:
             "url": f"https://github.com/{self.repo}/pull/{number}",
             "state": "OPEN",
             "isDraft": True,
-            "merged": False,
             "mergedAt": None,
             "mergeCommit": None,
             "headRefName": "",
@@ -255,6 +287,11 @@ class FakeGhRunner:
             return FakeCompletedProcess(returncode=1, stderr="no such PR")
         requested = self._flag(args, "--json")
         fields = requested.split(",") if requested else list(payload)
+        for field in fields:
+            if field not in GH_PR_VIEW_JSON_FIELDS:
+                return FakeCompletedProcess(
+                    returncode=1, stderr=unknown_gh_json_field_error(field)
+                )
         return FakeCompletedProcess(
             returncode=0,
             stdout=json.dumps({key: payload.get(key) for key in fields}),
