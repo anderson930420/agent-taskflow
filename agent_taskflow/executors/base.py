@@ -43,6 +43,10 @@ class ExecutorContext:
     context without this binding preserves the historical direct-subprocess
     behavior for bounded local tools and unit fixtures. A bound context must use
     PR-7's managed launch path.
+
+    ``attempt_id`` identifies the Attempt reserved by the runtime-admission
+    claim for this run. It is ``None`` when no claim exists, for example in
+    unit fixtures that call an executor directly.
     """
 
     task_key: str
@@ -55,6 +59,7 @@ class ExecutorContext:
     env: dict[str, str] | None = None
     repo_root: Path | None = None
     launch_binding: ExecutorLaunchBinding | None = None
+    attempt_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
@@ -98,10 +103,19 @@ class ExecutorContext:
         )
         object.__setattr__(self, "env", _validate_env(self.env))
 
+        if self.attempt_id is not None:
+            object.__setattr__(
+                self,
+                "attempt_id",
+                _require_non_empty(self.attempt_id, "attempt_id"),
+            )
+
         if self.launch_binding is not None:
             binding = self.launch_binding
             if binding.task_key != self.task_key:
                 raise ValueError("launch_binding task_key does not match ExecutorContext")
+            if self.attempt_id is not None and binding.attempt_id != self.attempt_id:
+                raise ValueError("launch_binding attempt_id does not match ExecutorContext")
             if binding.worktree_path.resolve() != self.worktree_path.resolve():
                 raise ValueError(
                     "launch_binding worktree_path does not match ExecutorContext"

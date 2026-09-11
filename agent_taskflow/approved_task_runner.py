@@ -37,6 +37,10 @@ from agent_taskflow.level2_execution_authority import (
 )
 from agent_taskflow.models import TaskRecord, require_absolute_path
 from agent_taskflow.preflight import PreflightResult, run_preflight
+from agent_taskflow.runtime_progress_recorder import (
+    RuntimeProgressRecorder,
+    claimed_attempt_id,
+)
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
@@ -339,12 +343,26 @@ def run_approved_task(
             preflight=preflight_payload,
         )
 
-    current_store.update_task_status(
-        effective_task.task_key,
-        RUN_STATUS_PREPARING,
-        source="approved_task_runner",
-        message="Approved task runner preparing workspace",
-    )
+    previous_attempt_id = claimed_attempt_id(current_store, effective_task.task_key)
+    try:
+        current_store.update_task_status(
+            effective_task.task_key,
+            RUN_STATUS_PREPARING,
+            source="approved_task_runner",
+            message="Approved task runner preparing workspace",
+        )
+    except Exception:
+        # Attempt-scoped workspace provisioning runs inside the claim, so the
+        # Attempt can exist even though the transition raised.
+        _progress(current_store, effective_task.task_key, previous_attempt_id).prepare_failed(
+            "Workspace preparation failed"
+        )
+        raise
+
+    # The claim reserved this run's Attempt (for Level 2, the Attempt the
+    # ExecutionEngine reports); progress and both contexts are bound to it.
+    progress = _progress(current_store, effective_task.task_key, previous_attempt_id)
+    progress.prepare_running(request.executor)
 
     workspace_request = WorkspacePreparationRequest(
         task_key=effective_task.task_key,
@@ -354,6 +372,7 @@ def run_approved_task(
     )
     workspace_result = prepare_task_workspace(workspace_request, store=current_store)
     if not workspace_result.ok:
+        progress.prepare_failed("Workspace preparation failed")
         _block_task(current_store, effective_task.task_key, workspace_result.summary)
         return _blocked_failure(
             request,
@@ -369,17 +388,21 @@ def run_approved_task(
     _record_artifact(current_store, effective_task.task_key, "manifest", contract_path)
 
     executor = _resolve_executor(request, effective_task, executor_registry=executor_registry)
-    executor_context = _build_executor_context(
-        effective_task,
-        workspace_result,
-        timeout_seconds=(
-            request.claude_code_timeout_seconds
-            if request.executor == "claude-code"
-            else None
+    executor_context = replace(
+        _build_executor_context(
+            effective_task,
+            workspace_result,
+            timeout_seconds=(
+                request.claude_code_timeout_seconds
+                if request.executor == "claude-code"
+                else None
+            ),
         ),
+        attempt_id=progress.attempt_id,
     )
     model_requirement_error = _model_requirement_error(request, effective_task)
     if model_requirement_error is not None:
+        progress.prepare_failed(f"Executor {request.executor} requires a model")
         _block_task(current_store, effective_task.task_key, model_requirement_error)
         return _blocked_failure(
             request,
@@ -393,6 +416,7 @@ def run_approved_task(
     if request.executor in EXECUTORS_REQUIRING_PROMPT and executor_context.prompt_path is None:
         prompt_path, prompt_error = _ensure_implementation_prompt(effective_task)
         if prompt_error is not None:
+            progress.prepare_failed("Implementation prompt is unavailable")
             _block_task(current_store, effective_task.task_key, prompt_error)
             return _blocked_failure(
                 request,
@@ -406,6 +430,7 @@ def run_approved_task(
         assert prompt_path is not None
         _record_artifact(current_store, effective_task.task_key, "implementation_prompt", prompt_path)
         executor_context = replace(executor_context, prompt_path=prompt_path)
+    progress.prepare_passed(request.executor)
 
     executor_run_id = current_store.create_executor_run(
         effective_task.task_key,
@@ -421,10 +446,12 @@ def run_approved_task(
         message=f"Approved task runner running executor {request.executor}",
     )
 
+    progress.implementer_running(request.executor)
     try:
         executor_result = executor.run(executor_context)
     except Exception as exc:  # pragma: no cover - defensive runtime failure path.
         reason = f"Executor {request.executor} raised {exc.__class__.__name__}: {exc}"
+        progress.implementer_raised(request.executor, exc)
         current_store.finish_executor_run(
             effective_task.task_key,
             executor_run_id,
@@ -471,7 +498,11 @@ def run_approved_task(
     )
     _record_executor_artifacts(current_store, effective_task.task_key, executor_result)
 
-    if executor_result.status in {"failed", "blocked"}:
+    executor_failed = executor_result.status in {"failed", "blocked"}
+    progress.implementer_finished(
+        request.executor, executor_result.status, passed=not executor_failed
+    )
+    if executor_failed:
         reason = executor_result.summary or f"Executor {request.executor} returned {executor_result.status}"
         _block_task(current_store, effective_task.task_key, reason)
         return _blocked_failure(
@@ -506,6 +537,7 @@ def run_approved_task(
         message="Approved task runner running validators",
     )
 
+    progress.validators_running(request.validators)
     validator_results: list[ValidatorResult] = []
     for validator_name in request.validators:
         validator = _resolve_validator(validator_name, validator_registry=validator_registry)
@@ -514,11 +546,14 @@ def run_approved_task(
             project=effective_task.project,
             worktree_path=workspace_result.worktree_path,
             artifact_dir=effective_task.artifact_dir,
+            attempt_id=progress.attempt_id,
         )
+        progress.validator_running(validator_name)
         try:
             validator_result = validator.run(validator_context)
         except Exception as exc:  # pragma: no cover - defensive runtime failure path.
             reason = f"Validator {validator_name} raised {exc.__class__.__name__}: {exc}"
+            progress.validator_raised(validator_name, exc)
             current_store.record_validation_result(
                 effective_task.task_key,
                 validator_name,
@@ -566,6 +601,7 @@ def run_approved_task(
 
         if validator_result.status in {"failed", "blocked"}:
             reason = validator_result.summary or f"Validator {validator_result.validator} returned {validator_result.status}"
+            progress.validator_failed(validator_name, validator_result.status)
             _block_task(current_store, effective_task.task_key, reason)
             return _blocked_failure(
                 request,
@@ -592,6 +628,8 @@ def run_approved_task(
                     validation_results=validator_results,
                 ),
             )
+
+    progress.validators_passed({item.validator: item.status for item in validator_results})
 
     codex_advisory_generation = _generate_codex_advisory_evidence(
         request,
@@ -903,6 +941,19 @@ def _resolve_validator(validator_name: str, *, validator_registry: Mapping[str, 
     if validator_name in validator_registry:
         return validator_registry[validator_name]
     return get_validator(validator_name)
+
+
+def _progress(
+    store: TaskMirrorStore,
+    task_key: str,
+    previous_attempt_id: str | None,
+) -> RuntimeProgressRecorder:
+    return RuntimeProgressRecorder.for_claim(
+        store,
+        task_key,
+        source="approved_task_runner",
+        previous_attempt_id=previous_attempt_id,
+    )
 
 
 def _block_task(store: TaskMirrorStore, task_key: str, reason: str) -> None:

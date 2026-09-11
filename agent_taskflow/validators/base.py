@@ -38,7 +38,11 @@ def validate_validator_result_status(status: str) -> str:
 
 @dataclass(frozen=True)
 class ValidatorContext:
-    """Runtime context supplied to a validator."""
+    """Runtime context supplied to a validator.
+
+    ``attempt_id`` identifies the Attempt reserved by the runtime-admission
+    claim for this run, or is ``None`` when no claim exists.
+    """
 
     task_key: str
     project: str
@@ -47,6 +51,7 @@ class ValidatorContext:
     timeout_seconds: int | None = None
     env: dict[str, str] | None = None
     launch_binding: ExecutorLaunchBinding | None = None
+    attempt_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
@@ -67,10 +72,18 @@ class ValidatorContext:
             _validate_timeout(self.timeout_seconds),
         )
         object.__setattr__(self, "env", _validate_env(self.env))
+        if self.attempt_id is not None:
+            object.__setattr__(
+                self,
+                "attempt_id",
+                _require_non_empty(self.attempt_id, "attempt_id"),
+            )
         if self.launch_binding is not None:
             binding = self.launch_binding
             if binding.task_key != self.task_key:
                 raise ValueError("launch_binding task_key does not match ValidatorContext")
+            if self.attempt_id is not None and binding.attempt_id != self.attempt_id:
+                raise ValueError("launch_binding attempt_id does not match ValidatorContext")
             if binding.worktree_path.resolve() != self.worktree_path.resolve():
                 raise ValueError(
                     "launch_binding worktree_path does not match ValidatorContext"

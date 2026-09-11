@@ -331,7 +331,10 @@ class RuntimeAdmissionStore:
                 normalized_key,
                 connection=conn,
             )
-            if task["status"] not in {"queued", "blocked"}:
+            # `created` is the persisted spelling of the §12 display status
+            # `ready`; a Step 1 Ticket starts from it. SPEC §44: `blocked`
+            # and `paused` are never claimable.
+            if task["status"] not in {"created", "queued"}:
                 raise RuntimeAdmissionError(
                     f"Task {normalized_key} is not claimable from status {task['status']}"
                 )

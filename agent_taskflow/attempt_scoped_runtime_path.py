@@ -578,7 +578,7 @@ def install_attempt_scoped_runtime_path(
                 except (OSError, ValueError):
                     task = None
                     previous = None
-                if task is not None and task.status in {"queued", "blocked"}:
+                if task is not None and task.status in {"created", "queued"}:
                     latest = self.store._attempt_resources.latest_for_task(task.task_key)
                     self.store.configure_attempt_resources(
                         task.task_key,
