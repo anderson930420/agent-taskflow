@@ -15,18 +15,149 @@ Re-integration, PR outcomes, Merge)
 Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 
 Status: **implementation-complete, awaiting independent review.** The branch
-is up to date with `main` as of `79e568d` (merge `ff86d9a`), which carries
-Step 1 (#195), Step 3 (#197) and F1 (#199). `main` has since gained Step 4
-(#200, `a5fa8e2`), which is not merged — see "`main` advanced again"
-below. The independent review's
-blocking item is fixed (Ruling 18), Ruling 19 is implemented, and the
-review's four other fixes are made. No stop condition is open. Nothing is
-approved, merged to `main`, or finally complete.
+is up to date with `main` as of `a5fa8e2` (merge `8bb699b`), which carries
+Step 1 (#195), Step 3 (#197), F1 (#199) and Step 4 (#200). The review's
+blocking item is fixed (Ruling 18, with the three points Ruling 22
+accepted), Ruling 19 is implemented, and the review's four other fixes are
+made. No stop condition is open. Nothing is approved, merged to `main`, or
+finally complete.
 
 Step 1 was merged into this branch twice while it was still in review
 (`96a6cd3`, `9e09ad7`). `main` was then merged in twice: `5b362bc` brought
 the final Step 1 (#195), and `ff86d9a` brought Step 3 (#197) and F1 (#199).
-Every merge was a merge commit, never a rebase. PR #196 reviews Step 2.
+`8bb699b` then brought Step 4 (#200). Every merge was a merge commit, never
+a rebase. PR #196 reviews Step 2.
+
+---
+
+## Merge of origin/main (`a5fa8e2`) — Step 4 concurrency readiness (#200)
+
+**Ruling 23.** Step 4 was merged before the next review, because it changes
+`store.connect()`, which every Step 2 read and write goes through. The review
+has to see the code that will actually land.
+
+`origin/main` was merged into `task/v1-step2` as merge commit `8bb699b`
+(parents `25ba7ac` — Step 2 — and `a5fa8e2` — main). A normal merge, never a
+rebase.
+
+**Conflicts: none.** One file changed on both sides, `agent_taskflow/store.py`,
+and git merged it automatically. Step 4 changed `connect()`; Step 2's changes
+are its two migrations, in different hunks. The auto-merge was verified:
+
+- No line of `main`'s `store.py` is missing from the result.
+- The only pre-merge Step 2 lines that are gone are the two base lines of
+  `connect()` that Step 4 replaced: its old docstring, and the plain
+  `sqlite3.connect(...)` call.
+- `connect()` in the result is byte-identical to Step 4's.
+- `SCHEMA_MIGRATIONS` is the three legacy migrations plus Step 2's two, and
+  `tasks_ticket_fields` is still absent (ruling 4a).
+
+**Step 4's behaviour is unchanged.**
+
+- By construction: all 26 of Step 4's files other than `store.py` are
+  byte-identical to `origin/main`, and its `connect()` is carried exactly.
+  So the capacity check stays the first statement inside the claim
+  transaction, `max_concurrent_tasks` still defaults to 1 on every database,
+  raising it still requires rehearsal evidence, and the reaper contract is
+  unchanged.
+- Confirmed by its own tests: Step 4's 102 tests, run as their own part of
+  the suite, all pass. The files are `test_concurrency_atomic_claim`,
+  `test_concurrency_crash_recovery`, `test_concurrency_rehearsal`,
+  `test_concurrency_writes`, `test_lease_contention`,
+  `test_observed_step_guard`, `test_runtime_capacity` and
+  `test_sqlite_contention`.
+
+### What Step 4 changed in `store.connect()`, and whether Step 2 depends on it
+
+**The change.** `connect()` now opens every connection with
+`factory=ContentionObservingConnection`, from the new
+`agent_taskflow.sqlite_contention`, plus the import and a docstring.
+Everything else in `connect()` is unchanged: the `timeout`, `PRAGMA
+busy_timeout = 5000`, the WAL attempt, `foreign_keys = ON`, and
+`row_factory`.
+
+`ContentionObservingConnection` subclasses `sqlite3.Connection` and overrides
+only `execute`, `executemany` and `executescript`. Each calls `super()`,
+returns its cursor unchanged, and re-raises any error unchanged. It only adds
+process-local counters and log lines:
+
+- a *busy wait* — only for an explicit `BEGIN IMMEDIATE` or `BEGIN EXCLUSIVE`
+  that waited at least 1 ms;
+- a *busy timeout* — for `SQLITE_BUSY` or `SQLITE_LOCKED`.
+
+It writes nothing to the database and adds no retries.
+
+**Step 2 does not depend on any of the old behaviour.** Checked by reading
+every Step 2 module and by running it on the new class:
+
+- **Connection lifetime.** Step 2 opens one connection per operation with
+  `with closing(connect(...)) as conn, conn:`. The context manager is
+  inherited unchanged, so each block still commits on success and rolls
+  back on error. No Step 2 code calls `sqlite3.connect` directly; every
+  access goes through `store.connect()`.
+- **WAL.** Unchanged. Step 2 neither sets nor reads the journal mode. It is
+  still `wal` on a fresh database.
+- **`busy_timeout`.** Unchanged at 5000 ms. Step 2 sets no timeout of its
+  own; the one `timeout=` in Step 2 is the validator subprocess timeout.
+- **Retries.** Step 4 adds none. Step 2 neither retries nor catches
+  `OperationalError`, "database is locked" or "busy".
+- **Contention counters.** Step 2 does not read them. Its writes are implicit
+  deferred transactions with no explicit `BEGIN`, so they show up in the
+  counters only if they time out. That is observability only; behaviour does
+  not change.
+- **The one thing Step 2 does rely on:** `cursor.rowcount` after
+  `INSERT OR IGNORE` and `DELETE` in its per-repo integration lock. That
+  cursor comes straight from `super().execute()`. Run on the new class:
+  acquire `True`, second acquire `False`, wrong-owner release `False`,
+  release `True` — unchanged.
+- **Step 2's schema migration** uses `executescript`, and it builds all of
+  Step 2's tables through the overridden `executescript`.
+
+### Step 4 rehearsal with Step 2's code present — 16/16
+
+`scripts/run_concurrency_rehearsal.py --output-dir /tmp/step2-rehearsal-MjWJLT`,
+on a fresh, empty throwaway directory. The script creates its disposable
+databases there and never opens the default state database. Result: exit 0,
+`ok: true`, `all_checks_passed: true`, gate `passed`, **16/16 checks passed**,
+evidence recorded against `repo_sha` `8bb699b` (this merge), and no stderr.
+
+### Stop conditions this round — none fired
+
+No conflict; no test went red; Step 4's behaviour is unchanged; the rehearsal
+passes.
+
+### Test counts for this merge
+
+| | `pytest tests -q` |
+| --- | --- |
+| Before (`ff86d9a`; `28cc209` and `25ba7ac` changed only this file) | `5083 passed, 8 skipped, 0 failed` |
+| After (`8bb699b`) | `5185 passed, 8 skipped, 0 failed` |
+
+Run in six parts, each under the 600 s tool limit, with Step 4's tests as a
+part of their own so that nothing ran twice. The parts add up to the whole:
+
+    Step 4's 8 new test files       102 passed
+    test_[a-c]*.py (excl. Step 4)   817 passed
+    test_[d-l]*.py (excl. Step 4)   871 passed
+    test_[m-q]*.py (excl. Step 4)   986 passed
+    test_r*.py     (excl. Step 4)   871 passed, 8 skipped
+    test_[s-z]*.py (excl. Step 4)  1538 passed
+    -------------------------------------------
+                                   5185 passed, 8 skipped = 5193 collected
+
+**No test went red.** The +102 is exactly Step 4's tests. Step 4's one-line
+fixture change to `test_project_class_controls` added no test.
+
+`python -m compileall -q agent_taskflow scripts tests`, from the repository
+root: exit 0, no "Can't list" or error lines.
+
+Repo validators — `agent_taskflow.cli.local_validation`, exit 0. Both repo
+validators passed: workflow contract validation and workflow policy
+validation. So did the Python environment dependencies check, the Mission
+Control and PiExecutor golden-path smokes, unit tests (`Ran 5191 tests`,
+`OK (skipped=8)`, +102 over the last run, the same +102 as pytest) and
+compileall. `openspec validate` was skipped: not on PATH, an optional check,
+pre-existing.
 
 ---
 
@@ -64,9 +195,7 @@ this end to end. Branch strings reach the store unchecked from `POST
   database-only step — and before the fetch, the first git command. A refusal
   runs no git at all, pushes nothing, records no `integrated_base_sha`, and
   ends in `needs_decision` via §27.2.1 with an `integration_blocked` event.
-- *My addition, flagged for review:* `HEAD` is refused as a task branch too.
-  It is never a Ticket's branch, and pushing it would publish whatever the
-  worktree has checked out.
+- `HEAD` is refused as a task branch too — accepted by Ruling 22b below.
 
 **Tests.**
 
@@ -95,6 +224,23 @@ which puts the working directory on `sys.path`, so it tests this branch):
     pushes: []
     origin/main before: 4a78f49ba29b after: 4a78f49ba29b
     origin/main advanced by the integration push: False
+
+### Ruling 22 — the three choices beyond Ruling 18's text, accepted
+
+All three were accepted exactly as implemented, and they stay:
+
+- **a. Only one prefix is stripped.** `normalize_branch_ref` removes a single
+  `refs/heads/` or `heads/`. To git, `refs/heads/refs/heads/main` is a
+  genuinely different branch, one literally named `refs/heads/main`.
+  Treating it as `main` would be wrong.
+- **b. `HEAD` is refused as a task branch.** It is not a branch name, and
+  pushing it would resolve to whatever the worktree happens to have checked
+  out.
+- **c. `refs/heads/<the Ticket's own task branch>` is accepted.** It
+  normalizes to the Ticket's own branch, which is exactly what 18b requires.
+
+`master` and `trunk` stay in the protected set, alongside main and the base
+branch.
 
 ### Ruling 19 — no git failure may leave a Ticket in `integrating`
 
@@ -186,25 +332,9 @@ Step 2's §32.1 public PR fields only when `task_pr_state` exists (it checks
 run together for the first time. Every Step 3 test passes, including its
 schema-diff gate.
 
-### `main` advanced again — Step 4 (#200) not merged
-
-After this round's instruction named `main` as `79e568d`, `main` gained one
-more commit: `a5fa8e2` — *V1 Step 4: concurrency readiness (SPEC §19, §42
-Step 4) (#200)*, 27 files and about 5,500 lines. It is **not** merged here;
-the branch contains exactly the `79e568d` named. Reasons:
-
-- The instruction named `79e568d`.
-- A merge commit cannot be undone on this branch without a force-push, which
-  is forbidden.
-- Unlike Step 3, it overlaps Step 2 in one file, `agent_taskflow/store.py`.
-  Step 4 changes `connect()` so that it opens connections through
-  `sqlite_contention.ContentionObservingConnection`, plus one import. Step 2's
-  changes in that file are its two migrations, in different hunks, so a merge
-  will probably be textually clean. But every Step 2 read and write goes
-  through `connect()`, so Step 2 would run on Step 4's connection factory for
-  the first time. That needs the full suite, not an assumption.
-
-A follow-up merge under the same rules would bring it in.
+Step 4 (#200) landed on `main` after this merge's instruction. It was
+merged in the following round, in `8bb699b` — see "Merge of origin/main
+(`a5fa8e2`)" above.
 
 ### Test counts for this merge
 
