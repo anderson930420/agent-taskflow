@@ -407,253 +407,287 @@ def _integrate_under_lock(
             **extra,
         )
 
-    # -- fetch and resolve the latest target (§44) -------------------------
+    # Review Ruling 18 — refuse an unpushable task branch as soon as
+    # integration reads it, before any git command runs. A branch recorded as
+    # `refs/heads/main` or `heads/main` names main itself; letting it through
+    # would push to the target branch.
     try:
-        git_ops.fetch(worktree_path, remote=request.remote, log=log)
-        target_sha = git_ops.resolve_target_sha(
-            worktree_path, request.remote, request.target_branch, log=log
+        git_ops.assert_task_branch_pushable(
+            worktree.branch, base_branch=request.target_branch
         )
     except IntegrationGitError as exc:
-        return stop_for_decision(f"Could not resolve the latest target: {exc}")
-
-    behind = git_ops.behind_count(worktree_path, "HEAD", target_ref, log=log)
-
-    # -- update against the latest target ---------------------------------
-    conflict_detected = False
-    conflict_resolved = False
-    already_up_to_date = False
-
-    if mode == "initial":
-        outcome = git_ops.rebase_onto_target(worktree_path, target_ref, log=log)
-        conflicted_paths = outcome.conflicted_paths
-        succeeded = outcome.ok
-        abort = git_ops.abort_rebase
-    else:
-        outcome = git_ops.merge_target_into_branch(worktree_path, target_ref, log=log)
-        conflicted_paths = outcome.conflicted_paths
-        succeeded = outcome.ok
-        already_up_to_date = outcome.already_up_to_date
-        abort = git_ops.abort_merge
-
-    if not succeeded:
-        if not conflicted_paths:
-            abort(worktree_path, log=log)
-            return stop_for_decision(
-                f"Integration update against {target_ref} failed: {outcome.output}"
-            )
-
-        conflict_detected = True
-        hunks = tuple(git_ops.conflict_hunks(worktree_path, log=log))
-        head_before_resolution = git_ops.head_sha(worktree_path, log=log)
-        resolution = resolve_conflicts(
-            ConflictResolutionRequest(
-                task_key=request.task_key,
-                prompt=task.title or request.task_key,
-                worktree_path=worktree_path,
-                conflict_hunks=hunks,
-                task_diff=git_ops.diff_context(worktree_path, target_ref, log=log),
-                target_ref=target_ref,
-                files=conflicted_paths,
-            ),
-            resolver=request.conflict_resolver,
-            integration_store=integration,
-            integration_run_id=run_id,
-        )
-        conflict_resolved = resolution.resolved
-
-        if not conflict_resolved:
-            # §27.2.1 — the resolver could not produce a tree. No auto retry.
-            if git_ops.in_progress_operation(worktree_path):
-                abort(worktree_path, log=log)
-            return stop_for_decision(
-                "Integration conflict could not be resolved into a conflict-free "
-                f"tree: {resolution.explanation}",
-                conflict_detected=True,
-                conflict_resolved=False,
-                behind_count=behind,
-            )
-
-        # Review blocker B2 — a resolver's claim is never trusted on its own.
-        # Before validators run, the control plane verifies the tree: nothing
-        # in progress, a clean worktree, no conflict markers, a new HEAD, and
-        # the latest target in HEAD's history. Any failure stops here: nothing
-        # is pushed and integrated_base_sha is not recorded.
-        verification = git_ops.verify_conflict_resolution(
-            worktree_path,
-            head_before=head_before_resolution,
-            target_sha=target_sha,
-            conflicted_files=conflicted_paths,
-            log=log,
-        )
-        integration.record_conflict_verification(
-            request.task_key,
-            integration_run_id=run_id,
-            checks=verification.to_list(),
-        )
-        if not verification.passed:
-            if git_ops.in_progress_operation(worktree_path):
-                abort(worktree_path, log=log)
-            return stop_for_decision(
-                "AI conflict resolution failed deterministic verification "
-                f"({', '.join(verification.failed)}): {resolution.explanation}",
-                conflict_detected=True,
-                conflict_resolved=False,
-                resolution_checks_failed=verification.failed,
-                behind_count=behind,
-            )
-
-    # -- validators (§29) — every integration, including re-integration ----
-    branch_sha = git_ops.head_sha(worktree_path, log=log)
-    diff_context = git_ops.diff_context(worktree_path, target_ref, log=log)
-    changed = git_ops.changed_files(worktree_path, target_ref, log=log)
-
-    report = run_integration_validators(
-        task_key=request.task_key,
-        worktree_path=worktree_path,
-        artifact_dir=task.artifact_dir,
-        specs=request.validator_specs,
-        branch_sha=branch_sha,
-        target_sha=target_sha,
-        diff_context=diff_context,
-        integration_run_id=run_id,
-        integration_store=integration,
-    )
-    if not report.passed:
-        # §29.1 — red validators stop for decision. No auto retry, no triage.
         return stop_for_decision(
-            report.summary,
+            f"Refusing to integrate before running any git command: {exc}"
+        )
+
+    def git_phase() -> IntegrationResult:
+        """Everything from the fetch to the review hand-off (§23.1)."""
+        # -- fetch and resolve the latest target (§44) -------------------------
+        try:
+            git_ops.fetch(worktree_path, remote=request.remote, log=log)
+            target_sha = git_ops.resolve_target_sha(
+                worktree_path, request.remote, request.target_branch, log=log
+            )
+        except IntegrationGitError as exc:
+            return stop_for_decision(f"Could not resolve the latest target: {exc}")
+
+        behind = git_ops.behind_count(worktree_path, "HEAD", target_ref, log=log)
+
+        # -- update against the latest target ---------------------------------
+        conflict_detected = False
+        conflict_resolved = False
+        already_up_to_date = False
+
+        if mode == "initial":
+            outcome = git_ops.rebase_onto_target(worktree_path, target_ref, log=log)
+            conflicted_paths = outcome.conflicted_paths
+            succeeded = outcome.ok
+            abort = git_ops.abort_rebase
+        else:
+            outcome = git_ops.merge_target_into_branch(worktree_path, target_ref, log=log)
+            conflicted_paths = outcome.conflicted_paths
+            succeeded = outcome.ok
+            already_up_to_date = outcome.already_up_to_date
+            abort = git_ops.abort_merge
+
+        if not succeeded:
+            if not conflicted_paths:
+                abort(worktree_path, log=log)
+                return stop_for_decision(
+                    f"Integration update against {target_ref} failed: {outcome.output}"
+                )
+
+            conflict_detected = True
+            hunks = tuple(git_ops.conflict_hunks(worktree_path, log=log))
+            head_before_resolution = git_ops.head_sha(worktree_path, log=log)
+            resolution = resolve_conflicts(
+                ConflictResolutionRequest(
+                    task_key=request.task_key,
+                    prompt=task.title or request.task_key,
+                    worktree_path=worktree_path,
+                    conflict_hunks=hunks,
+                    task_diff=git_ops.diff_context(worktree_path, target_ref, log=log),
+                    target_ref=target_ref,
+                    files=conflicted_paths,
+                ),
+                resolver=request.conflict_resolver,
+                integration_store=integration,
+                integration_run_id=run_id,
+            )
+            conflict_resolved = resolution.resolved
+
+            if not conflict_resolved:
+                # §27.2.1 — the resolver could not produce a tree. No auto retry.
+                if git_ops.in_progress_operation(worktree_path):
+                    abort(worktree_path, log=log)
+                return stop_for_decision(
+                    "Integration conflict could not be resolved into a conflict-free "
+                    f"tree: {resolution.explanation}",
+                    conflict_detected=True,
+                    conflict_resolved=False,
+                    behind_count=behind,
+                )
+
+            # Review blocker B2 — a resolver's claim is never trusted on its own.
+            # Before validators run, the control plane verifies the tree: nothing
+            # in progress, a clean worktree, no conflict markers, a new HEAD, and
+            # the latest target in HEAD's history. Any failure stops here: nothing
+            # is pushed and integrated_base_sha is not recorded.
+            verification = git_ops.verify_conflict_resolution(
+                worktree_path,
+                head_before=head_before_resolution,
+                target_sha=target_sha,
+                conflicted_files=conflicted_paths,
+                log=log,
+            )
+            integration.record_conflict_verification(
+                request.task_key,
+                integration_run_id=run_id,
+                checks=verification.to_list(),
+            )
+            if not verification.passed:
+                if git_ops.in_progress_operation(worktree_path):
+                    abort(worktree_path, log=log)
+                return stop_for_decision(
+                    "AI conflict resolution failed deterministic verification "
+                    f"({', '.join(verification.failed)}): {resolution.explanation}",
+                    conflict_detected=True,
+                    conflict_resolved=False,
+                    resolution_checks_failed=verification.failed,
+                    behind_count=behind,
+                )
+
+        # -- validators (§29) — every integration, including re-integration ----
+        branch_sha = git_ops.head_sha(worktree_path, log=log)
+        diff_context = git_ops.diff_context(worktree_path, target_ref, log=log)
+        changed = git_ops.changed_files(worktree_path, target_ref, log=log)
+
+        report = run_integration_validators(
+            task_key=request.task_key,
+            worktree_path=worktree_path,
+            artifact_dir=task.artifact_dir,
+            specs=request.validator_specs,
+            branch_sha=branch_sha,
+            target_sha=target_sha,
+            diff_context=diff_context,
+            integration_run_id=run_id,
+            integration_store=integration,
+        )
+        if not report.passed:
+            # §29.1 — red validators stop for decision. No auto retry, no triage.
+            return stop_for_decision(
+                report.summary,
+                validation_report=report,
+                conflict_detected=conflict_detected,
+                conflict_resolved=conflict_resolved,
+                behind_count=behind,
+            )
+
+        # -- hints, PR body ----------------------------------------------------
+        reintegration_count = pr_state["reintegration_count"] or 0
+        projected_count = reintegration_count + (1 if mode == "reintegration" else 0)
+        hints = tuple(
+            build_reviewer_hints(
+                ai_resolved_conflict=conflict_resolved,
+                reintegration_count=projected_count,
+                behind_count=behind,
+                changed_files=changed,
+            )
+        )
+        body = _pr_body(
+            request=request,
+            task=task,
+            mode=mode,
+            hints=hints,
+            previous_base=previous_base,
+            current_base=target_sha,
+        )
+        title = request.title or (task.title or request.task_key)
+
+        # -- push and publish --------------------------------------------------
+        should_push = not (mode == "reintegration" and already_up_to_date) or (
+            request.push_no_op_reintegration
+        )
+        if should_push:
+            try:
+                git_ops.push_branch(
+                    worktree_path,
+                    remote=request.remote,
+                    branch=worktree.branch,
+                    base_branch=request.target_branch,
+                    log=log,
+                )
+            except IntegrationGitError as exc:
+                return stop_for_decision(f"Could not publish the task branch: {exc}")
+
+        adapter = github or GitHubPrAdapter(request.repo)
+        try:
+            if mode == "initial":
+                snapshot = adapter.create_pr(
+                    base=request.target_branch,
+                    head=worktree.branch,
+                    title=title,
+                    body=body,
+                    cwd=worktree_path,
+                    draft=request.draft,
+                )
+            else:
+                snapshot = adapter.update_pr(
+                    pr_number=int(pr_state["pr_number"]),
+                    cwd=worktree_path,
+                    body=body,
+                )
+        except GitHubPrError as exc:
+            return stop_for_decision(f"GitHub PR operation failed: {exc}")
+
+        # -- record integrated_base_sha (§23.1) --------------------------------
+        integration.update_pr_state(
+            request.task_key,
+            pr_number=snapshot.number,
+            pr_url=snapshot.url,
+            pr_state=snapshot.state or "open",
+            pr_head_sha=branch_sha,
+            integrated_base_sha=target_sha,
+            reintegration_required=False,
+        )
+        if mode == "reintegration":
+            projected_count = integration.increment_reintegration_count(request.task_key)
+        integration.update_integration_state(
+            request.task_key,
+            previous_integrated_base_sha=previous_base,
+            new_target_sha=target_sha,
+            behind_count=behind,
+            last_integration_status="integrated",
+        )
+        remove_from_queue(integration, request.task_key)
+
+        # -- release the lock, *then* enter review (§23.1, §44) ----------------
+        lock.__exit__(None, None, None)
+
+        task_store.update_task_status(
+            request.task_key,
+            schema.NEEDS_REVIEW,
+            source=SOURCE,
+            message=f"Integration run {run_id} complete; awaiting human review",
+            expected_current_status=schema.INTEGRATING,
+        )
+        task_store.record_task_event(
+            request.task_key,
+            "integration_completed",
+            SOURCE,
+            message=f"Integration run {run_id} complete ({mode})",
+            payload={
+                "integration_run_id": run_id,
+                "mode": mode,
+                "pr_number": snapshot.number,
+                "integrated_base_sha": target_sha,
+                "reintegration_count": projected_count,
+            },
+        )
+
+        return _finish(
+            request,
+            task_store=task_store,
+            integration=integration,
+            ok=True,
+            status="integrated",
+            mode=mode,
+            final_task_status=schema.NEEDS_REVIEW,
+            summary=(
+                f"Integrated against {target_ref}@{target_sha[:12]}; "
+                f"PR #{snapshot.number} is awaiting human review"
+            ),
+            run_id=run_id,
+            log=log,
+            previous_base=previous_base,
+            pr_state=integration.get_pr_state(request.task_key),
+            task=task,
             validation_report=report,
             conflict_detected=conflict_detected,
             conflict_resolved=conflict_resolved,
             behind_count=behind,
+            already_up_to_date=already_up_to_date,
+            hints=hints,
         )
 
-    # -- hints, PR body ----------------------------------------------------
-    reintegration_count = pr_state["reintegration_count"] or 0
-    projected_count = reintegration_count + (1 if mode == "reintegration" else 0)
-    hints = tuple(
-        build_reviewer_hints(
-            ai_resolved_conflict=conflict_resolved,
-            reintegration_count=projected_count,
-            behind_count=behind,
-            changed_files=changed,
-        )
-    )
-    body = _pr_body(
-        request=request,
-        task=task,
-        mode=mode,
-        hints=hints,
-        previous_base=previous_base,
-        current_base=target_sha,
-    )
-    title = request.title or (task.title or request.task_key)
-
-    # -- push and publish --------------------------------------------------
-    should_push = not (mode == "reintegration" and already_up_to_date) or (
-        request.push_no_op_reintegration
-    )
-    if should_push:
-        try:
-            git_ops.push_branch(
-                worktree_path,
-                remote=request.remote,
-                branch=worktree.branch,
-                base_branch=request.target_branch,
-                log=log,
-            )
-        except IntegrationGitError as exc:
-            return stop_for_decision(f"Could not publish the task branch: {exc}")
-
-    adapter = github or GitHubPrAdapter(request.repo)
+    # Review Ruling 19 — no git failure may leave the Ticket in `integrating`.
+    # Every git call in the phase above either handles its own failure or
+    # lands here, and ends in needs_decision via §27.2.1 with an audited
+    # integration_blocked event. Remapping infrastructure failures to §29.2
+    # `failed` is Step 5's job; see docs/v1/handoff-step2.md.
     try:
-        if mode == "initial":
-            snapshot = adapter.create_pr(
-                base=request.target_branch,
-                head=worktree.branch,
-                title=title,
-                body=body,
-                cwd=worktree_path,
-                draft=request.draft,
+        return git_phase()
+    except IntegrationGitError as exc:
+        operation = git_ops.in_progress_operation(worktree_path)
+        if operation is not None:
+            abort_operation = (
+                git_ops.abort_merge if operation == "merge" else git_ops.abort_rebase
             )
-        else:
-            snapshot = adapter.update_pr(
-                pr_number=int(pr_state["pr_number"]),
-                cwd=worktree_path,
-                body=body,
-            )
-    except GitHubPrError as exc:
-        return stop_for_decision(f"GitHub PR operation failed: {exc}")
-
-    # -- record integrated_base_sha (§23.1) --------------------------------
-    integration.update_pr_state(
-        request.task_key,
-        pr_number=snapshot.number,
-        pr_url=snapshot.url,
-        pr_state=snapshot.state or "open",
-        pr_head_sha=branch_sha,
-        integrated_base_sha=target_sha,
-        reintegration_required=False,
-    )
-    if mode == "reintegration":
-        projected_count = integration.increment_reintegration_count(request.task_key)
-    integration.update_integration_state(
-        request.task_key,
-        previous_integrated_base_sha=previous_base,
-        new_target_sha=target_sha,
-        behind_count=behind,
-        last_integration_status="integrated",
-    )
-    remove_from_queue(integration, request.task_key)
-
-    # -- release the lock, *then* enter review (§23.1, §44) ----------------
-    lock.__exit__(None, None, None)
-
-    task_store.update_task_status(
-        request.task_key,
-        schema.NEEDS_REVIEW,
-        source=SOURCE,
-        message=f"Integration run {run_id} complete; awaiting human review",
-        expected_current_status=schema.INTEGRATING,
-    )
-    task_store.record_task_event(
-        request.task_key,
-        "integration_completed",
-        SOURCE,
-        message=f"Integration run {run_id} complete ({mode})",
-        payload={
-            "integration_run_id": run_id,
-            "mode": mode,
-            "pr_number": snapshot.number,
-            "integrated_base_sha": target_sha,
-            "reintegration_count": projected_count,
-        },
-    )
-
-    return _finish(
-        request,
-        task_store=task_store,
-        integration=integration,
-        ok=True,
-        status="integrated",
-        mode=mode,
-        final_task_status=schema.NEEDS_REVIEW,
-        summary=(
-            f"Integrated against {target_ref}@{target_sha[:12]}; "
-            f"PR #{snapshot.number} is awaiting human review"
-        ),
-        run_id=run_id,
-        log=log,
-        previous_base=previous_base,
-        pr_state=integration.get_pr_state(request.task_key),
-        task=task,
-        validation_report=report,
-        conflict_detected=conflict_detected,
-        conflict_resolved=conflict_resolved,
-        behind_count=behind,
-        already_up_to_date=already_up_to_date,
-        hints=hints,
-    )
+            try:
+                abort_operation(worktree_path, log=log)
+            except IntegrationGitError:
+                pass  # the stop below is recorded either way
+        return stop_for_decision(f"A git operation failed during integration: {exc}")
 
 
 def _pr_body(

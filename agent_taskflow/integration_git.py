@@ -36,6 +36,8 @@ __all__ = [
     "abort_merge",
     "abort_rebase",
     "assert_push_allowed",
+    "assert_task_branch_pushable",
+    "normalize_branch_ref",
     "behind_count",
     "build_push_command",
     "changed_files",
@@ -169,6 +171,59 @@ class PushOutcome:
     force_pushed: bool = False
 
 
+def normalize_branch_ref(name: str | None) -> str:
+    """Strip surrounding whitespace and one ``refs/heads/`` or ``heads/`` prefix.
+
+    Review Ruling 18: git resolves ``refs/heads/main`` and ``heads/main`` to the
+    same branch as ``main``, so branch names are only ever compared after this
+    normalization. Exactly one prefix is removed, because git reads
+    ``refs/heads/refs/heads/main`` as a *different* branch literally named
+    ``refs/heads/main``. Case is kept as-is: git refs are case-sensitive.
+    """
+    value = (name or "").strip()
+    for prefix in ("refs/heads/", "heads/"):
+        if value.startswith(prefix):
+            return value[len(prefix) :]
+    return value
+
+
+def _protected_names(base_branch: str | None) -> set[str]:
+    names = {normalize_branch_ref(name) for name in PROTECTED_BRANCHES}
+    if base_branch and base_branch.strip():
+        names.add(normalize_branch_ref(base_branch))
+    # HEAD is never a Ticket's branch, and pushing it would publish whatever
+    # the worktree happens to have checked out.
+    names.add("HEAD")
+    return names
+
+
+def assert_task_branch_pushable(
+    task_branch: str | None, *, base_branch: str | None = None
+) -> str:
+    """Return the Ticket's normalized task branch, or refuse it (Ruling 18).
+
+    Refused: an empty value; anything that is not a simple branch name; and
+    any value that, once normalized, is main, another protected branch, the
+    base branch or HEAD. The controller calls this as soon as integration
+    reads the branch, before any git command runs.
+    """
+    raw = (task_branch or "").strip()
+    if not raw:
+        raise IntegrationGitError(
+            "Push refused: no task branch was declared. The only permitted push "
+            f"is `git push {ALLOWED_PUSH_REMOTE} <task-branch>`."
+        )
+    branch = normalize_branch_ref(raw)
+    if not branch or not _TASK_BRANCH_RE.fullmatch(raw) or ".." in raw:
+        raise IntegrationGitError(f"Push refused: {raw!r} is not a simple task branch")
+    if branch in _protected_names(base_branch):
+        raise IntegrationGitError(
+            f"Push refused: task branch {raw!r} resolves to {branch!r}, the target "
+            "or a protected branch. Only a human merging on GitHub may advance it."
+        )
+    return branch
+
+
 def assert_push_allowed(
     argv: Sequence[str],
     *,
@@ -185,36 +240,40 @@ def assert_push_allowed(
     flags such as ``-vf``), ``--mirror``, ``--all``, ``--tags``, ``--delete``,
     any refspec containing ``:`` (so ``HEAD:<anything>``) or starting with
     ``+``, any other remote or branch, and main or the base branch.
+
+    Review Ruling 18: branch names are compared only after
+    :func:`normalize_branch_ref`, for the task branch, the push target and the
+    protected names alike, so ``refs/heads/main`` and ``heads/main`` are main.
+    The target must normalize to the Ticket's own task branch.
     """
     parts = [str(part) for part in argv]
     rendered = " ".join(parts)
     if parts[:2] != ["git", "push"]:
         raise IntegrationGitError(f"Not a git push: {rendered!r}")
 
-    branch = (task_branch or "").strip()
-    if not branch:
-        raise IntegrationGitError(
-            f"Push refused: no task branch was declared for {rendered!r}. The only "
-            f"permitted push is `git push {ALLOWED_PUSH_REMOTE} <task-branch>`."
-        )
-    if not _TASK_BRANCH_RE.fullmatch(branch) or ".." in branch:
-        raise IntegrationGitError(f"Push refused: {branch!r} is not a simple task branch")
-    protected = set(PROTECTED_BRANCHES)
-    if base_branch and base_branch.strip():
-        protected.add(base_branch.strip())
-    if branch in protected:
-        raise IntegrationGitError(
-            f"Push refused: {branch!r} is the target or a protected branch. Only a "
-            "human merging on GitHub may advance it."
-        )
+    branch = assert_task_branch_pushable(task_branch, base_branch=base_branch)
 
     rest = parts[2:]
     if rest[:1] == ["-u"]:
         rest = rest[1:]
-    if rest != [ALLOWED_PUSH_REMOTE, branch]:
+    if len(rest) != 2 or rest[0] != ALLOWED_PUSH_REMOTE:
         raise IntegrationGitError(
             f"Push refused: {rendered!r}. The only permitted push is "
-            f"`git push {ALLOWED_PUSH_REMOTE} {branch}` (optional -u)."
+            f"`git push {ALLOWED_PUSH_REMOTE} <task-branch>` (optional -u)."
+        )
+    target = rest[1]
+    if target != target.strip() or target.startswith(("-", "+")) or ":" in target:
+        raise IntegrationGitError(f"Push refused: {target!r} is not a plain branch refspec")
+    normalized_target = normalize_branch_ref(target)
+    if normalized_target in _protected_names(base_branch):
+        raise IntegrationGitError(
+            f"Push refused: target {target!r} resolves to {normalized_target!r}, the "
+            "target or a protected branch."
+        )
+    if normalized_target != branch:
+        raise IntegrationGitError(
+            f"Push refused: {rendered!r}. The target must be the Ticket's own task "
+            f"branch {branch!r}."
         )
 
 

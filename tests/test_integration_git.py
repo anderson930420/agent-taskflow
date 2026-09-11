@@ -353,5 +353,75 @@ class NonInteractiveGitTests(IntegrationGitTestCase):
         self.assertIsNone(git_ops.in_progress_operation(self.worktree))
 
 
+
+class BranchNormalizationTests(IntegrationGitTestCase):
+    """Review Ruling 18 — branch names are compared only after normalization."""
+
+    def test_normalize_strips_whitespace_and_exactly_one_heads_prefix(self) -> None:
+        for raw, expected in (
+            ("main", "main"),
+            ("refs/heads/main", "main"),
+            ("heads/main", "main"),
+            ("  refs/heads/main\t", "main"),
+            ("\nheads/develop\n", "develop"),
+            ("refs/heads/task/AT-601", "task/AT-601"),
+            # git reads these as other branches, literally named
+            # `refs/heads/main` and `heads/main`, so only one prefix goes.
+            ("refs/heads/refs/heads/main", "refs/heads/main"),
+            ("heads/heads/main", "heads/main"),
+            # Case is kept: git refs are case-sensitive.
+            ("refs/heads/Main", "Main"),
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(git_ops.normalize_branch_ref(raw), expected)
+
+    def test_a_task_branch_naming_main_or_the_base_branch_in_any_listed_form_is_refused(self) -> None:
+        for task_branch in (
+            "refs/heads/main",
+            "heads/main",
+            "refs/heads/develop",
+            "heads/develop",
+            "develop",
+            "  main  ",
+            "  refs/heads/main\t",
+            "\nheads/develop\n",
+            "refs/heads/master",
+            "heads/trunk",
+            "HEAD",
+        ):
+            with self.subTest(task_branch=task_branch):
+                with self.assertRaises(IntegrationGitError):
+                    git_ops.assert_task_branch_pushable(task_branch, base_branch="develop")
+                with self.assertRaises(IntegrationGitError):
+                    git_ops.assert_push_allowed(
+                        ["git", "push", "origin", task_branch.strip()],
+                        task_branch=task_branch,
+                        base_branch="develop",
+                    )
+
+    def test_a_push_target_naming_main_is_refused_even_for_a_legitimate_task_branch(self) -> None:
+        for target in ("refs/heads/main", "heads/main", "refs/heads/develop", "heads/develop"):
+            with self.subTest(target=target):
+                with self.assertRaises(IntegrationGitError):
+                    git_ops.assert_push_allowed(
+                        ["git", "push", "origin", target],
+                        task_branch=self.branch,
+                        base_branch="develop",
+                    )
+
+    def test_the_target_must_normalize_to_the_tickets_own_task_branch(self) -> None:
+        for target in (self.branch, f"refs/heads/{self.branch}", f"heads/{self.branch}"):
+            with self.subTest(allowed=target):
+                git_ops.assert_push_allowed(
+                    ["git", "push", "origin", target], task_branch=self.branch, base_branch="main"
+                )
+        for target in ("task/another-ticket", "refs/heads/task/another-ticket", f" {self.branch}"):
+            with self.subTest(refused=target):
+                with self.assertRaises(IntegrationGitError):
+                    git_ops.assert_push_allowed(
+                        ["git", "push", "origin", target], task_branch=self.branch, base_branch="main"
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

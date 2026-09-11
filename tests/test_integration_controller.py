@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -753,6 +754,106 @@ class ResolutionVerificationTests(ControllerTestCase):
         self.assertTrue(resolver.rebase_dir_present)
         self.assert_stopped_by(result, git_ops.CHECK_NO_OPERATION_IN_PROGRESS)
         self.assertIsNone(self.integration.get_pr_state("AT-101")["integrated_base_sha"])
+        self.assertIsNone(git_ops.in_progress_operation(worktree))
+
+
+
+class ProtectedBranchNormalizationTests(ControllerTestCase):
+    """Review blocking item / Ruling 18 — a task branch recorded as
+    ``refs/heads/main`` (or any other spelling of main or the base branch) is
+    refused as soon as integration reads it, before any git command runs:
+    nothing is pushed, no integrated_base_sha is recorded, and the Ticket ends
+    in needs_decision via §27.2.1."""
+
+    def _integrate_with_recorded_branch(self, branch: str, *, target_branch: str = "main"):
+        from v1_step2_fixtures import git as raw_git
+
+        self.make_task("AT-101")
+        # As in the reviewer's reproduction: the shared clone's local main
+        # holds a commit origin lacks, so any push to main would be visible.
+        (self.fixture.repo / "local.txt").write_text("unpushed\n", encoding="utf-8")
+        raw_git(self.fixture.repo, "add", "-A")
+        raw_git(self.fixture.repo, "commit", "-m", "unpushed local commit on main")
+        recorded = self.store.get_task_worktree("AT-101")
+        self.store.upsert_task_worktree(
+            TaskWorktreeRecord(
+                task_key="AT-101", repo_path=recorded.repo_path,
+                worktree_path=recorded.worktree_path, branch=branch,
+                base_branch=target_branch, base_sha=recorded.base_sha, status="active",
+            )
+        )
+        origin_main_before = self.fixture.target_sha()
+        result = self.integrate("AT-101", target_branch=target_branch)
+        return result, origin_main_before
+
+    def assert_refused_before_any_git(self, result, origin_main_before: str) -> None:
+        self.assertEqual(result.status, "needs_decision", result.summary)
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
+        self.assertEqual(result.git_commands, ())
+        self.assertEqual(self.gh_runner.calls, [])
+        self.assertEqual(self.fixture.target_sha(), origin_main_before)
+        self.assertIsNone(self.integration.get_pr_state("AT-101")["integrated_base_sha"])
+        self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
+        blocked = [e for e in self.store.list_task_events("AT-101") if e.event_type == "integration_blocked"]
+        self.assertEqual(len(blocked), 1)
+
+    def test_the_reviewers_refs_heads_main_scenario_pushes_nothing(self) -> None:
+        result, before = self._integrate_with_recorded_branch("refs/heads/main")
+        self.assert_refused_before_any_git(result, before)
+        self.assertIn("refs/heads/main", result.summary)
+
+    def test_each_listed_spelling_of_main_or_the_base_branch_pushes_nothing(self) -> None:
+        for branch, target_branch in (
+            ("heads/main", "main"),
+            ("refs/heads/develop", "develop"),
+            ("heads/develop", "develop"),
+            ("  refs/heads/main  ", "main"),
+        ):
+            with self.subTest(branch=branch, target_branch=target_branch):
+                self.tearDown()
+                self.setUp()
+                result, before = self._integrate_with_recorded_branch(
+                    branch, target_branch=target_branch
+                )
+                self.assert_refused_before_any_git(result, before)
+
+
+class GitFailureGuardTests(ControllerTestCase):
+    """Review Ruling 19 — no git failure may leave a Ticket in `integrating`.
+    A failure ends in needs_decision via §27.2.1 with an audited
+    integration_blocked event. (Remapping to §29.2 `failed` is Step 5's.)"""
+
+    def assert_stopped_not_stuck(self, result, message: str) -> None:
+        self.assertEqual(result.status, "needs_decision", result.summary)
+        self.assertEqual(self.status_of("AT-101"), schema.NEEDS_DECISION)
+        self.assertNotEqual(self.status_of("AT-101"), schema.INTEGRATING)
+        self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
+        self.assertEqual([c for c in result.git_commands if c[:2] == ("git", "push")], [])
+        self.assertEqual(self.gh_runner.calls, [])
+        self.assertIsNone(self.integration.get_pr_state("AT-101")["integrated_base_sha"])
+        blocked = [e for e in self.store.list_task_events("AT-101") if e.event_type == "integration_blocked"]
+        self.assertEqual(len(blocked), 1)
+        self.assertIn(message, blocked[0].message)
+
+    def test_a_behind_count_failure_ends_in_needs_decision_not_integrating(self) -> None:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
+        with mock.patch.object(
+            git_ops, "behind_count", side_effect=git_ops.IntegrationGitError("simulated rev-list failure")
+        ):
+            result = self.integrate("AT-101")
+        self.assert_stopped_not_stuck(result, "simulated rev-list failure")
+
+    def test_a_git_failure_mid_conflict_aborts_the_rebase_and_ends_in_needs_decision(self) -> None:
+        worktree = self.make_task("AT-101")
+        self.fixture.commit_in(worktree, "shared.txt", "task-side\n", "task edits shared")
+        self.fixture.advance_target("shared.txt", "target-side\n")
+        with mock.patch.object(
+            git_ops, "conflict_hunks", side_effect=git_ops.IntegrationGitError("simulated grep failure")
+        ):
+            result = self.integrate("AT-101")
+        self.assert_stopped_not_stuck(result, "simulated grep failure")
+        # The half-finished rebase is aborted so the worktree is left usable.
         self.assertIsNone(git_ops.in_progress_operation(worktree))
 
 

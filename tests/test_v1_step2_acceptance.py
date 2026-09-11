@@ -340,8 +340,14 @@ class EndToEndJourneyTests(AcceptanceTestCase):
                 self.assertEqual(self.status_of(key), schema.COMPLETED)
                 self.assertNotEqual(merge_sha, task_sha)
 
-    def test_item_34_dependents_are_not_released_before_completed(self) -> None:
-        """Step 2 half of §43.34: nothing here releases a dependent early."""
+    def test_item_34_integration_records_neither_placeholder_release_event_name(self) -> None:
+        """What this asserts: after integration the Ticket is in needs_review and
+        no event named ``dependency_released`` or ``blocked_by_cleared`` was
+        recorded. Those names exist nowhere in the code, so the second half
+        cannot fail. The real §43.34 invariant — dependents are released only
+        after the blocker is completed — lands with Step 5's dependency release
+        mechanism; see docs/v1/handoff-step2.md.
+        """
         self.make_task("AT-101")
         self.integrate("AT-101")
         self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
@@ -483,7 +489,13 @@ class NegativeScopeTests(AcceptanceTestCase):
         assert_push_allowed(["git", "push", "origin", branch], task_branch=branch, base_branch="main")
         assert_push_allowed(["git", "push", "-u", "origin", branch], task_branch=branch, base_branch="main")
 
-    def test_the_git_allowlist_excludes_history_rewriting_subcommands(self) -> None:
+    def test_the_git_allowlist_excludes_each_listed_subcommand(self) -> None:
+        """Proves only that the listed subcommands are not allowlisted.
+
+        It does not prove the allowlist is free of history-rewriting commands:
+        ``rebase`` (initial integration, §24) and ``merge`` (re-integration,
+        §26) are allowlisted on purpose.
+        """
         from agent_taskflow.integration_git import ALLOWED_SUBCOMMANDS
 
         for subcommand in (

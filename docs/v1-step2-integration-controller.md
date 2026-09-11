@@ -13,8 +13,8 @@ the resulting module boundary map.
 
 | Module | Change |
 | --- | --- |
-| `agent_taskflow/models.py` | Add Step-2 lifecycle statuses to `TASK_STATUSES`, integration event types to `TASK_EVENT_TYPES`, integration artifact types to `TASK_ARTIFACT_TYPES`. Set members only. |
-| `agent_taskflow/store.py` | Register new named idempotent migrations in `_MIGRATIONS` / `SCHEMA_MIGRATIONS` that create the Step-2 tables. No existing method changed. |
+| `agent_taskflow/models.py` | Add integration event types to `TASK_EVENT_TYPES` and integration artifact types to `TASK_ARTIFACT_TYPES`. Set members only. No status is added: Step 2 resolves its statuses through `status_vocab` (§12.2 ruling). |
+| `agent_taskflow/store.py` | Register two named idempotent migrations in `_MIGRATIONS` / `SCHEMA_MIGRATIONS`: `v1_step2_integration_tables` creates the Step-2 tables; `v1_step2_conflict_verification` adds one column to Step 2's private conflict-evidence table. No existing method changed. |
 | `WORKFLOW.md` | Add a descriptive Integration Controller boundary section. Non-Goals list untouched. |
 
 ### Created
@@ -43,7 +43,7 @@ and `validators/*` (reused through `validators.registry`, never edited).
 
 ## Field ownership (§32.1)
 
-`task_pr_state` holds exactly the eleven §32.1 fields plus the `task_key` key.
+`task_pr_state` holds exactly the twelve §32.1 fields plus the `task_key` key.
 Step 2 creates the table and is its only writer. Every other component reads it
 and must tolerate `NULL`. Integration-internal state that §32.1 does not list
 (`previous_integrated_base_sha`, `new_target_sha`, validator evidence, review

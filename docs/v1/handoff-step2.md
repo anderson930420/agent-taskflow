@@ -692,8 +692,8 @@ lost; both are to be revisited after real usage.
 
 | Module | Change |
 | --- | --- |
-| `agent_taskflow/models.py` | Added the Step-2 lifecycle statuses, integration event types, and integration artifact types as new set members. No existing value changed or removed. |
-| `agent_taskflow/store.py` | Added one named idempotent migration, `v1_step2_integration_tables`, registered in the existing `_MIGRATIONS` tuple. No existing method touched. |
+| `agent_taskflow/models.py` | Added the Step 2 integration event types and artifact types as new set members. Step 2 adds no status: under the §12.2 ruling it resolves its statuses through `status_vocab`, and `TASK_STATUSES` is Step 1's, identical to `main`. No existing value changed or removed. |
+| `agent_taskflow/store.py` | Added two named idempotent migrations, registered in the existing `_MIGRATIONS` tuple: `v1_step2_integration_tables` (the §32.1 table plus Step 2's private tables) and `v1_step2_conflict_verification` (one column on Step 2's private conflict-evidence table). No existing method touched. |
 | `WORKFLOW.md` | Added a descriptive Integration Controller boundary section. The Non-Goals list was **not** modified. |
 
 ### Created
@@ -738,9 +738,11 @@ is not a gate. Both are tested.
 
 **Git and gh execution is confined to two chokepoints.** Every git argv goes
 through `integration_git.run_git`, which applies a subcommand allowlist (no
-`reset`, `checkout`, `clean`, `update-ref`, …), a force-push denylist covering
-the flag and `+refspec` forms, and a protected/target-branch push check. Every
-gh argv goes through `GitHubPrAdapter.run`, which rejects merge argv. A test
+`reset`, `checkout`, `clean`, `update-ref`, …) and, for pushes, the push allowlist of review Ruling 3 — only
+`git push origin <task-branch>`, optional `-u` — with branch names normalized
+before every comparison (Ruling 18), so `refs/heads/main` and `heads/main`
+count as main. Every gh argv goes through `GitHubPrAdapter.run`, whose
+parsed-argv guard rejects `gh ... pr merge`. A test
 asserts no other Step 2 module even imports `subprocess`, so a bypass would be
 visible rather than possible.
 
