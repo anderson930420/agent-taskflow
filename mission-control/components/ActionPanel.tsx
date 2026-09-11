@@ -17,7 +17,7 @@ import { ConfirmActionButton } from "./ConfirmActionButton";
 import { StatusBadge } from "./StatusBadge";
 import { APPROVE_WARNING, REJECT_WARNING, BLOCK_WARNING } from "../lib/taskState";
 
-const STARTABLE_STATUSES = new Set(["queued", "blocked", "preparing"]);
+const STARTABLE_STATUSES = new Set(["queued", "preparing"]);
 const APPROVABLE_STATUSES = new Set(["waiting_approval"]);
 const REJECTABLE_STATUSES = new Set(["waiting_approval", "blocked"]);
 const BLOCKABLE_STATUSES = new Set([

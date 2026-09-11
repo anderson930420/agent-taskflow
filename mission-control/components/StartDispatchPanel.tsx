@@ -42,7 +42,6 @@ export function StartDispatchPanel({
 
   const canStart =
     currentStatus === "queued" ||
-    currentStatus === "blocked" ||
     currentStatus === "preparing";
 
   function toggleValidator(value: string) {
