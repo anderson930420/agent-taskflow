@@ -18,7 +18,8 @@ Two directions, deliberately asymmetric:
   than to themselves.
 
 No legacy value is left unmapped, and no legacy value is renamed, removed or
-repurposed. See HANDOFF.md for the reasoning behind each judgement call.
+repurposed. See docs/v1/handoff-step1.md for the reasoning behind each
+judgement call.
 """
 
 from __future__ import annotations
