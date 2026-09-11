@@ -417,6 +417,12 @@ class LifecycleRuntimeTaskStore(AttemptScopedRuntimeTaskStore):
             )
         elif pending is not None:
             outcome = pending
+        elif status in {"failed", "needs_decision"}:
+            # V1 Step 5 (SPEC §29.2): a Ticket failure with no executor or
+            # validator outcome behind it (preparation, an unavailable or
+            # raising executor/validator). `failed` is legal from every active
+            # Attempt status.
+            outcome = _TerminalOutcome("failed", "runtime_failed", "failed", None, {})
         else:
             outcome = _TerminalOutcome(
                 "blocked",
@@ -448,11 +454,13 @@ class LifecycleRuntimeTaskStore(AttemptScopedRuntimeTaskStore):
             with self._runtime_claims_lock:
                 self._runtime_claims.pop(normalized, None)
 
-        if status == "blocked" and (blocked_reason or message):
+        if status in {"blocked", "failed", "needs_decision"} and (blocked_reason or message):
+            # Audit the human reason beside the machine reason code. The mirror
+            # keeps `blocked_reason` for `blocked` only.
             canonical_path._LegacyTaskMirrorStore.update_task_status(
                 self,
                 normalized,
-                "blocked",
+                status,
                 message=message,
                 source=state.claim.owner_id,
                 blocked_reason=blocked_reason or message,

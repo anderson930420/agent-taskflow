@@ -74,6 +74,8 @@ RUNTIME_REASON_CODES = frozenset(
         "runtime_lease_expired",
         "runtime_internal_error",
         "runtime_governance_blocked",
+        # V1 Step 5: a Ticket's runtime failure with no executor/validator outcome.
+        "runtime_failed",
         "attempt_resource_allocation_failed",
         "advisory_evidence_retry_recovered",
     }
