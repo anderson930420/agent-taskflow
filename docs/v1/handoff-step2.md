@@ -14,17 +14,135 @@ Spec: `~/agent-taskflow-ops/v1/SPEC.md` §42 Step 2 (Integration Controller,
 Re-integration, PR outcomes, Merge)
 Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 
-Status: **implementation-complete, awaiting human re-review of PR #196.**
-All three re-review rulings are implemented, Ruling 2 as amended by the
-human decision on its stop. No stop condition is open. Nothing is approved,
-merged to `main`, or finally complete.
+Status: **implementation-complete, awaiting independent review.** The branch
+is up to date with `main` (merge `5b362bc`). All three re-review rulings are
+implemented, Ruling 2 as amended. No stop condition is open. Nothing is
+approved, merged to `main`, or finally complete.
 
-`task/v1-step1` has been merged into this branch twice, both times as a merge
-commit and never a rebase: first (`96a6cd3`) to bring in
-`agent_taskflow/status_vocab.py` for the SPEC §12.2 ruling — see §3(a) — and
-again (`9e09ad7`) for the reworked Step 1 persistence layer — see "Merge of
-the reworked Step 1" below. This branch therefore contains Step 1 *and*
-Step 2; PR #196 reviews Step 2.
+Step 1 was merged into this branch twice while it was still in review
+(`96a6cd3`, `9e09ad7`, both merge commits). It has since reached `main` as
+the squash merge of PR #195, and `main` itself is now merged in (`5b362bc`),
+so this branch carries `main`'s final Step 1. PR #196 reviews Step 2 — see
+"Merge of origin/main" below.
+
+---
+
+## Merge of origin/main (`b870b84`) — final Step 1 (#195) and CI pins (#198)
+
+`origin/main` was merged into `task/v1-step2` as merge commit `5b362bc`
+(parents `597604f` — Step 2 — and `b870b84` — main). A normal merge, never a
+rebase: this branch is published as draft PR #196 and §26 forbids
+force-pushing a published PR branch. Only `origin/main` was merged;
+`task/v1-step1` was not merged separately, because `main` already contains it.
+
+**Why this merge needed care.** Step 1 reached `main` as a *squash* merge
+(#195). `main` therefore does not contain the intermediate Step 1 commits this
+branch merged earlier (`764c9ff`, `dcad084`); the merge base is `4266c02`.
+Two consequences:
+
+- Every Step 1 file that both sides added or changed differently conflicts.
+- Worse, any file where this branch still carried *intermediate* Step 1 code
+  and `main` had nothing to say merges silently in this branch's favour. That
+  happened in `store.py`, which `main` left byte-identical to base.
+
+**Resolution principle.** For Step 1's files, take `main`'s final version: it
+is the reviewed one, and this branch's copies were superseded intermediates.
+Keep Step 2's own changes. Before taking `main`'s version of any file, I proved
+Step 2 never modified it: in this branch's first-parent history the only
+commits touching it are the two Step 1 merges.
+
+| File | Conflict | Resolution |
+| --- | --- | --- |
+| `agent_taskflow/api/main.py` | content | `main`'s version. Only Step 1 merges ever touched it here. |
+| `agent_taskflow/api/tickets.py` | add/add | `main`'s version. Only Step 1 merges ever touched it here. |
+| `agent_taskflow/status_vocab.py` | add/add | `main`'s version. Only Step 1 merges ever touched it here. Its display↔persisted mapping is identical to what Step 2 resolves against. |
+| `agent_taskflow/ticket_creation.py` | add/add | `main`'s version. Only Step 1 merges ever touched it here. |
+| `agent_taskflow/ticket_store.py` | add/add | `main`'s version. Only Step 1 merges ever touched it here. |
+| `tests/test_api_tickets.py` | add/add | `main`'s version. Step 1 test. |
+| `tests/test_ticket_creation.py` | add/add | `main`'s version. Step 1 test. |
+| `tests/test_ticket_store.py` | add/add | `main`'s version. Step 1 test. |
+| `agent_taskflow/models.py` | content | Both steps. `main`'s file, whose `TASK_STATUSES` is kept exactly, plus Step 2's integration event types and artifact types. Checked: statuses equal `main`'s; event and artifact types equal `main` ∪ Step 2. |
+| `agent_taskflow/store.py` | **none — silent** | Git kept this branch's copy, which still carried the intermediate Step 1 `tasks_ticket_fields` auto-migration. Final Step 1 (ruling 4a) moved that migration out of `init_db()` into `scripts/migrate_ticket_fields.py`. Resolved to `main`'s file (byte-identical to base) plus Step 2's two migrations, extracted verbatim from `597604f`. Checked: the result only *adds* lines to `main`'s file; `tasks_ticket_fields` is not in `SCHEMA_MIGRATIONS`. |
+| `HANDOFF.md` | none | Moved by Ruling 9 — see below. |
+
+All eight files resolved to `main` are byte-identical to `origin/main`
+(checked by blob hash). The nine Step 1 files that both sides added
+identically, and the thirty files only `main` changed, merged with no
+action.
+
+**Step 1's behaviour after the merge.** Checked on a fresh database:
+`init_db()` creates Step 2's tables and **none** of Step 1's `tasks` columns.
+`require_ticket_fields` fails closed until the explicit migration runs, and
+passes after `migrate_ticket_fields`.
+
+### Ruling 9 — the handoff lives in `docs/v1/`
+
+`git mv HANDOFF.md docs/v1/handoff-step2.md`; `main` keeps no root handoff.
+`docs/v1/handoff-step1.md` was not edited. Pointers updated: code comments in
+`integration_metrics.py` and `integration_controller.py`. Three mentions of
+`HANDOFF.md` inside this file describe earlier events, when that was the
+file's name, and were left as history. This file also carried a copy of Step
+1's handoff as an appendix, from the earlier merges; that intermediate copy is
+replaced by a pointer to `docs/v1/handoff-step1.md`.
+
+### Stop conditions for this merge — none fired
+
+- **A conflict that cannot be resolved without changing either step's
+  behaviour:** not hit. Every conflict resolves to one step's file exactly,
+  or to a union of the two steps' disjoint additions (`models.py`).
+- **Step 2 tests or fixtures that open a `TicketStore` or start the API going
+  red (step 3):** not hit. No Step 2 test does either (checked by grep), no
+  Step 2 test went red, and no fixture was changed.
+- **Step 2's schema handling conflicting with Step 1's explicit-migration
+  rule:** evaluated, not hit. Ruling 4a, as written in
+  `docs/v1/handoff-step1.md`, moves *Step 1's `tasks` columns* out of
+  `init_db()` and keeps the pre-existing migrations there. Step 2 adds no
+  `tasks` column. Its two migrations create Step 2's own tables and add one
+  column to its own private table. Step 1's schema tests pin only that
+  `tasks_ticket_fields` is not in `SCHEMA_MIGRATIONS` and compare migration
+  sets, so they pass with Step 2's entries present.
+
+**Open question for the reviewer, not a stop.** Step 2 still creates its own
+tables inside `store.init_db()` — the startup path — whereas ruling 4a moved
+Step 1's new V1 schema out of startup into an operator-run script. That is
+consistent with the rule as written but not with its direction. As
+instructed, Step 2's schema handling was not changed in this turn. Whether V1
+wants one policy for both steps is for the human to decide.
+
+### Test counts for this merge
+
+| | `pytest tests -q` |
+| --- | --- |
+| Before the merge (`6f47160`) | `4800 passed, 8 skipped, 0 failed` |
+| After the merge (`5b362bc`) | `4844 passed, 8 skipped, 0 failed` |
+
+The full suite takes about ten minutes and the tool times out at 600 s, so it
+was run in four parts. The parts add up to the whole:
+
+    test_[a-c]*.py    779 passed
+    test_[d-l]*.py    863 passed
+    test_[m-r]*.py   1664 passed, 8 skipped
+    test_[s-z]*.py   1538 passed
+    -------------------------------------
+                     4844 passed, 8 skipped = 4852 collected (one collection
+                     run over the whole suite)
+
+**No test went red.** The +44 is exactly Step 1 reaching its final form. Its
+five test files carried 133 tests at `dcad084`; `main`'s final versions of
+those five hold 144, and three new files add 33 (`test_git_ref_storage`,
+`test_migrate_ticket_fields_script`, `test_ticket_fields_schema`). That is 177,
+and 177 − 133 = 44. The merge deleted no test file.
+
+`python -m compileall -q agent_taskflow scripts tests`, run from the repository
+root: exit 0, with no "Can't list" or error lines.
+
+`agent_taskflow.cli.local_validation` after the merge: exit 0, every required
+check passed — Python environment dependencies, workflow contract validation,
+workflow policy validation, Mission Control golden path smoke, PiExecutor
+golden path smoke (fake Pi), unit tests (`Ran 4850 tests`, `OK (skipped=8)`),
+compileall. `openspec validate` skipped: `openspec` is not on PATH (optional
+check, pre-existing). The `unittest` count is 44 above the last one recorded
+(`Ran 4806` at `6f47160`), the same +44 as pytest.
 
 ---
 
