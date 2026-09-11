@@ -5,7 +5,10 @@ The dispatcher advances one task through the local state mirror:
 created/queued/preparing -> preparing -> implementing -> validating
 -> waiting_approval
 
-Failures move the task to blocked. The dispatcher never approves, merges,
+Failures move a legacy task to blocked. A Ticket (V1 Step 5, SPEC §29) ends
+``needs_decision`` when a validator returns ``failed`` and ``failed`` on every
+other failure; before its claim it gets its one worktree (SPEC §9). The
+dispatcher never approves, merges,
 pushes, cleans worktrees, or runs raw subprocesses directly. It only calls the
 executor and validator abstractions.
 
@@ -39,6 +42,30 @@ from agent_taskflow.runtime_progress_recorder import (
 )
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_dependencies import (
+    unreleased_dependency,
+    unreleased_dependency_message,
+)
+from agent_taskflow.ticket_lifecycle import (
+    FAILURE_EXECUTOR,
+    FAILURE_GOVERNANCE,
+    FAILURE_VALIDATOR_ERROR,
+    FAILURE_VALIDATOR_RED,
+    FAILURE_WORKTREE,
+    is_ticket,
+    ticket_failure_status,
+)
+from agent_taskflow.ticket_worktree import (
+    WORKTREE_ABSENT,
+    WORKTREE_READY,
+    ensure_ticket_worktree,
+    inspect_ticket_worktree,
+    ticket_worktree_for,
+)
+from agent_taskflow.ticket_worktree_schema import (
+    TicketWorktreeMigrationRequired,
+    require_ticket_worktree_resources,
+)
 from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
 from agent_taskflow.validators.registry import get_validator
 
@@ -55,7 +82,8 @@ RUNNABLE_STATUSES = {
 
 # SPEC §44: a blocked Ticket cannot execute and a paused Ticket cannot acquire
 # work. Refusing them writes nothing, so the pause and the real blocked_reason
-# survive. Other non-runnable statuses keep the blocking refusal below.
+# survive. For a legacy task, other non-runnable statuses keep the blocking
+# refusal below; refusing a Ticket never writes anything (V1 Step 5).
 UNTOUCHED_REFUSAL_STATUSES = {
     "blocked",
     "paused",
@@ -180,9 +208,16 @@ class Dispatcher:
                 summary=f"Task already in terminal/review status: {task.status}",
             )
 
+        ticket = is_ticket(self.store.db_path, task.task_key)
+
         if task.status not in RUNNABLE_STATUSES:
             reason = f"Task status is not runnable: {task.status}"
-            if not dry_run and task.status not in UNTOUCHED_REFUSAL_STATUSES:
+            # Refusing to start a Ticket never rewrites it (SPEC §29, §44): a
+            # stopped one is retried through scripts/reset_task_status.py, and
+            # any other status belongs to whoever set it (Step 2's integration
+            # statuses included). Legacy tasks keep the blocking refusal.
+            untouched = task.status in UNTOUCHED_REFUSAL_STATUSES or ticket
+            if not dry_run and not untouched:
                 self._block_task(task.task_key, reason)
             return DispatcherResult(
                 task_key=task.task_key,
@@ -190,6 +225,23 @@ class Dispatcher:
                 summary=reason,
                 blocked_reason=reason,
             )
+
+        if ticket:
+            # Ruling 32 (SPEC §44): a dependency releases only after its blocker
+            # completed. The claim transaction enforces it for every path; this
+            # earlier check refuses before worktree preparation, writing nothing.
+            unreleased = unreleased_dependency(self.store.db_path, task.task_key)
+            if unreleased is not None:
+                reason = unreleased_dependency_message(task.task_key, *unreleased)
+                return DispatcherResult(
+                    task_key=task.task_key,
+                    status="blocked",
+                    summary=reason,
+                    blocked_reason=reason,
+                )
+            refusal = self._prepare_ticket_worktree(task, dry_run=dry_run)
+            if refusal is not None:
+                return refusal
 
         try:
             worktree = self.store.get_task_worktree(task.task_key)
@@ -199,13 +251,19 @@ class Dispatcher:
         else:
             governance_error = self._validate_governance(task, worktree)
         if governance_error is not None:
-            if not dry_run:
-                self._block_task(task.task_key, governance_error)
-            return DispatcherResult(
-                task_key=task.task_key,
-                status="blocked",
-                summary=governance_error,
-                blocked_reason=governance_error,
+            if dry_run:
+                return DispatcherResult(
+                    task_key=task.task_key,
+                    status="blocked",
+                    summary=governance_error,
+                    blocked_reason=governance_error,
+                )
+            return self._fail(
+                task.task_key,
+                governance_error,
+                FAILURE_GOVERNANCE,
+                ticket=ticket,
+                expected_status=task.status,
             )
 
         assert worktree is not None
@@ -217,13 +275,19 @@ class Dispatcher:
 
         if selected_executor == "opencode" and not prompt_path.is_file():
             reason = f"implementation_prompt.md is required for opencode executor: {prompt_path}"
-            if not dry_run:
-                self._block_task(task.task_key, reason)
-            return DispatcherResult(
-                task_key=task.task_key,
-                status="blocked",
-                summary=reason,
-                blocked_reason=reason,
+            if dry_run:
+                return DispatcherResult(
+                    task_key=task.task_key,
+                    status="blocked",
+                    summary=reason,
+                    blocked_reason=reason,
+                )
+            return self._fail(
+                task.task_key,
+                reason,
+                FAILURE_GOVERNANCE,
+                ticket=ticket,
+                expected_status=task.status,
             )
 
         if dry_run:
@@ -274,13 +338,12 @@ class Dispatcher:
                 f"{exc.__class__.__name__}: {exc}"
             )
             progress.prepare_failed(f"Executor {selected_executor} is unavailable")
-            self._block_task(task.task_key, reason)
-            return DispatcherResult(
-                task_key=task.task_key,
-                status="blocked",
-                summary=reason,
+            return self._fail(
+                task.task_key,
+                reason,
+                FAILURE_EXECUTOR,
+                ticket=ticket,
                 executor_status="blocked",
-                blocked_reason=reason,
             )
 
         executor_context = ExecutorContext(
@@ -321,13 +384,12 @@ class Dispatcher:
                 status="blocked",
                 summary=reason,
             )
-            self._block_task(task.task_key, reason)
-            return DispatcherResult(
-                task_key=task.task_key,
-                status="blocked",
-                summary=reason,
+            return self._fail(
+                task.task_key,
+                reason,
+                FAILURE_EXECUTOR,
+                ticket=ticket,
                 executor_status="blocked",
-                blocked_reason=reason,
             )
 
         self._record_executor_result(task.task_key, executor_run_id, executor_result)
@@ -341,13 +403,14 @@ class Dispatcher:
                 executor_result.summary
                 or f"Executor {executor_result.executor} returned {executor_result.status}"
             )
-            self._block_task(task.task_key, reason)
-            return DispatcherResult(
-                task_key=task.task_key,
-                status="blocked",
-                summary=reason,
+            # A Ticket executor that fails or returns `blocked` (a cooperative
+            # operator kill included) ends `failed` (SPEC §29.2).
+            return self._fail(
+                task.task_key,
+                reason,
+                FAILURE_EXECUTOR,
+                ticket=ticket,
                 executor_status=executor_result.status,
-                blocked_reason=reason,
             )
 
         self.store.update_task_status(
@@ -383,14 +446,13 @@ class Dispatcher:
                     summary=reason,
                 )
                 validator_statuses[validator_name] = "blocked"
-                self._block_task(task.task_key, reason)
-                return DispatcherResult(
-                    task_key=task.task_key,
-                    status="blocked",
-                    summary=reason,
+                return self._fail(
+                    task.task_key,
+                    reason,
+                    FAILURE_VALIDATOR_ERROR,
+                    ticket=ticket,
                     executor_status=executor_result.status,
                     validator_statuses=validator_statuses,
-                    blocked_reason=reason,
                 )
 
             self._record_validator_result(task.task_key, validator_result)
@@ -402,14 +464,20 @@ class Dispatcher:
                     or f"Validator {validator_result.validator} returned {validator_result.status}"
                 )
                 progress.validator_failed(validator_name, validator_result.status)
-                self._block_task(task.task_key, reason)
-                return DispatcherResult(
-                    task_key=task.task_key,
-                    status="blocked",
-                    summary=reason,
+                # SPEC §29.1: only a red validator stops a Ticket for a
+                # decision; a validator that could not reach a verdict
+                # (`blocked`) is a runtime failure.
+                return self._fail(
+                    task.task_key,
+                    reason,
+                    (
+                        FAILURE_VALIDATOR_RED
+                        if validator_result.status == "failed"
+                        else FAILURE_VALIDATOR_ERROR
+                    ),
+                    ticket=ticket,
                     executor_status=executor_result.status,
                     validator_statuses=validator_statuses,
-                    blocked_reason=reason,
                 )
 
         progress.validators_passed(validator_statuses)
@@ -577,6 +645,127 @@ class Dispatcher:
             summary=result.summary,
             log_path=result.log_path,
             artifacts=result.artifacts,
+        )
+
+    def _prepare_ticket_worktree(
+        self,
+        task: TaskRecord,
+        *,
+        dry_run: bool,
+    ) -> DispatcherResult | None:
+        """Give a Ticket its one worktree before the claim (SPEC §9, ruling 26b).
+
+        Returns a refusal, or None to continue. A missing Step 5 migration
+        refuses without writing anything; a worktree that cannot be used ends
+        the Ticket ``failed`` (ruling 26f).
+        """
+        try:
+            require_ticket_worktree_resources(self.store.db_path)
+        except TicketWorktreeMigrationRequired as exc:
+            reason = str(exc)
+            return DispatcherResult(
+                task_key=task.task_key,
+                status="blocked",
+                summary=reason,
+                blocked_reason=reason,
+            )
+        if dry_run:
+            ticket = ticket_worktree_for(self.store.db_path, task.task_key)
+            inspection = inspect_ticket_worktree(ticket) if ticket is not None else None
+            if inspection is not None and inspection.state == WORKTREE_ABSENT:
+                return DispatcherResult(
+                    task_key=task.task_key,
+                    status="skipped",
+                    summary=(
+                        "Dry run passed; the Ticket's worktree would be created at "
+                        f"{ticket.worktree_path}. Executor and validators were not run."
+                    ),
+                )
+            if inspection is None or inspection.state != WORKTREE_READY:
+                reason = (
+                    f"Ticket worktree cannot be used: {inspection.detail}"
+                    if inspection is not None
+                    else f"Ticket {task.task_key} has no derived worktree"
+                )
+                return DispatcherResult(
+                    task_key=task.task_key,
+                    status="blocked",
+                    summary=reason,
+                    blocked_reason=reason,
+                )
+            return None
+        try:
+            result = ensure_ticket_worktree(
+                self.store.db_path,
+                task.task_key,
+                source="dispatcher",
+            )
+        except (OSError, ValueError) as exc:
+            return self._fail(
+                task.task_key,
+                f"Ticket worktree preparation failed: {exc}",
+                FAILURE_WORKTREE,
+                ticket=True,
+                expected_status=task.status,
+            )
+        if not result.ok:
+            return self._fail(
+                task.task_key,
+                result.reason or "Ticket worktree preparation failed",
+                FAILURE_WORKTREE,
+                ticket=True,
+                expected_status=task.status,
+            )
+        return None
+
+    def _fail(
+        self,
+        task_key: str,
+        reason: str,
+        kind: str,
+        *,
+        ticket: bool,
+        executor_status: str | None = None,
+        validator_statuses: dict[str, str] | None = None,
+        expected_status: str | None = None,
+    ) -> DispatcherResult:
+        """End a failed run: `blocked` for a legacy task, SPEC §29 for a Ticket.
+
+        ``expected_status`` makes a Ticket's pre-claim failure a compare-and-set
+        on the status this dispatch read, so it can never overwrite a Ticket that
+        another process has claimed since.
+        """
+        if ticket:
+            status = ticket_failure_status(kind)
+            try:
+                self.store.update_task_status(
+                    task_key,
+                    status,
+                    source="dispatcher",
+                    message=reason,
+                    blocked_reason=reason,
+                    expected_current_status=expected_status,
+                )
+            except (KeyError, ValueError) as exc:
+                if expected_status is None:
+                    raise
+                refusal = f"{reason} (not recorded as {status}: {exc})"
+                return DispatcherResult(
+                    task_key=task_key,
+                    status="blocked",
+                    summary=refusal,
+                    blocked_reason=refusal,
+                )
+        else:
+            status = "blocked"
+            self._block_task(task_key, reason)
+        return DispatcherResult(
+            task_key=task_key,
+            status=status,
+            summary=reason,
+            executor_status=executor_status,
+            validator_statuses=dict(validator_statuses or {}),
+            blocked_reason=reason,
         )
 
     def _block_task(self, task_key: str, reason: str) -> None:

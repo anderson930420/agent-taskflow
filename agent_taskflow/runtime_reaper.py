@@ -3,7 +3,8 @@
 :func:`reap_stale_runtime` is what a crashed runtime needs to become
 recoverable: it expires every lease past its ``expires_at``
 (``RuntimeAdmissionStore.expire_stale_leases``: the Attempt becomes
-``execution_aborted`` and the Ticket ``blocked``, both audited), then clears the
+``execution_aborted``; a Ticket becomes ``failed`` (V1 Step 5, SPEC §29.2) and a
+legacy task ``blocked``; both audited), then clears the
 stale lock and PID markers those Attempts left behind
 (``AttemptResourceManager.reap_stale_resources``). Worktrees, branches and
 artifacts are kept.

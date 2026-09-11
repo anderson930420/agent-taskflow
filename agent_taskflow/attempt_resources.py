@@ -21,6 +21,18 @@ from agent_taskflow.models import TaskRecord, TaskWorktreeRecord, require_absolu
 from agent_taskflow.runtime_admission import RuntimeClaim
 from agent_taskflow.store import TaskMirrorStore, connect, default_db_path
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_worktree import (
+    WORKTREE_ABSENT,
+    WORKTREE_READY,
+    TicketWorktree,
+    inspect_ticket_worktree,
+    record_ticket_worktree_reuse,
+    ticket_worktree_for,
+)
+from agent_taskflow.ticket_worktree_schema import (
+    TicketWorktreeMigrationRequired,
+    require_ticket_worktree_resources,
+)
 from agent_taskflow.workspace_manager import (
     WORKSPACE_BLOCKED,
     WORKSPACE_PREPARED,
@@ -277,10 +289,24 @@ class AttemptResourceManager:
         normalized_branch = base_branch.strip()
         if not normalized_branch:
             raise AttemptResourceError("base_branch must not be empty")
-        task_slug = _slug(task.task_key)
-        attempt_suffix = claim.attempt_id.removeprefix("attempt-")[:12]
-        branch_name = f"attempt/{task_slug}/{claim.attempt_number}-{attempt_suffix}"
-        worktree_path = resolved_worktree_root / task_slug / claim.attempt_id
+        ticket = ticket_worktree_for(self.db_path, task.task_key)
+        if ticket is not None:
+            # SPEC §9 / ruling 26a: every Attempt of a Ticket runs in the
+            # Ticket's one worktree, on the Ticket's branch. The Attempt keeps
+            # its own artifact root, lock and PID below.
+            try:
+                require_ticket_worktree_resources(self.db_path)
+            except TicketWorktreeMigrationRequired as exc:
+                raise AttemptResourceError(str(exc)) from exc
+            branch_name = ticket.branch
+            worktree_path = ticket.worktree_path
+            resolved_worktree_root = self._safe_worktree_root(repo_path, worktree_path.parent)
+            normalized_branch = ticket.base_branch
+        else:
+            task_slug = _slug(task.task_key)
+            attempt_suffix = claim.attempt_id.removeprefix("attempt-")[:12]
+            branch_name = f"attempt/{task_slug}/{claim.attempt_number}-{attempt_suffix}"
+            worktree_path = resolved_worktree_root / task_slug / claim.attempt_id
         artifact_root = resolved_artifact_base / claim.attempt_id
         lock_path = artifact_root / ATTEMPT_LOCK_FILENAME
         pid_path = artifact_root / ATTEMPT_PID_FILENAME
@@ -386,8 +412,19 @@ class AttemptResourceManager:
         *,
         store: TaskMirrorStore,
     ) -> WorkspacePreparationResult:
-        """Create or idempotently reopen only this Attempt's unique worktree."""
+        """Create or idempotently reopen only this Attempt's unique worktree.
+
+        A Ticket's Attempt instead uses the Ticket's one worktree
+        (:meth:`_provision_ticket_workspace`).
+        """
         record = self.get(handle.record.attempt_id) or handle.record
+        ticket = ticket_worktree_for(self.db_path, record.task_key)
+        if (
+            ticket is not None
+            and ticket.worktree_path == record.worktree_path
+            and ticket.branch == record.branch_name
+        ):
+            return self._provision_ticket_workspace(record, ticket, store=store)
         repo_check = _git(["rev-parse", "--show-toplevel"], record.repo_path)
         if repo_check.returncode != 0:
             return self._blocked(record, f"repo_path is not a git repository: {_git_message(repo_check)}")
@@ -436,12 +473,63 @@ class AttemptResourceManager:
             return self._blocked(record, f"git worktree add failed: {_git_message(created)}")
         return self._activate(record, base_sha, store, WORKSPACE_PREPARED)
 
+    def _provision_ticket_workspace(
+        self,
+        record: AttemptResourceRecord,
+        ticket: TicketWorktree,
+        *,
+        store: TaskMirrorStore,
+    ) -> WorkspacePreparationResult:
+        """Run this Attempt in the Ticket's worktree, as the last Attempt left it.
+
+        Ruling 26e: a dirty tree is recorded, never cleaned, reset or discarded.
+        Ruling 26f: a path that is not this repository's worktree on the Ticket's
+        branch is refused, never recreated or deleted.
+        """
+        inspection = inspect_ticket_worktree(ticket)
+        if inspection.state == WORKTREE_ABSENT:
+            # Ruling 26b: the worktree is created before the claim
+            # (ticket_worktree.ensure_ticket_worktree). Never create it here.
+            return self._blocked(
+                record,
+                f"Ticket worktree {ticket.worktree_path} is missing at claim time; it is "
+                "prepared before the claim and is not created after it",
+            )
+        if inspection.state != WORKTREE_READY:
+            return self._blocked(
+                record, f"Ticket worktree cannot be used: {inspection.detail}"
+            )
+        record_ticket_worktree_reuse(
+            store,
+            ticket,
+            attempt_id=record.attempt_id,
+            attempt_number=record.attempt_number,
+            dirty=inspection.dirty,
+            head_sha=inspection.head_sha,
+        )
+        existing = store.get_task_worktree(ticket.task_key)
+        return self._activate(
+            record,
+            inspection.head_sha or "",
+            store,
+            WORKSPACE_REUSED if record.attempt_number > 1 else WORKSPACE_PREPARED,
+            worktree_base_sha=existing.base_sha if existing is not None else None,
+            summary=(
+                f"Attempt {record.attempt_number} uses the Ticket's worktree "
+                f"{record.worktree_path} on {record.branch_name} "
+                f"({'dirty' if inspection.dirty else 'clean'}, left as it was)"
+            ),
+        )
+
     def _activate(
         self,
         record: AttemptResourceRecord,
         base_sha: str,
         store: TaskMirrorStore,
         workspace_status: str,
+        *,
+        worktree_base_sha: str | None = None,
+        summary: str | None = None,
     ) -> WorkspacePreparationResult:
         now = utc_now_iso()
         with closing(connect(self.db_path)) as conn, conn:
@@ -475,7 +563,9 @@ class AttemptResourceManager:
                 worktree_path=record.worktree_path,
                 branch=record.branch_name,
                 base_branch=record.base_branch,
-                base_sha=base_sha,
+                # A Ticket's row keeps the base its worktree was created from;
+                # the Attempt's own starting commit is attempts.base_commit.
+                base_sha=worktree_base_sha or base_sha,
                 status="active",
             )
         )
@@ -487,7 +577,8 @@ class AttemptResourceManager:
             base_branch=record.base_branch,
             base_sha=base_sha,
             status=workspace_status,
-            summary=(
+            summary=summary
+            or (
                 f"Prepared Attempt-scoped worktree {record.worktree_path} "
                 f"on {record.branch_name} from {record.base_branch}@{base_sha}"
                 if workspace_status == WORKSPACE_PREPARED

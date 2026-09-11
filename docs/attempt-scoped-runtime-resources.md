@@ -12,7 +12,8 @@ attempt_scoped_worktree = implemented
 attempt_scoped_artifact_root = implemented
 attempt_scoped_lock = implemented
 attempt_scoped_pid_manifest = implemented
-fresh_worktree_retry_identity = implemented
+fresh_worktree_retry_identity = implemented (legacy tasks)
+ticket_worktree_reuse = implemented (V1 Step 5, Tickets)
 stale_process_marker_reaper = implemented
 historical_resource_auto_cleanup = disabled
 process_group_kill = not_implemented_in_this_pr
@@ -75,7 +76,32 @@ worktree object cannot redirect executor writes into an older workspace.
 After a terminal runtime result, the task's review artifact pointer remains on
 the latest Attempt root. Historical Attempt roots remain immutable evidence.
 
-## Fresh retry contract
+## Two worktree contracts
+
+V1 Step 5 (ruling 26) splits Attempt resources into two contracts. SPEC §9 and
+§44 (One Ticket = One Worktree) win where they conflict with the PR-5 fresh
+retry contract below.
+
+| | Legacy task | Ticket (a `tasks` row with Step 1's columns) |
+|---|---|---|
+| Branch | `attempt/<task-slug>/<attempt-number>-<attempt-suffix>`, new per Attempt | the Ticket's derived `tasks.branch`, the same for every Attempt |
+| Worktree | `<repo>/.worktrees/<task-slug>/<attempt-id>/`, new per Attempt | the Ticket's derived `tasks.worktree_path`, the same for every Attempt |
+| Created | at the claim, by `provision_workspace` | before the claim, by `ticket_worktree.ensure_ticket_worktree` (idempotent, audited) |
+| Retry | a fresh branch and worktree (below) | the same worktree, **as the last Attempt left it**: a dirty tree is recorded in a `ticket_worktree_reused` event, never cleaned, reset or discarded |
+| Mismatch | `blocked` | a path that is not this repository's worktree on the Ticket's branch, or a branch without its worktree, is refused, never recreated or deleted; the Ticket ends `failed` |
+| Artifact root, lock, PID | per Attempt | per Attempt (unchanged) |
+
+Sharing a worktree needs `attempt_resources.worktree_path` and `.branch_name`
+without `UNIQUE`. Only the operator-run
+`scripts/migrate_ticket_worktree_resources.py` rebuilds the table that way
+(migration `v1_step5_ticket_worktree_attempt_resources`); every other
+constraint, including `UNIQUE(task_id, attempt_number)` and the unique
+artifact, lock and PID paths, is kept. Nothing applies it at startup: Ticket
+dispatch and the scheduler tick refuse a Ticket until it has run, naming the
+script. Legacy tasks run with or without it and keep unique paths, because the
+allocator derives them from the Attempt identity.
+
+## Fresh retry contract (legacy tasks)
 
 A terminal Attempt releases its live lock and removes its live PID marker, but it
 does not delete its branch, worktree, artifact root, manifest, or database row.

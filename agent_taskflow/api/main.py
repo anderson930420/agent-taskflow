@@ -367,7 +367,8 @@ def create_app(
             dry_run=request.dry_run,
         )
 
-        ok = result.status not in {"blocked"}
+        # V1 Step 5: a Ticket's failed run ends `failed` or `needs_decision`.
+        ok = result.status not in {"blocked", "failed", "needs_decision"}
         return action_response(
             ok=ok,
             action="start",
