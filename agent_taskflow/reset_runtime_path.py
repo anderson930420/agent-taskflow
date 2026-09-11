@@ -30,6 +30,7 @@ from agent_taskflow.runtime_admission import (
     ActiveAttemptExistsError,
     RuntimeAdmissionError,
     RuntimeClaim,
+    assert_runtime_capacity_available,
 )
 from agent_taskflow.store import connect
 from agent_taskflow.tasks import normalize_task_key
@@ -102,6 +103,8 @@ class ResetAwareRuntimeAdmissionStore(canonical_path.CanonicalRuntimeAdmissionSt
 
         with closing(connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
+            # Adopting a reset-reserved Attempt creates a lease too (V1 Step 4).
+            assert_runtime_capacity_available(conn)
             row = conn.execute(
                 """
                 SELECT tasks.task_id, tasks.task_key, tasks.status AS task_status,
