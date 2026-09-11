@@ -1,6 +1,7 @@
 # Handoff — V1 Step 5: Parallel Scheduler
 
 Branch: `task/v1-step5`
+Draft PR: https://github.com/anderson930420/agent-taskflow/pull/201 (draft, base `main`)
 Base: `a5fa8e2` (`main`, after Steps 1, 3, 4 and F1 merged)
 Spec: `~/agent-taskflow-ops/v1/SPEC.md` §20, §21, §9, §29, §42 Step 5
 Instructions: `~/agent-taskflow-ops/v1/step5.md`
@@ -433,7 +434,7 @@ sed -n 24p agent_taskflow/task_status_reset.py
 
 ## 9. Governance
 
-- **Git.** One commit on `task/v1-step5`, adding only this file. Only that
+- **Git.** Two commits on `task/v1-step5`: this file, then its PR link. Both touch only this file. Only that
   branch was pushed, with a normal push, and the PR is a draft against `main`.
   Nothing was pushed to or merged into `main`, nothing was force-pushed, and
   nothing was rebased.
