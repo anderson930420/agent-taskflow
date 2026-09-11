@@ -262,6 +262,8 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
         )
         claim_state = self._state_for(normalized)
         assert claim_state is not None
+        # Decided before allocating, so the release below cannot be skipped.
+        failure_status = "failed" if is_ticket(self.db_path, normalized) else "blocked"
         try:
             handle = self._attempt_resources.allocate(
                 claim_state.claim,
@@ -279,7 +281,7 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
                     lease_token=claim_state.claim.lease_token,
                     attempt_status="execution_aborted",
                     # SPEC §29.2 for a Ticket; legacy tasks keep `blocked`.
-                    task_status=("failed" if is_ticket(self.db_path, normalized) else "blocked"),
+                    task_status=failure_status,
                     reason_code="attempt_resource_allocation_failed",
                     execution_result="resource_allocation_failed",
                     metadata={"error": f"{exc.__class__.__name__}: {exc}"},

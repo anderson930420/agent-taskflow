@@ -331,5 +331,48 @@ class TicketRetryPathTests(FailureVocabularyTestCase):
         self.assertEqual(self.fx.status(self.key), "created")
 
 
+class ReviewFixRetryGuardTests(FailureVocabularyTestCase):
+    """B1: a retry never starts while a previous Attempt's process may be alive."""
+
+    def test_retry_is_refused_while_attempt_resources_may_still_run(self) -> None:
+        self.fx.dispatch(self.key, RecordingExecutor("failed"))
+        with closing(sqlite3.connect(self.fx.db_path)) as conn, conn:
+            conn.execute(
+                "UPDATE attempt_resources SET status = 'reap_blocked_live_pid' WHERE task_key = ?",
+                (self.key,),
+            )
+        request = TaskStatusResetRequest(
+            task_key=self.key,
+            db_path=self.fx.db_path,
+            from_status="failed",
+            reason="retry too early",
+            confirm_reset=True,
+        )
+        with self.assertRaises(TaskStatusResetError) as ctx:
+            reset_task_status(request)
+        self.assertIn("may still be alive", str(ctx.exception))
+        self.assertEqual(self.fx.status(self.key), "failed")
+        with closing(sqlite3.connect(self.fx.db_path)) as conn, conn:
+            conn.execute(
+                "UPDATE attempt_resources SET status = 'reaped' WHERE task_key = ?", (self.key,)
+            )
+        self.assertEqual(reset_task_status(request).to_status, "created")
+
+
+class ReviewFixRefusalTests(FailureVocabularyTestCase):
+    """S2: refusing to start a Ticket never rewrites it."""
+
+    def test_integration_and_other_statuses_are_refused_untouched(self) -> None:
+        for status in ("ready_for_integration", "integrating", "unknown", "archived"):
+            with self.subTest(status=status):
+                self.fx.set_status(self.key, status)
+                before = self.fx.task_row(self.key)
+                events = self.fx.events(self.key)
+                result = self.fx.dispatch(self.key, RecordingExecutor())
+                self.assertIn("not runnable", result.summary)
+                self.assertEqual(self.fx.task_row(self.key), before)
+                self.assertEqual(self.fx.events(self.key), events)
+
+
 if __name__ == "__main__":
     unittest.main()

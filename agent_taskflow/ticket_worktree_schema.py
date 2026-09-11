@@ -167,15 +167,22 @@ def migrate_ticket_worktree_resources(db_path: str | Path) -> TicketWorktreeMigr
 
     Installs the Attempt-resource prerequisites first (the same chain
     ``scripts/migrate_attempt_resources.py`` applies), then, if not yet
-    recorded, rebuilds the table in one ``BEGIN IMMEDIATE`` transaction using
-    SQLite's documented create-copy-drop-rename procedure, restores its index
-    and triggers verbatim, and records the migration.
+    recorded, rebuilds the table in one ``BEGIN IMMEDIATE`` transaction with
+    foreign keys off and ``legacy_alter_table`` on: it renames the old table
+    aside, creates the new one from the exact relaxed definition (so the stored
+    SQL differs by the two keywords only), copies every row, drops the old
+    table, restores its index and triggers verbatim, refuses a rebuild that
+    would add a foreign-key violation, and records the migration.
+    ``legacy_alter_table`` keeps the rename from rewriting any other object's
+    reference to the staging name (nothing references ``attempt_resources``
+    today).
     """
     path = _path(db_path)
     check_ticket_worktree_preconditions(path)
     migrate_attempt_resources(path)
     with closing(connect(path)) as conn:
         conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("PRAGMA legacy_alter_table = ON")
         try:
             with conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -225,6 +232,7 @@ def migrate_ticket_worktree_resources(db_path: str | Path) -> TicketWorktreeMigr
                     (TICKET_WORKTREE_RESOURCES_MIGRATION, utc_now_iso()),
                 )
         finally:
+            conn.execute("PRAGMA legacy_alter_table = OFF")
             conn.execute("PRAGMA foreign_keys = ON")
     return TicketWorktreeMigrationResult(
         db_path=path,

@@ -274,5 +274,43 @@ class TickCliTests(SchedulerTestCase):
         self.assertEqual(payload["max_concurrent_tasks"], 1)
 
 
+class ReviewFixSchedulerTests(SchedulerTestCase):
+    """S4 and S5 from the independent review."""
+
+    def test_a_slow_claimer_is_left_running_not_killed(self) -> None:
+        key = self.tickets(1)[0]
+        result = run_scheduler_tick(
+            self.fx.db_path,
+            launcher=worker_launcher(self.sync, mode="slow", delay=2.0),
+            wait=True,
+            claim_timeout_seconds=0.3,
+        )
+        self.addCleanup(self._reap_workers, result)
+        self.assertEqual(result.started, ())
+        self.assertEqual(len(result.not_started), 1)
+        self.assertIn("worker left running", result.not_started[0][1])
+        # wait=True waited for it; it claimed on its own and finished normally.
+        self.assertEqual(result.worker_results[0]["status"], "waiting_approval")
+        self.assertEqual(self.fx.status(key), "waiting_approval")
+        self.assertEqual(self.fx.leases(key, active_only=True), [])
+
+    def test_one_raising_candidate_does_not_abort_the_tick(self) -> None:
+        first = self.fx.create_ticket("raises", priority="high").task_key
+        second = self.fx.create_ticket("runs").task_key
+        real = parallel_scheduler.ensure_ticket_worktree
+
+        def flaky(db_path, task_key, **kwargs):
+            if task_key == first:
+                raise OSError("disk full")
+            return real(db_path, task_key, **kwargs)
+
+        with mock.patch.object(parallel_scheduler, "ensure_ticket_worktree", flaky):
+            result = self.tick()
+        self.assertEqual([key for key, _ in result.not_started], [first])
+        self.assertIn("disk full", result.not_started[0][1])
+        self.assertEqual([s.task_key for s in result.started], [second])
+        self.assertEqual(self.fx.status(first), "created")
+
+
 if __name__ == "__main__":
     unittest.main()

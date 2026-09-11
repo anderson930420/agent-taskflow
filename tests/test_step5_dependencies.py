@@ -302,5 +302,64 @@ class DependencyCliTests(DependencyTestCase):
         self.assertEqual(self.fx.status(self.a), "created")
 
 
+class ReviewFixDependencyTests(DependencyTestCase):
+    """B2 and S1 from the independent review."""
+
+    def test_a_failure_blocked_dependent_keeps_its_reason_when_the_blocker_fails(self) -> None:
+        set_blocked_by(self.fx.db_path, self.b, self.a, actor="op")
+        self.fx.set_status(self.b, "blocked", blocked_reason="Executor fake returned failed")
+        self.fx.set_status(self.a, "failed")
+        result = maintain_dependencies(self.fx.db_path, actor="scheduler")
+        self.assertEqual(result.needs_decision, ())
+        row = self.fx.task_row(self.b)
+        self.assertEqual((row["status"], row["blocked_reason"]), ("blocked", "Executor fake returned failed"))
+
+    def test_a_failed_dependent_needs_the_audited_retry_not_just_a_removal(self) -> None:
+        set_blocked_by(self.fx.db_path, self.b, self.a, actor="op")
+        self.fx.set_status(self.b, "failed")
+        self.fx.set_status(self.a, "failed")
+        self.assertEqual(
+            maintain_dependencies(self.fx.db_path, actor="scheduler").needs_decision, (self.b,)
+        )
+        change = remove_blocked_by(self.fx.db_path, self.b, actor="op")
+        self.assertEqual((change.from_status, change.to_status), ("needs_decision", "needs_decision"))
+        self.assertEqual(self.fx.status(self.b), "needs_decision")
+        c = self.fx.create_ticket("New blocker").task_key
+        change = set_blocked_by(self.fx.db_path, self.b, c, actor="op")
+        self.assertEqual(change.to_status, "needs_decision")
+
+    def test_a_dependency_wait_returns_to_ready_when_removed(self) -> None:
+        set_blocked_by(self.fx.db_path, self.b, self.a, actor="op")
+        self.fx.set_status(self.a, "canceled")
+        maintain_dependencies(self.fx.db_path, actor="scheduler")
+        self.assertEqual(self.fx.status(self.b), "needs_decision")
+        self.assertEqual(remove_blocked_by(self.fx.db_path, self.b, actor="op").to_status, "created")
+
+    def test_a_reserved_retry_attempt_blocks_setting_a_dependency(self) -> None:
+        from agent_taskflow.task_status_reset import TaskStatusResetRequest, reset_task_status
+
+        # A pre-Step-5 Ticket that failed as `blocked` is reset the legacy way,
+        # which reserves a retry Attempt and moves it to `queued`.
+        self.fx.dispatch(self.b, RecordingExecutor("failed"))
+        self.fx.set_status(self.b, "blocked", blocked_reason="old failure")
+        reset_task_status(
+            TaskStatusResetRequest(
+                task_key=self.b,
+                db_path=self.fx.db_path,
+                from_status="blocked",
+                reason="legacy retry",
+                confirm_reset=True,
+            )
+        )
+        row = self.fx.task_row(self.b)
+        self.assertEqual(row["status"], "queued")
+        self.assertIsNotNone(row["active_attempt_id"])
+        before = self.snapshot(self.b)
+        with self.assertRaises(TicketDependencyError) as ctx:
+            set_blocked_by(self.fx.db_path, self.b, self.a, actor="op")
+        self.assertIn("reserved retry Attempt", str(ctx.exception))
+        self.assertEqual(self.snapshot(self.b), before)
+
+
 if __name__ == "__main__":
     unittest.main()

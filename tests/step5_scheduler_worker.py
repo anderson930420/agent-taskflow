@@ -8,7 +8,9 @@ Ticket, with a fake executor that records where it ran and, depending on
 * ``pass``: waits until ``--expect`` workers have started (a barrier that
   proves they overlap), then completes;
 * ``hold``: waits until ``<sync-dir>/release`` exists, then completes;
-* ``fail``: returns ``failed``.
+* ``fail``: returns ``failed``;
+* ``slow``: waits ``--delay`` seconds before dispatching (it has not claimed
+  yet), then behaves like ``pass``.
 
 Not a test module and not production code.
 """
@@ -91,9 +93,13 @@ def main() -> int:
     parser.add_argument("--db-path", type=Path, required=True)
     parser.add_argument("--task-key", required=True)
     parser.add_argument("--sync-dir", type=Path, required=True)
-    parser.add_argument("--mode", default="pass", choices=("pass", "hold", "fail"))
+    parser.add_argument("--mode", default="pass", choices=("pass", "hold", "fail", "slow"))
     parser.add_argument("--expect", type=int, default=1)
+    parser.add_argument("--delay", type=float, default=0.0)
     args = parser.parse_args()
+    if args.mode == "slow":
+        time.sleep(args.delay)
+        args.mode = "pass"
     dispatcher = Dispatcher(
         db_path=args.db_path,
         executor_registry={"fake": _Executor(args.sync_dir, args.mode, args.expect)},

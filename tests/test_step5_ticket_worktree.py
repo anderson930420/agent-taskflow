@@ -268,5 +268,22 @@ class LegacyFreshWorktreeContractTests(Step5WorktreeTestCase):
         self.assertNotEqual(resources[0]["branch_name"], resources[1]["branch_name"])
 
 
+class ReviewFixClaimTimeWorktreeTests(Step5WorktreeTestCase):
+    """N5: a Ticket worktree is created before the claim, never after it."""
+
+    def test_claim_without_a_prepared_worktree_is_refused_not_created(self) -> None:
+        from agent_taskflow.attempt_scoped_runtime_path import AttemptScopedRuntimeTaskStore
+
+        ticket = self.fx.create_ticket("Claimed without preparation")
+        store = AttemptScopedRuntimeTaskStore(self.fx.db_path, heartbeat_interval_seconds=60)
+        store.preclaim_runtime(ticket.task_key, source="step5-test", artifact_base_root=ticket.artifact_dir)
+        workspace = store.prepare_attempt_workspace(ticket.task_key)
+        self.assertFalse(workspace.ok)
+        self.assertIn("missing at claim time", workspace.summary)
+        self.assertFalse(ticket.worktree_path.exists())
+        store.update_task_status(ticket.task_key, "failed", source="step5-test", message="cleanup")
+        store.shutdown_runtime_supervisors()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -48,7 +48,6 @@ from agent_taskflow.ticket_lifecycle import (
     FAILURE_VALIDATOR_ERROR,
     FAILURE_VALIDATOR_RED,
     FAILURE_WORKTREE,
-    TICKET_STOPPED_STATUSES,
     is_ticket,
     ticket_failure_status,
 )
@@ -79,7 +78,8 @@ RUNNABLE_STATUSES = {
 
 # SPEC §44: a blocked Ticket cannot execute and a paused Ticket cannot acquire
 # work. Refusing them writes nothing, so the pause and the real blocked_reason
-# survive. Other non-runnable statuses keep the blocking refusal below.
+# survive. For a legacy task, other non-runnable statuses keep the blocking
+# refusal below; refusing a Ticket never writes anything (V1 Step 5).
 UNTOUCHED_REFUSAL_STATUSES = {
     "blocked",
     "paused",
@@ -208,10 +208,11 @@ class Dispatcher:
 
         if task.status not in RUNNABLE_STATUSES:
             reason = f"Task status is not runnable: {task.status}"
-            untouched = task.status in UNTOUCHED_REFUSAL_STATUSES or (
-                # A stopped Ticket is retried through scripts/reset_task_status.py.
-                ticket and task.status in TICKET_STOPPED_STATUSES
-            )
+            # Refusing to start a Ticket never rewrites it (SPEC §29, §44): a
+            # stopped one is retried through scripts/reset_task_status.py, and
+            # any other status belongs to whoever set it (Step 2's integration
+            # statuses included). Legacy tasks keep the blocking refusal.
+            untouched = task.status in UNTOUCHED_REFUSAL_STATUSES or ticket
             if not dry_run and not untouched:
                 self._block_task(task.task_key, reason)
             return DispatcherResult(
@@ -241,7 +242,13 @@ class Dispatcher:
                     summary=governance_error,
                     blocked_reason=governance_error,
                 )
-            return self._fail(task.task_key, governance_error, FAILURE_GOVERNANCE, ticket=ticket)
+            return self._fail(
+                task.task_key,
+                governance_error,
+                FAILURE_GOVERNANCE,
+                ticket=ticket,
+                expected_status=task.status,
+            )
 
         assert worktree is not None
         assert task.artifact_dir is not None
@@ -259,7 +266,13 @@ class Dispatcher:
                     summary=reason,
                     blocked_reason=reason,
                 )
-            return self._fail(task.task_key, reason, FAILURE_GOVERNANCE, ticket=ticket)
+            return self._fail(
+                task.task_key,
+                reason,
+                FAILURE_GOVERNANCE,
+                ticket=ticket,
+                expected_status=task.status,
+            )
 
         if dry_run:
             return DispatcherResult(
@@ -671,14 +684,21 @@ class Dispatcher:
                 task.task_key,
                 source="dispatcher",
             )
-        except ValueError as exc:
-            return self._fail(task.task_key, str(exc), FAILURE_WORKTREE, ticket=True)
+        except (OSError, ValueError) as exc:
+            return self._fail(
+                task.task_key,
+                f"Ticket worktree preparation failed: {exc}",
+                FAILURE_WORKTREE,
+                ticket=True,
+                expected_status=task.status,
+            )
         if not result.ok:
             return self._fail(
                 task.task_key,
                 result.reason or "Ticket worktree preparation failed",
                 FAILURE_WORKTREE,
                 ticket=True,
+                expected_status=task.status,
             )
         return None
 
@@ -691,17 +711,35 @@ class Dispatcher:
         ticket: bool,
         executor_status: str | None = None,
         validator_statuses: dict[str, str] | None = None,
+        expected_status: str | None = None,
     ) -> DispatcherResult:
-        """End a failed run: `blocked` for a legacy task, SPEC §29 for a Ticket."""
+        """End a failed run: `blocked` for a legacy task, SPEC §29 for a Ticket.
+
+        ``expected_status`` makes a Ticket's pre-claim failure a compare-and-set
+        on the status this dispatch read, so it can never overwrite a Ticket that
+        another process has claimed since.
+        """
         if ticket:
             status = ticket_failure_status(kind)
-            self.store.update_task_status(
-                task_key,
-                status,
-                source="dispatcher",
-                message=reason,
-                blocked_reason=reason,
-            )
+            try:
+                self.store.update_task_status(
+                    task_key,
+                    status,
+                    source="dispatcher",
+                    message=reason,
+                    blocked_reason=reason,
+                    expected_current_status=expected_status,
+                )
+            except (KeyError, ValueError) as exc:
+                if expected_status is None:
+                    raise
+                refusal = f"{reason} (not recorded as {status}: {exc})"
+                return DispatcherResult(
+                    task_key=task_key,
+                    status="blocked",
+                    summary=refusal,
+                    blocked_reason=refusal,
+                )
         else:
             status = "blocked"
             self._block_task(task_key, reason)

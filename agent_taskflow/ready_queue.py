@@ -8,12 +8,13 @@ Eligible (step5.md layer 2):
 * not blocked by an unreleased dependency (its blocker, if any, is in a §12
   ``completed`` status);
 * not owned: no active runtime lease;
-* not paused or killed by a runtime control (global, project, class, task).
+* not paused or killed by a runtime control (global, project, task);
+* with the Step 1 derived worktree path and branch it needs to run.
 
 Order (ruling 28 D3): priority ``critical > high > normal > low``, then
 ``created_at`` (FIFO), then ``task_key``. There is no preferred-order column
-until Step 6's drag ordering. Read-only apart from the runtime-control lookup,
-which is the same one the claim itself performs.
+until Step 6's drag ordering. Read-only: it opens the database read-only, and
+the claim itself re-checks every runtime control.
 
 Legacy ``queued`` tasks are not scheduled here; the GitHub-issue path keeps its
 own runner (ruling 27f).
@@ -27,7 +28,6 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from agent_taskflow.lifecycle_control import RuntimeControlStore
 from agent_taskflow.models import require_absolute_path
 from agent_taskflow.ticket_dependencies import COMPLETED_BLOCKER_STATUSES
 from agent_taskflow.ticket_lifecycle import tasks_has_ticket_columns
@@ -86,6 +86,7 @@ def eligible_tickets(db_path: str | Path) -> list[ReadyTicket]:
             SELECT t.task_key, t.priority, t.created_at, t.status, t.project
             FROM tasks AS t
             WHERE t.prompt IS NOT NULL
+              AND t.worktree_path IS NOT NULL AND t.branch IS NOT NULL
               AND t.status IN ({placeholders})
               AND (
                   t.blocked_by IS NULL
@@ -98,6 +99,7 @@ def eligible_tickets(db_path: str | Path) -> list[ReadyTicket]:
             """,
             (*CLAIMABLE_STATUSES, *completed),
         ).fetchall()
+        halted = _halted_scopes(conn) if "runtime_controls" in tables else set()
     candidates = [
         ReadyTicket(
             task_key=str(row["task_key"]),
@@ -108,23 +110,30 @@ def eligible_tickets(db_path: str | Path) -> list[ReadyTicket]:
         )
         for row in rows
     ]
-    if not candidates:
-        return []
-    controls = RuntimeControlStore(path)
-    eligible = []
-    for ticket in candidates:
-        control = controls.effective_control(task_key=ticket.task_key)
-        if control.is_paused or control.kill_requested:
-            continue
-        # A Ticket that was never claimed has no task identity yet, so the
-        # effective control above cannot see its project; the claim would
-        # still refuse it. Check the project control directly.
-        if ticket.project:
-            project = controls.get_control(scope_kind="project", scope_id=ticket.project)
-            if project is not None and project.mode != "running":
-                continue
-        eligible.append(ticket)
+    eligible = [
+        ticket
+        for ticket in candidates
+        if ("global", "*") not in halted
+        and ("project", ticket.project) not in halted
+        and ("task", ticket.task_key) not in halted
+    ]
     return sorted(eligible, key=_sort_key)
+
+
+def _halted_scopes(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Runtime-control scopes currently paused or kill-requested. Read-only.
+
+    The same global / project / task scopes the claim's admission check
+    applies before a Ticket has an Attempt (lifecycle_control). The project is
+    matched on ``tasks.project`` directly, because a never-claimed Ticket has no
+    task identity yet.
+    """
+    return {
+        (str(row[0]), str(row[1]))
+        for row in conn.execute(
+            "SELECT scope_kind, scope_id FROM runtime_controls WHERE mode != 'running'"
+        )
+    }
 
 
 __all__ = ["CLAIMABLE_STATUSES", "PRIORITY_RANK", "ReadyTicket", "eligible_tickets"]

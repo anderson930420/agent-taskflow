@@ -338,6 +338,34 @@ def _record_row_if_needed(
     )
 
 
+def _existing(
+    store: TaskMirrorStore,
+    ticket: TicketWorktree,
+    *,
+    source: str,
+    inspection: TicketWorktreeInspection | None = None,
+) -> TicketWorktreeResult:
+    """A worktree already registered on the Ticket's branch: record its row if needed."""
+    inspection = inspection or inspect_ticket_worktree(ticket)
+    existing = store.get_task_worktree(ticket.task_key)
+    _record_row_if_needed(
+        store,
+        ticket,
+        base_sha=existing.base_sha if existing is not None else inspection.head_sha,
+        source=source,
+    )
+    return TicketWorktreeResult(
+        task_key=ticket.task_key,
+        worktree_path=ticket.worktree_path,
+        branch=ticket.branch,
+        base_branch=ticket.base_branch,
+        action=ACTION_EXISTING,
+        dirty=inspection.dirty,
+        base_sha=existing.base_sha if existing is not None else None,
+        head_sha=inspection.head_sha,
+    )
+
+
 def ensure_ticket_worktree(
     db_path: str | Path,
     task_key: str,
@@ -373,25 +401,12 @@ def ensure_ticket_worktree(
             source=source,
         )
     if inspection.state == WORKTREE_READY:
-        existing = store.get_task_worktree(ticket.task_key)
-        _record_row_if_needed(
-            store,
-            ticket,
-            base_sha=existing.base_sha if existing is not None else inspection.head_sha,
-            source=source,
-        )
-        return TicketWorktreeResult(
-            task_key=ticket.task_key,
-            worktree_path=ticket.worktree_path,
-            branch=ticket.branch,
-            base_branch=ticket.base_branch,
-            action=ACTION_EXISTING,
-            dirty=inspection.dirty,
-            base_sha=existing.base_sha if existing is not None else None,
-            head_sha=inspection.head_sha,
-        )
+        return _existing(store, ticket, source=source, inspection=inspection)
 
     if _branch_exists(ticket):
+        if inspect_ticket_worktree(ticket).state == WORKTREE_READY:
+            # Another process created it between our inspection and now.
+            return _existing(store, ticket, source=source)
         return _refuse(
             store,
             ticket,
@@ -421,6 +436,9 @@ def ensure_ticket_worktree(
         ticket.repo_path,
     )
     if created.returncode != 0:
+        if inspect_ticket_worktree(ticket).state == WORKTREE_READY:
+            # Lost a race with another process creating the same worktree.
+            return _existing(store, ticket, source=source)
         return _refuse(
             store,
             ticket,

@@ -164,12 +164,45 @@ def _last_status_source(conn: sqlite3.Connection, task_key: str) -> str | None:
     return row[0] if row is not None else None
 
 
+def _last_blocker_stop_was_dependency_owned(conn: sqlite3.Connection, task_key: str) -> bool:
+    """True when the latest failed/cancelled-blocker stop found a dependency wait."""
+    row = conn.execute(
+        """
+        SELECT payload_json FROM task_events
+        WHERE task_key = ? AND event_type = 'note' AND source = ?
+          AND json_extract(payload_json, '$.kind') = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (task_key, DEPENDENCY_SOURCE, DEPENDENCY_BLOCKER_STOPPED),
+    ).fetchone()
+    if row is None:
+        return False
+    return bool(json.loads(row[0]).get("dependency_owned"))
+
+
+def _active_attempt_id(conn: sqlite3.Connection, task_key: str) -> str | None:
+    """The row's active (or reserved) Attempt, or None; tolerant of legacy schemas."""
+    if not any(r[1] == "active_attempt_id" for r in conn.execute("PRAGMA table_info(tasks)")):
+        return None
+    row = conn.execute(
+        "SELECT active_attempt_id FROM tasks WHERE task_key = ?", (task_key,)
+    ).fetchone()
+    return row[0] if row is not None else None
+
+
 def _dependency_owned(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
-    """True when the row's current status was put there by a dependency."""
+    """True when the row's current status was put there by a dependency.
+
+    A `needs_decision` counts only if a stopped blocker put it there while the
+    Ticket was merely waiting on its dependency (ready, or dependency-blocked);
+    one that was failed or finished first still needs an operator retry.
+    """
     if row["status"] == "blocked":
         return bool(row["blocked_by"]) and is_dependency_blocked_reason(row["blocked_reason"])
     if row["status"] == "needs_decision":
-        return _last_status_source(conn, row["task_key"]) == DEPENDENCY_SOURCE
+        return _last_status_source(
+            conn, row["task_key"]
+        ) == DEPENDENCY_SOURCE and _last_blocker_stop_was_dependency_owned(conn, row["task_key"])
     return False
 
 
@@ -309,6 +342,13 @@ def set_blocked_by(
         _require_ticket_schema(conn)
         row = _validate(conn, normalized, normalized_blocker)
         from_status = row["status"]
+        if from_status in READY_STATUSES and _active_attempt_id(conn, normalized):
+            # A legacy reset reserved a retry Attempt; blocking it would strand
+            # the reservation (adoption needs `queued`).
+            raise TicketDependencyError(
+                f"{normalized} holds a reserved retry Attempt; start or cancel it before "
+                "setting a dependency"
+            )
         if from_status in READY_STATUSES or _dependency_owned(conn, row):
             to_status = "blocked"
             blocked_reason = dependency_blocked_reason(normalized_blocker)
@@ -424,7 +464,11 @@ def maintain_dependencies(db_path: str | Path, *, actor: str) -> DependencyMaint
             blocker = row["blocked_by"]
             blocker_status = row["blocker_status"]
             if blocker_status in COMPLETED_BLOCKER_STATUSES:
-                if row["status"] == "blocked" and is_dependency_blocked_reason(row["blocked_reason"]):
+                if (
+                    row["status"] == "blocked"
+                    and is_dependency_blocked_reason(row["blocked_reason"])
+                    and not _active_attempt_id(conn, row["task_key"])
+                ):
                     _write(
                         conn,
                         task_key=row["task_key"],
@@ -449,6 +493,13 @@ def maintain_dependencies(db_path: str | Path, *, actor: str) -> DependencyMaint
                     continue
                 if row["status"] in _NOT_REDIRECTED_STATUSES:
                     continue
+                dependency_owned = row["status"] in READY_STATUSES or (
+                    row["status"] == "blocked" and is_dependency_blocked_reason(row["blocked_reason"])
+                )
+                if row["status"] == "blocked" and not dependency_owned:
+                    # Blocked by a failure: it already waits for an operator
+                    # retry, and its failure reason must not be erased (D5).
+                    continue
                 shown = blocker_status or "missing"
                 _write(
                     conn,
@@ -462,7 +513,15 @@ def maintain_dependencies(db_path: str | Path, *, actor: str) -> DependencyMaint
                         f"blocked_by {blocker}: the blocker is {shown}; decide whether to "
                         "remove or replace the dependency, retry the blocker, or cancel"
                     ),
-                    payload={"blocker_status": shown, "actor": actor},
+                    payload={
+                        "blocker_status": shown,
+                        "actor": actor,
+                        "previous_status": row["status"],
+                        # Only a dependency wait may later return to ready by
+                        # removing or replacing the dependency; anything else
+                        # goes through the audited retry.
+                        "dependency_owned": dependency_owned,
+                    },
                     now=now,
                 )
                 stopped.append(row["task_key"])

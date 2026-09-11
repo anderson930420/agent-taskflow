@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
+from agent_taskflow.reset_lineage import ACTIVE_EXECUTOR_PROCESS_STATES
 from agent_taskflow.store import TaskMirrorStore, connect
 from agent_taskflow.ticket_dependencies import (
     COMPLETED_BLOCKER_STATUSES,
@@ -38,6 +39,8 @@ TICKET_RETRY_FROM_STATUSES = (TICKET_FAILED_STATUS, TICKET_NEEDS_DECISION_STATUS
 TICKET_RETRY_TO_STATUS = "created"
 TICKET_RETRY_KIND = "ticket_retry_reset"
 TICKET_RETRY_ARTIFACT_TYPE = "other"
+# Attempt-resource states whose runtime process is not known to have ended.
+_LIVE_RESOURCE_STATES = ("allocated", "active", "reap_blocked_live_pid")
 
 
 class TicketRetryError(RuntimeError):
@@ -190,6 +193,39 @@ def retry_ticket(request: Any, *, store: TaskMirrorStore) -> dict[str, Any]:
                     raise TicketRetryError(
                         f"Task {request.task_key} still has an active runtime lease"
                     )
+            # The next Attempt shares this worktree (ruling 26), so a process a
+            # previous Attempt may still run must be ruled out first: the same
+            # guard as the legacy reset, plus Attempt resources whose PID is not
+            # known to be dead.
+            if "executor_processes" in tables and row["task_id"]:
+                placeholders = ",".join("?" for _ in ACTIVE_EXECUTOR_PROCESS_STATES)
+                process = conn.execute(
+                    f"""
+                    SELECT process_id FROM executor_processes
+                    WHERE task_id = ? AND state IN ({placeholders}) LIMIT 1
+                    """,
+                    (row["task_id"], *ACTIVE_EXECUTOR_PROCESS_STATES),
+                ).fetchone()
+                if process is not None:
+                    raise TicketRetryError(
+                        f"Task {request.task_key} still has an active executor process "
+                        f"{process['process_id']}; terminate it before retrying"
+                    )
+            if "attempt_resources" in tables:
+                resource = conn.execute(
+                    f"""
+                    SELECT attempt_id, status FROM attempt_resources
+                    WHERE task_key = ? AND status IN ({",".join("?" for _ in _LIVE_RESOURCE_STATES)})
+                    LIMIT 1
+                    """,
+                    (request.task_key, *_LIVE_RESOURCE_STATES),
+                ).fetchone()
+                if resource is not None:
+                    raise TicketRetryError(
+                        f"Task {request.task_key} Attempt {resource['attempt_id']} resources are "
+                        f"{resource['status']!r}; its runtime process may still be alive. Run "
+                        "scripts/reap_stale_runtime.py (or terminate the process) before retrying"
+                    )
             latest = None
             if "attempts" in tables and row["task_id"]:
                 latest = conn.execute(
@@ -266,7 +302,25 @@ def retry_ticket(request: Any, *, store: TaskMirrorStore) -> dict[str, Any]:
                 raise TicketRetryError(
                     f"Task {request.task_key} changed while it was being retried"
                 )
-            artifact_dir = Path(row["artifact_dir"]) if row["artifact_dir"] else None
+            # After a claim `tasks.artifact_dir` names the last Attempt's root,
+            # which is immutable evidence; write beside it, under the Ticket's
+            # artifact base, as the legacy reset audit does.
+            base = (
+                conn.execute(
+                    """
+                    SELECT artifact_base_root FROM attempt_resources
+                    WHERE task_key = ? ORDER BY attempt_number DESC LIMIT 1
+                    """,
+                    (request.task_key,),
+                ).fetchone()
+                if "attempt_resources" in tables
+                else None
+            )
+            artifact_dir = (
+                Path(base[0])
+                if base is not None and base[0]
+                else (Path(row["artifact_dir"]) if row["artifact_dir"] else None)
+            )
             artifact_path = (
                 artifact_dir / "reset-audit" / f"{retry_id}.json" if artifact_dir else None
             )

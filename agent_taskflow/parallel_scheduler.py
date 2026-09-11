@@ -106,11 +106,31 @@ def _worker_env() -> dict[str, str]:
     return env
 
 
-def default_launcher(db_path: Path, task_key: str) -> subprocess.Popen:
-    """Start one production worker; its output goes to the Ticket's artifact dir."""
+def _ticket_artifact_base(db_path: Path, task_key: str) -> Path | None:
+    """The Ticket's artifact base, never an (immutable) Attempt root.
+
+    After a claim ``tasks.artifact_dir`` names the last Attempt's root; the
+    Attempt-resource row keeps the base it was derived from.
+    """
     with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if "attempt_resources" in tables:
+            row = conn.execute(
+                """
+                SELECT artifact_base_root FROM attempt_resources
+                WHERE task_key = ? ORDER BY attempt_number DESC LIMIT 1
+                """,
+                (task_key,),
+            ).fetchone()
+            if row is not None and row[0]:
+                return Path(row[0])
         row = conn.execute("SELECT artifact_dir FROM tasks WHERE task_key = ?", (task_key,)).fetchone()
-    log_dir = Path(row[0]) if row is not None and row[0] else db_path.parent
+    return Path(row[0]) if row is not None and row[0] else None
+
+
+def default_launcher(db_path: Path, task_key: str) -> subprocess.Popen:
+    """Start one production worker; its output goes to the Ticket's artifact base."""
+    log_dir = _ticket_artifact_base(db_path, task_key) or db_path.parent
     log_dir.mkdir(parents=True, exist_ok=True)
     # One log per launch, so a result line always belongs to this worker.
     log_path = log_dir / f"scheduler-worker-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid4().hex[:8]}.log"
@@ -208,9 +228,9 @@ def _await_claim(
                 reason = str(output.get("summary") or output.get("stderr_tail") or reason)
             return None, reason
         if time.monotonic() > deadline:
-            process.kill()
-            process.wait()
-            return None, f"no claim observed within {timeout:g}s; worker stopped"
+            # Never kill it: a claim committed an instant later would leave a
+            # lease with no owner. It keeps running and owns whatever it claims.
+            return None, f"no claim observed within {timeout:g}s; worker left running"
         time.sleep(_POLL_SECONDS)
 
 
@@ -241,7 +261,12 @@ def run_scheduler_tick(
     for candidate in candidates:
         if _active_leases(path) >= capacity:
             break
-        worktree = ensure_ticket_worktree(path, candidate.task_key, source=actor)
+        try:
+            worktree = ensure_ticket_worktree(path, candidate.task_key, source=actor)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            # One bad candidate must not wedge every later tick.
+            not_started.append((candidate.task_key, f"worktree preparation raised: {exc}"))
+            continue
         if not worktree.ok:
             reason = worktree.reason or "Ticket worktree preparation failed"
             try:
@@ -259,12 +284,21 @@ def run_scheduler_tick(
             preparation_failed.append((candidate.task_key, reason))
             continue
         before = _attempt_snapshot(path, candidate.task_key)
-        process = launch(path, candidate.task_key)
+        try:
+            process = launch(path, candidate.task_key)
+        except OSError as exc:
+            not_started.append((candidate.task_key, f"worker could not start: {exc}"))
+            continue
         attempt_id, reason = _await_claim(
             path, candidate.task_key, process, before, claim_timeout_seconds
         )
         if attempt_id is None:
             not_started.append((candidate.task_key, reason))
+            if process.poll() is None:
+                # Still running past the timeout: keep it, and start nothing
+                # more until a later tick can see what it claimed.
+                workers.append(process)
+                break
             if "runtime_capacity_exceeded" in reason:
                 break
             continue

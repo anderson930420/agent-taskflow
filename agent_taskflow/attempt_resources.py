@@ -25,7 +25,6 @@ from agent_taskflow.ticket_worktree import (
     WORKTREE_ABSENT,
     WORKTREE_READY,
     TicketWorktree,
-    ensure_ticket_worktree,
     inspect_ticket_worktree,
     record_ticket_worktree_reuse,
     ticket_worktree_for,
@@ -489,10 +488,13 @@ class AttemptResourceManager:
         """
         inspection = inspect_ticket_worktree(ticket)
         if inspection.state == WORKTREE_ABSENT:
-            created = ensure_ticket_worktree(self.db_path, record.task_key)
-            if not created.ok:
-                return self._blocked(record, created.reason or "Ticket worktree preparation failed")
-            inspection = inspect_ticket_worktree(ticket)
+            # Ruling 26b: the worktree is created before the claim
+            # (ticket_worktree.ensure_ticket_worktree). Never create it here.
+            return self._blocked(
+                record,
+                f"Ticket worktree {ticket.worktree_path} is missing at claim time; it is "
+                "prepared before the claim and is not created after it",
+            )
         if inspection.state != WORKTREE_READY:
             return self._blocked(
                 record, f"Ticket worktree cannot be used: {inspection.detail}"

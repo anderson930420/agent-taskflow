@@ -330,7 +330,7 @@ def worker_env() -> dict[str, str]:
     return env
 
 
-def worker_launcher(sync_dir: Path, *, mode: str = "pass", expect: int = 1):
+def worker_launcher(sync_dir: Path, *, mode: str = "pass", expect: int = 1, delay: float = 0.0):
     """Return a scheduler launcher that runs tests/step5_scheduler_worker.py."""
 
     def launch(db_path: Path, task_key: str) -> subprocess.Popen:
@@ -348,6 +348,8 @@ def worker_launcher(sync_dir: Path, *, mode: str = "pass", expect: int = 1):
                 mode,
                 "--expect",
                 str(expect),
+                "--delay",
+                str(delay),
             ],
             cwd=REPO_ROOT,
             env=worker_env(),
