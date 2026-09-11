@@ -3,382 +3,464 @@
 Branch: `task/v1-step5`
 Draft PR: https://github.com/anderson930420/agent-taskflow/pull/201 (draft, base `main`)
 Base: `a5fa8e2` (`main`, after Steps 1, 3, 4 and F1 merged)
-Spec: `~/agent-taskflow-ops/v1/SPEC.md` §20, §21, §9, §29, §42 Step 5
-Instructions: `~/agent-taskflow-ops/v1/step5.md`
+Spec: `~/agent-taskflow-ops/v1/SPEC.md` §5, §7, §9, §20, §21, §29, §33.3, §42 Step 5, §43, §44
+Instructions: `~/agent-taskflow-ops/v1/step5.md`; rulings 21 and 26–28 (`RULINGS.md`)
 
-**Status: STOPPED during the read-only inventory. Nothing is implemented.**
-Two stop conditions fired before any test or code was written (§3):
-
-- **S1:** "One worktree per Ticket, a retry reuses it" contradicts the
-  installed Attempt-scoped resource layer. It gives every Attempt a new branch
-  and a new worktree. The layer is documented, enforced by the schema, and
-  pinned by a pre-existing test.
-- **S2:** the §29 failure remap turns pre-existing tests red, because they
-  assert `blocked` on failure. step5.md's watchlist names this exact case a
-  stop condition. Remapping lease expiry would also change the Step 4 reaper,
-  which step5.md forbids.
-
-As the stop rule and the orchestration rules require, I stopped, wrote this
-file, and repaired nothing. The only change on this branch is this file. Every
-acceptance-gate row is unimplemented (§6). §5 lists the decisions needed.
+**Status: implemented and ready for human review. No stop condition is open.**
+Round 1 stopped during the read-only inventory on two stop conditions (S1, S2;
+§3.1). Rulings 26, 27 and 28 resolved them and decided D1–D6. This round
+implemented Step 5 under those rulings, with the acceptance-gate tests written
+first. No new stop condition fired, and no pre-existing test went red or was
+edited. Three interpretations of the rulings are flagged for the reviewer in
+§3.2; none of them is a stop condition. An independent read-only review
+subagent checked the implementation; its findings are fixed and listed in §2.5.
 The PR is a draft. Nothing is approved or merged.
 
 ---
 
-## 1. Read-only inventory
+## 0. Round history
 
-### 1.1 What earlier steps handed to Step 5, checked against the code
-
-| Handed-over fact (step5.md) | Result |
-|---|---|
-| A Step 1 Ticket has no `task_worktrees` row. `dispatch_task` refuses it with "Task worktree not found", and the governance branch writes `created → blocked`. | **Verified.** `create_ticket` writes `tasks` and `task_events` only (`ticket_store.py:236-287`); the probe (§3.1) reads the row as `None`. The refusal is `dispatcher.py:515-516`, and `_block_task` writes it (`dispatcher.py:200-203`). |
-| Executor failure, validator failure, governance refusal and lease expiry all write `blocked`. | **Verified, and wider than listed.** In the dispatcher: `dispatcher.py:277, 324, 344, 386, 405` (failures) and `:203` (governance). The runtime layers write it too: `attempt_scoped_runtime_path.py:280` (resource allocation failure) and `:621-637` (workspace preparation failure). Lease expiry writes it in `runtime_admission.py:742-757`. The Level 2 runner and `lifecycle_runtime_path.py:165-203` use the same target. |
-| `RuntimeAdmissionStore.claim()` checks capacity first, then `{"created", "queued"}`. | **Verified.** `runtime_admission.py:322-337`: `BEGIN IMMEDIATE` → `assert_runtime_capacity_available` → `_ensure_task_identity` → `assert_admission_allowed` → the status check. |
-| `max_concurrent_tasks` is global, default 1. | Verified (`runtime_capacity.py`, ruling 15). |
-| The reaper is one idempotent callable plus a CLI. | Verified: `runtime_reaper.reap_stale_runtime` (`runtime_reaper.py:93`) and `scripts/reap_stale_runtime.py`. It calls `RuntimeAdmissionStore.expire_stale_leases()`, and that call writes the `blocked` target. |
-| F1 records Prepare / Implementer / Validator. | Verified (`runtime_progress_recorder.py`). |
-
-### 1.2 Facts step5.md does not mention
-
-1. **The installed runtime already creates a git worktree on every claim,
-   one per Attempt.** `agent_taskflow/__init__.py` layers
-   `AttemptScopedRuntimeTaskStore` under the dispatcher. On every
-   `preparing` claim it allocates a new branch and a new worktree for that
-   Attempt (`attempt_resources.py:280-284`), then runs `git worktree add -b`
-   (`:424-434`) and **overwrites the Ticket's `task_worktrees` row** with the
-   Attempt's path and branch (`:471-481`). Each Attempt gets:
-   - branch `attempt/<task-slug>/<n>-<suffix>`
-   - worktree `<worktrees_dir>/<task-slug>/<attempt-id>`
-
-   See §3.1.
-2. **Dependency storage already exists in part (Step 1).**
-   - `tasks.blocked_by` is a single `TEXT` column (`ticket_fields_schema.py:41`).
-   - Creation checks that the blocker exists (`ticket_store.py:206-216`).
-     Its comment says "Cycle validation is Step 5".
-   - A Ticket created with `blocked_by` is persisted as `blocked`
-     (`ticket_models.py:105-113`).
-   - The board projection already reads `blocked_by`
-     (`realtime_projection.py:495`).
-   - **Nothing can set or remove `blocked_by` after creation**, and nothing
-     releases it.
-3. **The failure statuses already exist.** `failed` and `needs_decision` are in
-   `TASK_STATUSES` and map to themselves in `status_vocab.py`, so the remap
-   needs no vocabulary change. §12 `completed` is persisted as `cleaned`, with
-   aliases `completed` and `done` (`status_vocab.py:56, 99, 108, 115`).
-4. **There is no preferred-order field.** No column, API field or projection
-   field records a preferred order. §8 drag ordering is Step 6.
-5. **The only retry path accepts `blocked` only.** It resets to `queued`
-   (`task_status_reset.py:24`, `reset_lineage.py:330, 427-433`), a status
-   §12.1 says V1 never writes.
-
-### 1.3 Planned touch list (not executed; depends on §5)
-
-| Module | Extend / Create | Planned purpose | Blocked by |
-|---|---|---|---|
-| `agent_taskflow/ticket_worktree.py` | create | Idempotent, audited creation of the Ticket's worktree and `task_worktrees` row, from the Step 1 derived path and branch | S1 / D1 |
-| `agent_taskflow/attempt_resources.py`, `attempt_scoped_runtime_path.py` | extend | Bind a Ticket's Attempts to the Ticket's worktree instead of allocating a new one | S1 / D1 |
-| `scripts/migrate_*.py` (new) | create | Any schema change D1 needs, for example relaxing the `attempt_resources` `UNIQUE` columns. No startup migration. | D1 |
-| `agent_taskflow/ticket_dependencies.py` | create | Set/remove `blocked_by`: unknown and self rejected, cycle detection at set time, release on the §12 `completed` statuses only, failed/cancelled blocker → `needs_decision`, all audited | D2, D5, D6 |
-| `agent_taskflow/ready_queue.py` | create | Eligibility and deterministic ordering | D3 |
-| `agent_taskflow/parallel_scheduler.py` + `scripts/run_parallel_scheduler_tick.py` | create | One idempotent tick: reap → pick → claim → prepare worktree → start executor | S1, S2 |
-| `agent_taskflow/dispatcher.py` | extend | §29 remap of the failure targets | S2 / D2 |
-| `canonical_runtime_path.py`, `attempt_scoped_runtime_path.py`, `lifecycle_runtime_path.py` | extend | Release the lease and resources on `failed` / `needs_decision` too | S2 / D2 |
-| `runtime_admission.py` (`expire_stale_leases`), `task_status_reset.py`, `reset_lineage.py` | extend | Lease expiry → `failed`, and a retry path out of `failed` | S2 / D2 (the reaper change is forbidden as written) |
-| `tests/test_step5_*.py` | create | The acceptance gate | all of the above |
-
-No existing module was modified.
+| Round | Commit(s) | What happened |
+|---|---|---|
+| 1 | `a18057f`, `f339d54` | Read-only inventory hit S1 and S2 (§3.1). Stopped, wrote this file, opened draft PR #201. Nothing implemented. |
+| 1b | `2c77cc3` | A second builder run with the same prompt re-verified S1 and S2 against the code and changed nothing else (§10). |
+| 2 | `d7b51c0` | Rulings 26–28 applied. Step 5 implemented with the acceptance-gate tests written first (§2, §5). |
+| 2 | `ff7becd` | An independent read-only review of `d7b51c0` found 2 blocking and 5 should-fix issues plus 5 nits; all fixed with tests (§2.5). |
+| 2 | this commit | This handoff. Validation in §7 is on `ff7becd`'s code. |
 
 ---
 
-## 2. What was implemented
+## 1. Inventory
 
-Nothing, apart from this file. No test, module, script, schema or frontend
-file changed. The read-only probe in §3.1 ran under `/tmp` and is reproduced
-in Appendix A. It is not committed.
+### 1.1 Facts handed to Step 5 (verified in round 1, still true at `a5fa8e2`)
 
----
+- A Step 1 Ticket had no `task_worktrees` row, so dispatch refused it with
+  "Task worktree not found" and wrote `created → blocked`.
+- Executor failure, validator failure, governance refusal and lease expiry all
+  wrote `blocked`.
+- The claim checks capacity first, then `{created, queued}`
+  (`runtime_admission.py` `claim()`); `max_concurrent_tasks` is global, default 1.
+- The reaper is `runtime_reaper.reap_stale_runtime` plus
+  `scripts/reap_stale_runtime.py`.
+- The installed runtime (`AttemptScopedRuntimeTaskStore`) gave every Attempt
+  a new branch and worktree and overwrote `task_worktrees` with it (§3.1).
+- Step 1 already stores one `tasks.blocked_by` and persists a Ticket created
+  with it as `blocked`; nothing could set, remove or release it afterwards.
+- `failed` and `needs_decision` already exist in `TASK_STATUSES` and
+  `status_vocab.py`; §12 `completed` persists as `cleaned` (aliases
+  `completed`, `done`).
+- No preferred-order field exists.
 
-## 3. Stop conditions hit
+### 1.2 Every file touched: extend or create
 
-### 3.1 S1 — "One Ticket = One Worktree, a retry reuses it" contradicts the Attempt-scoped resource contract
+No existing module was rewritten.
 
-**The requirement.** step5.md, allowed layer 1: "One worktree per Ticket,
-never one per Attempt. A retry reuses the Ticket's worktree." It is also in
-the acceptance gate: "exactly one worktree and one `task_worktrees` row …
-a retry reuses the same worktree". SPEC §9 and §33.3 agree: "同一 Ticket、同一
-worktree".
+| File | Extend / Create | Change |
+|---|---|---|
+| `agent_taskflow/ticket_lifecycle.py` | **create** | Ticket identity (`prompt IS NOT NULL`, safe on legacy schemas) and the §29 failure vocabulary. |
+| `agent_taskflow/ticket_worktree_schema.py` | **create** | The ruling 26d rebuild of `attempt_resources`, its fail-closed gate and precondition check. |
+| `scripts/migrate_ticket_worktree_resources.py` | **create** | The only thing that applies it (§2.1). |
+| `agent_taskflow/ticket_worktree.py` | **create** | Idempotent, audited, fail-closed creation of the Ticket's one worktree and row (ruling 26b, e, f). |
+| `agent_taskflow/attempt_resources.py` | extend | `allocate()` binds a Ticket's Attempt to the Ticket's worktree and branch; `_provision_ticket_workspace()` reuses it as left and audits it; `_activate()` gains optional `worktree_base_sha` and `summary`. Legacy allocation unchanged. |
+| `agent_taskflow/canonical_runtime_path.py` | extend | `RUNTIME_RELEASE_TASK_STATUSES` adds `failed`, `needs_decision`; `_terminal_attempt_status` maps them; the post-release reason rewrite covers them. |
+| `agent_taskflow/attempt_scoped_runtime_path.py` | extend | Uses that release set; a Ticket's in-claim allocation failure and workspace-preparation failure write `failed`. |
+| `agent_taskflow/lifecycle_runtime_path.py` | extend | `_release` closes a `failed`/`needs_decision` with no pending executor/validator outcome as Attempt `failed` / `runtime_failed`; the reason rewrite covers them. |
+| `agent_taskflow/lifecycle_control.py` | extend | One new reason code, `runtime_failed`. |
+| `agent_taskflow/dispatcher.py` | extend | Ticket detection; refusing to start a Ticket never writes; missing Step 5 migration refused untouched, naming the script; worktree ensured before the claim; every failure through `_fail()` (legacy → unchanged `_block_task`; a Ticket's pre-claim failure is a compare-and-set). |
+| `agent_taskflow/runtime_admission.py` | extend | `expire_stale_leases` writes `failed` for a Ticket, `blocked` (unchanged) for a legacy task. |
+| `agent_taskflow/runtime_reaper.py` | extend | Docstring only. |
+| `agent_taskflow/ticket_retry.py` | **create** | The Ticket retry (§33.3): `failed`/`needs_decision → created`, one audited compare-and-set. |
+| `agent_taskflow/task_status_reset.py`, `scripts/reset_task_status.py` | extend | Accept `failed` and `needs_decision` for a Ticket, routed to `ticket_retry`; `to_status` is derived; the legacy `blocked → queued` path is unchanged. |
+| `agent_taskflow/ticket_dependencies.py` | **create** | Set / replace / remove `blocked_by`, cycle detection, release, failed/cancelled-blocker propagation (§2.3). |
+| `scripts/ticket_dependency.py` | **create** | The D6 operator CLI. |
+| `agent_taskflow/ready_queue.py` | **create** | Eligibility and D3 ordering. |
+| `agent_taskflow/parallel_scheduler.py` | **create** | The tick. |
+| `agent_taskflow/scheduler_worker.py` | **create** | The one-Ticket worker process a tick starts. |
+| `scripts/run_parallel_scheduler_tick.py` | **create** | The tick CLI. |
+| `agent_taskflow/api/main.py` | extend | One line: `/start` reports `ok: false` for `failed` and `needs_decision` too (it already did for `blocked`). |
+| `docs/attempt-scoped-runtime-resources.md` | extend | Both worktree contracts (ruling 26g). |
+| `tests/step5_support.py`, `tests/step5_scheduler_worker.py` | **create** | Test fixtures and the test-only scheduler worker (not test modules). |
+| `tests/test_step5_*.py` (6 files) | **create** | The acceptance gate, 92 tests (§5). |
+| `docs/v1/handoff-step5.md` | extend | This file. |
 
-**The existing code that contradicts it:**
-
-- **Documented contract.** `docs/attempt-scoped-runtime-resources.md`,
-  "Fresh retry contract": "The next Attempt therefore receives a new: branch;
-  worktree; … The prior Attempt cannot be reused as the retry workspace."
-  Its status block lists `fresh_worktree_retry_identity = implemented`.
-- **Schema.** In `attempt_resources_schema.py`, `branch_name` and
-  `worktree_path` are `NOT NULL UNIQUE`, and the trigger
-  `attempt_resources_immutable_paths` refuses any path update. Two Attempts
-  cannot share a worktree path or a branch, so a Ticket's Attempts cannot
-  either. Dropping a `UNIQUE` column constraint in SQLite means rebuilding the
-  table.
-- **Reuse is refused when dirty.** `provision_workspace` reopens an existing
-  worktree only for the same Attempt, and only if it is clean
-  (`attempt_resources.py:412-418`). A retry after a failed Attempt normally
-  finds uncommitted work left in the worktree.
-- **Pre-existing test.**
-  `tests/test_attempt_resources.py::AttemptResourceTests::test_retry_gets_new_branch_worktree_and_artifact_root`
-  (lines 147-171) asserts `assertNotEqual(first.worktree_path,
-  second.worktree_path)` and the same for the branch. It is green today (§7).
-- **The installed dispatcher always takes this path.**
-  `AttemptScopedDispatcher.dispatch_task` stages resources for every
-  `created`/`queued` task (`attempt_scoped_runtime_path.py:581-598`). The
-  `preparing` claim always runs `preclaim_runtime` and
-  `prepare_attempt_workspace` (`:350-366`).
-
-**Probe evidence.** Appendix A ran against a scratch repository and database
-under `/tmp`, with `HOME` redirected. It uses Step 1's real `create_ticket`,
-then does what layer 1 asks for: a real `git worktree add` at the Ticket's
-derived path and branch, plus a `task_worktrees` row. It then claims twice
-through the installed runtime store, staged the same way
-`AttemptScopedDispatcher` stages it, with the reset CLI's `blocked → queued`
-retry in between. No executor, validator or scheduler ran. Output, trimmed:
-
-```text
-Step 1 Ticket: AT-0001 status created
-  derived worktree: …/repo/.worktrees/AT-0001
-  derived branch:   task/AT-0001-add-a-probe-file
-  task_worktrees row: None
-after creating the per-Ticket worktree: git worktrees: ['…/.worktrees/AT-0001']
-claim #1 (installed runtime path):
-  store class: ValidatorProcessRuntimeTaskStore | dispatcher class: Dispatcher
-  attempt worktree: …/.worktrees/at-0001/attempt-28cf3b36…
-  attempt branch:   attempt/at-0001/1-28cf3b3669db
-  task_worktrees row now: …/.worktrees/at-0001/attempt-28cf3b36… | attempt/at-0001/1-28cf3b3669db
-claim #2 (retry):
-  attempt worktree: …/.worktrees/at-0001/attempt-9cf6f662…
-  attempt branch:   attempt/at-0001/2-9cf6f662e0e9
-git worktrees for one Ticket: 3
-retry reused the first Attempt's worktree: False
-retry reused the Ticket's derived worktree: False
-```
-
-With a per-Ticket worktree added in front, the installed path gives **one
-Ticket three git worktrees after one retry**. The executor never runs in the
-Ticket's worktree or on the Ticket's branch, and the `task_worktrees` row ends
-up naming the latest Attempt's worktree. Without that front step (only a
-`task_worktrees` row), dispatch would pass governance. Each Attempt would
-still get its own worktree, and a retry would still get a new one. Neither
-arrangement meets the acceptance row.
-
-**Why this is a stop and not a design choice I can make.** Meeting the
-requirement means changing a documented M0 / Level 2 contract: fresh worktree
-identity on retry. That takes a schema rebuild and flips a pre-existing test,
-or it takes a Ticket-only exception inside the Attempt resource layer. step5.md
-does not cover either, and the spec never mentions Attempt-scoped worktrees.
-That is "a spec requirement … contradicts existing code". See D1.
-
-### 3.2 S2 — The §29 failure remap turns pre-existing tests red, and lease expiry would change the reaper's contract
-
-**The requirement.** Allowed layer 6 and the acceptance gate: "A validator
-failure ends `needs_decision`; an executor crash, a worktree preparation
-failure and a lease expiry end `failed`". step5.md's own watchlist: "a
-pre-existing test that asserts `blocked` on failure is a stop condition."
-
-**Pre-existing tests that assert `blocked` on a failure the remap moves.**
-All are green today (§7):
-
-| Test | Failure it pins to `blocked` |
-|---|---|
-| `tests/test_dispatcher.py::DispatcherTests::test_executor_failed_blocks_task` (147) | executor `failed` |
-| `…::test_executor_blocked_blocks_task` (161) | executor `blocked` |
-| `…::test_validator_failed_blocks_task` (175) | validator `failed` (→ `needs_decision` under §29.1) |
-| `…::test_validator_blocked_blocks_task` (192) | validator `blocked` |
-| `…::test_unknown_executor_blocks_task` (432), `…::test_unknown_executor_still_blocks_task` (754) | executor unavailable |
-| `…::test_unknown_validator_blocks_task` (445) | validator unavailable |
-| `tests/test_runtime_admission.py::…::test_stale_lease_reaper_aborts_attempt_and_blocks_task` (296) | lease expiry: status `blocked`, reason `runtime_lease_expired` |
-| `tests/test_runtime_progress_wiring.py` (F1): `test_failing_executor_leaves_implementer_failed_and_validator_pending` (507), `test_raising_executor_leaves_implementer_failed` (529), `test_failing_validator_leaves_validator_failed` (547), `test_unavailable_executor_leaves_prepare_failed` (565), `test_failure_outcome_is_unchanged_by_a_raising_progress_store` (791) | `result.status == "blocked"` on failure |
-| `tests/test_concurrency_crash_recovery.py` (class fixture, line 95), and the rehearsal it drives, `concurrency_rehearsal.py:940-955` | after lease expiry, recovery runs `reset_task_status.py --from-status blocked` |
-
-**Why lease expiry cannot be remapped within step5.md's rules.** The
-`blocked` target is written inside `RuntimeAdmissionStore.expire_stale_leases()`
-(`runtime_admission.py:742-757`), which is what `reap_stale_runtime()` runs.
-step5.md forbids "Changing … the reaper's contract (Step 4)", but its
-acceptance gate requires "a lease expiry end `failed`". The two cannot both
-hold.
-
-**What breaks beyond those tests if only the dispatcher is remapped:**
-
-1. **Leases would not be released.** `CanonicalRuntimeTaskStore` and
-   `AttemptScopedRuntimeTaskStore` release the lease and Attempt resources
-   only on `{blocked, waiting_approval, canceled, completed}`
-   (`canonical_runtime_path.py:293`, `attempt_scoped_runtime_path.py:368`).
-   `_terminal_attempt_status` maps any other status to Attempt `blocked`
-   (`canonical_runtime_path.py:204-211`). A dispatcher writing `failed`
-   through these layers would keep the lease and its capacity slot until the
-   lease expires.
-2. **Nothing could retry `failed` or `needs_decision`.** The reset CLI accepts
-   `blocked` only (§1.2.5).
-3. **The Step 4 gate would stop passing.** Its §19.3 rehearsal checks recovery
-   "through the existing retry" with `--from-status blocked`. With lease
-   expiry writing `failed`, that check fails and the evidence gate stops
-   passing, so `max_concurrent_tasks` could no longer go above 1. That would
-   also block acceptance row §43.10 ("above 1 with evidence").
-4. **Failure alerts would stop.** Outside the repo:
-   `~/agent-taskflow-ops/taskflow_dc_notify.py` (5-minute cron) alerts
-   Discord on `blocked` (`NOTIFY_STATUSES`, lines 41-45) but not on `failed`
-   or `needs_decision`. After the remap, failures would stop alerting. This is
-   an ops-side change, and I did not touch it.
-
-### Not hit
-
-- **No pre-existing test went red.** Nothing was changed. The full suite on
-  this tree is in §7.
-- No forbidden layer was entered, no migration was added, and no startup
-  behaviour changed.
+Not touched: `approved_task_runner.py` (ruling 27f), Step 2's modules (ruling
+21), `RuntimeProgressStore` and its schema, the SSE endpoint, the board and
+Ticket projections, `mission-control/`, `~/agent-taskflow-ops/` (ruling 27g).
 
 ---
 
-## 4. Ambiguities flagged (step5.md watchlist and others)
+## 2. What was implemented, ruling by ruling
 
-1. **Preferred ordering beyond priority.** §7 names "priority → preferred
-   queue order → deterministic tie-breaker". §20 says only "highest-priority
-   eligible". §8 makes drag ordering optional and Step 6 owns it. No field
-   stores a preferred order (§1.2.4).
-2. **A running dependent whose blocker fails.** A dependent can only be
-   running while its blocker is incomplete if the dependency arrived after it
-   started, as a §5.2 runtime-discovered dependency. §13's
-   stop-at-safe-boundary is the nearest rule. The spec does not say whether
-   to stop the dependent.
-3. **Retrying a `failed` Ticket.** The reset CLI takes `blocked` only and
-   writes `queued`. §33.3 retries `needs_decision → ready` (persisted
-   `created`) with a new Attempt. There is no path out of `failed` or
-   `needs_decision` today.
-4. **Targets step5.md does not name:** governance refusal (for example a
-   worktree outside `.worktrees`), an executor that returns `blocked` (for
-   example a cooperative operator kill), and a validator that raises or is
-   unavailable. §29.2 "invalid repository state" suggests `failed` for the
-   first. For the validator cases, "validator red" (`needs_decision`) and
-   "infrastructure" (`failed`) are both plausible.
-5. **A dependency wait and a failure are both persisted `blocked`.** Step 1
-   persists "created with `blocked_by`" as `blocked`, the same value failures
-   write today. Releasing a dependency needs a new `blocked → created`
-   transition, which no path has. That transition must never release a
-   failure-`blocked` row. D2 mostly settles this: once failures stop writing
-   `blocked`, only legacy rows stay ambiguous.
-6. **`needs_decision` has no exit.** No route or CLI moves a Ticket out of it.
-   §5.4 lists the choices (remove or replace the dependency, retry the
-   blocker, cancel the dependent), and §18 lists them as manual controls.
+### 2.1 Ruling 26 — One Ticket = One Worktree (step5.md layer 1)
+
+- **26a.** `AttemptResourceManager.allocate()` looks the task up with
+  `ticket_worktree_for()`. For a Ticket, the Attempt's `branch_name` is
+  `tasks.branch` and its `worktree_path` is `tasks.worktree_path`; its
+  artifact root, lock and PID paths stay per Attempt (`<artifact>/<attempt-id>/`).
+- **26b.** `ticket_worktree.ensure_ticket_worktree()` creates the real worktree
+  (`git worktree add <tasks.worktree_path> -b <tasks.branch> <tasks.base_branch>`)
+  and the Ticket's single `task_worktrees` row, before any claim. It runs from
+  the dispatcher (`_prepare_ticket_worktree`, before governance and the claim)
+  and from the scheduler tick (before it starts a worker). It is idempotent: a
+  worktree already registered on the Ticket's branch is left as is and writes
+  no event, and one created concurrently by another process is treated as
+  existing. Creation writes a `worktree_recorded` event
+  (`kind: ticket_worktree_created`, with the base SHA). Provisioning at claim
+  time never creates it: a Ticket worktree missing then is refused.
+- **26c.** Legacy tasks never take the Ticket branch; they keep
+  `attempt/<slug>/<n>-<suffix>` and `.worktrees/<slug>/<attempt-id>`.
+  `test_retry_gets_new_branch_worktree_and_artifact_root` is unedited and green;
+  `LegacyFreshWorktreeContractTests` shows the same on a migrated database.
+- **26d.** `scripts/migrate_ticket_worktree_resources.py` →
+  `migrate_ticket_worktree_resources()` (migration
+  `v1_step5_ticket_worktree_attempt_resources`):
+  - takes the stored `CREATE TABLE attempt_resources` SQL and removes exactly
+    `UNIQUE` from `branch_name TEXT NOT NULL UNIQUE,` and
+    `worktree_path TEXT NOT NULL UNIQUE,`; any other shape is refused;
+  - in one `BEGIN IMMEDIATE` with foreign keys off: renames the old table aside,
+    creates the new one from the relaxed SQL, copies every column of every row,
+    drops the old table, restores its index and both triggers verbatim, refuses
+    if the rebuild would introduce a foreign-key violation, records the migration;
+  - is idempotent (a recorded migration returns without touching the schema), and
+    the lazy `migrate_attempt_resources` (all `IF NOT EXISTS`) does not restore
+    `UNIQUE` afterwards;
+  - needs the task-mirror schema and never creates it (exit 2, names the fix);
+  - **nothing applies it at startup.** `require_ticket_worktree_resources()`
+    fails closed and names the script. It is called by Ticket dispatch (a
+    refusal that writes nothing), by `ensure_ticket_worktree`, by
+    `allocate()` for a Ticket, and at the start of the tick CLI (exit 2).
+    Legacy tasks run with or without it. The API process does not gate on it:
+    ~15 existing API test files and 9 smoke scripts enter the API lifespan with
+    only Step 1's migration (Step 3 set no startup gate either); a Ticket
+    started through `/start` without it is refused at dispatch, untouched,
+    naming the script.
+  - The schema-diff test (`test_schema_diff_is_exactly_the_two_unique_keywords`)
+    asserts: only `attempt_resources`' SQL changed, by exactly those two
+    keywords; every other table, named index, trigger and view is identical;
+    the unique indexes lost are exactly `(branch_name)` and `(worktree_path)`,
+    and `artifact_root`, `lock_path`, `pid_path` and `(task_id,
+    attempt_number)` stay unique; the only new migration row is this one.
+- **26e.** `_provision_ticket_workspace()` runs the Attempt in the worktree as
+  the last Attempt left it. It never cleans, resets, checks out or discards.
+  Each Attempt writes a `note` (`kind: ticket_worktree_reused`) with
+  `attempt_number`, `dirty`, `head_sha` and `cleaned: false`. The Attempt's
+  `base_commit` is the worktree `HEAD` it started from; the `task_worktrees`
+  row keeps the base the worktree was created from.
+- **26f.** A path that exists but is not registered in this repository, is
+  registered on another branch, is registered but missing on disk, or a Ticket
+  branch that exists without its worktree, is refused: nothing is deleted,
+  recreated or reattached. A `note` (`kind: ticket_worktree_refused`,
+  `deleted: false`, `recreated: false`) is written and the Ticket ends
+  `failed` with the reason in its `status_changed` event.
+- **26g.** `docs/attempt-scoped-runtime-resources.md` now has a "Two worktree
+  contracts" table (legacy vs Ticket) and names the migration; the old section
+  is retitled "Fresh retry contract (legacy tasks)".
+
+### 2.2 Ruling 27 — the §29 failure vocabulary, Tickets only (layer 6)
+
+| Failure (Ticket) | Ends | Where |
+|---|---|---|
+| governance refusal (`_validate_governance`, the opencode-prompt check) | `failed` | `dispatcher._fail(FAILURE_GOVERNANCE)` |
+| worktree preparation (refused worktree, in-claim allocation or provisioning failure) | `failed` | `_prepare_ticket_worktree`, `attempt_scoped_runtime_path.py` |
+| executor unavailable, raised, returned `failed`, returned `blocked` (a cooperative operator kill included) | `failed` | `dispatcher._fail(FAILURE_EXECUTOR)` |
+| validator returned `failed` (red) | `needs_decision` | `dispatcher._fail(FAILURE_VALIDATOR_RED)` |
+| validator unavailable, raised, returned `blocked` | `failed` | `dispatcher._fail(FAILURE_VALIDATOR_ERROR)` |
+| runtime lease expired | `failed` | `RuntimeAdmissionStore.expire_stale_leases` |
+
+- **27a.** No pre-existing test needed to change: every test in round 1's
+  §3.2 list uses a legacy row, so under 27f its target stays `blocked` (§4).
+- **27b.** `expire_stale_leases` decides per lease, inside its existing
+  transaction: a Ticket gets `status = 'failed'`, `blocked_reason` NULL, and a
+  `status_changed` event from `runtime_lease_reaper` whose message names
+  `runtime_lease_expired`; a legacy task gets exactly what it got before. Still
+  idempotent, no schema change, same return value, one lifecycle event and one
+  status event per lease. The Step 4 rehearsal still passes 16/16 (§7).
+- **27c.** `reset_task_status` accepts `--from-status failed` and
+  `needs_decision` for a Ticket (a dependency-held `blocked` Ticket is sent to
+  `scripts/ticket_dependency.py` instead); `to_status` is derived (`created`) and an
+  explicit mismatch is refused. The Ticket retry (`ticket_retry.retry_ticket`)
+  is one `BEGIN IMMEDIATE` compare-and-set `failed|needs_decision → created`
+  that also writes a `status_changed` event and a `note`
+  (`kind: ticket_retry_reset`, the full audit record) plus a JSON audit
+  artifact under the Ticket's `reset-audit/`. It honours `--dry-run`,
+  `--confirm-reset`, `--request-id` (replay), `--expected-old-attempt-id` and
+  `--expected-reset-generation`, refuses a Ticket with an active Attempt or
+  lease, with a previous Attempt's process possibly still alive (an active
+  executor process, or Attempt resources `allocated`/`active`/
+  `reap_blocked_live_pid`), and one whose `blocked_by` is unreleased. The next claim
+  creates the new Attempt, in the same worktree. A legacy row cannot reset
+  from `failed`/`needs_decision`; `--from-status queued` and
+  `--to-status blocked` stay invalid choices. Step 4's rehearsal and
+  `test_concurrency_crash_recovery` use legacy rows, so their
+  `--from-status blocked` did not change (§3.2).
+- **27d.** `failed` and `needs_decision` release the lease and the Attempt's
+  resources in all three layers (the shared `RUNTIME_RELEASE_TASK_STATUSES`,
+  `LifecycleRuntimeTaskStore._release`, `_terminal_attempt_status`). A pending
+  executor/validator outcome still decides the Attempt status
+  (`failed`/`executor_failed`, `validation_failed`/`validator_failed`,
+  `blocked`, `execution_aborted`); with none, the Attempt closes `failed` /
+  `runtime_failed`. `FailureVocabularyTestCase.assert_ends` checks every row
+  of the table above leaves no active lease and no active Attempt, and
+  `test_capacity_slot_is_free_right_after_a_failure` starts a second Ticket at
+  capacity 1 immediately after a failure.
+- **27e.** As the table. A cooperative operator kill is signalled by the
+  lifecycle proxies as an executor or validator `blocked` result, so **it lands
+  in `failed` and is retried through the reset path** (`--from-status failed`).
+- **27f.** Legacy tasks are untouched: `_fail()` delegates to the unchanged
+  `_block_task` with the same result fields, `expire_stale_leases` keeps
+  `blocked`, and `approved_task_runner.py` is not modified.
+  `LegacyTasksKeepBlockedTests` and the unedited pre-existing suites pin it.
+- **27g.** `~/agent-taskflow-ops/taskflow_dc_notify.py` was not touched. **Failure
+  alerts for Tickets depend on it being updated at deploy time:** it alerts on
+  `blocked` but not on `failed` or `needs_decision`.
+- Refusing to start a Ticket writes nothing, whatever its status (like
+  `blocked`/`paused` after F1): a `failed` or `needs_decision` Ticket is
+  retried through the reset path, and `/start` can no longer overwrite a
+  Ticket, Step 2's `ready_for_integration`/`integrating` included, with
+  `blocked`. Legacy tasks keep the existing blocking refusal.
+- A Ticket's pre-claim failure (governance, worktree) is a compare-and-set on
+  the status the dispatch read, so it can never overwrite a Ticket another
+  process has claimed since.
+
+### 2.3 Ruling 28 — D3 to D6 (layers 2 and 3)
+
+- **D3.** `ready_queue.eligible_tickets()` orders by priority rank
+  (`critical 0, high 1, normal 2, low 3`), then `created_at`, then
+  `task_key`. No preferred-order column.
+- **Eligibility.** A Ticket row with its derived worktree path and branch;
+  status `created` (or a legacy-reset `queued`); no `blocked_by`, or one whose
+  blocker is in a §12 `completed` status; no active runtime lease; no pause or
+  kill control in force at the global, project (`tasks.project`) or task scope.
+  That check reads `runtime_controls` on the ready queue's read-only
+  connection. It matches the project directly because a never-claimed Ticket
+  has no task identity yet; the claim re-checks every control anyway. Legacy
+  `queued` tasks are not scheduled here (27f).
+- **D4.** A running dependent (`preparing`, `implementing`, `validating`) whose
+  blocker fails is never interrupted: `maintain_dependencies` reports it in
+  `deferred_running` and leaves it. It is not claimable while it runs, and once
+  its Attempt has ended the next maintenance moves it to `needs_decision`.
+- **D5.** Release happens only for a `blocked` row that has `blocked_by` and a
+  `blocked_reason` that is empty (Step 1 creation) or written by
+  `ticket_dependencies` (`blocked_by <KEY>: …`). It moves `blocked → created`,
+  clears `blocked_by` (SPEC §5.3 "解除"), and is audited
+  (`kind: ticket_dependency_released`). A `blocked_reason` that records a
+  failure is never released. Setting `blocked_by` on a `created` Ticket moves
+  it to `blocked` with the dependency reason.
+- **Failed or cancelled blocker (§5.4, §43.8).** A blocker in `failed`,
+  `canceled` or `archived` sends each dependent that is not running, deciding,
+  paused, completed, cancelled or already `blocked` by a failure to
+  `needs_decision`, audited (`kind: ticket_dependency_blocker_stopped`; the
+  message names the blocker and the choices). Nothing is released. The event
+  records whether the dependent was only waiting on its dependency
+  (`dependency_owned`). Only such a Ticket returns to ready when the
+  dependency is removed or replaced; one that had failed or finished first
+  stays `needs_decision` and needs the audited retry (§2.5 B2).
+- **Validation (§5.2, §43.6).** `set_blocked_by` refuses a self-dependency, an
+  unknown blocker, a non-Ticket dependent and any cycle (it walks the blocker's
+  chain), inside one transaction, so a refusal writes nothing.
+- **D6.** `scripts/ticket_dependency.py --db-path … {set,remove,retry}`:
+  previews unless `--confirm`; `set` also replaces; `remove` returns a
+  dependency-held Ticket (`blocked`, or `needs_decision` put there by a
+  dependency) to `created`; `retry` runs the §33.3 retry through
+  `reset_task_status`; refusals exit 2 and write nothing. No API route and no
+  Mission Control control.
+
+### 2.4 The scheduler loop (layers 4 and 5)
+
+`parallel_scheduler.run_scheduler_tick(db_path, *, launcher=None, wait=True,
+claim_timeout_seconds=60)` and `scripts/run_parallel_scheduler_tick.py
+--db-path DB [--no-wait]`:
+
+1. `reap_stale_runtime()` (Step 4's reaper, first).
+2. `maintain_dependencies()` (release and stop).
+3. Read `max_concurrent_tasks` and the eligible Tickets.
+4. While the active executor leases are below the limit: take the next
+   eligible Ticket, `ensure_ticket_worktree()` (a refusal ends it `failed` and
+   the loop moves on), start one worker process for it, and wait until that
+   worker's claim is observed (a new or adopted Attempt) or it exits without
+   claiming. A worker refused for capacity ends the loop. A worker that has not
+   claimed within the timeout is left running (never killed) and the tick
+   starts nothing more; a candidate whose preparation raises is recorded and
+   skipped.
+5. With `wait` (the CLI default), wait for the started workers to finish and
+   report their results; `--no-wait` returns once each is claimed.
+
+- **Atomic claim, bounded concurrency.** The worker
+  (`agent_taskflow.scheduler_worker`) runs the installed Dispatcher, so the
+  Step 4 claim transaction, capacity check first, is the authority. The tick
+  only picks; it never writes a claim itself. Several ticks, or a tick racing
+  a manual `/start`, cannot exceed the limit or double-claim.
+- **Several executors at once, each in its own worktree, one owner per
+  Attempt** (§21): each worker is its own process holding its own lease.
+- **No daemon, no cron, no background thread.** A worker handles one Ticket and
+  exits. Production workers log to `<artifact_dir>/scheduler-worker-<utc>-<id>.log`.
+- **Integration handoff is not wired** (ruling 21, FOLLOWUPS F4).
+
+### 2.5 Independent review of `d7b51c0`, and the fixes in `ff7becd`
+
+A read-only review subagent (it wrote nothing and touched no database) read
+the whole diff against rulings 26–28 and step5.md. I verified each finding
+against the code before fixing it. Each fix has a test (in brackets).
+
+| # | Finding | Fix |
+|---|---|---|
+| B1 (blocking) | The Ticket retry lacked the legacy reset's live-process guard; with a shared worktree, a retry could start while a previous Attempt's executor still wrote to it. | `ticket_retry` refuses while an executor process is `allocated`/`running`/`term_sent`/`kill_sent`, or an Attempt resource is `allocated`/`active`/`reap_blocked_live_pid` (run the reaper first). [`ReviewFixRetryGuardTests`] |
+| B2 (blocking) | A failed/cancelled blocker turned a failure-`blocked` (or `failed`) dependent into a `needs_decision` that `remove`/`replace` then released without a retry, erasing the failure reason — a D5 bypass. | A failure-`blocked` dependent is left untouched (its reason kept). Each stop records `dependency_owned`; only a dependency wait (ready, or dependency-`blocked`) returns to ready when its dependency is removed or replaced. Anything else stays `needs_decision` for the audited retry. [`ReviewFixDependencyTests`] |
+| S1 | `set_blocked_by` on a `queued` Ticket holding a legacy reserved retry Attempt stranded the reservation. | Refused; release also skips a row with an active Attempt. [`test_a_reserved_retry_attempt_blocks_setting_a_dependency`] |
+| S2 | A Ticket in another non-runnable status (`ready_for_integration`, `integrating`, `archived`, `unknown`, …) was still rewritten `blocked` by a refused dispatch. | Refusing to start a Ticket never writes; legacy tasks unchanged. [`ReviewFixRefusalTests`] |
+| S3 | A race could mark a healthy Ticket `failed`: an unconditional pre-claim `failed` write, and a lost concurrent `git worktree add` reported as a refusal. | Pre-claim Ticket failures are a compare-and-set on the status the dispatch read; `ensure_ticket_worktree` re-inspects before refusing and treats a worktree created meanwhile as existing. |
+| S4 | A claim timeout killed the worker, which could orphan a lease committed a moment later. | The worker is left running and kept (a `wait` tick waits for it); the tick starts nothing more. [`test_a_slow_claimer_is_left_running_not_killed`] |
+| S5 | One raising candidate aborted the whole tick, every tick. | Per-candidate errors are recorded in `not_started` and the loop continues; eligibility needs the derived worktree and branch. [`test_one_raising_candidate_does_not_abort_the_tick`] |
+| N1 | The rebuild renames the old table first; a rename could rewrite another object's reference to the staging name. | `legacy_alter_table = ON` during the rebuild; docstring corrected. Nothing references `attempt_resources` today. |
+| N2 | `is_ticket()` inside the in-claim release call could skip the release. | Decided before allocating. |
+| N3 | The retry audit artifact and the worker log landed inside the previous Attempt's immutable artifact root (`tasks.artifact_dir` after a claim). | Both use the Ticket's artifact base (the latest `attempt_resources.artifact_base_root`), as the legacy reset audit does; worker logs are one file per launch. |
+| N4 | The ready queue's pause check ran the lifecycle-control `init_db` per candidate. | It reads `runtime_controls` on its read-only connection. |
+| N5 | Provisioning created a missing Ticket worktree after the claim (26b says before). | Refused at claim time; the dispatcher and the tick create it before the claim. [`ReviewFixClaimTimeWorktreeTests`] |
+
+The reviewer also confirmed: legacy behaviour unchanged, `failed` /
+`needs_decision` release the lease in every layer, the reaper contract is
+unchanged apart from the Ticket status, the rebuild SQL copies every column
+and restores the index and triggers, the retry compare-and-set is atomic, cycle
+detection is correct, and D3 ordering is as ruled.
 
 ---
 
-## 5. Decisions needed
+## 3. Stop conditions
 
-**D1 (S1): how "One Ticket = One Worktree" coexists with Attempt-scoped resources.**
+### 3.1 Round 1: S1 and S2 — HIT, RESOLVED by rulings 26 and 27
 
-- *Option A (recommended):* a Ticket's Attempts run in the Ticket's worktree.
-  - For a row with Step 1 columns, the Attempt resource record points at the
-    Ticket's derived worktree and branch instead of a new one. The Attempt's
-    own artifact root, lock and PID stay.
-  - Step 5 creates that worktree and its `task_worktrees` row before the
-    claim, idempotently and with an audit event.
-  - Legacy tasks keep the fresh-worktree contract, so
-    `test_retry_gets_new_branch_worktree_and_artifact_root` stays green.
-  - Sub-decisions:
-    - (i) Authorize an explicit `scripts/` migration that rebuilds
-      `attempt_resources` without `UNIQUE` on `worktree_path` and
-      `branch_name`. `UNIQUE(task_id, attempt_number)` and the other
-      constraints stay.
-    - (ii) A retry reuses the worktree as the last Attempt left it. §33.3
-      continuity implies this; today reuse requires a clean tree.
-    - (iii) Amend `docs/attempt-scoped-runtime-resources.md` for Tickets.
-- *Option B:* keep per-Attempt worktrees for everything, and amend SPEC §9,
-  §33.3 and step5.md's acceptance row. Not recommended: it gives up §33.3's
-  "same worktree".
+- **S1.** "One worktree per Ticket, a retry reuses it" contradicted the
+  installed Attempt-scoped fresh-retry contract (documented in
+  `docs/attempt-scoped-runtime-resources.md`, enforced by `UNIQUE` on
+  `attempt_resources.worktree_path` / `branch_name`, pinned by
+  `test_retry_gets_new_branch_worktree_and_artifact_root`). The Appendix A
+  probe showed one Step 1 Ticket with three git worktrees after one retry.
+  **Ruling 26** chose Option A; applied as §2.1.
+- **S2.** The §29 remap would have turned pre-existing tests red (the 7
+  `test_dispatcher` tests, the admission lease-expiry test and the F1
+  progress-wiring failure tests), and remapping lease expiry needed a change to
+  the Step 4 reaper, which step5.md forbade. **Ruling 27** authorized the
+  remap for Tickets only; applied as §2.2.
 
-**D2 (S2): the failure remap.**
+### 3.2 This round: none hit. Interpretations flagged for the reviewer
 
-- (a) Authorize updating the pre-existing tests in §3.2 to the new targets.
-  Nothing else they assert would be weakened.
-- (b) Lease expiry → `failed` requires changing the target inside
-  `expire_stale_leases`. Either authorize that change, keeping the rest of the
-  reaper contract (idempotent, no schema, same return value, one audited event
-  per lease), or drop lease expiry from the acceptance row.
-- (c) Which statuses the retry path accepts. Recommended: `reset_task_status`
-  also accepts `failed`, and a Ticket's retry target follows §33.3. Either way,
-  the Step 4 rehearsal and `test_concurrency_crash_recovery` need their
-  `--from-status` updated.
-- (d) Authorize adding `failed` and `needs_decision` to the release sets in
-  `canonical_runtime_path.py`, `attempt_scoped_runtime_path.py` and
-  `lifecycle_runtime_path.py`, and to `_terminal_attempt_status`.
-- (e) Targets for §4.4. Recommended:
-  - governance refusal → `failed`
-  - executor failed, blocked, raised or unavailable → `failed`
-  - validator `failed` → `needs_decision`
-  - validator raised or unavailable → `failed`
-- (f) Scope: Tickets only, or the legacy GitHub-issue path as well
-  (`approved_task_runner.py`)?
-- (g) Ops: update `taskflow_dc_notify.py` to alert on `failed` and
-  `needs_decision` in the same change.
+1. **Lease expiry is remapped for Tickets only.** Ruling 27's header and 27f
+   scope the remap to Tickets, while 27a–c authorize updating the admission
+   test and the Step 4 rehearsal's `--from-status`. Those three use legacy
+   rows (`TaskMirrorStore.upsert_task`, no `prompt`), so under 27f their
+   targets stay `blocked`, and the authorizations went unused. Step 4's
+   evidence path is therefore unchanged. If a global lease-expiry remap was
+   intended, it is the per-row `ticket` choice in `expire_stale_leases` plus
+   the authorized test updates.
+2. **A validator that returns `blocked` ends `failed`, not `needs_decision`.**
+   27e names validator `failed` → `needs_decision` and validator raised or
+   unavailable → `failed`. A `blocked` result is how the lifecycle proxies
+   report an operator kill during validation, and 27e requires a kill to land
+   in `failed`. So only a red validator stops for a decision.
+3. **The Ticket retry does not write a `reset_lineages` row.** That table's
+   SQL `CHECK`s allow only `blocked → queued`, and reserved-Attempt adoption
+   only looks at `queued` rows, so a lineage-based Ticket retry would need a
+   second table rebuild and a change inside the adoption claim transaction.
+   Neither is authorized. The Ticket retry is an audited compare-and-set to
+   `created`, and the next ordinary claim creates the new Attempt, which is
+   what §33.3 describes.
 
-**D3: ordering.** Recommended: priority (`critical > high > normal > low`),
-then `created_at` (FIFO), then `task_key`. No preferred-order column until
-Step 6.
-
-**D4: a running dependent whose blocker fails.** Recommended: never interrupt
-a running Attempt. Refuse to start it again, and move it to `needs_decision`
-when its Attempt ends.
-
-**D5: dependency release.** Recommended: release only a `blocked` row that
-has `blocked_by` set and a dependency-owned `blocked_reason` (or none), moving
-`blocked → created`, audited. Setting `blocked_by` on a `created` Ticket moves
-it to `blocked`, as in §6's example history.
-
-**D6: the `needs_decision` exit.** Should Step 5 ship a CLI to remove or
-replace `blocked_by` and to retry, or is that Step 6's §18 UX?
+Not hit: no pre-existing test went red (§7), no forbidden layer was entered,
+nothing migrates at startup, and no push was rejected.
 
 ---
 
-## 6. Deliberately skipped, and why
+## 4. Pre-existing tests changed
 
-Every acceptance-gate row is unimplemented, and no test was written for it.
-Writing tests or code for any row would pick a side of S1 or S2 before a
-ruling, and would mean continuing after a stop condition.
+**None.** Every pre-existing test file is byte-identical to `a5fa8e2`
+(`git diff a5fa8e2 -- tests/` lists only new files). Ruling 27a authorized
+updating the round-1 §3.2 tests; none needed it, because each uses a legacy
+row and keeps `blocked` under 27f:
 
-| Row | Blocked by |
-|---|---|
-| §43.4 / §9 one worktree per Ticket | S1 (D1) |
-| §43.5 blocked / paused never execute | Unchanged F1 behaviour, already covered by `test_runtime_progress_wiring`. A Step 5 test of the loop needs the loop (S1, S2). |
-| §43.6 invalid dependencies | D5 and D6 decide what a set/remove API looks like. Cycle detection itself is independent of S1 and S2 and small once they are settled. |
-| §43.7 / §43.34 release after `completed` | D5 |
-| §43.8 failed / cancelled blocker | S2 (D2), because what `failed` means depends on the remap. Also D4. |
-| §43.10 capacity | S1 (the loop's "prepare worktree" step). S2(b)/(c) decide whether the Step 4 gate can still produce evidence above 1. |
-| §21 parallel implementation | S1 |
-| §29.1 / §29.2 failure vocabulary | S2 |
-| Loop idempotency | S1, S2 |
+| Test | Row | Result |
+|---|---|---|
+| `test_dispatcher.py`: `test_executor_failed_blocks_task`, `test_executor_blocked_blocks_task`, `test_validator_failed_blocks_task`, `test_validator_blocked_blocks_task`, `test_unknown_executor_blocks_task`, `test_unknown_validator_blocks_task`, `test_unknown_executor_still_blocks_task` | legacy (`upsert_task(TaskRecord)`) | unedited, green |
+| `test_runtime_admission.py::test_stale_lease_reaper_aborts_attempt_and_blocks_task` | legacy | unedited, green |
+| `test_runtime_progress_wiring.py` failure tests (F1) | legacy (no `prompt` column in its DB) | unedited, green |
+| `test_concurrency_crash_recovery.py`, Step 4 rehearsal (`--from-status blocked`) | legacy | unedited, green; rehearsal 16/16 |
+
+---
+
+## 5. Acceptance gate → tests
+
+92 new tests in 6 files, all passing: `test_step5_ticket_worktree` 12,
+`test_step5_ticket_worktree_schema` 10, `test_step5_failure_vocabulary` 24,
+`test_step5_dependencies` 25, `test_step5_ready_queue` 6,
+`test_step5_parallel_scheduler` 15.
+
+| # | Requirement | Tests |
+|---|---|---|
+| §43.4 / §9 | One worktree per Ticket | `test_step5_ticket_worktree`: `test_step1_ticket_gets_one_worktree_one_row_and_dispatch_runs` (a real `create_ticket` Ticket, dispatched; exactly one git worktree on its branch, one row, the executor ran there); `test_retry_reuses_the_same_worktree_as_the_last_attempt_left_it` (fail with a dirty file, retry to `created`, the second Attempt sees the file, same path and branch, per-Attempt artifact/lock paths, reuse events `dirty: false, true`); idempotent ensure; fail-closed cases; migration gate; legacy contract kept; a worktree missing at claim time is refused, not created (`ReviewFixClaimTimeWorktreeTests`). `test_step5_ticket_worktree_schema`: schema diff, idempotency, row preservation, sharing only after the rebuild, script CLI. |
+| §43.5 | Blocked / paused never execute | Unchanged F1 behaviour (F1's tests, unedited); `test_step5_ready_queue` shows neither is eligible, and `IdempotentLoopTests.test_a_tick_with_no_eligible_ticket_is_a_no_op` shows a tick leaves a paused Ticket's row and events untouched. |
+| §43.6 | Invalid dependencies | `InvalidDependencyTests`: self, unknown blocker, unknown dependent, 2-cycle, 3-cycle, creation-time blocker; the rows and events of every Ticket involved are identical before and after. |
+| §43.7 / §43.34 | Release after `completed` | `ReleaseOnlyAfterCompletedTests`: 12 non-completed blocker statuses plus a claimed (running) blocker release nothing; `cleaned`, `completed` and `done` each release, audited; a failure-`blocked` row is never released; idempotent. |
+| §43.8 | Failed / cancelled blocker | `FailedOrCancelledBlockerTests`: `failed`, `canceled`, `archived` → dependent `needs_decision`, audited, no Attempt; D4 running dependent deferred, then stopped after its Attempt ends; the stopped dependent is neither eligible nor dispatchable. `ReviewFixDependencyTests`: a failure-`blocked` dependent keeps its reason; a failed dependent needs the audited retry, not just a removal; a dependency wait returns to ready when removed; a reserved retry Attempt blocks setting a dependency. |
+| §43.10 | Capacity | `CapacityTests`: limit 1 with 3 eligible starts exactly the highest-priority one; limit 2 (disposable-fixture setting, ruling 17) with 3 eligible starts 2; a full slot starts nothing. |
+| §21 | Parallel implementation | `test_three_tickets_run_at_once_in_their_own_worktrees`: at limit 3, three worker processes run the real Dispatcher; a barrier opens only when all three executors are running; three PIDs, three worktrees equal to the derived paths, one Attempt and one lease per Ticket with matching ids, three distinct owners. |
+| §29.1 / §29.2 | Failure vocabulary | `test_step5_failure_vocabulary`: every row of §2.2's table, each audited, each leaving no lease or active Attempt; lease expiry for a Ticket (`failed`) vs legacy (`blocked`); stopped Tickets refused untouched; legacy failures still `blocked`; the retry path (API, dry run, confirmation, mismatch, unreleased dependency, legacy refusal, CLI, a possibly-live previous process: `ReviewFixRetryGuardTests`); a Ticket in any non-runnable status is refused untouched (`ReviewFixRefusalTests`). |
+| — | Loop is idempotent | `IdempotentLoopTests`: two no-wait ticks at a full limit start nothing twice (one Attempt each); the tick calls the reaper then dependency maintenance first; an expired slot is reaped and refilled in the same tick; a tick with no eligible Ticket is a no-op. Plus `PreparationTests`, `TickCliTests` and `ReviewFixSchedulerTests` (a slow claimer is left running, one raising candidate does not abort the tick). |
+
+---
+
+## 6. Known limitations and follow-ups (not repaired)
+
+1. **Integration handoff (FOLLOWUPS F4).** A Ticket whose implementation
+   succeeds ends `waiting_approval`, as before; it is not queued for Step 2.
+2. **Failure alerts (27g).** Update `taskflow_dc_notify.py` to alert on
+   `failed` and `needs_decision` when deploying.
+3. **Split vocabulary (FOLLOWUPS F5).** Legacy tasks keep `blocked`.
+4. **Deploy runbook addition (FOLLOWUPS F3).** Run
+   `scripts/migrate_ticket_worktree_resources.py --db-path <db>` after the
+   Step 1 and Step 3 migrations; until then Ticket dispatch and the tick refuse
+   Tickets, naming the script. Rehearsal evidence must be produced for the
+   deployed commit before `set-capacity` above 1 (Step 4 §4.7.5).
+5. **Mission Control** still offers no Start for `ready` Tickets (ruling 11)
+   and shows `needs_decision` as "Unknown task status" in `taskState.ts`
+   (cosmetic; Step 6 owns §18's UX).
+6. **M1 exit gate.** `m1_exit_gate._audit_three_attempts` looks for a task with
+   three Attempts on distinct worktrees; Ticket Attempts share one, so only
+   legacy tasks can provide that evidence.
+7. **A paused dependent** of a failed blocker keeps `paused`; it is not moved to
+   `needs_decision` over the user's pause.
+8. **The pre-existing `task_id` backfill** (F1 §4.3, ruling 14) also runs on a
+   refused Ticket dispatch and on the reaper's lazy migration; two new tests
+   apply it before their snapshots and say why.
 
 ---
 
 ## 7. Validation (run for this handoff)
 
-All Python commands used `/home/ubuntu/agent-taskflow/.venv/bin/python`
-with `PYTHONPATH` set to the worktree root and `HOME` set to a fresh
-`mktemp -d` directory, so nothing could reach `~/.agent-taskflow`. Each
-temporary `HOME` was empty afterwards.
+All Python ran with `/home/ubuntu/agent-taskflow/.venv/bin/python`,
+`PYTHONPATH` set to the worktree root, a throwaway git identity, and `HOME` set
+to a fresh `mktemp -d` directory; every one was empty afterwards. Every command
+ran in the foreground and finished before this file was written.
 
 | Command | Result |
 |---|---|
-| Pinned tests (S1, S2): the 7 `test_dispatcher` tests in §3.2, `test_attempt_resources…test_retry_gets_new_branch_worktree_and_artifact_root`, all of `test_runtime_admission`, all of `test_concurrency_crash_recovery` | `Ran 36 tests in 13.269s` — `OK` |
-| Full suite, part `-p 'test_[a-f]*.py'` (78 files) | `Ran 1220 tests in 211.610s` — `OK` |
-| Full suite, part `-p 'test_[g-q]*.py'` (66 files) | `Ran 1267 tests in 78.683s` — `OK` |
-| Full suite, part `-p 'test_r*.py'` (63 files) | `Ran 900 tests in 246.848s` — `OK (skipped=8)` |
-| Full suite, part `-p 'test_[s-z]*.py'` (80 files) | `Ran 1519 tests in 67.371s` — `OK` |
-| **Total** | **Ran 4906 tests — OK (skipped=8)**. Same as Step 4 after its merge (4906, skipped=8), so the baseline is unchanged. |
-| `python -m compileall -q agent_taskflow scripts tests` (from the worktree root) | exit 0 |
+| **BEFORE**: full suite at `a5fa8e2` (round 1, §7 of that round) | Ran 4906 tests, OK (skipped=8) |
+| Step 5 acceptance gate: the six `tests.test_step5_*` modules, with `-W error::ResourceWarning` (on `ff7becd`'s code) | Ran 92 tests in 46.5 s, OK |
+| Pre-existing suites nearest the change (on `d7b51c0`'s code, before the review fixes; the full suite below re-covers them): `test_dispatcher`, `test_runtime_progress_wiring`, `test_attempt_resources`, `test_attempt_resources_cli`, `test_runtime_admission`, `test_task_status_reset`, `test_reset_lineage`, `test_reset_lineage_cli`, `test_concurrency_crash_recovery`, `test_lease_contention`, `test_runtime_capacity`, `test_lifecycle_control`, `test_canonical_runtime_admission`, `test_api_actions`, `test_api`, `test_realtime_negative_scope`, `test_docs_maps`, `test_m1_exit_gate` | Ran 293 tests in 89.1 s, OK |
+| **AFTER** part `-p 'test_[a-f]*.py'` (78 files), on `ff7becd`'s code | `Ran 1220 tests in 212.403s` — `OK` |
+| **AFTER** part `-p 'test_[g-q]*.py'` (66 files) | `Ran 1267 tests in 66.941s` — `OK` |
+| **AFTER** part `-p 'test_r*.py'` (63 files) | `Ran 900 tests in 229.144s` — `OK (skipped=8)` |
+| **AFTER** part `-p 'test_[s-z]*.py'` (86 files) | `Ran 1611 tests in 125.639s` — `OK` |
+| **AFTER total** | **Ran 4998 tests — OK (skipped=8).** 4998 = 4906 + 92 new; the 8 skips are the same pre-existing ones. No test went red. (The same four parts on `d7b51c0`, before the review fixes, gave 4989 = 4906 + 83, also OK.) |
+| `python -m compileall -q agent_taskflow scripts tests` (on `ff7becd`'s code) | exit 0 |
 | `python scripts/validate_workflow_contract.py` | exit 0, `status: passed` |
 | `python scripts/validate_workflow_policy.py` | exit 0, `status: passed` |
-| Appendix A probe | exit 0, output in §3.1 |
+| `python scripts/run_concurrency_rehearsal.py --output-dir <fresh /tmp dir>` | exit 0, **16/16 checks**, gate `passed`, three times: on the uncommitted tree (evidence `repo_sha` `2c77cc3`), at `d7b51c0`, and at `ff7becd` (evidence `repo_sha` `ff7becd`; `max_concurrent_tasks` 19.1: 1, 19.2: 4, 19.3: 1). This handoff commit moves HEAD, so re-run it for the commit you deploy (Step 4 §4.7.5). |
+| Real tick smoke: a disposable DB, one Ticket, `scripts/run_parallel_scheduler_tick.py --db-path` with the production launcher and worker (manual executor, default validators) | exit 0; one Ticket started and claimed, its worktree created on its branch; the default `pytest` validator went red (exit code 5, no tests in the scratch repo), so the Ticket ended `needs_decision` (§29.1); the worker result was read from its own log; a second tick started nothing |
+| The three operator CLIs (`reset_task_status.py`, `ticket_dependency.py`, `migrate_ticket_worktree_resources.py`) `--help` under the system `python3 -S`, which has no pydantic | exit 0 each: they still run without the app's dependencies |
+| The §8 scratch-database commands | as documented: the tick exits 2 naming the Step 5 script; the migration reports `rebuilt: true`, then `already_installed: true`; the no-op tick reports `started: []` |
 | `cd mission-control && npm run build` | **not run**: no `mission-control/` file changed |
 
-The four parts cover all 287 `tests/test_*.py` files exactly once.
+The four parts cover all 293 `tests/test_*.py` files exactly once
+(78 + 66 + 63 + 86).
 
 ---
 
@@ -392,22 +474,13 @@ export HOME=$(mktemp -d) PYTHONPATH=$PWD
 export GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@example.invalid
 export GIT_COMMITTER_NAME=T GIT_COMMITTER_EMAIL=t@example.invalid
 
-# The branch changes only this file
-git diff --stat a5fa8e2..HEAD
+# No pre-existing test file changed (only new files are listed)
+git diff --stat a5fa8e2 -- tests/
 
-# S1 and S2: the pre-existing tests that pin today's behaviour (all green)
-$PY -m unittest \
-  tests.test_attempt_resources.AttemptResourceTests.test_retry_gets_new_branch_worktree_and_artifact_root \
-  tests.test_dispatcher.DispatcherTests.test_executor_failed_blocks_task \
-  tests.test_dispatcher.DispatcherTests.test_executor_blocked_blocks_task \
-  tests.test_dispatcher.DispatcherTests.test_validator_failed_blocks_task \
-  tests.test_dispatcher.DispatcherTests.test_validator_blocked_blocks_task \
-  tests.test_dispatcher.DispatcherTests.test_unknown_executor_blocks_task \
-  tests.test_dispatcher.DispatcherTests.test_unknown_validator_blocks_task \
-  tests.test_runtime_admission tests.test_concurrency_crash_recovery
-
-# S1 probe: save Appendix A as /tmp/probe_s1.py, then
-$PY /tmp/probe_s1.py
+# Step 5 acceptance gate (92 tests, ~50 s)
+$PY -m unittest tests.test_step5_ticket_worktree tests.test_step5_ticket_worktree_schema \
+  tests.test_step5_failure_vocabulary tests.test_step5_dependencies \
+  tests.test_step5_ready_queue tests.test_step5_parallel_scheduler
 
 # Full suite in four parts, each under 600 s
 for p in 'test_[a-f]*.py' 'test_[g-q]*.py' 'test_r*.py' 'test_[s-z]*.py'; do
@@ -419,38 +492,46 @@ $PY -m compileall -q agent_taskflow scripts tests
 $PY scripts/validate_workflow_contract.py
 $PY scripts/validate_workflow_policy.py
 
-# Code behind S1 and S2
-grep -n "UNIQUE" agent_taskflow/attempt_resources_schema.py
-sed -n 280,284p agent_taskflow/attempt_resources.py
-sed -n 471,481p agent_taskflow/attempt_resources.py
-sed -n 204,211p agent_taskflow/canonical_runtime_path.py
-sed -n 293p agent_taskflow/canonical_runtime_path.py
-sed -n 368p agent_taskflow/attempt_scoped_runtime_path.py
-sed -n 742,757p agent_taskflow/runtime_admission.py
-sed -n 24p agent_taskflow/task_status_reset.py
+# Step 4 rehearsal: must print 16/16 and exit 0
+OUT=/tmp/step5-rehearsal-$(date +%s)
+$PY scripts/run_concurrency_rehearsal.py --output-dir "$OUT"
+
+# The migration and the tick against a scratch database only
+DB=/tmp/step5-scratch-$(date +%s).db
+$PY -c "from agent_taskflow.store import TaskMirrorStore; TaskMirrorStore('$DB').init_db()"
+$PY scripts/migrate_ticket_fields.py --db-path "$DB"
+$PY scripts/run_parallel_scheduler_tick.py --db-path "$DB"; echo "exit=$?"   # 2, names the Step 5 script
+$PY scripts/migrate_ticket_worktree_resources.py --db-path "$DB"              # rebuilt: true
+$PY scripts/migrate_ticket_worktree_resources.py --db-path "$DB"              # already_installed: true
+$PY scripts/run_parallel_scheduler_tick.py --db-path "$DB"                    # no-op tick, started: []
 ```
 
 ---
 
 ## 9. Governance
 
-- **Git.** Three commits on `task/v1-step5`: this file, its PR link, and the
-  §10 re-verification. All three touch only this file. Only that
-  branch was pushed, with a normal push, and the PR is a draft against `main`.
-  Nothing was pushed to or merged into `main`, nothing was force-pushed, and
-  nothing was rebased.
+- **Git.** Commits on `task/v1-step5` only (`d7b51c0`, `ff7becd`, then this
+  handoff), each pushed with a normal fast-forward push; PR #201 stays a draft
+  against `main`. Nothing was pushed to or merged into `main`,
+  nothing was force-pushed, nothing was rebased.
 - **State.** `~/.agent-taskflow/state` and the production database were never
-  read or written. Every database was a scratch one under `/tmp`.
-  `taskflow_dc_notify.py` was read (lines 38-53) and not changed.
-- **Scheduler.** No scheduler tick or scheduler entry point ran. The probe
-  called the runtime store's claim API directly, as the existing unit tests
-  do, and ran no executor or validator.
-- **Approvals.** Nothing was approved, closed, cleaned up or deleted, and no
-  config, cron or deployment file was touched.
+  read or written. Every database was a temporary one under `/tmp`.
+- **Scheduler.** Scheduler ticks ran only against disposable databases under
+  `/tmp`: in the tests and in the §7 smoke.
+- **Ops.** Nothing under `~/agent-taskflow-ops/` was changed (27g).
+- **Subagents.** Read-only subagents did the inventory research and an
+  independent review of the diff (§2.5); every file, test run, commit and push
+  was done by the main session.
+- **Approvals.** Nothing was approved, closed, cleaned up or deleted; no config,
+  cron, systemd, nginx or deployment file was touched. No migration runs at
+  process startup.
 
 ---
 
-## 10. Re-verification by a second builder run (2026-09-11, HEAD `f339d54`)
+## 10. Round 1b — re-verification by a second builder run (2026-09-11, HEAD `f339d54`)
+
+*Historical record, kept verbatim. Its section references (§3, §7, §8) point
+at round 1's layout of this file, which §0–§3.1 now summarize.*
 
 A second builder session was launched with the same prompt and the same
 `step5.md`. No ruling after ruling 25 settles D1-D6, and `step5.md` has not
