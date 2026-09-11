@@ -22,6 +22,11 @@ from agent_taskflow.project_class_control_schema import (
     PROJECT_CLASS_CONTROL_SCOPES,
     migrate_project_class_controls,
 )
+from agent_taskflow.runtime_capacity import (
+    RuntimeCapacitySetting,
+    read_runtime_capacity,
+    set_max_concurrent_tasks,
+)
 from agent_taskflow.store import connect, default_db_path
 from agent_taskflow.tasks import normalize_task_key
 
@@ -656,6 +661,29 @@ class RuntimeControlStore:
             class_control_allows_auto_merge=allowed,
             matched_control=control,
             actual_auto_merge_enabled=False,
+        )
+
+    def runtime_capacity(self) -> RuntimeCapacitySetting:
+        """Return the global ``max_concurrent_tasks`` setting; never writes."""
+        return read_runtime_capacity(self.db_path)
+
+    def set_max_concurrent_tasks(
+        self,
+        value: int,
+        *,
+        actor: str,
+        evidence_path: str | Path | None = None,
+        repo_root: str | Path | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> RuntimeCapacitySetting:
+        """Set the global limit; above 1 requires passing Step 4 evidence."""
+        return set_max_concurrent_tasks(
+            self.db_path,
+            value,
+            actor=actor,
+            evidence_path=evidence_path,
+            repo_root=repo_root,
+            metadata=metadata,
         )
 
     def list_control_events(

@@ -23,6 +23,7 @@ from agent_taskflow.models import (
     validate_task_status,
     validate_task_worktree_status,
 )
+from agent_taskflow.sqlite_contention import ContentionObservingConnection
 from agent_taskflow.tasks import normalize_task_key
 
 
@@ -53,10 +54,18 @@ def _should_attempt_wal(db_path: Path) -> bool:
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
-    """Open a SQLite connection with concurrency and foreign-key pragmas."""
+    """Open a SQLite connection with concurrency and foreign-key pragmas.
+
+    The connection counts and logs lock waits and BUSY timeouts; see
+    :mod:`agent_taskflow.sqlite_contention`.
+    """
     db_path = _db_path(path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    conn = sqlite3.connect(
+        db_path,
+        timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
+        factory=ContentionObservingConnection,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
     if _should_attempt_wal(db_path):
