@@ -1,7 +1,7 @@
 # Handoff — V1 Step 4: Concurrency Readiness
 
 Branch: `task/v1-step4`
-Draft PR: __PR_URL__
+Draft PR: https://github.com/anderson930420/agent-taskflow/pull/200
 Base: `4552f4e` (`main`, after Steps 1 and 3 merged)
 Spec: `~/agent-taskflow-ops/v1/SPEC.md` §19, §42 Step 4
 Instructions: `~/agent-taskflow-ops/v1/step4.md`
@@ -514,7 +514,7 @@ the gate (§4.7.5). Re-run the rehearsal at the commit you want to deploy.
 
 ## 7. Governance
 
-- Only `task/v1-step4` was pushed, with normal pushes. Nothing was pushed to
+- Only `task/v1-step4` was pushed, with normal pushes (two commits: the work, then this PR link). Nothing was pushed to
   or merged into `main`, nothing was force-pushed, and the branch was never
   rebased.
 - The PR is a **draft**.
