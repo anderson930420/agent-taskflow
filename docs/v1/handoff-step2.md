@@ -15,17 +15,208 @@ Re-integration, PR outcomes, Merge)
 Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 
 Status: **implementation-complete, awaiting independent review.** The branch
-carries `main` as of `b870b84` (merge `5b362bc`). `main` has since gained
-Step 3 (#197, `4552f4e`), which is **not** merged here — see "`main`
-advanced during this turn" below. All three re-review rulings are
-implemented, Ruling 2 as amended. No stop condition is open. Nothing is
+is up to date with `main` as of `79e568d` (merge `ff86d9a`), which carries
+Step 1 (#195), Step 3 (#197) and F1 (#199). The independent review's
+blocking item is fixed (Ruling 18), Ruling 19 is implemented, and the
+review's four other fixes are made. No stop condition is open. Nothing is
 approved, merged to `main`, or finally complete.
 
 Step 1 was merged into this branch twice while it was still in review
-(`96a6cd3`, `9e09ad7`, both merge commits). It has since reached `main` as
-the squash merge of PR #195, and `main` itself is now merged in (`5b362bc`),
-so this branch carries `main`'s final Step 1. PR #196 reviews Step 2 — see
-"Merge of origin/main" below.
+(`96a6cd3`, `9e09ad7`). `main` was then merged in twice: `5b362bc` brought
+the final Step 1 (#195), and `ff86d9a` brought Step 3 (#197) and F1 (#199).
+Every merge was a merge commit, never a rebase. PR #196 reviews Step 2.
+
+---
+
+## Independent review of PR #196 — FAIL, and what was done
+
+The independent review (`review-step2.md`) returned FAIL on one blocking
+item, plus five non-blocking points. All six are addressed in `75f91d8`.
+
+### Blocking item — Ruling 18: normalize branch refs before comparing
+
+**The defect.** `assert_push_allowed` compared bare branch names. A task
+branch recorded as `refs/heads/main` or `heads/main` therefore passed the
+protected-branch check, and `integrate_task` ran `git push origin
+refs/heads/main`, which fast-forwarded `origin/main`. The reviewer reproduced
+this end to end. Branch strings reach the store unchecked from `POST
+/api/tasks` and `workspace_manager.py`.
+
+**The fix.**
+
+- `integration_git.normalize_branch_ref` strips surrounding whitespace and
+  one `refs/heads/` or `heads/` prefix. Exactly one, because git reads
+  `refs/heads/refs/heads/main` as a different branch literally named
+  `refs/heads/main`. Case is kept: git refs are case-sensitive, and no
+  case-insensitive matching was added.
+- `assert_task_branch_pushable` normalizes the Ticket's branch and the
+  protected names — main, master, trunk and the base branch — and refuses a
+  match.
+- `assert_push_allowed` uses the same check, and also requires the push
+  target to normalize to the Ticket's own task branch (18b). So
+  `refs/heads/<task-branch>` is accepted as the task branch itself, while
+  `refs/heads/main` is refused even when paired with a legitimate task
+  branch.
+- **18c:** the controller calls the check as soon as integration reads the
+  branch. It runs right after the Ticket enters `integrating` — a
+  database-only step — and before the fetch, the first git command. A refusal
+  runs no git at all, pushes nothing, records no `integrated_base_sha`, and
+  ends in `needs_decision` via §27.2.1 with an `integration_blocked` event.
+- *My addition, flagged for review:* `HEAD` is refused as a task branch too.
+  It is never a Ticket's branch, and pushing it would publish whatever the
+  worktree has checked out.
+
+**Tests.**
+
+- `test_integration_git.py::BranchNormalizationTests` (4 tests): the
+  normalization table, including the one-prefix and case-kept rows; every
+  listed spelling of main or the base branch (`refs/heads/`, `heads/`,
+  surrounding whitespace, master, trunk, HEAD) refused as the task branch;
+  `refs/heads/main` / `heads/main` refused as the push target even for a
+  legitimate task branch; and the target required to normalize to the
+  Ticket's own branch.
+- `test_integration_controller.py::ProtectedBranchNormalizationTests` (2
+  tests): the reviewer's `branch="refs/heads/main"` scenario, end to end, with
+  an unpushed commit on the clone's `main` so that any push would be visible;
+  then `heads/main`, the base branch `develop` in both prefixed forms, and a
+  whitespace-padded `refs/heads/main`. Each asserts no git command ran, no
+  `gh` call, `origin/main` unchanged, no `integrated_base_sha`, the lock
+  released, and exactly one `integration_blocked` event.
+- **Every existing allowlist test passes unedited** — each one's source is
+  byte-identical to `9f60b7f`. The exception is the one rename that fix 1
+  required; that rename changed only its `def` line and added a docstring.
+
+**The reviewer's reproduction, re-run** (`/tmp/step2_review_refs_heads_main.py`,
+which puts the working directory on `sys.path`, so it tests this branch):
+
+    result.status: needs_decision | final task status: needs_decision
+    pushes: []
+    origin/main before: 4a78f49ba29b after: 4a78f49ba29b
+    origin/main advanced by the integration push: False
+
+### Ruling 19 — no git failure may leave a Ticket in `integrating`
+
+The controller's whole git phase — from the fetch to the review hand-off —
+now runs inside one `IntegrationGitError` guard. A git failure that no
+narrower handler catches, such as the `behind_count` the report names, aborts
+any in-progress rebase or merge. It then ends in `needs_decision` via §27.2.1,
+with an audited `integration_blocked` event. The guard covers every git call
+in that phase, including any added later.
+
+Tests — `test_integration_controller.py::GitFailureGuardTests` (2 tests):
+
+- a failing `behind_count` ends in `needs_decision`, not `integrating`
+- a git failure in the middle of a rebase conflict aborts the rebase and
+  ends in `needs_decision`
+
+Both assert: the lock is released, nothing is pushed, there is no `gh` call,
+no `integrated_base_sha` is recorded, and exactly one `integration_blocked`
+event carries the failure.
+
+**Handed to Step 5 — the §29.2 gap.** SPEC §29.2 reserves `failed` for
+infrastructure failures, including git failures. step2.md's
+integration-owned transitions have no `failed`, so every integration
+failure — fetch, push, `gh`, and now any unhandled git error — ends in
+`needs_decision`. Remapping infrastructure failures to §29.2 `failed` belongs
+to Step 5, which owns the runtime lifecycle. Until then the guarded path above
+ensures no Ticket is ever stuck in `integrating`.
+
+### The review's other points
+
+1. **Overclaiming test name.** `test_the_git_allowlist_excludes_history_rewriting_subcommands`
+   → `test_the_git_allowlist_excludes_each_listed_subcommand`. Its docstring
+   now says `rebase` (§24) and `merge` (§26) are allowlisted on purpose.
+2. **Unguarded git calls** — Ruling 19, above.
+3. **Stale statements, corrected rather than left:**
+   - handoff §1 table, `models.py` row: said Step 2 adds lifecycle
+     statuses. It adds none since the §12.2 ruling.
+   - handoff §1 table, `store.py` row: said one migration. There are two.
+   - handoff "Git and gh execution" paragraph: described the old force-push
+     denylist. It now describes the Ruling 3 allowlist and Ruling 18.
+   - module map lines 16 and 18: the same two corrections.
+   - module map line 46: "the eleven §32.1 fields". There are twelve.
+4. **A test that cannot fail.** `test_item_34_dependents_are_not_released_before_completed`
+   → `test_item_34_integration_records_neither_placeholder_release_event_name`.
+   Its docstring states what it asserts: the Ticket is in `needs_review`, and
+   no `dependency_released` / `blocked_by_cleared` event was recorded. Those
+   names exist nowhere in the code, so that half cannot fail. **The real
+   §43.34 invariant — dependents are released only after the blocker is
+   completed — lands with Step 5's dependency-release mechanism.**
+
+### Stop conditions this round — none fired
+
+- **Branch normalization:** Ruling 18 was implementable as written. It
+  contradicted nothing, and no existing test needed an edit beyond the
+  required rename.
+- **Pre-existing tests going red:** none, at any point this round.
+- **The merge:** no conflict at all, so no conflict needed a behaviour
+  change — see below.
+
+---
+
+## Merge of origin/main (`79e568d`) — Step 3 (#197) and F1 (#199)
+
+`origin/main` was merged into `task/v1-step2` as merge commit `ff86d9a`
+(parents `75f91d8` — Step 2 with the review fixes — and `79e568d` — main). A
+normal merge, never a rebase.
+
+**Conflicts: none.** The merge was textually clean, as the reviewer's trial
+merge found. The last merge taught that clean is not the same as correct, so
+these were checked as well:
+
+- **No silent merges.** No file changed on both sides since the merge base
+  `b870b84`.
+- **Main's files are intact.** Every Step 3 and F1 file in the result is
+  byte-identical to `origin/main`.
+
+**F1's behaviour is unchanged.** Its files are byte-identical to main, and
+its claim-rule tests pass by name:
+
+- `CreatedTicketStartsTests`: persisted `created` stays claimable.
+- `BlockedTicketCannotExecuteTests` and `PausedTicketCannotAcquireWorkTests`:
+  `blocked` and `paused` stay unclaimable and unrunnable. Dispatch, claim and
+  the `preparing` transition all refuse.
+- `RefusalLeavesRowUntouchedTests`: a refused claim leaves the row untouched.
+
+**Step 3 now runs with Step 2's data.** Step 3's `realtime_projection` reads
+Step 2's §32.1 public PR fields only when `task_pr_state` exists (it checks
+`sqlite_master` first). After this merge the table exists, so the two steps
+run together for the first time. Every Step 3 test passes, including its
+schema-diff gate.
+
+### Test counts for this merge
+
+| | `pytest tests -q` |
+| --- | --- |
+| Before (`9f60b7f`, this branch) | `4844 passed, 8 skipped, 0 failed` |
+| After (`ff86d9a`) | `5083 passed, 8 skipped, 0 failed` |
+
+Run in five parts, each under the 600 s tool limit, adding up to the whole:
+
+    test_[a-c]*.py    817 passed
+    test_[d-l]*.py    871 passed
+    test_[m-q]*.py    986 passed
+    test_r*.py        871 passed, 8 skipped
+    test_[s-z]*.py   1538 passed
+    -------------------------------------
+                     5083 passed, 8 skipped = 5091 collected
+
+**No test went red.** The +239 is exactly:
+
+- +231 from Step 3 and F1. The reviewer's trial merge of `9f60b7f` with main
+  gave 5075 = 4844 + 231.
+- +8 from this round's new tests: 4 normalization, 2 protected-branch
+  controller, 2 git-failure guard.
+
+`python -m compileall -q agent_taskflow scripts tests`, from the repository
+root: exit 0, no "Can't list" or error lines.
+
+Repo validators — `agent_taskflow.cli.local_validation`, exit 0. Both repo
+validators passed: workflow contract validation and workflow policy
+validation. So did the Python environment dependencies check, the Mission
+Control and PiExecutor golden-path smokes, unit tests (`Ran 5089 tests`,
+`OK (skipped=8)`, +239 over the last run) and compileall. `openspec validate`
+was skipped: not on PATH, an optional check, pre-existing.
 
 ---
 
@@ -111,31 +302,9 @@ consistent with the rule as written but not with its direction. As
 instructed, Step 2's schema handling was not changed in this turn. Whether V1
 wants one policy for both steps is for the human to decide.
 
-### `main` advanced during this turn — Step 3 (#197) not merged
-
-After the fetch that this merge used, `main` gained one more commit:
-`4552f4e` — *V1 Step 3: realtime progress (SPEC 14, 15, 16, 17) (#197)*,
-25 files and about 7,400 lines, including its own explicit migration script
-`scripts/migrate_runtime_progress.py`. It is **not** merged into this branch.
-The branch carries `main` as of `b870b84`.
-
-It was deliberately left out, for the human to decide:
-
-- This turn's scope named `main` as #195 plus #198.
-- A merge commit cannot be undone on this branch without a force-push, which
-  is forbidden.
-- It is a real cross-step integration, not a side-by-side change. No file
-  that Step 2 changed is touched by Step 3, so a merge would be textually
-  clean. But Step 3's `realtime_projection.py` reads Step 2's §32.1 public PR
-  fields by name (`pr_number`, `pr_state`, `reintegration_count`,
-  `reintegration_required`, …). Step 3's schema-diff test calls `init_db()`
-  and diffs the schema around Step 3's own migration; that looks compatible
-  with Step 2's `init_db()` tables, but it has not been run together with
-  Step 2.
-
-If it should be merged, a follow-up turn under the same rules — merge only,
-never rebase, suite in parts, Step 3's explicit-migration fixture convention —
-would do it.
+Step 3 (#197) landed on `main` after this merge's fetch. It was merged in
+the following round, together with F1 (#199), in `ff86d9a` — see "Merge of
+origin/main (`79e568d`)" above.
 
 ### Test counts for this merge
 
