@@ -16,6 +16,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from agent_taskflow.api.main import create_app
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 from agent_taskflow.scheduler_confirmation_from_proposal import (
     CONFIRMATION_ARTIFACT_TYPE,
     CONFIRMATION_EVENT_TYPE,
@@ -144,6 +145,8 @@ class RunSchedulerConfirmationPreparationHardeningSmokeTests(unittest.TestCase):
         self.assertEqual(self.summary["readbacks"]["api_global_count"], 1)
         self.assertEqual(self.summary["readbacks"]["api_task_count"], 1)
 
+        # The API fails closed until the explicit Step 1 migration has run.
+        migrate_ticket_fields(self.db_path)
         with TestClient(create_app(self.db_path)) as client:
             global_payload = client.get(
                 "/api/scheduler/confirmations",
@@ -157,6 +160,8 @@ class RunSchedulerConfirmationPreparationHardeningSmokeTests(unittest.TestCase):
 
     def test_repeated_k3_gets_do_not_mutate_db(self) -> None:
         before = self._db_counts()
+        # The API fails closed until the explicit Step 1 migration has run.
+        migrate_ticket_fields(self.db_path)
         with TestClient(create_app(self.db_path)) as client:
             client.get(
                 "/api/scheduler/confirmations",

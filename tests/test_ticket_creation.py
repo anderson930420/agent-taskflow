@@ -1,0 +1,648 @@
+"""Step 1 acceptance gate for Ticket creation.
+
+Covers SPEC §43 items 1-4 and the §44 invariants this step can affect:
+
+* §43.1  Create Ticket from repository / prompt / priority only.
+* §43.2  Python derives every other metadata field.
+* §43.3  AI title failure cannot block creation.
+* §43.4  Derived worktree path and branch are deterministic and unique
+         (derivation only — creation is Step 2).
+* §44    One Ticket = One Worktree.
+* §44    All lifecycle mutations are auditable.
+* §12.1  Initial status is `ready`, or `blocked`; never `queued`, persisted
+         in the legacy vocabulary per §12.2.
+* Negative scope: creation runs no Git command and creates no directory.
+
+A Ticket is a row in the canonical `tasks` table (PR #195 ruling).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+import tempfile
+import time
+import unittest
+from contextlib import closing
+from dataclasses import replace
+from pathlib import Path
+from unittest import mock
+
+from agent_taskflow.models import utc_now_iso
+from agent_taskflow.status_vocab import to_display_status
+from agent_taskflow.store import TaskMirrorStore, init_db as init_task_db
+from agent_taskflow.ticket_ai_metadata import (
+    TicketAIMetadataRequest,
+    TicketAIMetadataSuggestion,
+)
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
+from agent_taskflow.ticket_creation import (
+    CREATION_SAFETY_FLAGS,
+    TicketBranchCollisionError,
+    TicketCreationError,
+    TicketCreationRequest,
+    create_ticket,
+    ticket_to_dict,
+)
+from agent_taskflow.ticket_metadata import (
+    TITLE_FALLBACK_MAX_CHARS,
+    derive_branch_name,
+    fallback_title_from_prompt,
+    slugify_branch_component,
+)
+from agent_taskflow.ticket_models import (
+    AI_TITLE_FALLBACK,
+    AI_TITLE_GENERATED,
+    AI_TITLE_NOT_ATTEMPTED,
+    METADATA_SOURCE_AI,
+    METADATA_SOURCE_FALLBACK,
+    RESERVED_INITIAL_TICKET_STATUS,
+)
+from agent_taskflow.ticket_store import TicketStore
+
+
+PROMPT = "Separate the ending page image from the shared hero component"
+
+PROJECTS_YAML = """\
+projects:
+  forms:
+    project_slug: forms
+    task_key_prefix: FM
+    repo_path: {repo_path}
+    github_repo: example/forms
+    artifacts_root: {artifacts_root}
+    worktrees_dir: {worktrees_dir}
+    default_branch: main
+    branch_prefix: task/
+  bullet_journal:
+    project_slug: bullet_journal
+    task_key_prefix: BJ
+    repo_path: {other_repo_path}
+    github_repo: example/bullet-journal
+    default_branch: trunk
+    branch_prefix: worktree/
+"""
+
+
+class TicketCreationTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+        # `sandbox` holds everything Ticket creation must never write into.
+        self.sandbox = self.root / "sandbox"
+        self.repo_path = self.sandbox / "forms"
+        self.other_repo_path = self.sandbox / "bullet-journal"
+        self.worktrees_dir = self.repo_path / ".worktrees"
+        self.artifacts_root = self.sandbox / "artifacts"
+        self.repo_path.mkdir(parents=True)
+        self.other_repo_path.mkdir(parents=True)
+
+        self.config_path = self.root / "projects.yaml"
+        self.config_path.write_text(
+            PROJECTS_YAML.format(
+                repo_path=self.repo_path,
+                artifacts_root=self.artifacts_root,
+                worktrees_dir=self.worktrees_dir,
+                other_repo_path=self.other_repo_path,
+            ),
+            encoding="utf-8",
+        )
+
+        db_dir = self.root / "db"
+        db_dir.mkdir()
+        self.db_path = db_dir / "state.db"
+        # Step 1's columns are installed only by the explicit migration.
+        init_task_db(self.db_path)
+        migrate_ticket_fields(self.db_path)
+        self.store = TicketStore(self.db_path)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def request(self, **overrides: object) -> TicketCreationRequest:
+        fields: dict[str, object] = {
+            "repository": "forms",
+            "prompt": PROMPT,
+            "priority": "normal",
+        }
+        fields.update(overrides)
+        return TicketCreationRequest(**fields)  # type: ignore[arg-type]
+
+    def create(self, **kwargs: object):
+        request = kwargs.pop("request", None) or self.request()
+        return create_ticket(
+            request,  # type: ignore[arg-type]
+            store=self.store,
+            projects_config_path=self.config_path,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    def sandbox_dirs(self) -> set[Path]:
+        return {path for path in self.sandbox.rglob("*") if path.is_dir()}
+
+
+class MinimalCreationInputTests(TicketCreationTestCase):
+    """SPEC §43.1 / §10: repository, prompt and priority are the whole form."""
+
+    def test_ticket_is_creatable_from_three_inputs(self) -> None:
+        ticket = self.create().ticket
+
+        self.assertEqual(ticket.repository, "forms")
+        self.assertEqual(ticket.prompt, PROMPT)
+        self.assertEqual(ticket.priority, "normal")
+
+    def test_request_surface_is_exactly_repository_prompt_priority(self) -> None:
+        user_supplied = set(TicketCreationRequest.__dataclass_fields__)
+        self.assertEqual(
+            user_supplied,
+            {"repository", "prompt", "priority", "blocked_by"},
+        )
+        for forbidden in (
+            "task_key",
+            "ticket_id",
+            "repo_path",
+            "worktree_path",
+            "branch",
+            "artifact_dir",
+            "base_branch",
+        ):
+            self.assertNotIn(forbidden, user_supplied)
+
+    def test_priority_defaults_to_normal(self) -> None:
+        self.assertEqual(TicketCreationRequest("forms", PROMPT).priority, "normal")
+
+    def test_every_spec_priority_is_accepted(self) -> None:
+        for priority in ("critical", "high", "normal", "low"):
+            with self.subTest(priority=priority):
+                result = self.create(request=self.request(priority=priority))
+                self.assertEqual(result.ticket.priority, priority)
+
+    def test_unknown_priority_is_rejected(self) -> None:
+        with self.assertRaises(TicketCreationError):
+            self.request(priority="urgent")
+
+    def test_unknown_repository_is_rejected(self) -> None:
+        with self.assertRaises(TicketCreationError):
+            self.create(request=self.request(repository="not-registered"))
+
+    def test_blank_prompt_is_rejected(self) -> None:
+        with self.assertRaises(TicketCreationError):
+            self.request(prompt="   \n\t ")
+
+
+class DerivedMetadataTests(TicketCreationTestCase):
+    """SPEC §43.2 / §10.1: Python derives all remaining metadata."""
+
+    def test_all_metadata_is_derived_by_python(self) -> None:
+        ticket = self.create().ticket
+
+        self.assertEqual(ticket.task_key, "AT-0001")
+        self.assertEqual(ticket.repo_path, self.repo_path)
+        self.assertEqual(ticket.github_repo, "example/forms")
+        self.assertEqual(ticket.base_branch, "main")
+        self.assertEqual(ticket.worktree_path, self.worktrees_dir / "AT-0001")
+        self.assertEqual(ticket.artifact_dir, self.artifacts_root / "AT-0001")
+        self.assertTrue(ticket.branch.startswith("task/AT-0001-"))
+
+    def test_registry_drives_base_branch_and_branch_prefix(self) -> None:
+        ticket = self.create(request=self.request(repository="bullet_journal")).ticket
+
+        self.assertEqual(ticket.task_key, "AT-0001")
+        self.assertEqual(ticket.base_branch, "trunk")
+        self.assertTrue(ticket.branch.startswith("worktree/AT-0001-"))
+        # No worktrees_dir / artifacts_root configured: both fall back under
+        # the repository path rather than being asked of the user.
+        self.assertEqual(
+            ticket.worktree_path,
+            self.other_repo_path / ".worktrees" / "AT-0001",
+        )
+        self.assertTrue(ticket.artifact_dir.is_relative_to(self.other_repo_path))
+
+    def test_task_keys_come_from_one_global_counter(self) -> None:
+        first = self.create().ticket
+        second = self.create().ticket
+        other = self.create(request=self.request(repository="bullet_journal")).ticket
+
+        self.assertEqual(first.task_key, "AT-0001")
+        self.assertEqual(second.task_key, "AT-0002")
+        # Not BJ-0001: the registry's per-project task_key_prefix is not used.
+        self.assertEqual(other.task_key, "AT-0003")
+
+    def test_ticket_serializes_without_leaking_path_objects(self) -> None:
+        payload = ticket_to_dict(self.create().ticket)
+        json.dumps(payload)
+        self.assertEqual(payload["task_key"], "AT-0001")
+        self.assertEqual(payload["worktree_path"], str(self.worktrees_dir / "AT-0001"))
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(payload["display_status"], "ready")
+
+
+class AiTitleFallbackTests(TicketCreationTestCase):
+    """SPEC §43.3 / §10.1: AI metadata failure cannot block creation."""
+
+    def expect_fallback(self, adapter, **kwargs: object) -> None:
+        result = self.create(ai_adapter=adapter, **kwargs)
+        ticket = result.ticket
+
+        self.assertEqual(ticket.title, PROMPT[:TITLE_FALLBACK_MAX_CHARS])
+        self.assertEqual(ticket.ai_title_status, AI_TITLE_FALLBACK)
+        self.assertEqual(ticket.branch_slug_source, METADATA_SOURCE_FALLBACK)
+        self.assertFalse(result.used_ai_title)
+        self.assertIsNotNone(self.store.get_ticket(ticket.task_key))
+
+    def test_adapter_raising_falls_back(self) -> None:
+        def adapter(request: TicketAIMetadataRequest):
+            raise RuntimeError("model unavailable")
+
+        self.expect_fallback(adapter)
+
+    def test_adapter_timing_out_falls_back(self) -> None:
+        def adapter(request: TicketAIMetadataRequest):
+            time.sleep(5)
+            raise AssertionError("should never be awaited")
+
+        started = time.monotonic()
+        self.expect_fallback(adapter, ai_timeout_seconds=0.05)
+        self.assertLess(time.monotonic() - started, 4)
+
+    def test_adapter_raising_timeout_error_falls_back(self) -> None:
+        def adapter(request: TicketAIMetadataRequest):
+            raise TimeoutError("deadline exceeded")
+
+        self.expect_fallback(adapter)
+
+    def test_adapter_returning_empty_title_falls_back(self) -> None:
+        def adapter(request: TicketAIMetadataRequest):
+            return TicketAIMetadataSuggestion(title="")
+
+        self.expect_fallback(adapter)
+
+    def test_adapter_returning_whitespace_title_falls_back(self) -> None:
+        def adapter(request: TicketAIMetadataRequest):
+            return TicketAIMetadataSuggestion(title="   \n\t  ")
+
+        self.expect_fallback(adapter)
+
+    def test_adapter_returning_nothing_falls_back(self) -> None:
+        def adapter(request: TicketAIMetadataRequest):
+            return None
+
+        self.expect_fallback(adapter)
+
+    def test_ai_failure_is_recorded_on_the_audit_event(self) -> None:
+        def adapter(request: TicketAIMetadataRequest):
+            raise RuntimeError("model unavailable")
+
+        ticket = self.create(ai_adapter=adapter).ticket
+        payload = json.loads(
+            self.store.list_ticket_events(ticket.task_key)[0].payload_json or "{}"
+        )
+        self.assertTrue(payload["ai_attempted"])
+        self.assertIn("model unavailable", payload["ai_error"])
+        self.assertEqual(payload["ai_title_status"], AI_TITLE_FALLBACK)
+
+    def test_successful_adapter_metadata_is_used(self) -> None:
+        def adapter(request: TicketAIMetadataRequest):
+            self.assertEqual(request.prompt, PROMPT)
+            self.assertEqual(request.repository, "forms")
+            return TicketAIMetadataSuggestion(
+                title="Separate ending-page image",
+                branch_slug="Separate Ending Image",
+                commit_message="feat: separate ending-page image",
+            )
+
+        result = self.create(ai_adapter=adapter)
+        ticket = result.ticket
+
+        self.assertEqual(ticket.title, "Separate ending-page image")
+        self.assertEqual(ticket.ai_title_status, AI_TITLE_GENERATED)
+        self.assertEqual(ticket.branch, "task/AT-0001-separate-ending-image")
+        self.assertEqual(ticket.branch_slug_source, METADATA_SOURCE_AI)
+        self.assertEqual(
+            ticket.commit_message_suggestion,
+            "feat: separate ending-page image",
+        )
+        self.assertTrue(result.used_ai_title)
+
+    def test_no_adapter_means_no_ai_attempt(self) -> None:
+        result = self.create()
+        self.assertFalse(result.metadata.ai_attempted)
+        self.assertIsNone(result.metadata.ai_error)
+        self.assertEqual(result.ticket.ai_title_status, AI_TITLE_NOT_ATTEMPTED)
+        self.assertEqual(result.ticket.title, PROMPT[:TITLE_FALLBACK_MAX_CHARS])
+
+
+class OneTicketOneWorktreeTests(TicketCreationTestCase):
+    """SPEC §43.4 and §44: derived identity is unique per Ticket."""
+
+    def test_identical_prompts_derive_distinct_worktrees_and_branches(self) -> None:
+        first = self.create().ticket
+        second = self.create().ticket
+
+        self.assertNotEqual(first.task_key, second.task_key)
+        self.assertNotEqual(first.worktree_path, second.worktree_path)
+        self.assertNotEqual(first.branch, second.branch)
+
+    def test_identical_ai_titles_derive_distinct_worktrees_and_branches(self) -> None:
+        def adapter(request: TicketAIMetadataRequest):
+            return TicketAIMetadataSuggestion(
+                title="Exactly the same title",
+                branch_slug="exactly-the-same-slug",
+            )
+
+        first = self.create(ai_adapter=adapter).ticket
+        second = self.create(ai_adapter=adapter).ticket
+
+        self.assertEqual(first.title, second.title)
+        self.assertNotEqual(first.branch, second.branch)
+        self.assertNotEqual(first.worktree_path, second.worktree_path)
+        self.assertIn(first.task_key, first.branch)
+        self.assertIn(second.task_key, second.branch)
+
+    def test_worktree_path_ends_with_the_task_key(self) -> None:
+        ticket = self.create().ticket
+        self.assertEqual(ticket.worktree_path.name, ticket.task_key)
+        self.assertEqual(ticket.worktree_path.parent, self.worktrees_dir)
+
+    def test_derived_identity_is_stable_across_readback(self) -> None:
+        ticket = self.create().ticket
+        stored = self.store.get_ticket(ticket.task_key)
+        assert stored is not None
+        self.assertEqual(stored.branch, ticket.branch)
+        self.assertEqual(stored.worktree_path, ticket.worktree_path)
+        self.assertEqual(stored.artifact_dir, ticket.artifact_dir)
+
+
+class InitialStatusTests(TicketCreationTestCase):
+    """SPEC §12.1 display status, persisted per §12.2; never `queued`."""
+
+    def test_new_ticket_displays_ready_and_persists_created(self) -> None:
+        ticket = self.create().ticket
+        self.assertEqual(ticket.status, "created")
+        self.assertEqual(to_display_status(ticket.status), "ready")
+
+    def test_ticket_created_with_blocked_by_is_blocked(self) -> None:
+        blocker = self.create().ticket
+        dependent = self.create(
+            request=self.request(blocked_by=blocker.task_key)
+        ).ticket
+
+        self.assertEqual(dependent.status, "blocked")
+        self.assertEqual(to_display_status(dependent.status), "blocked")
+        self.assertEqual(dependent.blocked_by, blocker.task_key)
+
+    def test_unknown_blocker_is_rejected(self) -> None:
+        with self.assertRaises(TicketCreationError):
+            self.create(request=self.request(blocked_by="AT-0404"))
+
+    def test_creation_never_writes_queued(self) -> None:
+        tickets = [
+            self.create().ticket,
+            self.create(request=self.request(priority="critical")).ticket,
+        ]
+        for ticket in tickets:
+            self.assertNotEqual(ticket.status, RESERVED_INITIAL_TICKET_STATUS)
+            self.assertNotEqual(
+                to_display_status(ticket.status),
+                RESERVED_INITIAL_TICKET_STATUS,
+            )
+
+
+class AuditabilityTests(TicketCreationTestCase):
+    """SPEC §44: all lifecycle mutations are auditable."""
+
+    def test_creation_writes_an_audit_event(self) -> None:
+        ticket = self.create().ticket
+        events = self.store.list_ticket_events(ticket.task_key)
+
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.event_type, "created")
+        self.assertEqual(event.task_key, ticket.task_key)
+        self.assertEqual(event.source, "mission_control")
+        self.assertTrue(event.created_at)
+
+        payload = json.loads(event.payload_json or "{}")
+        self.assertEqual(payload["kind"], "ticket_created")
+        self.assertEqual(payload["repository"], "forms")
+        self.assertEqual(payload["priority"], "normal")
+        self.assertEqual(payload["initial_status"], "created")
+        self.assertEqual(payload["initial_display_status"], "ready")
+
+    def test_audit_event_lives_in_the_task_event_log(self) -> None:
+        ticket = self.create().ticket
+        mirrored = TaskMirrorStore(self.db_path).list_task_events(ticket.task_key)
+        self.assertEqual([event.event_type for event in mirrored], ["created"])
+
+    def test_audit_event_records_that_creation_touched_no_git(self) -> None:
+        ticket = self.create().ticket
+        payload = json.loads(
+            self.store.list_ticket_events(ticket.task_key)[0].payload_json or "{}"
+        )
+        self.assertEqual(payload["safety_flags"], dict(CREATION_SAFETY_FLAGS))
+        self.assertFalse(any(payload["safety_flags"].values()))
+
+
+class NegativeScopeTests(TicketCreationTestCase):
+    """Step 1 derives strings. It must not run Git or touch the filesystem."""
+
+    def test_creation_runs_no_subprocess(self) -> None:
+        def forbidden(*args: object, **kwargs: object):
+            raise AssertionError(f"Ticket creation must not spawn a process: {args}")
+
+        with mock.patch.object(subprocess, "Popen", forbidden), mock.patch.object(
+            subprocess, "run", forbidden
+        ), mock.patch.object(os, "system", forbidden):
+            ticket = self.create().ticket
+
+        self.assertEqual(ticket.task_key, "AT-0001")
+
+    def test_creation_creates_no_directory(self) -> None:
+        before = self.sandbox_dirs()
+        ticket = self.create().ticket
+        after = self.sandbox_dirs()
+
+        self.assertEqual(before, after)
+        self.assertFalse(ticket.worktree_path.exists())
+        self.assertFalse(ticket.artifact_dir.exists())
+        self.assertFalse(self.worktrees_dir.exists())
+        self.assertFalse(self.artifacts_root.exists())
+
+    def test_creation_writes_no_file_inside_the_repository(self) -> None:
+        files_before = {path for path in self.sandbox.rglob("*") if path.is_file()}
+        self.create()
+        files_after = {path for path in self.sandbox.rglob("*") if path.is_file()}
+        self.assertEqual(files_before, files_after)
+
+    def test_creation_does_not_require_the_repository_to_exist(self) -> None:
+        # Step 1 never inspects the repository working tree.
+        missing = self.root / "sandbox" / "forms-gone"
+        self.config_path.write_text(
+            PROJECTS_YAML.format(
+                repo_path=missing,
+                artifacts_root=self.artifacts_root,
+                worktrees_dir=missing / ".worktrees",
+                other_repo_path=self.other_repo_path,
+            ),
+            encoding="utf-8",
+        )
+        ticket = self.create().ticket
+        self.assertEqual(ticket.repo_path, missing)
+        self.assertFalse(missing.exists())
+
+
+class RequestNormalizationTests(TicketCreationTestCase):
+    def test_prompt_whitespace_is_normalized_before_storage(self) -> None:
+        request = self.request(prompt="  Fix\tthe\n\nlogin  flow  ")
+        ticket = self.create(request=request).ticket
+        self.assertEqual(ticket.prompt, "Fix the login flow")
+        self.assertEqual(ticket.title, "Fix the login flow")
+
+    def test_blank_blocked_by_is_treated_as_absent(self) -> None:
+        ticket = self.create(request=self.request(blocked_by="   ")).ticket
+        self.assertIsNone(ticket.blocked_by)
+        self.assertEqual(ticket.status, "created")
+
+    def test_request_is_immutable(self) -> None:
+        request = self.request()
+        with self.assertRaises(Exception):
+            request.priority = "high"  # type: ignore[misc]
+        self.assertEqual(replace(request, priority="high").priority, "high")
+
+
+
+class BranchCollisionTests(TicketCreationTestCase):
+    """PR #195 ruling 4b: an existing derived branch refuses creation.
+
+    Refused without auto-suffixing, and the refusal writes no row and no
+    audit event, creates no directory and spawns no process — the §43
+    negative-scope guarantees hold on the refusal path too.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.branch = derive_branch_name(
+            "task/",
+            "AT-0001",
+            slugify_branch_component(fallback_title_from_prompt(PROMPT)),
+        )
+
+    def make_repository(self) -> None:
+        self.git_env = {
+            **os.environ,
+            "HOME": str(self.root),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+        self.git("init", "-q", "-b", "main")
+        self.git("commit", "-q", "--allow-empty", "-m", "init")
+
+    def git(self, *args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.repo_path), *args],
+            check=True,
+            capture_output=True,
+            env=self.git_env,
+        )
+
+    def counts(self) -> tuple[int, int]:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            return (
+                conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0],
+            )
+
+    def record_branch_in_tasks(self, task_key: str = "AT-MANUAL") -> None:
+        now = utc_now_iso()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "INSERT INTO tasks (task_key, project, board, title, status,"
+                " repo_path, created_at, updated_at, branch)"
+                " VALUES (?, 'forms', 'forms', 'Manual', 'queued', ?, ?, ?, ?)",
+                (task_key, str(self.repo_path), now, now, self.branch),
+            )
+
+    def expect_refusal(self, source: str) -> TicketBranchCollisionError:
+        counts_before = self.counts()
+        dirs_before = self.sandbox_dirs()
+
+        def forbidden(*args: object, **kwargs: object):
+            raise AssertionError(f"Ticket creation must not spawn a process: {args}")
+
+        with mock.patch.object(subprocess, "Popen", forbidden), mock.patch.object(
+            subprocess, "run", forbidden
+        ), mock.patch.object(os, "system", forbidden):
+            with self.assertRaises(TicketBranchCollisionError) as ctx:
+                self.create()
+
+        error = ctx.exception
+        self.assertEqual(error.branch, self.branch)
+        self.assertEqual(error.source, source)
+        self.assertIn(self.branch, str(error))
+        self.assertEqual(self.counts(), counts_before, "refusal wrote a row or event")
+        self.assertEqual(self.sandbox_dirs(), dirs_before, "refusal created a directory")
+        self.assertIsNone(self.store.get_ticket("AT-0001"))
+        return error
+
+    def test_collision_with_a_branch_recorded_in_tasks(self) -> None:
+        self.record_branch_in_tasks()
+        error = self.expect_refusal("tasks")
+        self.assertEqual(error.existing, "AT-MANUAL")
+
+    def test_collision_with_a_local_repository_branch(self) -> None:
+        self.make_repository()
+        self.git("branch", self.branch)
+        error = self.expect_refusal("repository")
+        self.assertEqual(error.existing, f"refs/heads/{self.branch}")
+
+    def test_collision_with_a_remote_tracking_branch(self) -> None:
+        self.make_repository()
+        self.git("update-ref", f"refs/remotes/origin/{self.branch}", "HEAD")
+        error = self.expect_refusal("repository")
+        self.assertEqual(error.existing, f"refs/remotes/origin/{self.branch}")
+
+    def test_collision_with_a_packed_repository_branch(self) -> None:
+        self.make_repository()
+        self.git("branch", self.branch)
+        self.git("pack-refs", "--all")
+        error = self.expect_refusal("repository")
+        self.assertEqual(error.existing, f"refs/heads/{self.branch}")
+
+    def test_unrelated_repository_branches_do_not_block_creation(self) -> None:
+        self.make_repository()
+        self.git("branch", "unrelated")
+
+        def forbidden(*args: object, **kwargs: object):
+            raise AssertionError(f"Ticket creation must not spawn a process: {args}")
+
+        with mock.patch.object(subprocess, "Popen", forbidden), mock.patch.object(
+            subprocess, "run", forbidden
+        ), mock.patch.object(os, "system", forbidden):
+            ticket = self.create().ticket
+        self.assertEqual(ticket.branch, self.branch)
+
+    def test_refusal_never_auto_suffixes_and_consumes_no_key(self) -> None:
+        self.record_branch_in_tasks()
+        self.expect_refusal("tasks")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            suffixed = conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE branch LIKE ?",
+                (self.branch + "%",),
+            ).fetchone()[0]
+        self.assertEqual(suffixed, 1, "only the pre-existing branch may exist")
+
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("DELETE FROM tasks WHERE task_key = 'AT-MANUAL'")
+        ticket = self.create().ticket
+        self.assertEqual(ticket.task_key, "AT-0001")
+        self.assertEqual(ticket.branch, self.branch)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

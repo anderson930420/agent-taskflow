@@ -73,8 +73,12 @@ from agent_taskflow.level2_execution_authority import (
     Level2ExecutionAuthorityError,
     level2_direct_execution_error,
 )
+from agent_taskflow.api.tickets import build_ticket_router
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_ai_metadata import TicketAIMetadataAdapter
+from agent_taskflow.ticket_repositories import DEFAULT_PROJECTS_CONFIG_PATH
+from agent_taskflow.ticket_store import TicketStore
 from agent_taskflow.workspace_manager import (
     WorkspacePreparationRequest,
     prepare_task_workspace,
@@ -118,18 +122,27 @@ def create_app(
     db_path: str | Path | None = None,
     *,
     dispatcher_factory: DispatcherFactory | None = None,
+    projects_config_path: str | Path = DEFAULT_PROJECTS_CONFIG_PATH,
+    ticket_ai_adapter: TicketAIMetadataAdapter | None = None,
 ) -> FastAPI:
     """Create the Mission Control API app.
 
     db_path is injectable for tests. The default app uses the standard local
     mirror database path. Action routes mutate only the local mirror state and
     route execution through the dispatcher abstraction.
+
+    projects_config_path and ticket_ai_adapter configure the V1 Ticket routes
+    (SPEC §10, §11). Ticket creation writes local state only.
     """
     store = TaskMirrorStore(db_path)
+    ticket_store = TicketStore(db_path)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store.init_db()
+        # Fails closed, naming scripts/migrate_ticket_fields.py, when the
+        # Step 1 Ticket columns are missing. It never applies them.
+        ticket_store.init_db()
         yield
 
     app = FastAPI(title="Agent Taskflow Mission Control API", lifespan=lifespan)
@@ -816,6 +829,13 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return artifact_preview_to_dict(preview)
 
+    app.include_router(
+        build_ticket_router(
+            ticket_store,
+            projects_config_path=projects_config_path,
+            ai_adapter=ticket_ai_adapter,
+        )
+    )
 
     return app
 

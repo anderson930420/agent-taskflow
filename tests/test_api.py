@@ -8,6 +8,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from agent_taskflow.api.main import create_app
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.store import TaskMirrorStore
 
@@ -26,6 +27,8 @@ class ApiTests(unittest.TestCase):
         self.store.init_db()
         self._seed_data()
 
+        # The API fails closed until the explicit Step 1 migration has run.
+        migrate_ticket_fields(self.db_path)
         self.client_context = TestClient(create_app(self.db_path))
         self.client = self.client_context.__enter__()
 
@@ -487,6 +490,9 @@ class ApiTests(unittest.TestCase):
     def test_app_factory_uses_temp_db_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "custom-state.db"
+            # The API fails closed until the explicit Step 1 migration has run.
+            TaskMirrorStore(db_path).init_db()
+            migrate_ticket_fields(db_path)
             with TestClient(create_app(db_path)) as client:
                 response = client.get("/api/tasks")
 

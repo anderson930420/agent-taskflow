@@ -27,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 from fastapi.testclient import TestClient
 
 from agent_taskflow.api.main import create_app
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.scheduler_candidate_proposals import (
     SchedulerCandidateProposalRequest,
@@ -662,6 +663,10 @@ def run_smoke(
     _require(isinstance(helper_safety, dict), "K3 helper safety missing")
     _require(helper_safety.get("read_only") is True, "K3 helper is not read-only")
 
+    # V1 Step 1: the API fails closed until the explicit Ticket-column
+    # migration (scripts/migrate_ticket_fields.py) has run.
+    TaskMirrorStore(db_path).init_db()
+    migrate_ticket_fields(db_path)
     app = create_app(db_path)
     api_before = _db_counts(db_path)
     with TestClient(app) as client:
