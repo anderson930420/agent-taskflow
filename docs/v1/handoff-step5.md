@@ -7,6 +7,8 @@ Spec: `~/agent-taskflow-ops/v1/SPEC.md` §5, §7, §9, §20, §21, §29, §33.3,
 Instructions: `~/agent-taskflow-ops/v1/step5.md`; rulings 21 and 26–28 (`RULINGS.md`)
 
 **Status: implemented and ready for human review. No stop condition is open.**
+Round 3 (ruling 32) closed the independent review's single FAIL item: the
+dependency gate now lives at runtime admission (§2.6).
 Round 1 stopped during the read-only inventory on two stop conditions (S1, S2;
 §3.1). Rulings 26, 27 and 28 resolved them and decided D1–D6. This round
 implemented Step 5 under those rulings, with the acceptance-gate tests written
@@ -26,7 +28,9 @@ The PR is a draft. Nothing is approved or merged.
 | 1b | `2c77cc3` | A second builder run with the same prompt re-verified S1 and S2 against the code and changed nothing else (§10). |
 | 2 | `d7b51c0` | Rulings 26–28 applied. Step 5 implemented with the acceptance-gate tests written first (§2, §5). |
 | 2 | `ff7becd` | An independent read-only review of `d7b51c0` found 2 blocking and 5 should-fix issues plus 5 nits; all fixed with tests (§2.5). |
-| 2 | this commit | This handoff. Validation in §7 is on `ff7becd`'s code. |
+| 2 | `a12d708` | Handoff for round 2. |
+| 3 | `68f9f58` | Independent review of PR #201: FAIL, one blocking item (§2.6). Ruling 32 applied: the dependency gate at runtime admission, 13 new tests. |
+| 3 | this commit | This handoff. Validation in §7 is on `68f9f58`'s code. |
 
 ---
 
@@ -66,8 +70,9 @@ No existing module was rewritten.
 | `agent_taskflow/attempt_scoped_runtime_path.py` | extend | Uses that release set; a Ticket's in-claim allocation failure and workspace-preparation failure write `failed`. |
 | `agent_taskflow/lifecycle_runtime_path.py` | extend | `_release` closes a `failed`/`needs_decision` with no pending executor/validator outcome as Attempt `failed` / `runtime_failed`; the reason rewrite covers them. |
 | `agent_taskflow/lifecycle_control.py` | extend | One new reason code, `runtime_failed`. |
-| `agent_taskflow/dispatcher.py` | extend | Ticket detection; refusing to start a Ticket never writes; missing Step 5 migration refused untouched, naming the script; worktree ensured before the claim; every failure through `_fail()` (legacy → unchanged `_block_task`; a Ticket's pre-claim failure is a compare-and-set). |
-| `agent_taskflow/runtime_admission.py` | extend | `expire_stale_leases` writes `failed` for a Ticket, `blocked` (unchanged) for a legacy task. |
+| `agent_taskflow/dispatcher.py` | extend | Ticket detection; round 3: an unreleased dependency is refused before worktree preparation, writing nothing; refusing to start a Ticket never writes; missing Step 5 migration refused untouched, naming the script; worktree ensured before the claim; every failure through `_fail()` (legacy → unchanged `_block_task`; a Ticket's pre-claim failure is a compare-and-set). |
+| `agent_taskflow/runtime_admission.py` | extend | `expire_stale_leases` writes `failed` for a Ticket, `blocked` (unchanged) for a legacy task. Round 3: `RuntimeDependencyUnreleasedError` and `assert_dependency_released`, called in `claim()` after the capacity and status checks (§2.6). |
+| `agent_taskflow/reset_runtime_path.py` | extend (round 3) | The reserved-retry adoption claim calls `assert_dependency_released` (§2.6). |
 | `agent_taskflow/runtime_reaper.py` | extend | Docstring only. |
 | `agent_taskflow/ticket_retry.py` | **create** | The Ticket retry (§33.3): `failed`/`needs_decision → created`, one audited compare-and-set. |
 | `agent_taskflow/task_status_reset.py`, `scripts/reset_task_status.py` | extend | Accept `failed` and `needs_decision` for a Ticket, routed to `ticket_retry`; `to_status` is derived; the legacy `blocked → queued` path is unchanged. |
@@ -80,7 +85,7 @@ No existing module was rewritten.
 | `agent_taskflow/api/main.py` | extend | One line: `/start` reports `ok: false` for `failed` and `needs_decision` too (it already did for `blocked`). |
 | `docs/attempt-scoped-runtime-resources.md` | extend | Both worktree contracts (ruling 26g). |
 | `tests/step5_support.py`, `tests/step5_scheduler_worker.py` | **create** | Test fixtures and the test-only scheduler worker (not test modules). |
-| `tests/test_step5_*.py` (6 files) | **create** | The acceptance gate, 92 tests (§5). |
+| `tests/test_step5_*.py` (7 files) | **create** | The acceptance gate, 105 tests (§5); `test_step5_dependency_admission.py` is round 3's. |
 | `docs/v1/handoff-step5.md` | extend | This file. |
 
 Not touched: `approved_task_runner.py` (ruling 27f), Step 2's modules (ruling
@@ -293,14 +298,19 @@ claim_timeout_seconds=60)` and `scripts/run_parallel_scheduler_tick.py
 - **Several executors at once, each in its own worktree, one owner per
   Attempt** (§21): each worker is its own process holding its own lease.
 - **No daemon, no cron, no background thread.** A worker handles one Ticket and
-  exits. Production workers log to `<artifact_dir>/scheduler-worker-<utc>-<id>.log`.
+  exits. Production workers log to `<artifact base>/scheduler-worker-<utc>-<id>.log`,
+  where the artifact base is the latest `attempt_resources.artifact_base_root`
+  (the Ticket's own artifact directory), falling back to `tasks.artifact_dir`
+  before the Ticket's first claim.
 - **Integration handoff is not wired** (ruling 21, FOLLOWUPS F4).
 
 ### 2.5 Independent review of `d7b51c0`, and the fixes in `ff7becd`
 
 A read-only review subagent (it wrote nothing and touched no database) read
 the whole diff against rulings 26–28 and step5.md. I verified each finding
-against the code before fixing it. Each fix has a test (in brackets).
+against the code before fixing it. Fixes with a dedicated test name it in
+brackets; S3 and N1–N4 have none (their paths are races or internals the
+existing tests exercise only indirectly).
 
 | # | Finding | Fix |
 |---|---|---|
@@ -322,6 +332,121 @@ The reviewer also confirmed: legacy behaviour unchanged, `failed` /
 unchanged apart from the Ticket status, the rebuild SQL copies every column
 and restores the index and triggers, the retry compare-and-set is atomic, cycle
 detection is correct, and D3 ordering is as ruled.
+
+### 2.6 Ruling 32 — the dependency gate at runtime admission (round 3)
+
+**The review's blocking item.** Neither `RuntimeAdmissionStore.claim()` nor
+`Dispatcher.dispatch_task` read `blocked_by`, so SPEC §44 "Dependency releases
+only after blocker completed" (§43.7) held only in the scheduler's selection.
+The reviewer reproduced it:
+
+1. A Ticket B ran once and failed.
+2. An operator held it through the `/block` route, making it `blocked` with a
+   free-text reason.
+3. `set_blocked_by(B, A)` kept it `blocked` with that reason.
+4. `reset_task_status --from-status blocked` passed, because its guard only
+   refused a reason written by the dependency module. B became `queued` with
+   a reserved retry Attempt and `blocked_by=A`.
+5. `dispatch_task(B)` ran it while A was still `created`.
+
+**Every path that can start a Ticket.** A read-only sweep of
+`agent_taskflow/` and `scripts/`, which I checked against the code, found exactly
+two transactions that create a lease and move a task to `preparing`:
+`RuntimeAdmissionStore.claim()` (`runtime_admission.py`) and the reset-reserved
+retry adoption `ResetAwareRuntimeAdmissionStore._try_claim_reserved_retry`
+(`reset_runtime_path.py`). The installed admission class is
+`ResetAwareRuntimeAdmissionStore`: its `claim()` runs the adoption first and
+`RuntimeAdmissionStore.claim()` otherwise. Every entry point reaches one of the
+two through the installed store:
+
+- `POST /api/tasks/{key}/start` and `scripts/run_dispatcher.py` → the
+  installed `Dispatcher` → `update_task_status("preparing")` → `_claim`
+  → `ResetAware.claim`;
+- `scheduler_worker` (started by the tick) → the same Dispatcher;
+- `run_approved_task` and its wrappers (`scripts/run_approved_task.py`,
+  the manual ExecutionEngine, queued handoff, the GitHub-issue one-task tick
+  and automation) → `approved_task_runner` → the same claim. They accept only
+  `queued`, which a Ticket reaches only through a legacy reset;
+- the concurrency and M1 rehearsals → `claim()` directly, on disposable
+  databases.
+
+The runtime-handoff, one-shot and scheduler-watcher paths never execute (no
+runner is injected). No executor context is built and no executor starts before
+a claim. No production code writes a raw `preparing`.
+
+Two paths outside the two transactions, neither reachable by a Ticket from
+code:
+
+- the legacy PR-3 trigger `runtime_pickup_claim_after_preparing`. It claims
+  on a raw status write to `preparing`, but only on a database that never ran
+  the canonical migration. That migration makes it `WHEN 0` and adds
+  `runtime_preparing_requires_canonical_claim`, which refuses a raw
+  `preparing`. Every runtime store applies it inside `_claim` before
+  claiming, and Ticket dispatch requires the Step 5 migration, which
+  installs it. Only an external raw SQL write, or a hand-written
+  `TaskMirrorStore.update_task_status(key, 'preparing')`, on a Step-1-only
+  database could fire it;
+- `AttemptStore.create_attempt`, which creates an Attempt with no lease and
+  no execution, and is called only by an M1 rehearsal.
+
+**No path needed rerouting and no stop condition fired** (ruling 32f).
+
+**The fix (`68f9f58`):**
+
+- **32a.** `runtime_admission.assert_dependency_released(conn, task_key)`
+  runs inside `claim()`'s transaction **after** Step 4's capacity check
+  (still the first statement) and **after** F1's claimable-status check,
+  before any write. It refuses a task whose `blocked_by` blocker is not in a
+  §12 `completed` status (`cleaned`, `completed`, `done`). The same call runs
+  in the adoption transaction, after its capacity check, its `queued` row
+  match and its admission-control check. Both claim transactions are gated,
+  as ruling 32 intends ("the dependency gate belongs at admission"). The
+  adoption is the other half of the installed admission store's `claim()`,
+  so this gates it rather than rerouting it.
+- **32b.** The refusal is typed:
+  `RuntimeDependencyUnreleasedError(RuntimeAdmissionError)`, with
+  `reason_code = "runtime_dependency_unreleased"` and the task, blocker and
+  blocker status. The transaction rolls back, so nothing is written: no
+  status, no `blocked_reason`, no Attempt, no lease, no task event, and a
+  reserved lineage stays `reserved`. The pre-existing `task_id` backfill runs
+  before the transaction (ruling 14). An unknown blocker is refused with
+  `blocker_status = None`.
+- **32c.** `reset_task_status` refuses any Ticket with an unreleased or
+  unknown blocker, on both the legacy `blocked → queued` branch and the
+  Ticket retry. The message tells the operator to remove or replace the
+  dependency with `scripts/ticket_dependency.py`. It can no longer make such
+  a Ticket runnable.
+- **32d.** The scheduler's selection filter (`ready_queue`) is kept. The
+  dispatcher also refuses such a Ticket *before* worktree preparation. This
+  earlier refusal exists so that a direct or API start writes nothing at all,
+  not even a worktree audit event. The claim gate stays the authority.
+- Shared helpers: `ticket_dependencies.unreleased_dependency_in_connection`,
+  `unreleased_dependency`, and `unreleased_dependency_message`.
+
+**Tests (`tests/test_step5_dependency_admission.py`, 13, written first):**
+
+- `ResetRefusesTests`: the reviewer's Ticket (steps 1–3) cannot be reset,
+  and the refusal names the blocker and the D6 CLI. An unknown blocker is
+  refused too. Once the blocker is `cleaned`, the reset proceeds.
+- `StartPathsRefuseTests`: the reviewer's post-reset state is built with
+  `ResetLineageStore.reserve_retry`, the lower-level call a pre-fix reset
+  made, so it is `queued` with a reserved retry Attempt and `blocked_by=A`.
+  Then:
+  - **(i)** direct `Dispatcher.dispatch_task`,
+  - **(ii)** `POST /api/tasks/{key}/start` (`ok: false`, the blocker named),
+  - **(iii)** a scheduler tick (B is not a candidate and is not started;
+    the blocker itself may run),
+  - and the installed adoption claim,
+
+  are each refused. The row, events, Attempts and leases are identical
+  before and after, the lineage stays `reserved`, and there is no active
+  lease. Once A is `cleaned`, dispatch adopts the reserved Attempt and runs
+  B, and the lineage becomes `claimed`.
+- `ClaimRefusesTests`: `RuntimeAdmissionStore.claim()` refuses for six
+  non-completed blocker statuses and for an unknown blocker, writing
+  nothing. The capacity check still fires first. `cleaned`, `completed` and
+  `done` each allow the claim, and a Ticket without `blocked_by` is
+  unaffected.
 
 ---
 
@@ -368,12 +493,20 @@ detection is correct, and D3 ordering is as ruled.
 Not hit: no pre-existing test went red (§7), no forbidden layer was entered,
 nothing migrates at startup, and no push was rejected.
 
+### 3.3 Round 3: none hit
+
+The review's FAIL item was a defect in this branch, not a stop condition;
+ruling 32 decided the fix. The ruling 32f sweep found no path that starts a
+Ticket outside the two admission transactions (§2.6), so nothing had to be
+rerouted and nothing is left open. No pre-existing test went red, and none
+was edited.
+
 ---
 
 ## 4. Pre-existing tests changed
 
 **None.** Every pre-existing test file is byte-identical to `a5fa8e2`
-(`git diff a5fa8e2 -- tests/` lists only new files). Ruling 27a authorized
+(`git diff --name-status a5fa8e2 -- tests/` lists only `A` entries). Ruling 27a authorized
 updating the round-1 §3.2 tests; none needed it, because each uses a legacy
 row and keeps `blocked` under 27f:
 
@@ -388,17 +521,18 @@ row and keeps `blocked` under 27f:
 
 ## 5. Acceptance gate → tests
 
-92 new tests in 6 files, all passing: `test_step5_ticket_worktree` 12,
+105 new tests in 7 files, all passing: `test_step5_ticket_worktree` 12,
 `test_step5_ticket_worktree_schema` 10, `test_step5_failure_vocabulary` 24,
 `test_step5_dependencies` 25, `test_step5_ready_queue` 6,
-`test_step5_parallel_scheduler` 15.
+`test_step5_parallel_scheduler` 15, `test_step5_dependency_admission` 13
+(round 3).
 
 | # | Requirement | Tests |
 |---|---|---|
 | §43.4 / §9 | One worktree per Ticket | `test_step5_ticket_worktree`: `test_step1_ticket_gets_one_worktree_one_row_and_dispatch_runs` (a real `create_ticket` Ticket, dispatched; exactly one git worktree on its branch, one row, the executor ran there); `test_retry_reuses_the_same_worktree_as_the_last_attempt_left_it` (fail with a dirty file, retry to `created`, the second Attempt sees the file, same path and branch, per-Attempt artifact/lock paths, reuse events `dirty: false, true`); idempotent ensure; fail-closed cases; migration gate; legacy contract kept; a worktree missing at claim time is refused, not created (`ReviewFixClaimTimeWorktreeTests`). `test_step5_ticket_worktree_schema`: schema diff, idempotency, row preservation, sharing only after the rebuild, script CLI. |
 | §43.5 | Blocked / paused never execute | Unchanged F1 behaviour (F1's tests, unedited); `test_step5_ready_queue` shows neither is eligible, and `IdempotentLoopTests.test_a_tick_with_no_eligible_ticket_is_a_no_op` shows a tick leaves a paused Ticket's row and events untouched. |
 | §43.6 | Invalid dependencies | `InvalidDependencyTests`: self, unknown blocker, unknown dependent, 2-cycle, 3-cycle, creation-time blocker; the rows and events of every Ticket involved are identical before and after. |
-| §43.7 / §43.34 | Release after `completed` | `ReleaseOnlyAfterCompletedTests`: 12 non-completed blocker statuses plus a claimed (running) blocker release nothing; `cleaned`, `completed` and `done` each release, audited; a failure-`blocked` row is never released; idempotent. |
+| §43.7 / §43.34 / §44 on every start path | Release after `completed` | Round 3, `test_step5_dependency_admission` (§2.6): `claim()`, the adoption claim, direct dispatch, `POST /start` and a tick all refuse a Ticket whose blocker is not completed, writing nothing; `reset_task_status` refuses it; a completed blocker makes it claimable. Round 2, `ReleaseOnlyAfterCompletedTests`: 12 non-completed blocker statuses plus a claimed (running) blocker release nothing; `cleaned`, `completed` and `done` each release, audited; a failure-`blocked` row is never released; idempotent. |
 | §43.8 | Failed / cancelled blocker | `FailedOrCancelledBlockerTests`: `failed`, `canceled`, `archived` → dependent `needs_decision`, audited, no Attempt; D4 running dependent deferred, then stopped after its Attempt ends; the stopped dependent is neither eligible nor dispatchable. `ReviewFixDependencyTests`: a failure-`blocked` dependent keeps its reason; a failed dependent needs the audited retry, not just a removal; a dependency wait returns to ready when removed; a reserved retry Attempt blocks setting a dependency. |
 | §43.10 | Capacity | `CapacityTests`: limit 1 with 3 eligible starts exactly the highest-priority one; limit 2 (disposable-fixture setting, ruling 17) with 3 eligible starts 2; a full slot starts nothing. |
 | §21 | Parallel implementation | `test_three_tickets_run_at_once_in_their_own_worktrees`: at limit 3, three worker processes run the real Dispatcher; a barrier opens only when all three executors are running; three PIDs, three worktrees equal to the derived paths, one Attempt and one lease per Ticket with matching ids, three distinct owners. |
@@ -442,7 +576,14 @@ ran in the foreground and finished before this file was written.
 
 | Command | Result |
 |---|---|
-| **BEFORE**: full suite at `a5fa8e2` (round 1, §7 of that round) | Ran 4906 tests, OK (skipped=8) |
+| **BEFORE round 3**: full suite at `a12d708` (measured on `ff7becd`'s code, which `a12d708` changes only in this file; the independent reviewer re-ran it at `a12d708` and got the same 4998) | Ran 4998 tests, OK (skipped=8) |
+| **BEFORE round 2**: full suite at `a5fa8e2` (round 1) | Ran 4906 tests, OK (skipped=8) |
+| **AFTER round 3**, on `68f9f58`'s code: `test_[a-f]` 1220, `test_[g-q]` 1267, `test_r` 900 (skipped=8), `test_[s-z]` 1624 | **Ran 5011 tests — OK (skipped=8).** 5011 = 4998 + 13 new. No test went red. |
+| Round 3: Step 5 gate, the seven `tests.test_step5_*` modules, `-W error::ResourceWarning` | Ran 105 tests in 56.7 s, OK |
+| Round 3: pre-existing admission/reset suites (`test_runtime_admission`, `test_reset_lineage`, `test_reset_lineage_cli`, `test_task_status_reset`, `test_runtime_capacity`, `test_lease_contention`, `test_concurrency_atomic_claim`, `test_concurrency_crash_recovery`, `test_dispatcher`, `test_runtime_progress_wiring`, `test_canonical_runtime_admission`, `test_api_actions`) | Ran 225 tests in 69.5 s, OK, unedited |
+| Round 3: compileall, both validators, the two operator CLIs under `python3 -S` with no pydantic | exit 0; `status: passed` twice; `--help` exit 0 each |
+| Round 3: Step 4 rehearsal at `68f9f58` | exit 0, **16/16 checks**, gate `passed`, evidence `repo_sha` `68f9f58` |
+| *Round 2 results follow (on `ff7becd`'s code).* | |
 | Step 5 acceptance gate: the six `tests.test_step5_*` modules, with `-W error::ResourceWarning` (on `ff7becd`'s code) | Ran 92 tests in 46.5 s, OK |
 | Pre-existing suites nearest the change (on `d7b51c0`'s code, before the review fixes; the full suite below re-covers them): `test_dispatcher`, `test_runtime_progress_wiring`, `test_attempt_resources`, `test_attempt_resources_cli`, `test_runtime_admission`, `test_task_status_reset`, `test_reset_lineage`, `test_reset_lineage_cli`, `test_concurrency_crash_recovery`, `test_lease_contention`, `test_runtime_capacity`, `test_lifecycle_control`, `test_canonical_runtime_admission`, `test_api_actions`, `test_api`, `test_realtime_negative_scope`, `test_docs_maps`, `test_m1_exit_gate` | Ran 293 tests in 89.1 s, OK |
 | **AFTER** part `-p 'test_[a-f]*.py'` (78 files), on `ff7becd`'s code | `Ran 1220 tests in 212.403s` — `OK` |
@@ -474,11 +615,14 @@ export HOME=$(mktemp -d) PYTHONPATH=$PWD
 export GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@example.invalid
 export GIT_COMMITTER_NAME=T GIT_COMMITTER_EMAIL=t@example.invalid
 
-# No pre-existing test file changed (only new files are listed)
-git diff --stat a5fa8e2 -- tests/
+# No pre-existing test file changed: the first prints nothing, the second lists
+# only added (A) files
+git diff --name-status --diff-filter=M a5fa8e2 -- tests/
+git diff --name-status a5fa8e2 -- tests/
 
-# Step 5 acceptance gate (92 tests, ~50 s)
-$PY -m unittest tests.test_step5_ticket_worktree tests.test_step5_ticket_worktree_schema \
+# Step 5 acceptance gate (105 tests, ~60 s)
+$PY -m unittest tests.test_step5_dependency_admission \
+  tests.test_step5_ticket_worktree tests.test_step5_ticket_worktree_schema \
   tests.test_step5_failure_vocabulary tests.test_step5_dependencies \
   tests.test_step5_ready_queue tests.test_step5_parallel_scheduler
 
@@ -510,9 +654,9 @@ $PY scripts/run_parallel_scheduler_tick.py --db-path "$DB"                    # 
 
 ## 9. Governance
 
-- **Git.** Commits on `task/v1-step5` only (`d7b51c0`, `ff7becd`, then this
-  handoff), each pushed with a normal fast-forward push; PR #201 stays a draft
-  against `main`. Nothing was pushed to or merged into `main`,
+- **Git.** Commits on `task/v1-step5` only (`d7b51c0`, `ff7becd`, `a12d708`,
+  `68f9f58`, then this handoff), each pushed with a normal fast-forward push;
+  PR #201 stays a draft against `main`. Nothing was pushed to or merged into `main`,
   nothing was force-pushed, nothing was rebased.
 - **State.** `~/.agent-taskflow/state` and the production database were never
   read or written. Every database was a temporary one under `/tmp`.
