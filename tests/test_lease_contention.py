@@ -26,6 +26,7 @@ from agent_taskflow.runtime_admission import (
     LeaseOwnershipError,
     RuntimeAdmissionStore,
 )
+from agent_taskflow.runtime_capacity import set_disposable_fixture_capacity
 from agent_taskflow.runtime_reaper import reap_stale_runtime
 from agent_taskflow.store import connect
 
@@ -102,6 +103,8 @@ class HeartbeatVersusReaperTests(LeaseContentionTestCase):
             self.assertEqual(lease.release_reason, "runtime_lease_expired")
 
     def test_live_lease_heartbeat_wins_and_the_reaper_leaves_it(self) -> None:
+        # Every round's live lease stays active.
+        set_disposable_fixture_capacity(self.fixture.db_path, ROUNDS, fixture=self.id())
         for round_index in range(ROUNDS):
             task_key = f"AT-HB-LIVE-{round_index}"
             add_rehearsal_task(self.fixture, task_key)
@@ -127,6 +130,8 @@ class HeartbeatVersusReaperTests(LeaseContentionTestCase):
             self.assertTrue(self.admission.get_lease(claim.lease_id).is_active)
 
     def test_racing_reapers_reap_each_lease_exactly_once(self) -> None:
+        # Four expired, unreaped leases each keep their slot until reaped.
+        set_disposable_fixture_capacity(self.fixture.db_path, 4, fixture=self.id())
         claims = []
         for index in range(4):
             task_key = f"AT-REAPERS-{index}"

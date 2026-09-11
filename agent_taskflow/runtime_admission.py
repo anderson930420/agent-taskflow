@@ -70,13 +70,11 @@ def assert_runtime_capacity_available(conn: sqlite3.Connection) -> None:
     """Refuse a claim that would exceed ``max_concurrent_tasks`` (V1 Step 4).
 
     Call it first inside the claim's ``BEGIN IMMEDIATE`` transaction, so the
-    count and the new lease cannot be split by another writer. A database
-    without the capacity control installed is not gated; see
-    :mod:`agent_taskflow.runtime_capacity_schema`.
+    count and the new lease cannot be split by another writer. It applies to
+    every database; one that never stored a value is limited to the default
+    of 1 (ruling 15).
     """
     setting = runtime_capacity_in_connection(conn)
-    if not setting.enforced:
-        return
     active = count_active_executor_leases_in_connection(conn)
     if active >= setting.max_concurrent_tasks:
         raise RuntimeCapacityExceededError(

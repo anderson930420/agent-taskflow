@@ -25,6 +25,7 @@ from agent_taskflow.lifecycle_runtime_path import LifecycleRuntimeAdmissionStore
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.project_class_control_schema import migrate_project_class_controls
 from agent_taskflow.runtime_admission import RuntimeAdmissionStore
+from agent_taskflow.runtime_capacity import set_disposable_fixture_capacity
 from agent_taskflow.store import TaskMirrorStore, connect
 
 
@@ -118,6 +119,8 @@ class ProjectClassControlTests(unittest.TestCase):
             )
 
     def test_project_pause_isolated_and_existing_attempt_remains_active(self) -> None:
+        # The scenario holds A2, B1 and A1 at once; V1 ruling 15b.
+        set_disposable_fixture_capacity(self.db_path, 3, fixture=self.id())
         active_a2 = self.admission.claim("AT-A2", owner_id="runner-a2")
         self.controls.pause(
             scope_kind="project",

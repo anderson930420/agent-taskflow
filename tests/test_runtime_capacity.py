@@ -1,8 +1,9 @@
 """Capacity limit and concurrency gate (V1 Step 4, SPEC §19.4, §20, §43.9-10).
 
-``max_concurrent_tasks`` is a global runtime control, default 1, stored with
-the existing runtime controls. It is enforced inside the claim transaction and
-can rise above 1 only against passing Step 4 rehearsal evidence.
+``max_concurrent_tasks`` is a global runtime control, default 1 on every
+database (ruling 15), stored with the existing runtime controls. It is enforced
+inside the claim transaction and can rise above 1 only against passing Step 4
+rehearsal evidence.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_taskflow.concurrency_gate import (
     CONCURRENCY_REHEARSAL_SCHEMA_VERSION,
@@ -38,11 +40,14 @@ from agent_taskflow.runtime_admission import (
 from agent_taskflow.runtime_capacity import (
     DEFAULT_MAX_CONCURRENT_TASKS,
     ConcurrencyGateRefused,
+    RuntimeCapacityError,
     list_runtime_capacity_events,
     read_runtime_capacity,
+    set_disposable_fixture_capacity,
     set_max_concurrent_tasks,
 )
 from agent_taskflow.runtime_capacity_schema import (
+    DISPOSABLE_FIXTURE_CAPACITY_REASON,
     RUNTIME_CAPACITY_MIGRATION,
     migrate_runtime_capacity,
 )
@@ -110,19 +115,15 @@ class CapacityTestCase(unittest.TestCase):
 class DefaultLimitTests(CapacityTestCase):
     def test_default_is_one(self) -> None:
         self.assertEqual(DEFAULT_MAX_CONCURRENT_TASKS, 1)
-        self.deploy()
         setting = read_runtime_capacity(self.db)
         self.assertEqual(setting.max_concurrent_tasks, 1)
         self.assertEqual(setting.source, "default")
-        self.assertTrue(setting.enforced)
 
     def test_default_reads_as_one_through_the_runtime_control_store(self) -> None:
-        self.deploy()
         setting = RuntimeControlStore(self.db).runtime_capacity()
         self.assertEqual(setting.max_concurrent_tasks, 1)
 
     def test_with_limit_one_a_second_concurrent_claim_is_refused(self) -> None:
-        self.deploy()
         add_rehearsal_task(self.fixture, "AT-CAP-A")
         add_rehearsal_task(self.fixture, "AT-CAP-B")
         admission = RuntimeAdmissionStore(self.db)
@@ -148,7 +149,6 @@ class DefaultLimitTests(CapacityTestCase):
         self.assertEqual(b_attempts, 0)
 
     def test_with_limit_one_concurrent_claimers_on_different_tickets_get_one_slot(self) -> None:
-        self.deploy()
         keys = [f"AT-CAP-RACE-{index}" for index in range(8)]
         for key in keys:
             add_rehearsal_task(self.fixture, key)
@@ -165,7 +165,6 @@ class DefaultLimitTests(CapacityTestCase):
         self.assertEqual(self.active_leases(), 1)
 
     def test_a_released_slot_can_be_claimed_again(self) -> None:
-        self.deploy()
         add_rehearsal_task(self.fixture, "AT-CAP-R1")
         add_rehearsal_task(self.fixture, "AT-CAP-R2")
         admission = RuntimeAdmissionStore(self.db)
@@ -183,7 +182,6 @@ class DefaultLimitTests(CapacityTestCase):
         self.assertEqual(second.task_key, "AT-CAP-R2")
 
     def test_expired_but_unreaped_leases_still_hold_their_slot(self) -> None:
-        self.deploy()
         add_rehearsal_task(self.fixture, "AT-CAP-E1")
         add_rehearsal_task(self.fixture, "AT-CAP-E2")
         admission = RuntimeAdmissionStore(self.db)
@@ -202,7 +200,6 @@ class DefaultLimitTests(CapacityTestCase):
     def test_capacity_applies_to_the_reset_retry_claim_path(self) -> None:
         import agent_taskflow.canonical_runtime_path as canonical_path
 
-        self.deploy()
         add_rehearsal_task(self.fixture, "AT-CAP-RETRY")
         add_rehearsal_task(self.fixture, "AT-CAP-HOLDER")
         runtime = canonical_path.CanonicalRuntimeAdmissionStore(self.db)
@@ -228,39 +225,83 @@ class DefaultLimitTests(CapacityTestCase):
         self.assertEqual(self.active_leases(), 1)
 
 
-class UndeployedDatabaseTests(CapacityTestCase):
-    """Stop condition recorded in docs/v1/handoff-step4.md §4.1.
+class EveryDatabaseIsBoundedTests(CapacityTestCase):
+    """Ruling 15: the default of 1 applies to every database, no migration."""
 
-    Until the capacity control is deployed with an explicit operator action,
-    a database keeps its pre-Step-4 admission behaviour, exactly as
-    ``runtime_controls`` does for databases that predate it.
-    """
-
-    def test_reading_never_deploys_the_control(self) -> None:
-        setting = read_runtime_capacity(self.db)
-        self.assertEqual(setting.max_concurrent_tasks, 1)
-        self.assertFalse(setting.enforced)
+    def assert_no_capacity_table(self) -> None:
         with closing(connect(self.db)) as conn:
             table = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE name = 'runtime_capacity_controls'"
             ).fetchone()
         self.assertIsNone(table)
 
-    def test_undeployed_database_is_not_capacity_gated(self) -> None:
-        add_rehearsal_task(self.fixture, "AT-UNDEPLOYED-A")
-        add_rehearsal_task(self.fixture, "AT-UNDEPLOYED-B")
+    def test_a_database_that_never_stored_a_value_is_limited_to_one(self) -> None:
+        add_rehearsal_task(self.fixture, "AT-NOVALUE-A")
+        add_rehearsal_task(self.fixture, "AT-NOVALUE-B")
         admission = RuntimeAdmissionStore(self.db)
-        admission.claim("AT-UNDEPLOYED-A", owner_id="a")
-        admission.claim("AT-UNDEPLOYED-B", owner_id="b")
-        self.assertEqual(self.active_leases(), 2)
-
-    def test_deploying_the_control_enforces_the_default_immediately(self) -> None:
-        add_rehearsal_task(self.fixture, "AT-DEPLOY-A")
-        add_rehearsal_task(self.fixture, "AT-DEPLOY-B")
-        RuntimeAdmissionStore(self.db).claim("AT-DEPLOY-A", owner_id="a")
-        self.deploy()
+        admission.claim("AT-NOVALUE-A", owner_id="a")
         with self.assertRaises(RuntimeCapacityExceededError):
-            RuntimeAdmissionStore(self.db).claim("AT-DEPLOY-B", owner_id="b")
+            admission.claim("AT-NOVALUE-B", owner_id="b")
+        self.assertEqual(self.active_leases(), 1)
+        self.assert_no_capacity_table()
+
+    def test_reading_and_refused_claims_never_install_the_tables(self) -> None:
+        self.assertEqual(read_runtime_capacity(self.db).max_concurrent_tasks, 1)
+        self.assert_no_capacity_table()
+
+    def test_installed_tables_without_a_row_still_mean_one(self) -> None:
+        self.deploy()
+        self.assertEqual(read_runtime_capacity(self.db).source, "default")
+        add_rehearsal_task(self.fixture, "AT-EMPTY-A")
+        add_rehearsal_task(self.fixture, "AT-EMPTY-B")
+        RuntimeAdmissionStore(self.db).claim("AT-EMPTY-A", owner_id="a")
+        with self.assertRaises(RuntimeCapacityExceededError):
+            RuntimeAdmissionStore(self.db).claim("AT-EMPTY-B", owner_id="b")
+
+
+class DisposableFixtureCapacityTests(CapacityTestCase):
+    """Ruling 15b: fixtures that hold several claims set their own value."""
+
+    def test_fixture_value_is_enforced_and_labelled(self) -> None:
+        setting = set_disposable_fixture_capacity(self.db, 2, fixture="unit-test")
+        self.assertEqual(setting.max_concurrent_tasks, 2)
+        self.assertEqual(setting.source, "disposable_fixture")
+        self.assertEqual(setting.requested_by, "fixture:unit-test")
+        self.assertIsNone(setting.evidence_sha256)
+        for key in ("AT-FIX-A", "AT-FIX-B", "AT-FIX-C"):
+            add_rehearsal_task(self.fixture, key)
+        admission = RuntimeAdmissionStore(self.db)
+        admission.claim("AT-FIX-A", owner_id="a")
+        admission.claim("AT-FIX-B", owner_id="b")
+        with self.assertRaises(RuntimeCapacityExceededError) as raised:
+            admission.claim("AT-FIX-C", owner_id="c")
+        self.assertEqual(raised.exception.max_concurrent_tasks, 2)
+
+    def test_fixture_value_is_audited_with_its_own_reason(self) -> None:
+        set_disposable_fixture_capacity(self.db, 3, fixture="unit-test")
+        events = list_runtime_capacity_events(self.db)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["reason_code"], DISPOSABLE_FIXTURE_CAPACITY_REASON)
+        self.assertEqual(events[0]["to_max_concurrent_tasks"], 3)
+        self.assertIsNone(events[0]["evidence_sha256"])
+
+    def test_fixture_setter_refuses_the_default_state_database(self) -> None:
+        with mock.patch(
+            "agent_taskflow.runtime_capacity.default_db_path", return_value=self.db
+        ):
+            with self.assertRaises(RuntimeCapacityError):
+                set_disposable_fixture_capacity(self.db, 2, fixture="unit-test")
+        self.assertEqual(read_runtime_capacity(self.db).source, "default")
+
+    def test_fixture_setter_is_not_on_the_operator_cli(self) -> None:
+        source = (REPO_ROOT / "scripts" / "runtime_control.py").read_text(encoding="utf-8")
+        self.assertNotIn("set_disposable_fixture_capacity", source)
+        self.assertNotIn("disposable_fixture", source)
+
+    def test_the_operator_path_still_needs_evidence_after_a_fixture_value(self) -> None:
+        set_disposable_fixture_capacity(self.db, 3, fixture="unit-test")
+        with self.assertRaises(ConcurrencyGateRefused):
+            set_max_concurrent_tasks(self.db, 3, actor="operator")
 
 
 class GateTests(CapacityTestCase):
@@ -270,10 +311,16 @@ class GateTests(CapacityTestCase):
         self.assertIn("evidence", str(raised.exception))
         self.assertEqual(read_runtime_capacity(self.db).max_concurrent_tasks, 1)
 
-    def test_refusal_writes_nothing_and_does_not_deploy(self) -> None:
+    def test_refusal_writes_nothing(self) -> None:
         with self.assertRaises(ConcurrencyGateRefused):
             set_max_concurrent_tasks(self.db, 3, actor="operator")
-        self.assertFalse(read_runtime_capacity(self.db).enforced)
+        self.assertEqual(read_runtime_capacity(self.db).source, "default")
+        self.assertEqual(list_runtime_capacity_events(self.db), [])
+        with closing(connect(self.db)) as conn:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'runtime_capacity_controls'"
+            ).fetchone()
+        self.assertIsNone(table)
 
     def test_raising_above_one_with_failing_evidence_is_refused(self) -> None:
         cases = {
@@ -427,7 +474,6 @@ class RuntimeControlCliTests(CapacityTestCase):
         )
         self.assertEqual(payload["max_concurrent_tasks"], 1)
         self.assertEqual(payload["source"], "default")
-        self.assertFalse(payload["enforced"])
         self.assertEqual(payload["scope"], "global")
 
     def test_set_capacity_above_one_without_evidence_exits_two(self) -> None:
@@ -462,7 +508,7 @@ class RuntimeControlCliTests(CapacityTestCase):
         payload = json.loads(completed.stdout)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["max_concurrent_tasks"], 3)
-        self.assertTrue(payload["enforced"])
+        self.assertEqual(payload["source"], "configured")
         status = json.loads(self.run_cli("capacity", "--db-path", str(self.db)).stdout)
         self.assertEqual(status["max_concurrent_tasks"], 3)
 

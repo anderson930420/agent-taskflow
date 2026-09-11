@@ -1,7 +1,9 @@
 """Global ``max_concurrent_tasks`` runtime control (V1 Step 4, SPEC §19.4, §20).
 
-The setting is global, defaults to 1, and is stored in the runtime-control
-database beside ``runtime_controls`` (see
+The setting is global and defaults to 1 on **every** database (ruling 15).
+A database that has never stored a value needs no migration to be bounded:
+the claim transaction applies the default. A stored value lives in the
+runtime-control database beside ``runtime_controls`` (see
 :mod:`agent_taskflow.runtime_capacity_schema`). ``RuntimeControlStore`` and
 ``scripts/runtime_control.py`` expose it.
 
@@ -14,6 +16,13 @@ still holds its slot.
 Raising the limit above 1 is refused unless the Step 4 rehearsal evidence
 passes :func:`agent_taskflow.concurrency_gate.evaluate_concurrency_evidence`.
 Lowering it to 1 never needs evidence.
+
+The one exception is :func:`set_disposable_fixture_capacity`, for disposable
+rehearsal and test databases whose scenario holds several claims at once —
+including the Step 4 rehearsal itself, which has to run concurrent claims to
+produce the evidence. It refuses the default state database, no CLI exposes
+it, and its rows and events carry their own reason code so they can never pass
+for an evidence-backed limit.
 """
 
 from __future__ import annotations
@@ -28,16 +37,22 @@ from typing import Any
 from agent_taskflow.concurrency_gate import evaluate_concurrency_evidence
 from agent_taskflow.models import require_absolute_path, utc_now_iso
 from agent_taskflow.runtime_capacity_schema import (
+    DISPOSABLE_FIXTURE_CAPACITY_REASON,
     RUNTIME_CAPACITY_MIGRATION,
     migrate_runtime_capacity,
     runtime_capacity_deployed_in_connection,
 )
-from agent_taskflow.store import connect
+from agent_taskflow.store import connect, default_db_path
 
 DEFAULT_MAX_CONCURRENT_TASKS = 1
 CAPACITY_SCOPE_KIND = "global"
 CAPACITY_SCOPE_ID = "*"
 CAPACITY_SET_REASON = "operator_capacity_set"
+
+_SOURCE_BY_REASON = {
+    CAPACITY_SET_REASON: "configured",
+    DISPOSABLE_FIXTURE_CAPACITY_REASON: "disposable_fixture",
+}
 
 
 class RuntimeCapacityError(RuntimeError):
@@ -56,7 +71,6 @@ class ConcurrencyGateRefused(RuntimeCapacityError):
 class RuntimeCapacitySetting:
     max_concurrent_tasks: int
     source: str
-    enforced: bool
     scope: str = CAPACITY_SCOPE_KIND
     generation: int | None = None
     requested_by: str | None = None
@@ -69,18 +83,17 @@ class RuntimeCapacitySetting:
         return asdict(self)
 
 
-def _default_setting(*, enforced: bool) -> RuntimeCapacitySetting:
+def _default_setting() -> RuntimeCapacitySetting:
     return RuntimeCapacitySetting(
         max_concurrent_tasks=DEFAULT_MAX_CONCURRENT_TASKS,
         source="default",
-        enforced=enforced,
     )
 
 
 def runtime_capacity_in_connection(conn: sqlite3.Connection) -> RuntimeCapacitySetting:
     """Return the effective setting as seen by ``conn``'s transaction."""
     if not runtime_capacity_deployed_in_connection(conn):
-        return _default_setting(enforced=False)
+        return _default_setting()
     row = conn.execute(
         """
         SELECT * FROM runtime_capacity_controls
@@ -89,11 +102,10 @@ def runtime_capacity_in_connection(conn: sqlite3.Connection) -> RuntimeCapacityS
         (CAPACITY_SCOPE_KIND, CAPACITY_SCOPE_ID),
     ).fetchone()
     if row is None:
-        return _default_setting(enforced=True)
+        return _default_setting()
     return RuntimeCapacitySetting(
         max_concurrent_tasks=int(row["max_concurrent_tasks"]),
-        source="configured",
-        enforced=True,
+        source=_SOURCE_BY_REASON.get(row["reason_code"], "configured"),
         generation=int(row["generation"]),
         requested_by=row["requested_by"],
         requested_at=row["requested_at"],
@@ -125,7 +137,7 @@ def read_runtime_capacity(db_path: str | Path) -> RuntimeCapacitySetting:
     """Read the setting without creating, migrating or writing anything."""
     path = require_absolute_path(db_path, "db_path")
     if not path.is_file():
-        return _default_setting(enforced=False)
+        return _default_setting()
     with closing(_read_only_connection(path)) as conn:
         return runtime_capacity_in_connection(conn)
 
@@ -138,67 +150,25 @@ def _require_limit(value: Any) -> int:
     return value
 
 
-def set_max_concurrent_tasks(
-    db_path: str | Path,
-    value: int,
+def _require_actor(actor: str) -> str:
+    normalized = (actor or "").strip()
+    if not normalized:
+        raise ValueError("actor must not be empty")
+    return normalized
+
+
+def _write_setting(
+    path: Path,
+    limit: int,
     *,
     actor: str,
-    evidence_path: str | Path | None = None,
-    repo_root: str | Path | None = None,
-    metadata: dict[str, Any] | None = None,
+    reason_code: str,
+    evidence_fields: tuple[str | None, str | None, str | None, str | None],
+    metadata: dict[str, Any],
 ) -> RuntimeCapacitySetting:
-    """Set the global limit; above 1 requires passing Step 4 rehearsal evidence.
-
-    A refusal raises :class:`ConcurrencyGateRefused` before anything is
-    written, so it neither installs the control nor changes enforcement.
-    """
-    path = require_absolute_path(db_path, "db_path")
-    limit = _require_limit(value)
-    normalized_actor = (actor or "").strip()
-    if not normalized_actor:
-        raise ValueError("actor must not be empty")
-
-    report: dict[str, Any] | None = None
-    if limit > 1:
-        if evidence_path is None:
-            report = {
-                "gate": "blocked",
-                "errors": [
-                    "evidence_path is required to raise max_concurrent_tasks above 1"
-                ],
-                "read_only": True,
-            }
-            raise ConcurrencyGateRefused(
-                "Raising max_concurrent_tasks above 1 requires Step 4 rehearsal "
-                "evidence (--evidence-path)",
-                report,
-            )
-        report = evaluate_concurrency_evidence(evidence_path, repo_root=repo_root)
-        if report["gate"] != "passed":
-            raise ConcurrencyGateRefused(
-                "Step 4 rehearsal evidence did not pass the concurrency gate: "
-                + "; ".join(report["errors"]),
-                report,
-            )
-
     migrate_runtime_capacity(path)
     now = utc_now_iso()
-    evidence_fields = (
-        (
-            report["evidence_path"],
-            report["evidence_sha256"],
-            report["evidence_schema_version"],
-            report["evidence_repo_sha"],
-        )
-        if limit > 1 and report is not None
-        else (None, None, None, None)
-    )
-    event_metadata = dict(metadata or {})
-    if limit > 1 and report is not None:
-        event_metadata["gate"] = {
-            "schema_version": report["schema_version"],
-            "audited_repo_sha": report["audited_repo_sha"],
-        }
+    metadata_json = json.dumps(metadata, sort_keys=True)
     with closing(connect(path)) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         previous = conn.execute(
@@ -233,11 +203,11 @@ def set_max_concurrent_tasks(
                 CAPACITY_SCOPE_ID,
                 limit,
                 *evidence_fields,
-                CAPACITY_SET_REASON,
-                normalized_actor,
+                reason_code,
+                actor,
                 now,
                 generation,
-                json.dumps(event_metadata, sort_keys=True),
+                metadata_json,
             ),
         )
         conn.execute(
@@ -255,14 +225,106 @@ def set_max_concurrent_tasks(
                 limit,
                 evidence_fields[0],
                 evidence_fields[1],
-                CAPACITY_SET_REASON,
-                normalized_actor,
+                reason_code,
+                actor,
                 generation,
                 now,
-                json.dumps(event_metadata, sort_keys=True),
+                metadata_json,
             ),
         )
     return read_runtime_capacity(path)
+
+
+def set_max_concurrent_tasks(
+    db_path: str | Path,
+    value: int,
+    *,
+    actor: str,
+    evidence_path: str | Path | None = None,
+    repo_root: str | Path | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> RuntimeCapacitySetting:
+    """Set the global limit; above 1 requires passing Step 4 rehearsal evidence.
+
+    A refusal raises :class:`ConcurrencyGateRefused` before anything is
+    written.
+    """
+    path = require_absolute_path(db_path, "db_path")
+    limit = _require_limit(value)
+    normalized_actor = _require_actor(actor)
+    event_metadata = dict(metadata or {})
+    evidence_fields: tuple[str | None, str | None, str | None, str | None] = (
+        None,
+        None,
+        None,
+        None,
+    )
+    if limit > 1:
+        if evidence_path is None:
+            raise ConcurrencyGateRefused(
+                "Raising max_concurrent_tasks above 1 requires Step 4 rehearsal "
+                "evidence (--evidence-path)",
+                {
+                    "gate": "blocked",
+                    "errors": [
+                        "evidence_path is required to raise max_concurrent_tasks above 1"
+                    ],
+                    "read_only": True,
+                },
+            )
+        report = evaluate_concurrency_evidence(evidence_path, repo_root=repo_root)
+        if report["gate"] != "passed":
+            raise ConcurrencyGateRefused(
+                "Step 4 rehearsal evidence did not pass the concurrency gate: "
+                + "; ".join(report["errors"]),
+                report,
+            )
+        evidence_fields = (
+            report["evidence_path"],
+            report["evidence_sha256"],
+            report["evidence_schema_version"],
+            report["evidence_repo_sha"],
+        )
+        event_metadata["gate"] = {
+            "schema_version": report["schema_version"],
+            "audited_repo_sha": report["audited_repo_sha"],
+        }
+    return _write_setting(
+        path,
+        limit,
+        actor=normalized_actor,
+        reason_code=CAPACITY_SET_REASON,
+        evidence_fields=evidence_fields,
+        metadata=event_metadata,
+    )
+
+
+def set_disposable_fixture_capacity(
+    db_path: str | Path,
+    value: int,
+    *,
+    fixture: str,
+) -> RuntimeCapacitySetting:
+    """Set the limit on a disposable rehearsal or test database, ungated.
+
+    For fixtures whose scenario deliberately holds ``value`` claims at once
+    (ruling 15b). Refuses the default state database. Recorded with
+    ``reason_code = disposable_fixture_capacity`` and reported as source
+    ``disposable_fixture``, never as an evidence-backed limit.
+    """
+    path = require_absolute_path(db_path, "db_path")
+    if path.expanduser().resolve() == default_db_path().expanduser().resolve():
+        raise RuntimeCapacityError(
+            "set_disposable_fixture_capacity refuses the default state database"
+        )
+    return _write_setting(
+        path,
+        _require_limit(value),
+        actor=f"fixture:{_require_actor(fixture)}",
+        reason_code=DISPOSABLE_FIXTURE_CAPACITY_REASON,
+        evidence_fields=(None, None, None, None),
+        metadata={"fixture": fixture.strip(), "disposable_database": True},
+    )
 
 
 def list_runtime_capacity_events(db_path: str | Path) -> list[dict[str, Any]]:
@@ -288,6 +350,7 @@ __all__ = [
     "CAPACITY_SCOPE_KIND",
     "CAPACITY_SET_REASON",
     "DEFAULT_MAX_CONCURRENT_TASKS",
+    "DISPOSABLE_FIXTURE_CAPACITY_REASON",
     "RUNTIME_CAPACITY_MIGRATION",
     "ConcurrencyGateRefused",
     "RuntimeCapacityError",
@@ -296,5 +359,6 @@ __all__ = [
     "list_runtime_capacity_events",
     "read_runtime_capacity",
     "runtime_capacity_in_connection",
+    "set_disposable_fixture_capacity",
     "set_max_concurrent_tasks",
 ]

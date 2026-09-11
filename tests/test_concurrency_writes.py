@@ -22,6 +22,7 @@ from agent_taskflow.concurrency_rehearsal import (
     lifecycle_log_errors,
     run_worker_processes,
 )
+from agent_taskflow.runtime_capacity import set_disposable_fixture_capacity
 from agent_taskflow.store import connect
 
 WRITERS = 4
@@ -34,6 +35,10 @@ class ConcurrentWriteRehearsalTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.tmp = tempfile.TemporaryDirectory()
         cls.fixture = create_rehearsal_fixture(Path(cls.tmp.name) / "fixture")
+        # Every writer holds its claim at the same time (ruling 15b).
+        set_disposable_fixture_capacity(
+            cls.fixture.db_path, WRITERS, fixture="test_concurrency_writes"
+        )
         cls.task_keys = [f"AT-WRITE-{index}" for index in range(WRITERS)]
         for task_key in cls.task_keys:
             add_rehearsal_task(cls.fixture, task_key)

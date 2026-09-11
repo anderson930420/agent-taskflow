@@ -71,6 +71,10 @@ from agent_taskflow.runtime_admission import (
     RuntimeAdmissionError,
     RuntimeAdmissionStore,
 )
+from agent_taskflow.runtime_capacity import (
+    DEFAULT_MAX_CONCURRENT_TASKS,
+    set_disposable_fixture_capacity,
+)
 from agent_taskflow.runtime_progress import RUNTIME_STEPS
 from agent_taskflow.runtime_progress_schema import migrate_runtime_progress
 from agent_taskflow.runtime_progress_store import RuntimeProgressStore
@@ -154,7 +158,8 @@ def create_rehearsal_fixture(root: str | Path) -> RehearsalFixture:
     """Create a fresh disposable database, git repository and artifact root.
 
     The database gets the full runtime schema the installed runtime path uses,
-    plus Step 3's progress tables. The capacity control is not installed.
+    plus Step 3's progress tables. No capacity is stored, so claims are limited
+    to the default of 1 until a scenario sets its own value.
     """
     base = Path(root).expanduser().resolve()
     base.mkdir(parents=True, exist_ok=False)
@@ -593,15 +598,26 @@ def rehearse_atomic_claim(
     threads: int = 8,
     processes: int = 4,
 ) -> dict[str, Any]:
-    fixture = create_rehearsal_fixture(Path(workdir))
-    db = fixture.db_path
+    """Four races, each on a fresh database at the default limit of 1."""
+    base = Path(workdir)
     races: dict[str, dict[str, Any]] = {}
+    databases: list[str] = []
 
-    add_rehearsal_task(fixture, "AT-S4-CLAIM-THREADS")
-    races["threads_explicit"] = _race_summary(
-        db,
+    def race(
+        name: str,
+        task_key: str,
+        run: Callable[[Path], list[dict[str, Any]]],
+        allowed: tuple[str, ...],
+    ) -> None:
+        fixture = create_rehearsal_fixture(base / name)
+        add_rehearsal_task(fixture, task_key)
+        databases.append(str(fixture.db_path))
+        races[name] = _race_summary(fixture.db_path, task_key, run(fixture.db_path), allowed)
+
+    race(
+        "threads_explicit",
         "AT-S4-CLAIM-THREADS",
-        run_thread_race(
+        lambda db: run_thread_race(
             [
                 (lambda index=index: explicit_claim(
                     db, "AT-S4-CLAIM-THREADS", owner_id=f"thread-{index}"
@@ -611,12 +627,10 @@ def rehearse_atomic_claim(
         ),
         EXPLICIT_CLAIM_REFUSALS,
     )
-
-    add_rehearsal_task(fixture, "AT-S4-CLAIM-PROCS")
-    races["processes_explicit"] = _race_summary(
-        db,
+    race(
+        "processes_explicit",
         "AT-S4-CLAIM-PROCS",
-        run_worker_processes(
+        lambda db: run_worker_processes(
             [
                 {
                     "op": "claim",
@@ -629,12 +643,10 @@ def rehearse_atomic_claim(
         ),
         EXPLICIT_CLAIM_REFUSALS,
     )
-
-    add_rehearsal_task(fixture, "AT-S4-DISPATCH-THREADS")
-    races["threads_dispatcher"] = _race_summary(
-        db,
+    race(
+        "threads_dispatcher",
         "AT-S4-DISPATCH-THREADS",
-        run_thread_race(
+        lambda db: run_thread_race(
             [
                 (lambda index=index: dispatcher_preparing_claim(
                     db, "AT-S4-DISPATCH-THREADS", source=f"dispatcher-thread-{index}"
@@ -644,12 +656,10 @@ def rehearse_atomic_claim(
         ),
         DISPATCHER_PATH_REFUSALS,
     )
-
-    add_rehearsal_task(fixture, "AT-S4-DISPATCH-PROCS")
-    races["processes_dispatcher"] = _race_summary(
-        db,
+    race(
+        "processes_dispatcher",
         "AT-S4-DISPATCH-PROCS",
-        run_worker_processes(
+        lambda db: run_worker_processes(
             [
                 {
                     "op": "dispatcher-claim",
@@ -681,7 +691,11 @@ def rehearse_atomic_claim(
             race["attempts"] == 1 and race["leases"] == 1 for race in races.values()
         ),
     }
-    return {"checks": checks, "details": {"races": races}, "databases": [str(db)]}
+    return {
+        "checks": checks,
+        "details": {"max_concurrent_tasks": DEFAULT_MAX_CONCURRENT_TASKS, "races": races},
+        "databases": databases,
+    }
 
 
 # -- §19.2 concurrent writes -------------------------------------------------
@@ -789,6 +803,8 @@ def rehearse_concurrent_writes(
 ) -> dict[str, Any]:
     fixture = create_rehearsal_fixture(Path(workdir))
     db = fixture.db_path
+    # The scenario holds one claim per writer at once (ruling 15b).
+    set_disposable_fixture_capacity(db, writers, fixture="step4-rehearsal-19.2")
     keys = [f"AT-S4-WRITE-{index}" for index in range(writers)]
     for key in keys:
         add_rehearsal_task(fixture, key)
@@ -845,6 +861,8 @@ def rehearse_concurrent_writes(
     return {
         "checks": checks,
         "details": {
+            "max_concurrent_tasks": writers,
+            "max_concurrent_tasks_source": "disposable_fixture",
             "writers": writers,
             "heartbeats_per_writer": heartbeats,
             "evidence_rows_per_writer": evidence_rows,
@@ -1052,6 +1070,7 @@ def rehearse_crash_recovery(
     return {
         "checks": checks,
         "details": {
+            "max_concurrent_tasks": DEFAULT_MAX_CONCURRENT_TASKS,
             "lease_ttl_seconds": lease_ttl_seconds,
             "holder_pid": holder.get("pid"),
             "holder_return_code": return_code,
@@ -1172,6 +1191,13 @@ def run_concurrency_rehearsal(
         },
         "disposable_database": True,
         "production_database_touched": False,
+        # §19.1 and §19.3 run at the default limit; only §19.2 raises it, on
+        # its own disposable database, through set_disposable_fixture_capacity.
+        "max_concurrent_tasks": {
+            "19.1": DEFAULT_MAX_CONCURRENT_TASKS,
+            "19.2": processes,
+            "19.3": DEFAULT_MAX_CONCURRENT_TASKS,
+        },
         "databases": databases,
         "checks": checks,
         "all_checks_passed": all(checks.values()),
@@ -1181,7 +1207,6 @@ def run_concurrency_rehearsal(
             "default_state_database_used": False,
             "real_executor_invoked": False,
             "github_contacted": False,
-            "capacity_control_installed": False,
         },
     }
     atomic_write_json(output / CONCURRENCY_EVIDENCE_FILENAME, evidence, indent=2, sort_keys=True)
