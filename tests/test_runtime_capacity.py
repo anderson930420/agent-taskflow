@@ -259,6 +259,47 @@ class EveryDatabaseIsBoundedTests(CapacityTestCase):
             RuntimeAdmissionStore(self.db).claim("AT-EMPTY-B", owner_id="b")
 
 
+class CapacityAndF1StatusCheckTests(CapacityTestCase):
+    """The capacity check runs before F1's status check in the claim.
+
+    Either way a `blocked` or `paused` Ticket is refused and its row is left
+    untouched, and a persisted `created` Ticket stays claimable.
+    """
+
+    def row(self, task_key: str) -> tuple:
+        with closing(connect(self.db)) as conn:
+            return tuple(
+                conn.execute("SELECT * FROM tasks WHERE task_key = ?", (task_key,)).fetchone()
+            )
+
+    def test_blocked_and_paused_are_refused_untouched_with_or_without_a_free_slot(self) -> None:
+        add_rehearsal_task(self.fixture, "AT-F1-BLOCKED", status="blocked")
+        add_rehearsal_task(self.fixture, "AT-F1-PAUSED", status="paused")
+        add_rehearsal_task(self.fixture, "AT-F1-READY", status="created")
+        admission = RuntimeAdmissionStore(self.db)
+        # claim() runs init_db() before its transaction, and that pre-existing
+        # migration backfills a legacy row's task_id (handoff §4.8). Run it
+        # first so the snapshots measure the claim transaction alone.
+        admission.init_db()
+        for key in ("AT-F1-BLOCKED", "AT-F1-PAUSED"):
+            with self.subTest(slot="free", task=key):
+                before = self.row(key)
+                with self.assertRaisesRegex(RuntimeAdmissionError, "not claimable") as raised:
+                    admission.claim(key, owner_id="free-slot")
+                self.assertNotIsInstance(raised.exception, RuntimeCapacityExceededError)
+                self.assertEqual(self.row(key), before)
+
+        admission.claim("AT-F1-READY", owner_id="created-is-claimable")
+
+        for key in ("AT-F1-BLOCKED", "AT-F1-PAUSED"):
+            with self.subTest(slot="full", task=key):
+                before = self.row(key)
+                with self.assertRaises(RuntimeCapacityExceededError):
+                    admission.claim(key, owner_id="full-slot")
+                self.assertEqual(self.row(key), before)
+        self.assertEqual(self.active_leases(), 1)
+
+
 class DisposableFixtureCapacityTests(CapacityTestCase):
     """Ruling 15b: fixtures that hold several claims set their own value."""
 
