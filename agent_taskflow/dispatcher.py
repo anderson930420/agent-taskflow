@@ -2,19 +2,23 @@
 
 The dispatcher advances one task through the local state mirror:
 
-queued/blocked/preparing -> preparing -> implementing -> validating
+created/queued/preparing -> preparing -> implementing -> validating
 -> waiting_approval
 
 Failures move the task to blocked. The dispatcher never approves, merges,
 pushes, cleans worktrees, or runs raw subprocesses directly. It only calls the
 executor and validator abstractions.
+
+Runtime progress (SPEC §14) is recorded for the Attempt reserved by the
+``preparing`` claim. Progress writes are best-effort observation and never
+change the lifecycle outcome.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
 from agent_taskflow.executors.registry import get_executor
@@ -29,6 +33,10 @@ from agent_taskflow.level2_execution_authority import (
     level2_direct_execution_error,
 )
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord, require_absolute_path
+from agent_taskflow.runtime_progress_recorder import (
+    RuntimeProgressRecorder,
+    claimed_attempt_id,
+)
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
@@ -38,9 +46,19 @@ from agent_taskflow.validators.registry import get_validator
 DEFAULT_VALIDATORS = ("pytest", "openspec")
 
 RUNNABLE_STATUSES = {
+    # Persisted spelling of the §12 display status `ready` (status_vocab);
+    # a Step 1 Ticket is created in it.
+    "created",
     "queued",
-    "blocked",
     "preparing",
+}
+
+# SPEC §44: a blocked Ticket cannot execute and a paused Ticket cannot acquire
+# work. Refusing them writes nothing, so the pause and the real blocked_reason
+# survive. Other non-runnable statuses keep the blocking refusal below.
+UNTOUCHED_REFUSAL_STATUSES = {
+    "blocked",
+    "paused",
 }
 
 SKIPPED_STATUSES = {
@@ -81,6 +99,7 @@ class Dispatcher:
         default_model: str | None = None,
         executor_timeout_seconds: int | None = None,
         validator_timeout_seconds: int | None = None,
+        progress_store: Any | None = None,
     ) -> None:
         if store is not None and db_path is not None:
             raise ValueError("Provide either store or db_path, not both")
@@ -93,6 +112,8 @@ class Dispatcher:
         self.default_model = default_model
         self.executor_timeout_seconds = executor_timeout_seconds
         self.validator_timeout_seconds = validator_timeout_seconds
+        # A RuntimeProgressStore-compatible object. None uses the store's DB.
+        self.progress_store = progress_store
 
     @staticmethod
     def _normalize_name(name: str, field_name: str) -> str:
@@ -161,7 +182,7 @@ class Dispatcher:
 
         if task.status not in RUNNABLE_STATUSES:
             reason = f"Task status is not runnable: {task.status}"
-            if not dry_run:
+            if not dry_run and task.status not in UNTOUCHED_REFUSAL_STATUSES:
                 self._block_task(task.task_key, reason)
             return DispatcherResult(
                 task_key=task.task_key,
@@ -212,12 +233,26 @@ class Dispatcher:
                 summary="Dry run passed; executor and validators were not run.",
             )
 
-        self.store.update_task_status(
-            task.task_key,
-            "preparing",
-            source="dispatcher",
-            message="Dispatcher preparing task",
-        )
+        previous_attempt_id = claimed_attempt_id(self.store, task.task_key)
+        try:
+            self.store.update_task_status(
+                task.task_key,
+                "preparing",
+                source="dispatcher",
+                message="Dispatcher preparing task",
+            )
+        except Exception:
+            # Attempt-scoped workspace provisioning runs inside the claim, so
+            # the Attempt can exist even though the transition raised.
+            self._progress(task.task_key, previous_attempt_id).prepare_failed(
+                "Workspace preparation failed"
+            )
+            raise
+
+        # The claim reserved this run's Attempt; progress and both contexts
+        # are bound to it.
+        progress = self._progress(task.task_key, previous_attempt_id)
+        progress.prepare_running(selected_executor)
 
         # Phase 20: write mission contract before executor runs.
         # The contract documents task intent, executor config, validators,
@@ -238,6 +273,7 @@ class Dispatcher:
                 f"Executor {selected_executor} is unavailable: "
                 f"{exc.__class__.__name__}: {exc}"
             )
+            progress.prepare_failed(f"Executor {selected_executor} is unavailable")
             self._block_task(task.task_key, reason)
             return DispatcherResult(
                 task_key=task.task_key,
@@ -255,7 +291,9 @@ class Dispatcher:
             prompt_path=prompt_path if prompt_path.exists() else None,
             model=selected_model,
             timeout_seconds=self.executor_timeout_seconds,
+            attempt_id=progress.attempt_id,
         )
+        progress.prepare_passed(selected_executor)
 
         self.store.update_task_status(
             task.task_key,
@@ -270,10 +308,12 @@ class Dispatcher:
             prompt_path=executor_context.prompt_path,
         )
 
+        progress.implementer_running(selected_executor)
         try:
             executor_result = executor.run(executor_context)
         except Exception as exc:  # pragma: no cover - exercised by integration failures.
             reason = f"Executor {selected_executor} raised {exc.__class__.__name__}: {exc}"
+            progress.implementer_raised(selected_executor, exc)
             self.store.finish_executor_run(
                 task.task_key,
                 executor_run_id,
@@ -292,7 +332,11 @@ class Dispatcher:
 
         self._record_executor_result(task.task_key, executor_run_id, executor_result)
 
-        if executor_result.status in {"failed", "blocked"}:
+        executor_failed = executor_result.status in {"failed", "blocked"}
+        progress.implementer_finished(
+            selected_executor, executor_result.status, passed=not executor_failed
+        )
+        if executor_failed:
             reason = (
                 executor_result.summary
                 or f"Executor {executor_result.executor} returned {executor_result.status}"
@@ -319,15 +363,19 @@ class Dispatcher:
             worktree_path=worktree.worktree_path,
             artifact_dir=task.artifact_dir,
             timeout_seconds=self.validator_timeout_seconds,
+            attempt_id=progress.attempt_id,
         )
 
+        progress.validators_running(self.validators)
         validator_statuses: dict[str, str] = {}
         for validator_name in self.validators:
+            progress.validator_running(validator_name)
             try:
                 validator = self._get_validator(validator_name)
                 validator_result = validator.run(validator_context)
             except Exception as exc:  # pragma: no cover - exercised by integration failures.
                 reason = f"Validator {validator_name} raised {exc.__class__.__name__}: {exc}"
+                progress.validator_raised(validator_name, exc)
                 self.store.record_validation_result(
                     task.task_key,
                     validator_name,
@@ -353,6 +401,7 @@ class Dispatcher:
                     validator_result.summary
                     or f"Validator {validator_result.validator} returned {validator_result.status}"
                 )
+                progress.validator_failed(validator_name, validator_result.status)
                 self._block_task(task.task_key, reason)
                 return DispatcherResult(
                     task_key=task.task_key,
@@ -363,6 +412,7 @@ class Dispatcher:
                     blocked_reason=reason,
                 )
 
+        progress.validators_passed(validator_statuses)
         self.store.update_task_status(
             task.task_key,
             "waiting_approval",
@@ -483,6 +533,19 @@ class Dispatcher:
             return str(exc)
 
         return None
+
+    def _progress(
+        self,
+        task_key: str,
+        previous_attempt_id: str | None,
+    ) -> RuntimeProgressRecorder:
+        return RuntimeProgressRecorder.for_claim(
+            self.store,
+            task_key,
+            source="dispatcher",
+            progress_store=self.progress_store,
+            previous_attempt_id=previous_attempt_id,
+        )
 
     def _record_executor_result(
         self,
