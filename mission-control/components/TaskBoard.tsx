@@ -275,6 +275,10 @@ export function TaskBoard({
             <span className="sidebar-icon">!</span>
             Blocked
           </a>
+          <a className="sidebar-item" href="/live">
+            <span className="sidebar-icon">◉</span>
+            Live Board
+          </a>
         </nav>
 
         <div className="sidebar-section">

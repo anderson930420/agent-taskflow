@@ -125,7 +125,7 @@ UI exposes only these safe action controls, gated by current task state:
 
 | Action | Endpoint | Enable condition |
 |---|---|---|
-| Start task | `POST /api/tasks/{key}/start` | `queued`, `blocked`, `preparing` |
+| Start task | `POST /api/tasks/{key}/start` | `queued`, `preparing` |
 | Approve task | `POST /api/tasks/{key}/approve` | `waiting_approval` only |
 | Reject task | `POST /api/tasks/{key}/reject` | `waiting_approval`, `blocked` |
 | Block task | `POST /api/tasks/{key}/block` | `queued`, `preparing`, `implementing`, `validating`, `waiting_approval` |
@@ -314,7 +314,7 @@ The `/tasks/new` page provides a Create Task form that calls `POST /api/tasks` (
 
 The task detail page provides a `StartDispatchPanel` component above the state timeline. It calls `POST /api/tasks/{key}/start` (existing backend endpoint).
 
-- **Enable condition:** task is in `queued`, `blocked`, or `preparing` state only.
+- **Enable condition:** task is in `queued` or `preparing` state only.
 - **Disabled for terminal states:** waiting_approval, accepted, rejected, etc. — shows a message directing the user to the approval action instead.
 - **Options panel (collapsible):** executor selector, model input, validator multi-select (checkboxes), dry_run toggle.
 - **Default validators:** pytest and openspec are always pre-selected and disabled (cannot be unchecked). Optional validators (policy, typecheck, lint) can be toggled.

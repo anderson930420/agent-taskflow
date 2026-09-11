@@ -285,7 +285,7 @@ class DispatcherTests(unittest.TestCase):
         self.assertTrue(any("validation_result" in payload and "openspec" in payload for payload in payloads))
 
     def test_successful_task_has_no_blocked_reason(self) -> None:
-        self.add_task(status="blocked")
+        self.add_task(status="queued")
         dispatcher = self.make_dispatcher()
 
         dispatcher.dispatch_task("AT-0007")

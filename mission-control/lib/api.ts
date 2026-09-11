@@ -6,6 +6,7 @@ import type {
   Artifact,
   ArtifactPreview,
   BlockTaskRequest,
+  BoardProjection,
   CreateTaskRequest,
   DetailResponse,
   ExecutorRun,
@@ -20,6 +21,7 @@ import type {
   Task,
   TaskDetailBundle,
   TaskReviewBundle,
+  TicketProjection,
   ValidationResult
 } from "./types";
 
@@ -468,4 +470,58 @@ export async function blockTask(
     `/api/tasks/${encodeURIComponent(taskKey)}/block`,
     payload
   );
+}
+
+// ─── V1 Step 3: realtime progress (SPEC §15, §16, §17) ─────────────────────
+//
+// Read-only. These helpers never mutate orchestrator state, and the SSE
+// streams follow SPEC §15.1: each connection opens with a full snapshot, so
+// there is no replay, no Last-Event-ID, and no missed-event backfill.
+
+export function realtimeStreamUrl(project?: string | null): string {
+  const search = new URLSearchParams();
+  if (project) search.set("project", project);
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return endpoint(`/api/realtime/stream${suffix}`);
+}
+
+export function ticketRealtimeStreamUrl(
+  taskKey: string,
+  attemptId?: string | null
+): string {
+  const search = new URLSearchParams();
+  if (attemptId) search.set("attempt_id", attemptId);
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return endpoint(
+    `/api/tasks/${encodeURIComponent(taskKey)}/realtime/stream${suffix}`
+  );
+}
+
+export async function getRealtimeBoard(
+  project?: string | null
+): Promise<ApiResult<BoardProjection>> {
+  const search = new URLSearchParams();
+  if (project) search.set("project", project);
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  const result = await requestJson<DetailResponse<BoardProjection>>(
+    `/api/realtime/board${suffix}`
+  );
+
+  if (!result.ok) return result;
+  return { ok: true, data: result.data.item };
+}
+
+export async function getTicketRealtime(
+  taskKey: string,
+  attemptId?: string | null
+): Promise<ApiResult<TicketProjection>> {
+  const search = new URLSearchParams();
+  if (attemptId) search.set("attempt_id", attemptId);
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  const result = await requestJson<DetailResponse<TicketProjection>>(
+    `/api/tasks/${encodeURIComponent(taskKey)}/realtime${suffix}`
+  );
+
+  if (!result.ok) return result;
+  return { ok: true, data: result.data.item };
 }
