@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -177,6 +178,19 @@ def unknown_gh_json_field_error(field: str) -> str:
     return f'Unknown JSON field: "{field}"\nAvailable fields:\n{listing}\n'
 
 
+# What real gh 2.45.0 prints, rc=1, for `gh pr edit` on this repository: the
+# Projects (classic) GraphQL deprecation error. Captured read-only with
+# `gh pr view 196 --json projectCards`, which fails with the same message and
+# field path (review round 5; Ruling 35c). The fake fails `gh pr edit` with
+# exactly this, so a regression back to `pr edit` fails a test.
+GH_PR_EDIT_PROJECTS_CLASSIC_ERROR = (
+    "GraphQL: Projects (classic) is being deprecated in favor of the new "
+    "Projects experience, see: "
+    "https://github.blog/changelog/2024-05-23-sunset-notice-projects-classic/. "
+    "(repository.pullRequest.projectCards)\n"
+)
+
+
 @dataclass
 class FakeCompletedProcess:
     returncode: int
@@ -194,6 +208,11 @@ class FakeGhRunner:
     Like real gh it knows only the fields in ``GH_PR_VIEW_JSON_FIELDS``: a
     ``--json`` request naming any other field fails with gh's own error, and
     ``set_pr`` refuses to script one.
+
+    Like real gh 2.45.0 on this repository, ``gh pr edit`` always fails with
+    the Projects (classic) error; a PR is updated through the REST PATCH
+    ``gh api -X PATCH repos/<repo>/pulls/<n> -f key=value``. Any ``gh api``
+    call that names a merge endpoint or ``graphql`` raises, like ``pr merge``.
     """
 
     def __init__(self, *, repo: str = "owner/repo", start_number: int = 41) -> None:
@@ -242,6 +261,8 @@ class FakeGhRunner:
             return self._view(args)
         if args[:3] == ["gh", "pr", "merge"]:
             raise AssertionError("gh pr merge must never be invoked by Taskflow")
+        if args[:2] == ["gh", "api"]:
+            return self._api(args)
         return FakeCompletedProcess(returncode=97, stderr=f"unexpected gh call: {args}")
 
     def _flag(self, args: list[str], flag: str) -> str | None:
@@ -270,15 +291,56 @@ class FakeGhRunner:
         return FakeCompletedProcess(returncode=0, stdout=f"{payload['url']}\n")
 
     def _edit(self, args: list[str]) -> FakeCompletedProcess:
-        number = int(args[3])
-        payload = self.pulls[number]
-        body = self._flag(args, "--body")
-        if body is not None:
-            payload["body"] = body
-        title = self._flag(args, "--title")
-        if title is not None:
-            payload["title"] = title
-        return FakeCompletedProcess(returncode=0, stdout=f"{payload['url']}\n")
+        # Real gh 2.45.0 cannot edit a PR on this repository (Ruling 35).
+        return FakeCompletedProcess(returncode=1, stderr=GH_PR_EDIT_PROJECTS_CLASSIC_ERROR)
+
+    def _api(self, args: list[str]) -> FakeCompletedProcess:
+        method = "GET"
+        endpoint: str | None = None
+        fields: list[str] = []
+        rest = args[2:]
+        index = 0
+        while index < len(rest):
+            token = rest[index]
+            if token in ("-X", "--method"):
+                method = rest[index + 1].upper()
+                index += 2
+            elif token in ("-f", "--raw-field", "-F", "--field"):
+                fields.append(rest[index + 1])
+                index += 2
+            else:
+                endpoint = endpoint or token
+                index += 1
+        target = endpoint or ""
+        if "merge" in target or "graphql" in target:
+            raise AssertionError(f"a gh api merge must never be invoked by Taskflow: {args}")
+        match = re.fullmatch(rf"repos/{re.escape(self.repo)}/pulls/(\d+)", target)
+        if method != "PATCH" or match is None:
+            return FakeCompletedProcess(returncode=97, stderr=f"unexpected gh api call: {args}")
+        payload = self.pulls.get(int(match.group(1)))
+        if payload is None:
+            return FakeCompletedProcess(returncode=1, stderr="gh: Not Found (HTTP 404)\n")
+        for field_arg in fields:
+            key, _, value = field_arg.partition("=")
+            if key not in {"title", "body"}:
+                return FakeCompletedProcess(
+                    returncode=1, stderr="gh: Validation Failed (HTTP 422)\n"
+                )
+            payload[key] = value
+        # The REST pull-request object, in the few keys a caller might read.
+        return FakeCompletedProcess(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": payload["number"],
+                    "html_url": payload["url"],
+                    "state": "open" if payload["state"] == "OPEN" else "closed",
+                    "draft": payload["isDraft"],
+                    "title": payload["title"],
+                    "body": payload["body"],
+                }
+            ),
+        )
 
     def _view(self, args: list[str]) -> FakeCompletedProcess:
         number = int(args[3])

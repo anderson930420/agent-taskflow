@@ -3,8 +3,10 @@
 Read/write on pull requests, never merge. The adapter exposes exactly three
 operations — create a PR, update the same PR, poll a PR's state — and every
 argv it is asked to run first passes :func:`assert_not_a_merge_command`, so
-``gh pr merge`` and its API equivalent are unreachable rather than merely
-unused (§34, §44).
+``gh pr merge`` and its API equivalents are unreachable rather than merely
+unused (§34, §44). Every ``gh api`` argv must also pass
+:func:`assert_gh_api_allowed`, which admits only the one REST form the
+adapter issues (review Ruling 35).
 
 Polling is idempotent and read-only: it issues a single ``gh pr view`` and
 normalizes the response into the §32.1 enum vocabulary. GitHub CI state is
@@ -26,6 +28,7 @@ __all__ = [
     "GitHubPrAdapter",
     "GitHubPrError",
     "PrSnapshot",
+    "assert_gh_api_allowed",
     "assert_not_a_merge_command",
 ]
 
@@ -60,6 +63,15 @@ _GIT_GLOBAL_VALUE_FLAGS = frozenset(
      "--exec-path", "--super-prefix"}
 )
 _API_PR_MERGE_RE = re.compile(r"(^|/)pulls/\d+/merge/?$")
+# `repos/<o>/<r>/merges` merges one branch into another; `graphql` can run a
+# `mergePullRequest` mutation (review Ruling 35b).
+_API_BRANCH_MERGE_RE = re.compile(r"(^|/)merges/?$")
+_API_GRAPHQL_RE = re.compile(r"(^|/)graphql/?$")
+
+# Review Ruling 35: `gh pr edit` fails on gh 2.45.0 (Projects-classic GraphQL
+# deprecation), so the adapter updates a PR through REST instead. That is the
+# only `gh api` call it makes, and assert_gh_api_allowed admits nothing else.
+_GH_API_UPDATE_FIELDS = ("title", "body")
 
 _CI_FAILURE_STATES = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
 _CI_PENDING_STATES = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "EXPECTED", ""}
@@ -130,7 +142,9 @@ def assert_not_a_merge_command(argv: Sequence[str]) -> None:
         if any(positionals[i : i + 2] == ["pr", "merge"] for i in range(len(positionals) - 1)):
             _refuse_merge(rendered)
         if positionals[:1] == ["api"] and any(
-            _API_PR_MERGE_RE.search(token) for token in tokens[gh + 1 :]
+            pattern.search(token)
+            for token in tokens[gh + 1 :]
+            for pattern in (_API_PR_MERGE_RE, _API_BRANCH_MERGE_RE, _API_GRAPHQL_RE)
         ):
             _refuse_merge(rendered)
 
@@ -141,6 +155,95 @@ def assert_not_a_merge_command(argv: Sequence[str]) -> None:
             _refuse_merge(rendered)
         if positionals[:1] == ["push"] and any(":" in token for token in positionals[1:]):
             _refuse_merge(rendered)
+
+
+def assert_gh_api_allowed(argv: Sequence[str], *, repo: str) -> None:
+    """Admit a ``gh api`` argv only in the exact form this adapter issues.
+
+    Review Ruling 35b: once the adapter talks REST, ``gh api`` must not become
+    a merge vector — ``-X PUT repos/o/r/pulls/N/merge`` merges a PR,
+    ``repos/o/r/merges`` merges branches and ``graphql`` can run a
+    ``mergePullRequest`` mutation. So this is an allowlist, in the spirit of
+    the push allowlist, not a denylist. The one admitted form is::
+
+        gh api -X PATCH repos/<repo>/pulls/<number> -f title=<t> -f body=<b>
+
+    with ``repo`` exactly the adapter's own repository, a positive PR number,
+    at least one of the ``title``/``body`` fields (each at most once) and no
+    other flag. No GET is admitted: the adapter reads through ``gh pr view``.
+    Everything else is refused — every other method or method spelling
+    (``--method``, ``-XPATCH``), every other endpoint (``/merge``,
+    ``/merges``, ``graphql``, ``issues``, another repository, a full
+    ``https://`` URL, a leading ``/``, a query string), ``-F`` (which reads
+    ``@file`` and converts types), and any global flag before ``api``.
+
+    argv is parsed the way :func:`assert_not_a_merge_command` parses it: the
+    executable is found by basename and global flags are skipped with their
+    values, so ``/usr/bin/gh -R o/r api ...`` is recognized as ``gh api``.
+    A non-``api`` gh command is left to the merge guard.
+    """
+    tokens = [str(part) for part in argv]
+    gh = _executable_index(tokens, "gh")
+    if gh is None:
+        return
+    if _positionals(tokens[gh + 1 :], _GH_GLOBAL_VALUE_FLAGS)[:1] != ["api"]:
+        return
+
+    rendered = " ".join(tokens)
+    owner, _, name = repo.strip().partition("/")
+
+    def refuse(reason: str) -> None:
+        raise GitHubPrError(
+            f"Refusing gh api call {rendered!r}: {reason}. The only gh api "
+            f"form Taskflow issues is `gh api -X PATCH repos/{repo}/pulls/<n> "
+            "-f title=... -f body=...` (review Ruling 35)."
+        )
+
+    if not owner or not name or "/" in name:
+        refuse(f"the adapter's repository {repo!r} is not owner/name")
+    if tokens[gh + 1] != "api":
+        refuse("no global flag may precede `api`")
+
+    method: str | None = None
+    endpoint: str | None = None
+    fields: list[str] = []
+    rest = tokens[gh + 2 :]
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token in ("-X", "-f"):
+            if index + 1 >= len(rest):
+                refuse(f"{token} has no value")
+            value = rest[index + 1]
+            index += 2
+            if token == "-X":
+                if method is not None:
+                    refuse("the method is given more than once")
+                method = value
+            else:
+                key, separator, _ = value.partition("=")
+                if not separator or key not in _GH_API_UPDATE_FIELDS:
+                    refuse(f"field {key!r} is not one of {', '.join(_GH_API_UPDATE_FIELDS)}")
+                if key in fields:
+                    refuse(f"field {key!r} is given more than once")
+                fields.append(key)
+            continue
+        if token.startswith("-"):
+            refuse(f"flag {token!r} is not allowed")
+        if endpoint is not None:
+            refuse("more than one endpoint is given")
+        endpoint = token
+        index += 1
+
+    if method != "PATCH":
+        refuse(f"method {method or 'GET (the default)'!r} is not PATCH")
+    own_pull = re.compile(
+        rf"repos/{re.escape(owner)}/{re.escape(name)}/pulls/[1-9][0-9]*"
+    )
+    if endpoint is None or own_pull.fullmatch(endpoint) is None:
+        refuse(f"endpoint {endpoint!r} is not repos/{repo}/pulls/<number>")
+    if not fields:
+        refuse("a PATCH must set title or body")
 
 
 @dataclass(frozen=True)
@@ -200,8 +303,9 @@ class GitHubPrAdapter:
 
     # -- command execution -------------------------------------------------
     def run(self, argv: Sequence[str], *, cwd: Path) -> CompletedProcessLike:
-        """Run one gh command after the merge guard has cleared it."""
+        """Run one gh command after the merge guard and gh api allowlist clear it."""
         assert_not_a_merge_command(argv)
+        assert_gh_api_allowed(argv, repo=self.repo)
         return self._runner(
             list(argv),
             cwd=Path(cwd),
@@ -268,15 +372,31 @@ class GitHubPrAdapter:
         title: str | None = None,
         body: str | None = None,
     ) -> PrSnapshot:
-        """Update the *same* PR in place — the number never changes (§26)."""
-        argv = [self._gh_bin, "pr", "edit", str(pr_number), "--repo", self.repo]
+        """Update the *same* PR in place — the number never changes (§26).
+
+        Uses the REST endpoint, ``gh api -X PATCH repos/<repo>/pulls/<n>``:
+        ``gh pr edit`` fails on gh 2.45.0 with the Projects (classic) GraphQL
+        deprecation error, so re-integration could not update a PR (review
+        Ruling 35). Fields go as ``-f`` raw strings, so a body that starts with
+        ``@`` or reads ``true`` is sent literally, never read from a file or
+        converted. The PATCH leaves the draft state alone.
+        """
+        fields: list[str] = []
         if title is not None:
-            argv.extend(["--title", title])
+            fields.extend(["-f", f"title={title}"])
         if body is not None:
-            argv.extend(["--body", body])
-        if len(argv) == 6:
+            fields.extend(["-f", f"body={body}"])
+        if not fields:
             return self.poll_pr(pr_number=pr_number, cwd=cwd)
-        self._run_checked(argv, cwd=cwd, action="gh pr edit")
+        argv = [
+            self._gh_bin,
+            "api",
+            "-X",
+            "PATCH",
+            f"repos/{self.repo}/pulls/{int(pr_number)}",
+            *fields,
+        ]
+        self._run_checked(argv, cwd=cwd, action="gh api PATCH pulls")
         return self.poll_pr(pr_number=pr_number, cwd=cwd)
 
     def poll_pr(self, *, pr_number: int, cwd: Path) -> PrSnapshot:

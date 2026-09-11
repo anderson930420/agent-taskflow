@@ -337,7 +337,15 @@ class ReIntegrationTests(ControllerTestCase):
         self.assertEqual(
             len([c for c in self.gh_runner.calls if c[:3] == ["gh", "pr", "create"]]), 1
         )
-        self.assertTrue([c for c in self.gh_runner.calls if c[:3] == ["gh", "pr", "edit"]])
+        # Ruling 35: the same PR is updated through the REST PATCH, never
+        # `gh pr edit` (which fails on gh 2.45.0), and the new body landed.
+        self.assertEqual([c for c in self.gh_runner.calls if c[:3] == ["gh", "pr", "edit"]], [])
+        patches = [
+            c for c in self.gh_runner.calls
+            if c[:5] == ["gh", "api", "-X", "PATCH", f"repos/owner/repo/pulls/{first_pr}"]
+        ]
+        self.assertEqual(len(patches), 1)
+        self.assertIn(result.integrated_base_sha, self.gh_runner.pulls[first_pr]["body"])
 
     def test_reintegration_merges_rather_than_rebasing(self) -> None:
         worktree = self._published()

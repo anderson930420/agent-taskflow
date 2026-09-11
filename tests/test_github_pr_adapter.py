@@ -15,9 +15,11 @@ from agent_taskflow.github_pr_adapter import (
     PR_VIEW_FIELDS,
     GitHubPrAdapter,
     GitHubPrError,
+    assert_gh_api_allowed,
     assert_not_a_merge_command,
 )
 from v1_step2_fixtures import (  # noqa: E402
+    GH_PR_EDIT_PROJECTS_CLASSIC_ERROR,
     GH_PR_VIEW_JSON_FIELDS,
     FakeCompletedProcess,
     FakeGhRunner,
@@ -55,8 +57,8 @@ class CreateAndUpdateTests(unittest.TestCase):
             pr_number=created.number, body="updated body", cwd=Path("/tmp")
         )
         self.assertEqual(updated.number, created.number)
-        edit_call = next(call for call in self.runner.calls if call[:3] == ["gh", "pr", "edit"])
-        self.assertEqual(edit_call[3], str(created.number))
+        patch_call = next(call for call in self.runner.calls if call[:2] == ["gh", "api"])
+        self.assertEqual(patch_call[4], f"repos/owner/repo/pulls/{created.number}")
 
     def test_create_failure_raises(self) -> None:
         self.runner.create_returncode = 1
@@ -301,6 +303,164 @@ class PollTests(unittest.TestCase):
         self.assertEqual(snapshot.reviews[0]["body"], "please fix")
 
 
+class RestUpdateTests(unittest.TestCase):
+    """Review Ruling 35a/c — update_pr is a REST PATCH, never `gh pr edit`."""
+
+    def setUp(self) -> None:
+        self.runner = FakeGhRunner()
+        self.adapter = GitHubPrAdapter("owner/repo", runner=self.runner)
+        self.runner.set_pr(42, state="OPEN", title="old title", body="old body")
+
+    def api_calls(self) -> list[list[str]]:
+        return [call for call in self.runner.calls if call[:2] == ["gh", "api"]]
+
+    def test_the_fake_fails_gh_pr_edit_exactly_like_real_gh(self) -> None:
+        completed = self.runner(
+            ["gh", "pr", "edit", "42", "--repo", "owner/repo", "--body", "x"]
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(completed.stderr, GH_PR_EDIT_PROJECTS_CLASSIC_ERROR)
+        self.assertIn("Projects (classic) is being deprecated", completed.stderr)
+        self.assertEqual(self.runner.pulls[42]["body"], "old body")
+
+    def test_update_pr_sends_one_patch_with_the_body(self) -> None:
+        snapshot = self.adapter.update_pr(pr_number=42, body="new body", cwd=Path("/tmp"))
+        self.assertEqual(
+            self.api_calls(),
+            [["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "body=new body"]],
+        )
+        self.assertEqual(snapshot.number, 42)
+        self.assertEqual(snapshot.body, "new body")
+        self.assertEqual(self.runner.pulls[42]["title"], "old title")
+
+    def test_update_pr_sends_title_and_body_as_raw_fields(self) -> None:
+        self.adapter.update_pr(pr_number=42, title="t2", body="b2", cwd=Path("/tmp"))
+        self.assertEqual(
+            self.api_calls()[0][5:], ["-f", "title=t2", "-f", "body=b2"]
+        )
+        self.assertEqual(self.runner.pulls[42]["title"], "t2")
+        self.assertEqual(self.runner.pulls[42]["body"], "b2")
+
+    def test_update_pr_never_calls_gh_pr_edit(self) -> None:
+        self.adapter.update_pr(pr_number=42, body="x", cwd=Path("/tmp"))
+        self.assertEqual([c for c in self.runner.calls if c[:3] == ["gh", "pr", "edit"]], [])
+
+    def test_a_body_is_sent_literally(self) -> None:
+        # -f, not -F: `@file` is never read and `a=b` keeps its `=`.
+        for body in ("@/etc/passwd", "a=b=c", "-starts-with-dash", "true", "merge me"):
+            with self.subTest(body=body):
+                self.adapter.update_pr(pr_number=42, body=body, cwd=Path("/tmp"))
+                self.assertEqual(self.api_calls()[-1][-1], f"body={body}")
+                self.assertEqual(self.runner.pulls[42]["body"], body)
+
+    def test_update_pr_returns_a_poll_of_the_same_pr(self) -> None:
+        snapshot = self.adapter.update_pr(pr_number=42, body="x", cwd=Path("/tmp"))
+        self.assertEqual(self.runner.calls[-1][:4], ["gh", "pr", "view", "42"])
+        self.assertEqual(snapshot.state, "open")
+
+    def test_update_pr_with_no_field_only_polls(self) -> None:
+        self.adapter.update_pr(pr_number=42, cwd=Path("/tmp"))
+        self.assertEqual(self.api_calls(), [])
+
+    def test_a_failed_patch_raises(self) -> None:
+        with self.assertRaises(GitHubPrError) as caught:
+            self.adapter.update_pr(pr_number=99, body="x", cwd=Path("/tmp"))
+        self.assertIn("HTTP 404", str(caught.exception))
+
+
+class GhApiAllowlistTests(unittest.TestCase):
+    """Review Ruling 35b — every `gh api` argv passes an allowlist that admits
+    only the exact REST update the adapter issues."""
+
+    ADMITTED = (
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "title=t", "-f", "body=b"],
+        ["/usr/bin/gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/7", "-f", "title=t"],
+        ["env", "gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "body=x"],
+    )
+
+    REFUSED = (
+        # The ruling's list.
+        ["gh", "api", "-X", "PUT", "repos/owner/repo/pulls/42/merge"],
+        ["gh", "api", "--method", "PUT", "repos/owner/repo/pulls/42/merge"],
+        ["gh", "api", "-X", "POST", "repos/owner/repo/merges", "-f", "base=main", "-f", "head=task/x"],
+        ["gh", "api", "graphql", "-f", "query=mutation { mergePullRequest(input: {}) { clientMutationId } }"],
+        ["gh", "api", "-X", "DELETE", "repos/owner/repo/pulls/42"],
+        ["gh", "api", "-X", "PATCH", "repos/other/repo/pulls/42", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/issues/42", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "https://api.github.com/repos/owner/repo/pulls/42", "-f", "body=x"],
+        # Spellings that would slip past a naive match.
+        ["gh", "api", "-X", "PATCH", "/repos/owner/repo/pulls/42", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42/", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42?merge=1", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42/../../merges", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42/merge", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo2/pulls/42", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/0", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/x", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "graphql", "-f", "body=x"],
+        ["gh", "api", "--method", "PATCH", "repos/owner/repo/pulls/42", "-f", "body=x"],
+        ["gh", "api", "-XPATCH", "repos/owner/repo/pulls/42", "-f", "body=x"],
+        ["gh", "api", "-X", "patch", "repos/owner/repo/pulls/42", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "-X", "PUT", "repos/owner/repo/pulls/42", "-f", "body=x"],
+        # Methods, fields and flags the adapter never sends.
+        ["gh", "api", "repos/owner/repo/pulls/42"],
+        ["gh", "api", "-X", "GET", "repos/owner/repo/pulls/42"],
+        ["gh", "api", "-X", "POST", "repos/owner/repo/pulls", "-f", "title=t"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "state=closed"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "base=main"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "body"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "body=a", "-f", "body=b"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-F", "body=@/etc/passwd"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "--input", "body.json"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "body=x", "--hostname", "h"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "repos/owner/repo/pulls/43", "-f", "body=x"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f"],
+        ["gh", "api", "-X"],
+        # Global flags before `api`, whatever the path to gh.
+        ["gh", "--hostname", "h", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "body=x"],
+        ["/usr/bin/gh", "-R", "owner/repo", "api", "-X", "PUT", "repos/owner/repo/pulls/42/merge"],
+        ["./gh", "--repo=owner/repo", "api", "graphql", "-f", "query=x"],
+    )
+
+    def test_each_listed_adapter_form_is_admitted(self) -> None:
+        for argv in self.ADMITTED:
+            with self.subTest(argv=argv):
+                assert_gh_api_allowed(argv, repo="owner/repo")
+
+    def test_each_listed_other_form_is_refused(self) -> None:
+        for argv in self.REFUSED:
+            with self.subTest(argv=argv):
+                with self.assertRaises(GitHubPrError):
+                    assert_gh_api_allowed(argv, repo="owner/repo")
+
+    def test_the_adapter_never_runs_a_refused_form(self) -> None:
+        runner = FakeGhRunner()
+        adapter = GitHubPrAdapter("owner/repo", runner=runner)
+        for argv in self.REFUSED:
+            with self.subTest(argv=argv):
+                with self.assertRaises(GitHubPrError):
+                    adapter.run(argv, cwd=Path("/tmp"))
+        self.assertEqual(runner.calls, [])
+
+    def test_non_api_gh_commands_are_left_to_the_merge_guard(self) -> None:
+        for argv in (
+            ["gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state"],
+            ["gh", "pr", "create", "--repo", "owner/repo", "--draft"],
+            ["git", "push", "origin", "task/AT-101"],
+        ):
+            with self.subTest(argv=argv):
+                assert_gh_api_allowed(argv, repo="owner/repo")
+
+    def test_the_repository_must_be_exactly_the_adapters(self) -> None:
+        argv = ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42", "-f", "body=x"]
+        for repo in ("other/repo", "owner/repo2", "owner", "owner/repo/extra"):
+            with self.subTest(repo=repo):
+                with self.assertRaises(GitHubPrError):
+                    assert_gh_api_allowed(argv, repo=repo)
+
+
 class MergeIsForbiddenTests(unittest.TestCase):
     def test_adapter_has_no_merge_method(self) -> None:
         public = [name for name in dir(GitHubPrAdapter) if not name.startswith("_")]
@@ -311,6 +471,10 @@ class MergeIsForbiddenTests(unittest.TestCase):
             ["gh", "pr", "merge", "42"],
             ["gh", "pr", "merge", "42", "--squash"],
             ["gh", "api", "-X", "PUT", "repos/owner/repo/pulls/42/merge"],
+            # Ruling 35b: the branch-merge endpoint and GraphQL.
+            ["gh", "api", "-X", "POST", "repos/owner/repo/merges", "-f", "base=main"],
+            ["gh", "api", "graphql", "-f", "query=mutation { mergePullRequest }"],
+            ["gh", "api", "https://api.github.com/graphql", "-f", "query=x"],
             ["git", "merge", "task/AT-101"],
             ["git", "push", "origin", "HEAD:main"],
         ):
