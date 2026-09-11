@@ -14,20 +14,211 @@ Spec: `~/agent-taskflow-ops/v1/SPEC.md` §42 Step 2 (Integration Controller,
 Re-integration, PR outcomes, Merge)
 Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 
-Status: **implementation-complete, awaiting independent review.** The round-4
-review's three blocking items are fixed: Ruling 29 (the GitHub adapter works
-against real `gh`), Ruling 30 (never publish a branch that was not
-validated), and Ruling 31 (no exception of any kind leaves a Ticket in
-`integrating`). The branch is up to date with `main` as of `a5fa8e2` (merge
-`8bb699b`), which carries Step 1 (#195), Step 3 (#197), F1 (#199) and Step 4
-(#200); `main` has not moved since. No stop condition is open. Nothing is
-approved, merged to `main`, or finally complete.
+Status: **implementation-complete, awaiting independent review.** Round 5
+passed with no blocking item; its one note outside the checklist became
+**Ruling 35**, which is now fixed: a PR is updated through the REST endpoint,
+because `gh pr edit` cannot work on this box. The round-4 rulings are fixed
+too: Ruling 29 (the GitHub adapter works against real `gh`), Ruling 30 (never
+publish a branch that was not validated), and Ruling 31 (no exception of any
+kind leaves a Ticket in `integrating`). The branch is up to date with `main`
+as of `75bb6ba` (merge `b7b6314`), which carries Step 1 (#195), Step 3
+(#197), F1 (#199), Step 4 (#200) and Step 5 (#201). No stop condition is
+open. Nothing is approved, merged to `main`, or finally complete.
 
 Step 1 was merged into this branch twice while it was still in review
 (`96a6cd3`, `9e09ad7`). `main` was then merged in twice: `5b362bc` brought
 the final Step 1 (#195), and `ff86d9a` brought Step 3 (#197) and F1 (#199).
 `8bb699b` then brought Step 4 (#200). Every merge was a merge commit, never
 a rebase. PR #196 reviews Step 2.
+
+---
+
+## Review round 5 — Ruling 35: update a PR through REST
+
+Round 5 passed its checklist. Outside it, the reviewer found that
+re-integration calls `gh pr edit`, which **fails on this box's gh 2.45.0**
+with the Projects (classic) GraphQL deprecation error. Re-integration could
+push a branch and then stop in `needs_decision` every time, so SPEC §43 items
+20-22 could not complete in production. The owner chose one narrow fix.
+
+**Field evidence.** The Step 4 builder already updated a PR body in this
+repository with `gh api -X PATCH repos/<owner>/<repo>/pulls/<n>` and it
+worked; `gh pr edit` is what fails. The failure is a gh-CLI/GitHub API
+deprecation, not auth.
+
+### a. `update_pr` now issues the REST PATCH
+
+    gh api -X PATCH repos/<repo>/pulls/<number> -f title=<title> -f body=<body>
+
+Only the fields the caller passes are sent. The signature, the return
+contract (a fresh `poll_pr` snapshot of the same PR) and the `_run_checked`
+path are unchanged, and a call with no field still only polls.
+
+Fields go as **`-f`, not `-F`**. `-F` reads `@file` and retypes values, so a
+PR body beginning with `@` would be read from disk and a body of `true` would
+become a boolean. `-f` sends the string literally. A test pins that for
+`@/etc/passwd`, `a=b=c`, `-starts-with-dash`, `true` and `merge me`.
+
+The PATCH leaves the draft state alone, so a draft PR stays a draft.
+
+### b. Every `gh api` argv passes an allowlist
+
+`assert_gh_api_allowed(argv, repo=...)` runs inside `GitHubPrAdapter.run`,
+next to the merge guard. REST is a merge vector —
+`-X PUT repos/<o>/<r>/pulls/<n>/merge` merges a PR, `repos/<o>/<r>/merges`
+merges branches, and `graphql` can run a `mergePullRequest` mutation — and
+the old merge guard refused only `gh ... pr merge`. So this is an allowlist,
+in the spirit of the push allowlist.
+
+**The only admitted form**, with nothing else on the command line:
+
+    gh api -X PATCH repos/<the adapter's own repo>/pulls/<n> -f title=<t> -f body=<b>
+
+- the method must be exactly `-X PATCH`; `--method PATCH` and `-XPATCH` are
+  refused, as is a lower-case `patch`, a repeated `-X`, and the default GET;
+- the endpoint must match `repos/<owner>/<name>/pulls/<positive number>`
+  exactly, where `<owner>/<name>` is the adapter's own repository;
+- at least one of `title`/`body`, each at most once, and no other field
+  (`state`, `base`, … are refused, so the adapter cannot close a PR here);
+- no other flag at all — `-F`, `--input`, `--hostname` are refused;
+- no global flag may precede `api`.
+
+**The adapter issues no `gh api` GET**: it reads through `gh pr view`, so no
+GET form is admitted either. argv is parsed the way the merge guard parses
+it, so `/usr/bin/gh`, `./gh` and `env gh` are recognized, and a global flag
+is skipped with its value.
+
+Refused forms, each pinned by a test: `-X PUT .../pulls/42/merge`,
+`--method PUT .../merge`, `-X POST repos/owner/repo/merges`, `graphql`,
+a `DELETE`, a PATCH to another repository (`repos/other/repo/...`,
+`repos/owner/repo2/...`), a PATCH to a non-pulls endpoint
+(`repos/owner/repo/issues/42`), a full `https://api.github.com/...` URL, a
+leading `/`, a trailing `/`, a query string (`...?merge=1`), a traversal
+(`.../pulls/42/../../merges`), `pulls/0`, `pulls/x`, two endpoints, a missing
+value, and global flags before `api`. A separate test runs every one of them
+through `adapter.run` and asserts the runner was never called.
+
+The **merge guard itself** now also refuses the branch-merge endpoint and
+`graphql`, not just `pulls/<n>/merge`.
+
+### c. The fake `gh` now fails `pr edit` like the real one
+
+`FakeGhRunner` returns rc=1 with real gh 2.45.0's exact text for any
+`gh pr edit`, so **a regression back to `pr edit` cannot pass the tests**, and
+it serves the REST PATCH instead. Proven: with the pre-ruling `update_pr`
+restored in memory for one throwaway run, all eight `RestUpdateTests`, the
+adapter's update test and the controller's re-integration test go red.
+
+The error text was captured read-only with
+`gh pr view 196 --json projectCards`, which fails with the same message and
+the same `(repository.pullRequest.projectCards)` field path:
+
+    GraphQL: Projects (classic) is being deprecated in favor of the new
+    Projects experience, see:
+    https://github.blog/changelog/2024-05-23-sunset-notice-projects-classic/.
+    (repository.pullRequest.projectCards)                              (rc=1)
+
+**+13 tests**: 8 `RestUpdateTests`, 5 `GhApiAllowlistTests`. One existing test
+outside the adapter changed —
+`ReIntegrationTests::test_reintegration_updates_the_same_pr_number` asserted
+that re-integration calls `gh pr edit`. It now asserts the opposite: no
+`pr edit` call, exactly one PATCH to `repos/owner/repo/pulls/<same number>`,
+and the new body landed on the PR. That is Ruling 35c's end-to-end
+re-integration test. **It is the only change outside the ruling's file
+scope**, and it is a test asserting the wire format the ruling replaced.
+
+### d. Verified read-only against the real binary
+
+    $ gh api repos/anderson930420/agent-taskflow/pulls/196
+    {"number":196, "state":"open", "draft":true,
+     "html_url":"https://github.com/anderson930420/agent-taskflow/pull/196",
+     "head_ref":"task/v1-step2",
+     "head_sha":"01e4c953f7ae96cf3bc88da9c93539b6c4f341e2",
+     "base_ref":"main", "merged":false,
+     "title":"V1 Step 2: Integration Controller ..."}                  (rc=0)
+
+**No live PATCH, PUT, POST or DELETE was issued** against the real GitHub
+API, and no PR was created, edited, closed or merged. The write path is
+covered by the fake `gh` and by the Step 4 builder's field evidence above.
+
+### Stop conditions this round — none fired
+
+- **A fix needing a change outside the ruling's scope:** not hit, with the
+  one test-assertion exception named in (c), which Ruling 35c itself calls
+  for.
+- **Pre-existing tests going red:** none.
+
+---
+
+## Merge of origin/main (`75bb6ba`) — Step 5 parallel scheduler (#201)
+
+`origin/main` was merged into `task/v1-step2` as merge commit `b7b6314`
+(parents `0ee2fac` — Step 2 with Ruling 35 — and `75bb6ba` — main). A normal
+merge, never a rebase.
+
+**Conflicts: none, and no silent merge.** Step 2 and Step 5 touch disjoint
+files: Step 5 changed 34, Step 2 changed 33 since the merge base `a5fa8e2`,
+and **no file was changed on both sides**. Verified rather than assumed:
+
+- all 34 of Step 5's files in the result are byte-identical to `origin/main`;
+- all 33 of Step 2's files are byte-identical to the pre-merge commit
+  `0ee2fac`, including `WORKFLOW.md`;
+- the result differs from the Step 2 parent in exactly Step 5's 34 files, and
+  from the `main` parent in exactly Step 2's 33 files.
+
+**Step 5's behaviour is unchanged**, by construction (byte-identical files)
+and confirmed by its own tests: all **105** Step 5 tests pass on the merged
+tree. The three named invariants pass by name:
+
+- **The dependency gate stays inside the claim transaction:**
+  `ClaimRefusesTests::test_claim_refuses_an_unreleased_blocker_and_writes_nothing`,
+  `test_capacity_is_still_checked_first`, `test_claim_refuses_an_unknown_blocker`.
+- **A Ticket whose blocker is not `completed` stays unclaimable:**
+  `ReleaseOnlyAfterCompletedTests::test_no_status_short_of_completed_releases`,
+  `test_a_running_blocker_does_not_release`, and the four `StartPathsRefuseTests`
+  (direct dispatch, API start, scheduler tick, adoption claim).
+- **The reset refusal stays:** `ResetRefusesTests::test_reset_of_the_reviewers_ticket_is_refused`,
+  `test_reset_is_refused_for_an_unknown_blocker_too`,
+  `test_reset_proceeds_once_the_blocker_completed`.
+
+**The two steps do not touch each other.** No Step 5 module or script
+mentions `task_pr_state` or any Step 2 module, and no Step 2 module mentions
+`parallel_scheduler`, `ready_queue`, `ticket_dependencies`,
+`scheduler_worker` or `runtime_admission`. That matches Ruling 21, which kept
+Step 5 off Step 2's modules and deferred the integration handoff to
+FOLLOWUPS F4. Step 2's two migrations in `store.py` are intact and still the
+only `v1_step2_*` entries.
+
+### Test counts for round 5 and the merge
+
+| | unittest (`Ran`) | pytest |
+| --- | --- | --- |
+| Before (`01e4c95`) | 5237 | 5239 collected |
+| Ruling 35 only (`0ee2fac`) | 5250 | 5252 collected |
+| After the merge (`b7b6314`) | 5355 | **5349 passed, 8 skipped** (5357 collected) |
+
+**0 failed. No test went red at any point.** The arithmetic:
+
+- **+13** from Ruling 35's new tests (8 REST update, 5 allowlist).
+- **+105** from Step 5's own tests, which is exactly the number that
+  `tests/test_step5_*.py` runs.
+
+The full suite now runs as **one** parallel command,
+`PYTHONPATH=. python -m pytest tests -q -n 4`, in 298 s — under the 600 s
+foreground limit, so it no longer needs splitting into parts.
+
+Other checks, from the repository root:
+
+- `python -m compileall -q agent_taskflow scripts tests`: exit 0.
+- `scripts/validate_workflow_contract.py` (`WORKFLOW.md`): passed, exit 0.
+- `scripts/validate_workflow_policy.py`: passed, exit 0.
+
+### Stop conditions for this merge — none fired
+
+- **A conflict that cannot be resolved without changing Step 5's or Step 4's
+  behaviour:** not hit. There was no conflict at all, and no file needed a
+  resolution.
+- **Step 5's behaviour changing:** not hit — see the invariants above.
 
 ---
 
