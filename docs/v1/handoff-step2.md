@@ -14,19 +14,321 @@ Spec: `~/agent-taskflow-ops/v1/SPEC.md` §42 Step 2 (Integration Controller,
 Re-integration, PR outcomes, Merge)
 Instruction set: `~/agent-taskflow-ops/v1/step2.md`
 
-Status: **implementation-complete, awaiting independent review.** The branch
-is up to date with `main` as of `a5fa8e2` (merge `8bb699b`), which carries
-Step 1 (#195), Step 3 (#197), F1 (#199) and Step 4 (#200). The review's
-blocking item is fixed (Ruling 18, with the three points Ruling 22
-accepted), Ruling 19 is implemented, and the review's four other fixes are
-made. No stop condition is open. Nothing is approved, merged to `main`, or
-finally complete.
+Status: **implementation-complete, awaiting independent review.** The round-4
+review's three blocking items are fixed: Ruling 29 (the GitHub adapter works
+against real `gh`), Ruling 30 (never publish a branch that was not
+validated), and Ruling 31 (no exception of any kind leaves a Ticket in
+`integrating`). The branch is up to date with `main` as of `a5fa8e2` (merge
+`8bb699b`), which carries Step 1 (#195), Step 3 (#197), F1 (#199) and Step 4
+(#200); `main` has not moved since. No stop condition is open. Nothing is
+approved, merged to `main`, or finally complete.
 
 Step 1 was merged into this branch twice while it was still in review
 (`96a6cd3`, `9e09ad7`). `main` was then merged in twice: `5b362bc` brought
 the final Step 1 (#195), and `ff86d9a` brought Step 3 (#197) and F1 (#199).
 `8bb699b` then brought Step 4 (#200). Every merge was a merge commit, never
 a rebase. PR #196 reviews Step 2.
+
+---
+
+## Review round 4 — Rulings 29, 30 and 31
+
+The round-4 review failed on three defects, each reproduced by the reviewer.
+All three are fixed, each with the reviewer's own scenario as a test.
+
+### Ruling 29 — the GitHub adapter must work against real `gh`
+
+**The defect.** The adapter asked `gh pr view --json` for a `merged` field.
+Real gh has no such field, so every poll failed. Two things followed:
+
+- `create_pr` polled right after creating the PR, so a real PR was created
+  and then orphaned.
+- The watcher swallowed the failure (`except GitHubPrError: continue`), so
+  it went blind without saying so.
+
+The fake `gh` in the tests answered any field it was asked for, which is why
+no test caught it.
+
+**a. The field list.** `merged` is gone from `PR_VIEW_FIELDS`. Merged is now
+*derived* by `_is_merged`: `state == "MERGED"`, or a `mergedAt`, or a
+`mergeCommit`. This matters. Merely dropping the field would have made a
+merged PR read as closed-unmerged, and the watcher would then cancel a merged
+Ticket. §35/§36 verification is unchanged and still driven by the merge
+commit.
+
+**b. Verified against the real binary on this box.** gh 2.45.0, authenticated
+as `anderson930420`. Only `gh pr view` was run (read-only), against this
+repository's #196 (open draft) and #200 (merged):
+
+    $ gh pr view 196 --repo anderson930420/agent-taskflow --json number,merged,state
+    Unknown JSON field: "merged"
+    Available fields:
+      additions ...                                                    (rc=1)
+
+    $ gh pr view 196 --json number,url,state,isDraft,mergedAt,mergeCommit,headRefName,baseRefName,headRefOid,reviewDecision,statusCheckRollup,reviews,title,body
+    {"baseRefName":"main","headRefName":"task/v1-step2",
+     "headRefOid":"25143529eea66560138feef2e4326b436b28c6ab","isDraft":true,
+     "mergeCommit":null,"mergedAt":null,"number":196,"reviewDecision":"",
+     "state":"OPEN", ...}                                              (rc=0)
+
+    $ gh pr view 200 --json <the same list>
+    {"baseRefName":"main","headRefName":"task/v1-step4",
+     "headRefOid":"4f3bdb87350d12c536ec92f900de6ab856e66469","isDraft":false,
+     "mergeCommit":{"oid":"a5fa8e2daee56d026ad11068122e99eb5fc78281"},
+     "mergedAt":"2026-09-11T09:54:01Z","number":200,"reviewDecision":"",
+     "state":"MERGED"}                                                 (rc=0)
+
+The production adapter was also run end to end against real gh. A recording
+runner asserted that every call was `gh pr view`, and the adapter read:
+
+    196  state=open    merged=False  merge_commit_sha=None      ci_status=success  is_draft=True
+    200  state=closed  merged=True   merge_commit_sha=a5fa8e2…  merged_at=2026-09-11T09:54:01Z
+
+No PR was created, edited, closed or merged.
+
+**c. The root cause in the tests.** `tests/v1_step2_fixtures.py` now holds
+`GH_PR_VIEW_JSON_FIELDS`, copied verbatim from gh 2.45.0's own list. The fake
+`gh`:
+
+- rejects any other `--json` field with gh's own error (`Unknown JSON field:
+  "<name>"`, rc=1);
+- refuses to let a test script a field real gh lacks (`set_pr(merged=True)`
+  raises).
+
+Seventeen `merged=` arguments that tests fed the fake were removed. None of
+their assertions changed, and every such test still passes, now through the
+derivation. New tests:
+
+- `RealGhFieldContractTests` (4) pins the field list. It fails if any
+  requested field is unknown, and it proves a list containing `merged` fails
+  the poll.
+- `RealGhPayloadTests` (2) parses the real #196/#200 shapes.
+- `MergeDerivationTests` (5).
+
+**d. The PR's identity is recorded before any poll.** `create_pr` no longer
+polls. It returns the number and URL that `gh pr create` printed. The
+controller records `pr_number`, `pr_url`, `pr_state='open'` and `pr_head_sha`
+(the validated, pushed commit) immediately. `integrated_base_sha` is still
+recorded only at the end.
+
+`PrIdentityTests` (2) covers this: initial integration makes exactly one
+`gh` call, `pr create`; and a failure injected right after create leaves
+PR #42's identity recorded, the Ticket in `needs_decision`, and no
+`integrated_base_sha`. `CreateIdentityTests` (2) covers the adapter side.
+
+**e. The watcher no longer swallows failures.** Any poll exception is caught
+and recorded as a new `pr_poll_failed` event (added to `TASK_EVENT_TYPES`),
+carrying the exception type and message. No §32.1 field is written from a
+failed poll.
+
+- **`needs_review` → `needs_decision`** via §27.2.1.
+- **A Ticket the transition table does not let integration move there keeps
+  its status and gets the event.** These are `ready_for_integration`,
+  `paused`, and a Ticket already in `needs_decision`. For a queued Ticket,
+  its own integration run reaches `needs_decision` when its `gh` call fails.
+  I did not add a `ready_for_integration → needs_decision` edge: it would
+  also have changed the changes-requested path. Say if you want it.
+- With `confirm_poll=False`, the failure is reported in the outcome
+  (`poll_error`) and nothing is written.
+
+`PollFailureTests` (9) covers:
+
+- gh's error, the old `Unknown JSON field` failure, a missing `gh` binary,
+  and a `UnicodeDecodeError`;
+- no PR fields written from a failed poll;
+- `paused` and queued Tickets;
+- the dry run;
+- one failing poll not stopping the others.
+
+### Ruling 30 — never publish a branch that was not validated
+
+**The defect.** The push publishes the branch *by name*, but validators ran
+against HEAD. Take a detached HEAD and no conflict at all: the rebase
+succeeds on the detached HEAD, validators pass on it, and the push publishes
+the untouched old branch. The Ticket then reached `waiting_for_review`, with
+a recorded `integrated_base_sha` the published branch did not contain.
+
+**The fix.** `integration_git.assert_head_on_task_branch` checks three
+things:
+
+- HEAD resolves to `refs/heads/<task-branch>`, so it is neither detached nor
+  on another branch;
+- the branch ref equals HEAD;
+- when given `expected_sha`, the branch ref is exactly that commit.
+
+It uses only `rev-parse`, which is read-only; no new git subcommand was
+allowlisted. The controller runs it twice:
+
+- **Before validators.** Its result becomes the `branch_sha` that validators
+  see and that is recorded as `pr_head_sha`.
+- **Before the push**, with `expected_sha=branch_sha`, so a validator that
+  moved the branch or HEAD is caught. This also runs when a no-op
+  re-integration skips the push, because `integrated_base_sha` is recorded
+  either way.
+
+A mismatch refuses: nothing is pushed, there is no `gh` call, no
+`integrated_base_sha`, and `needs_decision` via §27.2.1. The
+`integration_blocked` event carries `check=head_on_task_branch`, the
+`stage`, the `task_branch` and the `mismatch` text. The push itself is
+unchanged: still `git push origin <task-branch>` with optional `-u`, and no
+SHA-to-ref form.
+
+Tests: `UnvalidatedBranchRefusalTests` (6) in the controller and
+`HeadOnTaskBranchTests` (6) in `integration_git`. The controller tests cover:
+
+- the reviewer's detached-HEAD, no-conflict scenario. It asserts the Ticket
+  never reaches review, validators never run, nothing is pushed, and the
+  branch that would have been published lacks the target;
+- HEAD on another branch;
+- a validator that commits;
+- a validator that detaches HEAD;
+- a detached HEAD on re-integration, where the published branch and the
+  recorded base both stay as they were;
+- the positive case: the published branch equals `pr_head_sha` and contains
+  `integrated_base_sha`.
+
+To confirm the test is real, the guard was stubbed out with a mock for one
+throwaway run: the detached scenario again reached `waiting_for_review`, and
+the published branch lacked the recorded target.
+
+### Ruling 31 — finish Ruling 19
+
+**The defect.** Ruling 19's guard caught `IntegrationGitError` only. The
+reviewer left a Ticket stuck in `integrating` two ways. That is permanent,
+because the watcher defers `integrating` Tickets indefinitely:
+
+- a rebase conflict on a Latin-1 filename, where git's raw bytes raised
+  `UnicodeDecodeError`;
+- a missing `gh` binary after the push.
+
+**a. The boundary catches `Exception`.** Everything from the fetch to the
+review hand-off is inside it. On any exception it aborts any in-progress
+rebase or merge; a failed abort does not prevent the stop. It then ends in
+`needs_decision` via §27.2.1. The `integration_blocked` event records
+`exception_type` and `exception_message`, and the message names the type.
+
+If the Ticket has already left `integrating` — the failure came after the
+hand-off to review, or from inside a stop — it is not stuck. The guard
+re-raises rather than guess a new status.
+
+**b. Decoding.** All three subprocess chokepoints decode as UTF-8 with
+`errors="replace"`: `integration_git._default_runner`, the validator runner,
+and the `gh` adapter. A Latin-1 path therefore reaches evidence with
+U+FFFD in place of the byte. If a resolver then acts on the mangled path,
+its failure is caught by (a) and by the B2 verification.
+
+**c. A missing `gh`** now lands in the same guard, including after the push.
+The branch is published; no PR exists, and nothing claims one exists.
+
+**d. Tests.** `IntegrationBoundaryTests` (7):
+
+- an injected `UnicodeDecodeError`;
+- `FileNotFoundError` for `git`, and for `gh` after the push;
+- a `RuntimeError`;
+- a non-git failure mid-rebase, which is aborted;
+- a failure after the hand-off, which is raised while the Ticket stays in
+  `needs_review`;
+- **the reviewer's Latin-1 filename conflict, unmocked**, which ends in
+  `needs_decision`. With the old strict-decoding runner patched back in, the
+  same scenario still ends in `needs_decision`, this time through the guard,
+  with `exception_type=UnicodeDecodeError`.
+
+Real non-UTF-8 output is covered by one git test (`OutputDecodingTests`) and
+one validator test (`ValidatorOutputDecodingTests`). An adapter test checks
+the `gh` runner arguments.
+
+**Not covered.** If `stop_for_decision` itself fails — the database is
+unwritable while the stop is being recorded — the exception propagates and
+the Ticket can stay `integrating`. No code path can record a status the
+database refuses to take. I have not checked whether anything outside Step 2
+recovers such a Ticket.
+
+### Rulings 16 and 21, recorded here
+
+These were made between rounds and missing from this file.
+
+- **Ruling 16.** #196 went to independent review against the branch as it
+  stood, with main at `b870b84` merged in. Merging main again, for Step 3 and
+  F1, was a separate turn (it became `ff86d9a`). **Step 2 keeps creating its
+  own tables at startup (`store.init_db()`) for V1.** Aligning that with Step
+  1's explicit-migration-script rule is repo-wide cleanup owned by FOLLOWUPS
+  **F2** ("Repo-wide vocabulary and migration cleanup"). This settles the
+  question the `b870b84` merge section below used to leave open.
+- **Ruling 21.** Step 5 started from `main` at `a5fa8e2`, in parallel with
+  this fix round. The "integration handoff" item of §42 Step 5 was cut from
+  its scope and deferred to FOLLOWUPS **F4**, "Wire the implementation →
+  integration handoff". That is to be wired in one turn after #196 merges.
+  Step 5 must not import, stub or guess at Step 2's modules. Nothing on this
+  branch depends on Step 5.
+
+### Stop conditions this round
+
+- **Pre-existing tests going red:** none — see the counts below.
+- **Rulings contradicting each other or the spec:** none. Ruling 30's check
+  uses `rev-parse` only, so the push allowlist from Rulings 3, 18 and 22 is
+  untouched.
+- **The push being rejected because the branch diverged:** not expected to
+  hit. Checked before pushing: `origin/task/v1-step2` was `2514352`, the
+  commit this work sits on, so the push is a fast-forward. `origin/main` was
+  still `a5fa8e2`, already merged in, so no merge was needed.
+
+Two judgment calls are flagged, not stops:
+
+- The watcher does not move `ready_for_integration` or `paused` Tickets on a
+  poll failure; it audits them (29e above).
+- The seventeen `merged=` arguments were removed from test inputs because
+  real gh has no such field (29c). No assertion changed.
+
+### Test counts for round 4
+
+| | unittest (`Ran`) | `pytest tests` |
+| --- | --- | --- |
+| Before (`2514352`) | 5191 | 5185 passed, 8 skipped (5193 collected) |
+| After (this commit) | 5237 | 5231 passed, 8 skipped (5239 collected) |
+
+**+46 tests, 0 failed, and no test went red at any point.** The +46 is
+exactly this round's new tests:
+
+- controller: 15 (Ruling 30: 6, Ruling 29d: 2, Ruling 31: 7)
+- adapter: 14
+- watcher: 9
+- `integration_git`: 7
+- validators: 1
+
+The unittest counts come from the unittest loader on both trees. The full
+unittest run takes longer than the tool's 600 s limit, so every test was
+*run* through pytest, in six foreground parts:
+
+    Step 4's 8 files       102 passed
+    test_[a-c]*.py         858 passed
+    test_[d-l]*.py         926 passed
+    test_[m-q]*.py         998 passed
+    test_r*.py             903 passed, 8 skipped
+    test_[s-z]*.py        1546 passed
+    ------------------------------------------
+    sum                   5333 passed, 8 skipped
+    Step 4 counted twice  −102
+    unique                5231 passed, 8 skipped = 5239 collected
+
+**A correction to my own tooling.** Parts 2–6 passed `--ignore` for Step 4's
+files, but pytest does not apply `--ignore` to paths named explicitly on the
+command line. So Step 4's 102 tests ran twice: in part 1 and inside the glob
+parts. `--collect-only` confirms it (41 + 9 + 12 + 32 + 8 = 102). The
+arithmetic above removes the duplicates. Both runs of those tests passed.
+
+Other checks, all from the repository root:
+
+- `python -m compileall -q agent_taskflow scripts tests`: exit 0, no
+  "Can't list" or error lines.
+- `scripts/validate_workflow_contract.py` (`WORKFLOW.md`): status passed,
+  exit 0.
+- `scripts/validate_workflow_policy.py`
+  (`examples/workflow-policy.example.json`): status passed, exit 0.
+
+These are the two repo validators, run directly. `local_validation` was not
+run as a whole this round, because it wraps a full unittest run that exceeds
+the 600 s foreground limit. Its unit-test and compileall steps are covered
+above.
 
 ---
 
@@ -244,6 +546,10 @@ branch.
 
 ### Ruling 19 — no git failure may leave a Ticket in `integrating`
 
+> Superseded in scope by **Ruling 31** (review round 4, above). The guard
+> described here caught `IntegrationGitError` only. It now catches every
+> exception and records its type and message.
+
 The controller's whole git phase — from the fetch to the review hand-off —
 now runs inside one `IntegrationGitError` guard. A git failure that no
 narrower handler catches, such as the `behind_count` the report names, aborts
@@ -266,8 +572,10 @@ infrastructure failures, including git failures. step2.md's
 integration-owned transitions have no `failed`, so every integration
 failure — fetch, push, `gh`, and now any unhandled git error — ends in
 `needs_decision`. Remapping infrastructure failures to §29.2 `failed` belongs
-to Step 5, which owns the runtime lifecycle. Until then the guarded path above
-ensures no Ticket is ever stuck in `integrating`.
+to Step 5, which owns the runtime lifecycle. As first implemented, the guard
+did **not** ensure that no Ticket is ever stuck in `integrating`: a
+non-git exception escaped it. The round-4 review reproduced exactly that, and
+Ruling 31 closed it.
 
 ### The review's other points
 
@@ -447,12 +755,12 @@ replaced by a pointer to `docs/v1/handoff-step1.md`.
   `tasks_ticket_fields` is not in `SCHEMA_MIGRATIONS` and compare migration
   sets, so they pass with Step 2's entries present.
 
-**Open question for the reviewer, not a stop.** Step 2 still creates its own
-tables inside `store.init_db()` — the startup path — whereas ruling 4a moved
-Step 1's new V1 schema out of startup into an operator-run script. That is
-consistent with the rule as written but not with its direction. As
-instructed, Step 2's schema handling was not changed in this turn. Whether V1
-wants one policy for both steps is for the human to decide.
+**Settled by Ruling 16.** Step 2 still creates its own tables inside
+`store.init_db()`, the startup path, whereas ruling 4a moved Step 1's new V1
+schema into an operator-run script. This merge left that as an open question.
+Ruling 16 settled it: Step 2 keeps creating its tables at startup for V1, and
+aligning the two steps is repo-wide cleanup owned by FOLLOWUPS F2
+("Repo-wide vocabulary and migration cleanup").
 
 Step 3 (#197) landed on `main` after this merge's fetch. It was merged in
 the following round, together with F1 (#199), in `ff86d9a` — see "Merge of
