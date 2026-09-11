@@ -3,6 +3,11 @@
 PR-8 turns ``blocked -> queued`` into an atomic retry reservation. The reset
 creates and binds the next Attempt identity, records old/new lineage, and leaves
 execution, validation, approval, merge, and cleanup to their own authorities.
+
+V1 Step 5 (ruling 27c) adds the Ticket retry of SPEC §33.3: a Ticket in
+``failed`` or ``needs_decision`` returns to ``created`` (display ``ready``)
+through :mod:`agent_taskflow.ticket_retry`, and its next claim creates the new
+Attempt in the same worktree. Legacy tasks keep exactly ``blocked -> queued``.
 """
 
 from __future__ import annotations
@@ -20,9 +25,19 @@ from agent_taskflow.reset_lineage import (
 )
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_lifecycle import is_ticket
+from agent_taskflow.ticket_retry import (
+    TICKET_RETRY_FROM_STATUSES,
+    TICKET_RETRY_TO_STATUS,
+    TicketRetryError,
+    dependency_blocked_ticket_reason,
+    retry_ticket,
+)
 
 RESET_FROM_STATUS = "blocked"
 RESET_TO_STATUS = "queued"
+RESET_FROM_STATUSES = (RESET_FROM_STATUS, *TICKET_RETRY_FROM_STATUSES)
+RESET_TO_STATUSES = (RESET_TO_STATUS, TICKET_RETRY_TO_STATUS)
 RESET_SOURCE = "reset_task_status_cli"
 RESET_ARTIFACT_TYPE = "other"
 
@@ -38,7 +53,9 @@ class TaskStatusResetRequest:
     task_key: str
     from_status: str
     reason: str
-    to_status: str = RESET_TO_STATUS
+    # None: derived from the row, `queued` for a legacy reset from `blocked`
+    # and `created` for a Ticket retry from `failed` / `needs_decision`.
+    to_status: str | None = None
     db_path: Path | None = None
     confirm_reset: bool = False
     dry_run: bool = False
@@ -51,18 +68,27 @@ class TaskStatusResetRequest:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
 
         normalized_from = self.from_status.strip().lower()
-        if normalized_from != RESET_FROM_STATUS:
+        if normalized_from not in RESET_FROM_STATUSES:
             raise ValueError(
-                f"from_status must be {RESET_FROM_STATUS!r}, got {self.from_status!r}"
+                f"from_status must be one of {RESET_FROM_STATUSES!r}, got {self.from_status!r}"
             )
         object.__setattr__(self, "from_status", normalized_from)
 
-        normalized_to = self.to_status.strip().lower()
-        if normalized_to != RESET_TO_STATUS:
-            raise ValueError(
-                f"to_status must be {RESET_TO_STATUS!r}, got {self.to_status!r}"
-            )
-        object.__setattr__(self, "to_status", normalized_to)
+        expected_to = (
+            TICKET_RETRY_TO_STATUS
+            if normalized_from in TICKET_RETRY_FROM_STATUSES
+            else RESET_TO_STATUS
+        )
+        if self.to_status is None:
+            object.__setattr__(self, "to_status", expected_to)
+        else:
+            normalized_to = self.to_status.strip().lower()
+            if normalized_to != expected_to:
+                raise ValueError(
+                    f"to_status must be {expected_to!r} when from_status is "
+                    f"{normalized_from!r}, got {self.to_status!r}"
+                )
+            object.__setattr__(self, "to_status", normalized_to)
 
         normalized_reason = self.reason.strip()
         if not normalized_reason:
@@ -180,9 +206,31 @@ def reset_task_status(
     *,
     store: TaskMirrorStore | None = None,
 ) -> TaskStatusResetResult:
-    """Preview or perform one atomic ``blocked`` to ``queued`` retry reset."""
+    """Preview or perform one atomic retry reset.
+
+    Legacy: ``blocked`` to ``queued`` with a reserved retry Attempt. Ticket:
+    ``failed`` / ``needs_decision`` to ``created`` (SPEC §33.3).
+    """
 
     current_store = store or TaskMirrorStore(request.db_path)
+    ticket = is_ticket(current_store.db_path, request.task_key)
+    if request.from_status in TICKET_RETRY_FROM_STATUSES:
+        if not ticket:
+            raise TaskStatusResetError(
+                f"Task {request.task_key} is not a Ticket; only a Ticket is retried from "
+                f"{request.from_status!r}. Legacy tasks reset from {RESET_FROM_STATUS!r}."
+            )
+        try:
+            return TaskStatusResetResult(**retry_ticket(request, store=current_store))
+        except TicketRetryError as exc:
+            raise TaskStatusResetError(str(exc)) from exc
+    if ticket:
+        dependency_reason = dependency_blocked_ticket_reason(
+            current_store.db_path, request.task_key
+        )
+        if dependency_reason is not None:
+            raise TaskStatusResetError(dependency_reason)
+
     lineage_store = ResetLineageStore(current_store.db_path)
 
     if request.request_id is not None:

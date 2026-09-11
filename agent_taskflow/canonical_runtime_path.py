@@ -31,6 +31,14 @@ from agent_taskflow.runtime_admission import (
 from agent_taskflow.store import TaskMirrorStore as _LegacyTaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
 
+# Task statuses that end the claimed Attempt and release its lease. `failed`
+# and `needs_decision` are V1 Step 5's Ticket failure targets (SPEC §29);
+# without them a failed Ticket would hold its capacity slot until the lease
+# expired.
+RUNTIME_RELEASE_TASK_STATUSES = frozenset(
+    {"blocked", "waiting_approval", "canceled", "completed", "failed", "needs_decision"}
+)
+
 
 class CanonicalRuntimeAdmissionStore(_PR3RuntimeAdmissionStore):
     """Runtime admission API whose initialization preserves PR-4 guards."""
@@ -208,6 +216,12 @@ class CanonicalRuntimeTaskStore(_LegacyTaskMirrorStore):
             return "completed", "completed", "passed"
         if task_status == "canceled":
             return "canceled", "canceled", None
+        # V1 Step 5 (SPEC §29): a Ticket's runtime failure and its validator
+        # failure release the claim like any other terminal status.
+        if task_status == "failed":
+            return "failed", "failed", None
+        if task_status == "needs_decision":
+            return "validation_failed", "completed", "failed"
         return "blocked", "blocked", None
 
     def _release(
@@ -260,10 +274,10 @@ class CanonicalRuntimeTaskStore(_LegacyTaskMirrorStore):
             with self._runtime_claims_lock:
                 self._runtime_claims.pop(normalized, None)
 
-        if status == "blocked" and (blocked_reason or message):
+        if status in {"blocked", "failed", "needs_decision"} and (blocked_reason or message):
             super().update_task_status(
                 normalized,
-                "blocked",
+                status,
                 message=message,
                 source=state.claim.owner_id,
                 blocked_reason=blocked_reason or message,
@@ -290,7 +304,7 @@ class CanonicalRuntimeTaskStore(_LegacyTaskMirrorStore):
             return
 
         state = self._state_for(normalized)
-        if status in {"blocked", "waiting_approval", "canceled", "completed"}:
+        if status in RUNTIME_RELEASE_TASK_STATUSES:
             if state is None:
                 super().update_task_status(
                     normalized,

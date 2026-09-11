@@ -18,6 +18,7 @@ from agent_taskflow.attempt_resources import (
 )
 from agent_taskflow.attempt_resources_schema import migrate_attempt_resources
 from agent_taskflow.runtime_admission import RuntimeAdmissionError
+from agent_taskflow.ticket_lifecycle import is_ticket
 
 
 _CURRENT_APPROVED_STORE: ContextVar["AttemptScopedRuntimeTaskStore | None"] = ContextVar(
@@ -277,7 +278,8 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
                     owner_id=claim_state.claim.owner_id,
                     lease_token=claim_state.claim.lease_token,
                     attempt_status="execution_aborted",
-                    task_status="blocked",
+                    # SPEC §29.2 for a Ticket; legacy tasks keep `blocked`.
+                    task_status=("failed" if is_ticket(self.db_path, normalized) else "blocked"),
                     reason_code="attempt_resource_allocation_failed",
                     execution_result="resource_allocation_failed",
                     metadata={"error": f"{exc.__class__.__name__}: {exc}"},
@@ -365,7 +367,7 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
             self._heartbeat(normalized)
             return
 
-        terminal = status in {"blocked", "waiting_approval", "canceled", "completed"}
+        terminal = status in canonical_path.RUNTIME_RELEASE_TASK_STATUSES
         if terminal and resource_state is not None:
             handle = resource_state.handle
             super().update_task_status(
@@ -621,17 +623,25 @@ def install_attempt_scoped_runtime_path(
             except (AttemptResourceError, RuntimeAdmissionError, OSError) as exc:
                 normalized = canonical_path.normalize_task_key(task_key)
                 reason = f"Attempt resource preparation failed: {exc}"
+                # SPEC §29.2: a Ticket's worktree preparation failure is `failed`.
+                ticket = is_ticket(self.store.db_path, normalized)
+                target = "failed" if ticket else "blocked"
                 if self.store.runtime_claim(normalized) is not None:
                     self.store.update_task_status(
                         normalized,
-                        "blocked",
+                        target,
                         source="dispatcher",
                         message=reason,
                         blocked_reason=reason,
                     )
+                current = self.store.get_task(normalized) if ticket else None
                 return dispatcher_module.DispatcherResult(
                     task_key=normalized,
-                    status="blocked",
+                    status=(
+                        "failed"
+                        if current is not None and current.status == "failed"
+                        else "blocked"
+                    ),
                     summary=reason,
                     blocked_reason=reason,
                 )

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Atomically reserve one retry Attempt for a blocked task."""
+"""Atomically reserve one retry Attempt for a blocked task, or retry a stopped Ticket.
+
+Legacy tasks: ``blocked -> queued`` with a reserved retry Attempt. A Ticket in
+``failed`` or ``needs_decision`` returns to ``created`` (V1 Step 5, SPEC §33.3);
+its next claim creates the new Attempt in the same worktree.
+"""
 
 from __future__ import annotations
 
@@ -37,8 +42,8 @@ def _bootstrap_source_package_without_runtime_imports() -> None:
 _bootstrap_source_package_without_runtime_imports()
 
 from agent_taskflow.task_status_reset import (  # noqa: E402
-    RESET_FROM_STATUS,
-    RESET_TO_STATUS,
+    RESET_FROM_STATUSES,
+    RESET_TO_STATUSES,
     TaskStatusResetError,
     TaskStatusResetRequest,
     reset_task_status,
@@ -63,7 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Operator-confirmed blocked-to-queued reset that atomically binds "
-            "the closed Attempt to one newly reserved retry Attempt. This "
+            "the closed Attempt to one newly reserved retry Attempt, or the "
+            "retry of a failed / needs_decision Ticket back to created. This "
             "command does not approve, merge, clean up, execute, or validate."
         )
     )
@@ -76,12 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--from-status",
         required=True,
-        choices=(RESET_FROM_STATUS,),
+        choices=RESET_FROM_STATUSES,
+        help="blocked (legacy reset), or failed / needs_decision (Ticket retry)",
     )
     parser.add_argument(
         "--to-status",
-        default=RESET_TO_STATUS,
-        choices=(RESET_TO_STATUS,),
+        default=None,
+        choices=RESET_TO_STATUSES,
+        help="Optional; derived from --from-status (queued for blocked, created for a Ticket)",
     )
     parser.add_argument("--reason", required=True, type=_non_empty)
     parser.add_argument(
