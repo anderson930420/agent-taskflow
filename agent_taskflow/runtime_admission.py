@@ -21,6 +21,10 @@ from agent_taskflow.attempt_models import (
     validate_attempt_status,
 )
 from agent_taskflow.models import require_absolute_path, utc_now_iso, validate_task_status
+from agent_taskflow.runtime_capacity import (
+    count_active_executor_leases_in_connection,
+    runtime_capacity_in_connection,
+)
 from agent_taskflow.runtime_admission_schema import (
     DEFAULT_LEASE_TTL_SECONDS,
     RUNTIME_ADMISSION_MIGRATION,
@@ -36,14 +40,47 @@ __all__ = [
     "LeaseOwnershipError",
     "RuntimeAdmissionError",
     "RuntimeAdmissionStore",
+    "RuntimeCapacityExceededError",
     "RuntimeClaim",
     "RuntimeLeaseRecord",
+    "assert_runtime_capacity_available",
     "migrate_runtime_admission",
 ]
 
 
 class RuntimeAdmissionError(RuntimeError):
     """Base error for runtime admission and ownership failures."""
+
+
+class RuntimeCapacityExceededError(RuntimeAdmissionError):
+    """Raised when a claim would exceed the global ``max_concurrent_tasks``."""
+
+    reason_code = "runtime_capacity_exceeded"
+
+    def __init__(self, *, max_concurrent_tasks: int, active_executor_leases: int) -> None:
+        self.max_concurrent_tasks = max_concurrent_tasks
+        self.active_executor_leases = active_executor_leases
+        super().__init__(
+            f"{self.reason_code}: {active_executor_leases} active executor "
+            f"lease(s) already fill max_concurrent_tasks={max_concurrent_tasks}"
+        )
+
+
+def assert_runtime_capacity_available(conn: sqlite3.Connection) -> None:
+    """Refuse a claim that would exceed ``max_concurrent_tasks`` (V1 Step 4).
+
+    Call it first inside the claim's ``BEGIN IMMEDIATE`` transaction, so the
+    count and the new lease cannot be split by another writer. It applies to
+    every database; one that never stored a value is limited to the default
+    of 1 (ruling 15).
+    """
+    setting = runtime_capacity_in_connection(conn)
+    active = count_active_executor_leases_in_connection(conn)
+    if active >= setting.max_concurrent_tasks:
+        raise RuntimeCapacityExceededError(
+            max_concurrent_tasks=setting.max_concurrent_tasks,
+            active_executor_leases=active,
+        )
 
 
 class LeaseOwnershipError(RuntimeAdmissionError):
@@ -283,6 +320,7 @@ class RuntimeAdmissionStore:
 
         with closing(connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
+            assert_runtime_capacity_available(conn)
             task = self._ensure_task_identity(conn, normalized_key)
             # Resolve project from the persisted Task row and evaluate controls
             # inside the same write transaction as the claim. Caller-supplied

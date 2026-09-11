@@ -26,7 +26,9 @@ from agent_taskflow.execution_observability import ExecutionObservedStep
 from agent_taskflow.models import require_absolute_path, utc_now_iso
 from agent_taskflow.runtime_progress import (
     AttemptProgressSnapshot,
+    ObservedStepRegressionError,
     assert_no_progress_estimate,
+    is_step_status_regression,
     observed_step,
     runtime_step_order,
     validate_runtime_step,
@@ -165,7 +167,14 @@ class RuntimeProgressStore:
         summary: str | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> ExecutionObservedStep:
-        """Record one §14.1 first-level step transition for an Attempt."""
+        """Record one §14.1 first-level step transition for an Attempt.
+
+        A step never moves backwards within its Attempt (V1 Step 4): a write
+        that would, such as a late ``running`` after ``passed``, raises
+        :class:`ObservedStepRegressionError` and changes nothing. The check
+        and the write share one ``BEGIN IMMEDIATE`` transaction, so concurrent
+        writers are serialized and cannot interleave between them.
+        """
 
         record = observed_step(step, status, summary=summary, metadata=metadata)
         order = runtime_step_order(record.name)
@@ -175,6 +184,21 @@ class RuntimeProgressStore:
         with closing(connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             attempt = self._attempt_row(conn, attempt_id)
+            current = conn.execute(
+                """
+                SELECT status FROM attempt_observed_steps
+                WHERE attempt_id = ? AND step_name = ?
+                """,
+                (attempt_id, record.name),
+            ).fetchone()
+            if current is not None and is_step_status_regression(
+                current["status"], record.status
+            ):
+                raise ObservedStepRegressionError(
+                    f"Refusing to move step {record.name} of attempt "
+                    f"{attempt_id!r} back from {current['status']!r} to "
+                    f"{record.status!r}"
+                )
             cursor = conn.execute(
                 """
                 UPDATE attempt_observed_steps

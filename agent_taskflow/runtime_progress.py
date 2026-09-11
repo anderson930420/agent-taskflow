@@ -83,9 +83,25 @@ RUNTIME_STEP_GLYPHS: dict[str, str] = {
 _STEP_INDEX = {name.lower(): index for index, name in enumerate(RUNTIME_STEPS)}
 _STEP_CANONICAL = {name.lower(): name for name in RUNTIME_STEPS}
 
+# V1 Step 4 lost-write guard: within one Attempt a step only moves forward,
+# pending -> running -> an outcome. The three outcomes share a rank, so a write
+# never lowers the rank but may still replace one outcome with another; Step
+# 3's store tests write every status in sequence on one step.
+RUNTIME_STEP_STATUS_RANK: dict[str, int] = {
+    RUNTIME_STEP_STATUS_PENDING: 0,
+    RUNTIME_STEP_STATUS_RUNNING: 1,
+    RUNTIME_STEP_STATUS_PASSED: 2,
+    RUNTIME_STEP_STATUS_FAILED: 2,
+    RUNTIME_STEP_STATUS_BLOCKED: 2,
+}
+
 
 class RuntimeProgressError(ValueError):
     """Raised for an invalid step, status, or a forbidden completion signal."""
+
+
+class ObservedStepRegressionError(RuntimeProgressError):
+    """Raised when a write would move a step backwards for its Attempt."""
 
 
 # -- §14.2 "No Fake Percentage" guard --------------------------------------
@@ -212,6 +228,17 @@ def runtime_step_order(name: str) -> int:
     return _STEP_INDEX[validate_runtime_step(name).lower()]
 
 
+def is_step_status_regression(current: str | None, new: str) -> bool:
+    """Return whether writing ``new`` over ``current`` moves a step backwards."""
+
+    if current is None:
+        return False
+    return (
+        RUNTIME_STEP_STATUS_RANK[validate_runtime_step_status(new)]
+        < RUNTIME_STEP_STATUS_RANK[validate_runtime_step_status(current)]
+    )
+
+
 def step_glyph(status: str) -> str:
     """Return the §14.2 lifecycle glyph for a step status."""
 
@@ -315,11 +342,14 @@ __all__ = [
     "RUNTIME_STEP_STATUS_FAILED",
     "RUNTIME_STEP_STATUS_PASSED",
     "RUNTIME_STEP_STATUS_PENDING",
+    "RUNTIME_STEP_STATUS_RANK",
     "RUNTIME_STEP_STATUS_RUNNING",
     "AttemptProgressSnapshot",
+    "ObservedStepRegressionError",
     "RuntimeProgressError",
     "assert_no_progress_estimate",
     "find_progress_estimates",
+    "is_step_status_regression",
     "observed_step",
     "pending_step",
     "runtime_step_order",
