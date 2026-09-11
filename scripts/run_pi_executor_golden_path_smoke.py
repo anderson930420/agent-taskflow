@@ -24,6 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 from fastapi.testclient import TestClient
 
 from agent_taskflow.api.main import create_app
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 from agent_taskflow.dispatcher import Dispatcher
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
@@ -281,6 +282,10 @@ def run_smoke(
             )
             original_path = _prepend_path(fake_pi_path.parent)
 
+    # V1 Step 1: the API fails closed until the explicit Ticket-column
+    # migration (scripts/migrate_ticket_fields.py) has run.
+    TaskMirrorStore(db_path).init_db()
+    migrate_ticket_fields(db_path)
     app = create_app(
         db_path=db_path,
         dispatcher_factory=_make_dispatcher_factory(),

@@ -103,7 +103,7 @@ class IntegrationRequest:
     body: str | None = None
     trigger: str | None = None
 
-    # Ambiguity watchlist (see HANDOFF.md): the spec does not say whether a
+    # Ambiguity watchlist (see docs/v1/handoff-step2.md): the spec does not say whether a
     # re-integration that is already up to date should still push. The default
     # is not to push a branch with nothing new on it; validators re-run either
     # way, because §44 requires that unconditionally.

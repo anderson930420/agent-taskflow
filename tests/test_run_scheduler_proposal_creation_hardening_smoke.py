@@ -16,6 +16,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from agent_taskflow.api.main import create_app
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 from agent_taskflow.scheduler_proposal_readback import (
     list_task_scheduler_proposal_readbacks,
 )
@@ -171,6 +172,8 @@ class RunSchedulerProposalCreationHardeningSmokeTests(unittest.TestCase):
         self.assertEqual(self.summary["readbacks"]["helper_count"], 1)
 
     def test_j2_api_global_readback_count_is_one(self) -> None:
+        # The API fails closed until the explicit Step 1 migration has run.
+        migrate_ticket_fields(self.db_path)
         with TestClient(create_app(self.db_path)) as client:
             response = client.get(
                 "/api/scheduler/proposals",
@@ -182,6 +185,8 @@ class RunSchedulerProposalCreationHardeningSmokeTests(unittest.TestCase):
         self.assertEqual(self.summary["readbacks"]["api_global_count"], 1)
 
     def test_j2_api_task_readback_count_is_one(self) -> None:
+        # The API fails closed until the explicit Step 1 migration has run.
+        migrate_ticket_fields(self.db_path)
         with TestClient(create_app(self.db_path)) as client:
             response = client.get(
                 f"/api/tasks/{self.summary['task_key']}/scheduler-proposals"
@@ -193,6 +198,8 @@ class RunSchedulerProposalCreationHardeningSmokeTests(unittest.TestCase):
 
     def test_repeated_j2_api_get_does_not_mutate_db_counts(self) -> None:
         before = self._db_counts()
+        # The API fails closed until the explicit Step 1 migration has run.
+        migrate_ticket_fields(self.db_path)
         with TestClient(create_app(self.db_path)) as client:
             client.get(
                 "/api/scheduler/proposals",

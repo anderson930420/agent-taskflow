@@ -1,9 +1,13 @@
 """Ticket persistence over the canonical `tasks` table.
 
 There is no separate Ticket table: `tasks` is the only canonical Ticket
-entity. A Ticket is a `tasks` row whose Step 1 columns (added by the
-`tasks_ticket_fields` migration in :mod:`agent_taskflow.store`) are populated,
-and its creation audit event goes to the existing `task_events` log.
+entity. A Ticket is a `tasks` row whose Step 1 columns are populated, and its
+creation audit event goes to the existing `task_events` log.
+
+Those columns are installed only by the operator-run
+``scripts/migrate_ticket_fields.py`` (:mod:`agent_taskflow.ticket_fields_schema`).
+:meth:`TicketStore.init_db` never applies that migration; it fails closed
+when the columns are missing.
 
 Task key allocation, the `tasks` insert and the audit write share one
 `BEGIN IMMEDIATE` transaction, so two concurrent creations can never be handed
@@ -35,6 +39,7 @@ from agent_taskflow.store import (
     init_db as init_task_db,
 )
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_fields_schema import require_ticket_fields
 from agent_taskflow.ticket_metadata import (
     FIRST_TASK_KEY_SEQUENCE,
     TASK_KEY_PREFIX,
@@ -77,7 +82,25 @@ class TicketStoreError(RuntimeError):
     """Raised when a Ticket cannot be persisted."""
 
 
+class TicketBranchExistsError(TicketStoreError):
+    """The derived branch already exists. Creation is refused, never suffixed.
+
+    `source` is where it was found: `tasks`, `task_worktrees`, or `repository`
+    (the repository's ref storage, via the creation service's branch guard).
+    """
+
+    def __init__(self, branch: str, source: str, existing: str) -> None:
+        self.branch = branch
+        self.source = source
+        self.existing = existing
+        super().__init__(f"Branch {branch!r} already exists ({source}: {existing})")
+
+
 TicketBuilder = Callable[[str], TicketRecord]
+
+# Raises (typically TicketBranchExistsError) to refuse a derived branch. It
+# runs inside the creation transaction, so a refusal writes nothing.
+BranchGuard = Callable[[TicketRecord], None]
 
 
 def _row_to_ticket(row: sqlite3.Row) -> TicketRecord:
@@ -114,7 +137,14 @@ class TicketStore:
         )
 
     def init_db(self) -> None:
+        """Ensure the legacy schema, then fail closed on Step 1's columns.
+
+        Raises :class:`~agent_taskflow.ticket_fields_schema.TicketFieldsMigrationRequired`
+        naming ``scripts/migrate_ticket_fields.py`` when they are missing. It
+        never applies that migration (PR #195 ruling 4a).
+        """
         init_task_db(self.db_path)
+        require_ticket_fields(self.db_path)
 
     # ------------------------------------------------------------------
     # Task key allocation
@@ -151,11 +181,17 @@ class TicketStore:
         message: str | None = None,
         payload: dict[str, Any] | None = None,
         blocked_by: str | None = None,
+        branch_guard: BranchGuard | None = None,
     ) -> TicketRecord:
         """Allocate a task key, insert the `tasks` row, record the audit event.
 
         `build` receives the reserved task key and returns the fully derived
         Ticket. Allocation, insert and audit write share one transaction.
+
+        Before any write, the derived branch is refused if it is already
+        recorded in `tasks` or `task_worktrees` for the same repository, or if
+        `branch_guard` raises. Either way the transaction rolls back: no row,
+        no audit event, no key consumed.
         """
         event_type = validate_task_event_type(TICKET_CREATED_EVENT_TYPE)
         normalized_actor = require_non_empty(actor, "actor")
@@ -191,6 +227,10 @@ class TicketStore:
                 created_at=ticket.created_at or created_at,
                 updated_at=ticket.updated_at or created_at,
             )
+
+            self._reject_recorded_branch(conn, record)
+            if branch_guard is not None:
+                branch_guard(record)
 
             try:
                 conn.execute(
@@ -252,6 +292,21 @@ class TicketStore:
 
             return record
 
+    @staticmethod
+    def _reject_recorded_branch(
+        conn: sqlite3.Connection,
+        record: TicketRecord,
+    ) -> None:
+        """Refuse a branch the store already records for this repository."""
+        params = (str(record.repo_path), record.branch)
+        for table in ("tasks", "task_worktrees"):
+            row = conn.execute(
+                f"SELECT task_key FROM {table} WHERE repo_path = ? AND branch = ?",
+                params,
+            ).fetchone()
+            if row is not None:
+                raise TicketBranchExistsError(record.branch, table, row["task_key"])
+
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
@@ -308,8 +363,10 @@ class TicketStore:
 
 
 __all__ = [
+    "BranchGuard",
     "TICKET_CREATED_EVENT_TYPE",
     "TICKET_SELECT_COLUMNS",
+    "TicketBranchExistsError",
     "TicketBuilder",
     "TicketStore",
     "TicketStoreError",

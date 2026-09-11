@@ -40,11 +40,6 @@ TASK_STATUSES = {
     # additively by the §12.2 ruling so every display name has a persisted
     # counterpart in agent_taskflow.status_vocab. Nothing above is renamed,
     # removed or repurposed, and `blocked` already existed.
-    #
-    # Deliberately absent: `needs_review` and `cancelled`. Both §12 display
-    # names already have a legacy persisted spelling (`waiting_for_review`
-    # and `canceled`), and §12.2 forbids two spellings of one idea coexisting
-    # in this enum. Step 2 reaches them through status_vocab.
     "paused",
     "needs_decision",
     "ready_for_integration",

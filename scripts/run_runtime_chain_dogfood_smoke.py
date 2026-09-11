@@ -58,6 +58,7 @@ if str(REPO_ROOT) not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 from agent_taskflow.api.main import create_app  # noqa: E402
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields  # noqa: E402
 from agent_taskflow.codex_advisory_review import (  # noqa: E402
     CodexAdvisoryReviewRequest,
     generate_codex_advisory_review,
@@ -725,6 +726,10 @@ def _read_through_api(db_path: Path, task_key: str) -> dict[str, Any]:
     smoke DB. The API exposes no runtime action endpoints; this call
     never mutates the DB.
     """
+    # V1 Step 1: the API fails closed until the explicit Ticket-column
+    # migration (scripts/migrate_ticket_fields.py) has run.
+    TaskMirrorStore(db_path).init_db()
+    migrate_ticket_fields(db_path)
     app = create_app(db_path)
     with TestClient(app) as client:
         runtime_response = client.get(

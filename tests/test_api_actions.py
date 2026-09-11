@@ -9,6 +9,7 @@ from typing import Any, Sequence
 from fastapi.testclient import TestClient
 
 from agent_taskflow.api.main import create_app
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.dispatcher import DispatcherResult
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
@@ -79,6 +80,8 @@ class ApiActionTests(unittest.TestCase):
             )
             return dispatcher
 
+        # The API fails closed until the explicit Step 1 migration has run.
+        migrate_ticket_fields(self.db_path)
         self.client_context = TestClient(
             create_app(self.db_path, dispatcher_factory=dispatcher_factory)
         )

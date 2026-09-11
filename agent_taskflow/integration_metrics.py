@@ -140,7 +140,7 @@ def compute_integration_metrics(
     # §39.1 late_dependency_rate and upstream_rework_rate depend on the
     # runtime-discovered dependency signal (§5.2) and on cross-Ticket file
     # overlap attribution, neither of which Step 2 owns. They are reported as
-    # 0.0 with their bases exposed rather than guessed at; see HANDOFF.md.
+    # 0.0 with their bases exposed rather than guessed at; see docs/v1/handoff-step2.md.
     late_dependency_rate = 0.0
     upstream_rework_rate = _rate(len(reintegrated), len(published))
 
