@@ -2,7 +2,7 @@
 
 Branch: `task/v1-stepf1`, stacked on `task/v1-step3` (PR #197) at `35e6b02`,
 which already contains Step 1.
-Draft PR: linked in the follow-up commit on this branch.
+Draft PR: https://github.com/anderson930420/agent-taskflow/pull/199 (draft, base `main`)
 Instructions: `~/agent-taskflow-ops/v1/stepf1.md`. Spec: `~/agent-taskflow-ops/v1/SPEC.md`.
 Follow-up definition: `~/agent-taskflow-ops/v1/FOLLOWUPS.md` F1.
 
