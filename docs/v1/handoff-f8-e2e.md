@@ -1,10 +1,30 @@
 # HANDOFF — V1 FOLLOWUPS F8 final gate: one real end-to-end run (rulings 53/56)
 
-## READ THIS FIRST
+## READ THIS FIRST — the outcome
 
-**PHASE 1 IS COMPLETE AND THE GATE PASSED.** Every step ran against the real
-`git` and `gh`; every command exited 0. Nothing failed, so nothing was patched
-and nothing was rerun.
+**BOTH PHASES ARE COMPLETE AND THE F8 END-TO-END GATE PASSED.** Every step ran
+against the real `git` and `gh`; every command exited 0. Nothing failed, so
+nothing was patched and nothing was rerun.
+
+Phase 1 (below) stopped exactly where ruling 56 says it must, at the owner's
+merge. The owner then merged PR #1, and **phase 2 — at the end of this file —
+ran the merge detection, the §36 verification and the gated cleanup, all green.**
+The Ticket reached persisted `cleaned` = §12 `completed`.
+
+**The phase-1 section below is kept as it was written at the time**, so its
+"waiting for you" wording describes that moment, not now.
+
+| | |
+| --- | --- |
+| Throwaway repo | **https://github.com/anderson930420/agent-taskflow-e2e-f8-20260912-1644** (private, left in place) |
+| PR | https://github.com/anderson930420/agent-taskflow-e2e-f8-20260912-1644/pull/1 — **MERGED** by the owner |
+| Final Ticket state | `AT-0001` → persisted `cleaned` = **`completed`** |
+| Hand-written statuses | **NONE, in either phase** |
+| One manual step remaining | the operator's `confirm_integration` trigger on `integrate_task` |
+
+---
+
+## Phase 1, as written at the time
 
 | | |
 | --- | --- |
@@ -718,3 +738,530 @@ F8. It is the natural next follow-up, and it is the owner's call.
 
 Every command exited 0 apart from the deliberate `grep` non-match. No step
 failed, so no code was patched and nothing was rerun.
+
+---
+
+# Phase 2 — after the owner's merge
+
+**BOTH PHASES ARE COMPLETE. THE F8 END-TO-END GATE PASSED.**
+
+The owner merged PR #1 on the throwaway repository at `2026-09-12T17:25:00Z`
+(`mergedBy: anderson930420`). Phase 2 ran the PR-outcome poll, the §36 merge
+verification and the gated cleanup. Every command exited 0. Nothing failed, so
+nothing was patched and nothing was rerun.
+
+| | |
+| --- | --- |
+| Throwaway repository | **https://github.com/anderson930420/agent-taskflow-e2e-f8-20260912-1644** (private, **left in place**) |
+| PR | https://github.com/anderson930420/agent-taskflow-e2e-f8-20260912-1644/pull/1 — `MERGED` |
+| GitHub merge commit | `be56ff48f2b60911081d448afeb9dd56e74bed56` |
+| Original task SHA | `53564f650054da7e513620db958c01a8e14f3a49` (**different**) |
+| Ticket | `AT-0001`, persisted `cleaned` = §12 display **`completed`** |
+
+Write boundaries were unchanged and were kept: only the throwaway repository and
+`/tmp`. `anderson930420/agent-taskflow` stayed read-only (PR #203 is still a
+draft and was not edited), `~/.agent-taskflow` was never opened, nothing was
+merged by me, nothing was force-pushed and nothing was rebased.
+
+---
+
+## Step 1 — poll the PR through the adapter (ruling 29)
+
+### The ruling-29 problem is real, and this run hit it
+
+Before running anything I asked `gh` for a `merged` field directly. It does not
+exist:
+
+```text
+$ gh pr view 1 --repo anderson930420/agent-taskflow-e2e-f8-20260912-1644 \
+    --json number,state,isDraft,merged,mergedAt,mergeCommit,...
+Unknown JSON field: "merged"
+exit=1
+```
+
+That is exactly the failure ruling 29 was written for. The adapter never asks
+for it:
+
+```text
+PR_VIEW_FIELDS = ('number', 'url', 'state', 'isDraft', 'mergedAt', 'mergeCommit',
+                  'headRefName', 'baseRefName', 'headRefOid', 'reviewDecision',
+                  'statusCheckRollup', 'reviews', 'title', 'body')
+'merged' present: False    <- the merge outcome is DERIVED
+```
+
+`GitHubPrAdapter._is_merged(state, merged_at, merge_commit_sha)` returns True
+when `state == "MERGED"`, or `mergedAt` is set, or `mergeCommit` is set. All
+three were present here, so the derivation is unambiguous.
+
+### The adapter's own snapshot
+
+```python
+GitHubPrAdapter(repo=GH).poll_pr(pr_number=1, cwd="/tmp/e2e-f8-20260912-1644/repo")
+```
+
+```json
+{
+  "number": 1,
+  "state": "closed",
+  "merged": true,
+  "merged_at": "2026-09-12T17:25:00Z",
+  "merge_commit_sha": "be56ff48f2b60911081d448afeb9dd56e74bed56",
+  "head_sha": "53564f650054da7e513620db958c01a8e14f3a49",
+  "is_draft": false,
+  "review_decision": "none",
+  "ci_status": "none"
+}
+exit=0
+```
+
+`state` is normalized to `closed`: §32.1 carries the merge fact in `pr_merged`,
+not in `pr_state`.
+
+### The dry poll writes nothing, the confirmed poll writes
+
+```python
+poll_pr_outcomes(WatcherRequest(repo=GH, repo_path=..., db_path=...,
+                                target_branch="main", remote="origin",
+                                confirm_poll=False))    # then True
+```
+
+Both returned the same outcome; only the confirmed one persisted it:
+
+```json
+{"task_key": "AT-0001", "pr_number": 1, "pr_state": "closed", "merged": true,
+ "review_decision": "none", "ci_status": "none",
+ "merge_commit_sha": "be56ff48f2b60911081d448afeb9dd56e74bed56",
+ "proposed_transition": null, "applied_transition": null,
+ "cleanup_performed": false, "task_status": "waiting_for_review",
+ "deferred": false, "poll_error": null}
+exit=0
+```
+
+```text
+ticket status after dry poll:       waiting_for_review
+ticket status after confirmed poll: waiting_for_review
+```
+
+The poll deliberately does **not** transition the Ticket on merge. Detecting a
+merge is not the same as verifying it (§36), so the status move waits for
+verification in step 3. `merge_detected` was audited (event id 25).
+
+### §32.1 after step 1 — ticket status `waiting_for_review`
+
+| field | value |
+| --- | --- |
+| pr_number | 1 |
+| pr_url | `https://github.com/anderson930420/agent-taskflow-e2e-f8-20260912-1644/pull/1` |
+| **pr_state** | **`closed`** |
+| **pr_merged** | **true** |
+| pr_head_sha | `53564f650054da7e513620db958c01a8e14f3a49` |
+| **merge_commit_sha** | **`be56ff48f2b60911081d448afeb9dd56e74bed56`** |
+| **review_decision** | **`none`** |
+| **ci_status** | **`none`** |
+| integrated_base_sha | `7b4a57ea8b40a42489c7ebc805f9f4a096d6d545` |
+| reintegration_count | 1 |
+| reintegration_required | false |
+| **pr_last_polled_at** | **`2026-09-12T17:27:43Z`** |
+
+All twelve §32.1 fields are now populated. The three that were null "by design"
+in phase 1 — `review_decision`, `ci_status`, `pr_last_polled_at` — were filled
+by this watcher tick, exactly as phase 1 predicted.
+
+---
+
+## Step 2 — merge verification (§35, §36, §36.1)
+
+### The two identities differ in this run
+
+```text
+PR merge_commit_sha (GitHub's merge result): be56ff48f2b60911081d448afeb9dd56e74bed56
+pr_head_sha         (the ORIGINAL task SHA): 53564f650054da7e513620db958c01a8e14f3a49
+THEY DIFFER: True
+```
+
+**Yes, they differ.** The owner used a merge commit, so GitHub created a new
+commit `be56ff4` whose parents are the previous `main` and the task head. §35
+exists precisely because these are not interchangeable, and this run exercises
+that difference rather than getting a lucky fast-forward where both SHAs match.
+
+### The worktree and branch were intact before verification
+
+```text
+$ git rev-parse --abbrev-ref HEAD  (exit=0) -> task/AT-0001-add-a-trivial-marker-file-so-the-f8-end
+$ git rev-parse HEAD               (exit=0) -> 53564f650054da7e513620db958c01a8e14f3a49
+worktree dir exists: True
+```
+
+### The verdict
+
+```python
+verify_merge(MergeVerificationRequest(
+    task_key="AT-0001", worktree_path=..., remote="origin", target_branch="main",
+    pr_merged=True, merge_commit_sha="be56ff48f2b60911081d448afeb9dd56e74bed56"))
+```
+
+```json
+{
+  "kind": "merge_verification",
+  "task_key": "AT-0001",
+  "verified": true,
+  "pr_merged": true,
+  "merge_commit_sha": "be56ff48f2b60911081d448afeb9dd56e74bed56",
+  "target_sha": "be56ff48f2b60911081d448afeb9dd56e74bed56",
+  "contained_in_target": true,
+  "original_task_sha_used": false,
+  "reasons": [],
+  "verified_at": "2026-09-12T17:28:07Z"
+}
+exit=0
+```
+
+Its git commands, in order:
+
+```text
+git fetch origin --prune
+git rev-parse origin/main
+git merge-base --is-ancestor be56ff48f2b60911081d448afeb9dd56e74bed56 origin/main
+```
+
+**Confirmed: the ancestry check ran on `be56ff4…`, GitHub's merge result — the
+original task SHA `53564f6…` appears nowhere in it.** The result records that
+fact explicitly rather than leaving it to be inferred:
+`"original_task_sha_used": false`.
+
+### §36.1 — the merge method actually used
+
+```text
+$ git merge-base --is-ancestor 53564f65... be56ff48...   (exit=0)
+
+*   be56ff4 Merge pull request #1 from anderson930420/task/AT-0001-add-a-trivial-...
+|\
+| *   53564f6 Merge remote-tracking branch 'origin/main' into task/AT-0001-...
+| |\
+| |/
+|/|
+* | 7b4a57e Unrelated change on main to make the F8 task branch stale
+| * d17b2b8 AT-0001: add a trivial marker file for the F8 end-to-end gate
+|/
+* 76f142b Initial commit
+```
+
+A **merge commit**. The task SHA happens to also be an ancestor here, but that
+is incidental to the method chosen — under squash or rebase merge it would not
+be, and the verification would still have passed, because it never looks at it.
+
+§32.1 is unchanged by this step: verification is a read, and only Step 2's
+watcher writes those fields.
+
+---
+
+## Step 3 — gated cleanup (§37), only after verification
+
+### Before cleanup — everything intact
+
+```text
+worktree dir exists : True
+git worktree list   : /tmp/e2e-f8-20260912-1644/repo                     7b4a57e [main]
+                      /tmp/e2e-f8-20260912-1644/repo/.worktrees/AT-0001  53564f6 [task/AT-0001-...]
+local branch        : + task/AT-0001-add-a-trivial-marker-file-so-the-f8-end
+REMOTE branch       : 53564f65... refs/heads/task/AT-0001-add-a-trivial-marker-file-so-the-f8-end
+```
+
+### 3a — the dry run verifies but removes nothing
+
+```python
+run_integration_cleanup(IntegrationCleanupRequest(..., confirm_cleanup=False))
+```
+
+```json
+{"ok": true, "status": "dry_run", "route": "verified_merge",
+ "final_task_status": "waiting_for_review",
+ "merge_verified": true,
+ "merge_commit_sha": "be56ff48f2b60911081d448afeb9dd56e74bed56",
+ "target_sha": "be56ff48f2b60911081d448afeb9dd56e74bed56",
+ "verification_reasons": [],
+ "worktree_removed": false, "local_branch_deleted": false,
+ "remote_branch_deleted": false, "evidence_archived": false,
+ "summary": "Merge is verified, but cleanup is dry-run by default; pass confirm_cleanup=True to remove the worktree and branch."}
+exit=0
+```
+
+Re-checked afterwards: the worktree, the local branch and the remote branch were
+all still there, and the Ticket was still `waiting_for_review`. **The worktree
+and branch survived right up to the confirmed call — they were never at risk
+before verification passed.**
+
+### 3b — the confirmed cleanup
+
+```python
+run_integration_cleanup(IntegrationCleanupRequest(
+    task_key="AT-0001", repo=GH, repo_path=..., target_branch="main",
+    remote="origin", db_path=..., confirm_cleanup=True))
+```
+
+```json
+{"ok": true, "status": "cleaned", "route": "verified_merge",
+ "final_task_status": "cleaned",
+ "merge_verified": true,
+ "merge_commit_sha": "be56ff48f2b60911081d448afeb9dd56e74bed56",
+ "target_sha": "be56ff48f2b60911081d448afeb9dd56e74bed56",
+ "verification_reasons": [],
+ "worktree_removed": true,
+ "local_branch_deleted": true,
+ "remote_branch_deleted": false,
+ "evidence_archived": true,
+ "merged": false, "force_pushed": false,
+ "safety": {"merged_by_taskflow": false, "force_pushed": false,
+            "human_review_required": true,
+            "cleanup_requires_verified_merge_or_explicit_confirmation": true},
+ "summary": "Merge be56ff48f2b60911081d448afeb9dd56e74bed56 verified; cleanup completed and Ticket marked completed"}
+exit=0
+```
+
+Every git command, in order — note that verification runs **again inside**
+cleanup, before anything is removed:
+
+```text
+git fetch origin --prune
+git rev-parse origin/main
+git merge-base --is-ancestor be56ff48f2b60911081d448afeb9dd56e74bed56 origin/main   ← re-verified
+git worktree remove /tmp/e2e-f8-20260912-1644/repo/.worktrees/AT-0001
+git branch -D task/AT-0001-add-a-trivial-marker-file-so-the-f8-end
+
+commands with a force flag or a remote delete: NONE
+```
+
+### What was removed, and what was kept
+
+| | |
+| --- | --- |
+| Worktree `/tmp/.../.worktrees/AT-0001` | **removed** |
+| Local branch `task/AT-0001-…` | **deleted** (`git branch -D`) |
+| **Remote branch `task/AT-0001-…`** | **KEPT — ruling 5** |
+| Evidence under `artifacts/AT-0001/attempt-b23e82b6…/` | **archived, kept** |
+| The merged commits on `main` | untouched |
+
+After:
+
+```text
+worktree dir exists : False
+git worktree list   : /tmp/e2e-f8-20260912-1644/repo  7b4a57e [main]
+local branch        : (gone)
+REMOTE branch       : 53564f65... refs/heads/task/AT-0001-add-a-trivial-marker-file-so-the-f8-end
+```
+
+Confirmed on GitHub — the remote branch is still there:
+
+```text
+$ gh api repos/anderson930420/agent-taskflow-e2e-f8-20260912-1644/branches --jq '.[].name'
+main
+task/AT-0001-add-a-trivial-marker-file-so-the-f8-end
+exit=0
+```
+
+**Ruling 5 holds.** `delete_remote_branch` is refused up front by the request
+object — `git push --delete` is outside the push allowlist and no exception is
+made for it — so remote branch deletion is left to GitHub's automatic
+head-branch deletion or to a human.
+
+The archived evidence, 18 files, kept in full:
+
+```text
+artifacts/AT-0001/attempt-b23e82b6572d4bc29e618e4f075fc833/
+    mission_contract.json
+    shell-shell.log                          ← the executor's own log
+    policy-validate.log
+    changed-files-audit.json  changed-files-validate.log
+    changed-files-git-status.out / .err
+    executor-launch-spec-shell.json  executor-process-shell.pid.json
+    validator-launch-spec-changed-files-git-status.json
+    validator-process-changed-files-git-status.pid.json
+    attempt-resources.json  runtime.lock
+    integration/integration-f4d1f9370eba.json   ← initial integration
+    integration/validators-f4d1f9370eba.json
+    integration/integration-357ca20f79fc.json   ← re-integration
+    integration/validators-357ca20f79fc.json
+    integration/cleanup-55c5cd950f6a.json       ← this cleanup
+```
+
+### §32.1 after step 3 — ticket status `cleaned`
+
+| field | value |
+| --- | --- |
+| pr_number | 1 |
+| pr_url | `https://github.com/anderson930420/agent-taskflow-e2e-f8-20260912-1644/pull/1` |
+| pr_state | `closed` |
+| pr_merged | true |
+| pr_head_sha | `53564f650054da7e513620db958c01a8e14f3a49` |
+| merge_commit_sha | `be56ff48f2b60911081d448afeb9dd56e74bed56` |
+| review_decision | `none` |
+| ci_status | `none` |
+| integrated_base_sha | `7b4a57ea8b40a42489c7ebc805f9f4a096d6d545` |
+| reintegration_count | 1 |
+| reintegration_required | false |
+| pr_last_polled_at | `2026-09-12T17:27:43Z` |
+
+---
+
+## Step 4 — `completed`, and the whole chain in one place
+
+```text
+persisted status            : cleaned
+§12 display (status_vocab)  : completed
+```
+
+### Every `status_changed` event, in order — §43 items 12 → 33
+
+| id | timestamp (UTC) | status | written by | §43 |
+| --- | --- | --- | --- | --- |
+| 3 | `16:45:53` | `preparing` | `dispatcher:c8fc68c9…` | 4 (one worktree) |
+| 5 | `16:45:53` | `implementing` | `dispatcher:c8fc68c9…` | 11 |
+| 8 | `16:45:54` | `validating` | `dispatcher:c8fc68c9…` | 15 |
+| **11** | **`16:45:54`** | **`ready_for_integration`** | **`dispatcher:c8fc68c9…`** | **12 — F8** |
+| 13 | `16:46:38` | `integrating` | `integration_controller` | 13 |
+| 15 | `16:46:44` | `waiting_for_review` | `integration_controller` | 14, 16 |
+| 17 | `16:47:33` | `ready_for_integration` | `integration_watcher` | 18, 19 |
+| 20 | `16:47:33` | `integrating` | `integration_controller` | 20 |
+| 22 | `16:47:40` | `waiting_for_review` | `integration_controller` | 21, 22 |
+| **27** | **`17:28:33`** | **`cleaned`** | **`integration_cleanup`** | **32, 33** |
+
+The full 28-event audit trail, including the non-status events:
+
+```text
+id=1    16:45:03  created                        mission_control
+id=2    16:45:53  worktree_recorded              dispatcher
+id=3    16:45:53  status_changed                 dispatcher:c8fc68c9…   → preparing
+id=4    16:45:53  note                           ticket_worktree
+id=5    16:45:53  status_changed                 dispatcher:c8fc68c9…   → implementing
+id=6    16:45:53  note                           canonical_runtime_admission
+id=7    16:45:54  note                           dispatcher
+id=8    16:45:54  status_changed                 dispatcher:c8fc68c9…   → validating
+id=9    16:45:54  note                           dispatcher
+id=10   16:45:54  note                           dispatcher
+id=11   16:45:54  status_changed                 dispatcher:c8fc68c9…   → ready_for_integration   ← F8
+id=12   16:45:54  integration_queued             integration_handoff                              ← F8
+id=13   16:46:38  status_changed                 integration_controller → integrating
+id=14   16:46:38  integration_started            integration_controller
+id=15   16:46:44  status_changed                 integration_controller → waiting_for_review
+id=16   16:46:44  integration_completed          integration_controller
+id=17   16:47:33  status_changed                 integration_watcher    → ready_for_integration
+id=18   16:47:33  reintegration_required         integration_watcher
+id=19   16:47:33  integration_queued             integration_watcher
+id=20   16:47:33  status_changed                 integration_controller → integrating
+id=21   16:47:33  integration_started            integration_controller
+id=22   16:47:40  status_changed                 integration_controller → waiting_for_review
+id=23   16:47:40  integration_completed          integration_controller
+id=24   17:27:43  pr_state_polled                integration_watcher
+id=25   17:27:43  merge_detected                 integration_watcher
+id=26   17:28:33  merge_verified                 integration_cleanup
+id=27   17:28:33  status_changed                 integration_cleanup    → cleaned
+id=28   17:28:33  integration_cleanup_completed  integration_cleanup
+```
+
+The per-repo integration queue is empty; both entries (F8's handoff at id 12 and
+the watcher's re-queue at id 19) were consumed by the controller.
+
+### Who wrote each status, across BOTH phases
+
+```text
+ - dispatcher:c8fc68c9a33448a0a0458a618eab8eb0
+ - integration_controller
+ - integration_watcher
+ - integration_cleanup
+
+hand-written by this run: NONE
+```
+
+Four sources, all of them production components. **There is no `source=e2e-*`
+status write anywhere in this database.**
+
+---
+
+## Step 5 — does the chain hold end to end without a hand-written status?
+
+**Yes. It holds, and no status in either phase was written by hand.**
+
+Compare with ruling 43's run, which needed this to get past the same point:
+
+```python
+store.update_task_status("AT-0001", "ready_for_integration",
+    source="e2e-ruling-43", expected_current_status="created")
+```
+
+That call has no counterpart here. Event id 11 shows
+`ready_for_integration` written by `dispatcher:<attempt-id>`, one step after
+`validating`, with `waiting_approval` never appearing and no approval row
+recorded. From there every remaining transition was written by
+`integration_controller`, `integration_watcher` or `integration_cleanup`.
+
+### The one remaining manual step
+
+**The operator's `confirm_integration` trigger.**
+
+`integrate_task` has no non-test caller anywhere in the repository, and
+`IntegrationRequest.confirm_integration` defaults to `False`. Nothing reads the
+per-repo integration queue and acts on it. So twice in this run — for the
+initial integration and again for the re-integration — a human had to call:
+
+```python
+integrate_task(IntegrationRequest(..., dry_run=False, confirm_integration=True))
+```
+
+That is the *only* step in the whole §43 12→33 chain that a person had to
+perform, other than the merge itself (§34, which is human by design and must
+stay that way). F8 does not change it, does not claim to, and reports it as
+fact 1 of `docs/v1/handoff-f8.md`. Building the queue consumer that makes that
+call is the natural next follow-up, and it is the owner's decision.
+
+For completeness, the other confirmation flags in this run (`confirm_poll`,
+`confirm_cleanup`) are deliberate dry-run-by-default gates on every Step 2 entry
+point, not lifecycle gates. Each was exercised in both modes and the dry mode
+wrote nothing.
+
+---
+
+## Phase 2 — every command and its exit code
+
+| # | Command | exit |
+| --- | --- | --- |
+| — | `gh pr view 1 --repo <throwaway> --json …,merged,…` | **1** — `Unknown JSON field: "merged"`, deliberately run to demonstrate ruling 29 |
+| — | `gh pr view 1 --repo <throwaway> --json number,state,isDraft,mergedAt,mergeCommit,mergedBy,…` | 0 |
+| — | `gh api repos/<throwaway>/commits/main --jq .sha` | 0 |
+| 1 | `python /tmp/e2e-f8-p2-step1.py` (adapter snapshot + dry poll + confirmed poll) | 0 |
+| 2 | `python /tmp/e2e-f8-p2-step2.py` (`verify_merge` + §36.1 ancestry check) | 0 |
+| 3 | `python /tmp/e2e-f8-p2-step3.py` (dry cleanup + confirmed cleanup) | 0 |
+| 4 | `python /tmp/e2e-f8-p2-step4.py` (status vocab + full audit chain) | 0 |
+| — | `gh api repos/<throwaway>/branches --jq '.[].name'` (remote branch survives) | 0 |
+| — | `find <scratch>/artifacts -type f` (archived evidence) | 0 |
+
+Every command exited 0 apart from the one deliberate `gh` failure that
+demonstrates why ruling 29 exists.
+
+---
+
+# VERDICT — the F8 end-to-end gate PASSED
+
+Both phases are complete. Running the same scenario as ruling 43 against the new
+path:
+
+- a Ticket whose validators pass reaches `ready_for_integration` **by itself**,
+  written by the dispatcher one step after `validating`;
+- it enters its repo's integration queue **exactly once**, automatically, keyed
+  on the moment it entered that status (§22.1) rather than the enqueue clock;
+- **the hand-written compare-and-set that ruling 43's run required is gone**, and
+  no status in either phase was written by anything other than a production
+  component;
+- initial integration, staleness detection, re-integration without a force push,
+  merge detection derived per ruling 29, §36 verification against GitHub's merge
+  result rather than the original task SHA (which **differed** here), and gated
+  cleanup that kept the remote branch (ruling 5) all behaved as specified;
+- the Ticket reached persisted `cleaned` = §12 `completed`, closing §43 items
+  12 → 33.
+
+The one manual step that remains is the operator's `confirm_integration`
+trigger on `integrate_task`, reported honestly and unchanged by F8.
+
+**Throwaway repository, left in place as instructed:**
+**https://github.com/anderson930420/agent-taskflow-e2e-f8-20260912-1644**
+
+**PR #203 on `anderson930420/agent-taskflow` is still a DRAFT. The owner merges it.**
