@@ -30,6 +30,7 @@ from agent_taskflow.governance import (
     assert_task_has_artifact_dir,
     assert_worktree_inside_repo_worktrees,
 )
+from agent_taskflow.integration_handoff import handoff_completed_implementation
 from agent_taskflow.mission_contract import build_from_task_fields, write_mission_contract
 from agent_taskflow.level2_execution_authority import (
     Level2ExecutionAuthorityError,
@@ -487,6 +488,7 @@ class Dispatcher:
             source="dispatcher",
             message="Dispatcher completed implementation and validation",
         )
+        self._handoff_to_integration(task.task_key, ticket=ticket)
 
         return DispatcherResult(
             task_key=task.task_key,
@@ -495,6 +497,37 @@ class Dispatcher:
             executor_status=executor_result.status,
             validator_statuses=validator_statuses,
         )
+
+    def _handoff_to_integration(self, task_key: str, *, ticket: bool) -> None:
+        """SPEC §43.12: put the finished implementation in its repo's queue.
+
+        Only a Ticket has a repository registry entry and an integration
+        lifecycle, so a legacy mirror row is left alone. The handoff writes no
+        lifecycle status: the Ticket stays at ``waiting_approval`` and the
+        human review gate is untouched.
+
+        Like the runtime progress writes, this is observation after the fact.
+        The implementation is already complete and already recorded, so a queue
+        failure is audited and never turns a finished run into a failure.
+        """
+        if not ticket:
+            return
+        try:
+            handoff_completed_implementation(
+                self.store, task_key, task_status="waiting_approval"
+            )
+        except Exception as exc:
+            reason = f"Integration handoff failed: {exc.__class__.__name__}: {exc}"
+            try:
+                self.store.record_task_event(
+                    task_key,
+                    "note",
+                    "dispatcher",
+                    message=reason,
+                    payload={"kind": "integration_handoff_failed", "error": str(exc)},
+                )
+            except Exception:  # pragma: no cover - the store itself is broken.
+                pass
 
     def _selected_executor_name(
         self,
