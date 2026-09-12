@@ -80,11 +80,12 @@ class CapacityTests(SchedulerTestCase):
 
         self.assertEqual(result.max_concurrent_tasks, 1)
         self.assertEqual([s.task_key for s in result.started], [high])
-        self.assertEqual(self.fx.status(high), "waiting_approval")
+        # V1 FOLLOWUPS F8: a Ticket's success terminal.
+        self.assertEqual(self.fx.status(high), "ready_for_integration")
         for untouched in (low, normal):
             self.assertEqual(self.fx.status(untouched), "created")
             self.assertEqual(self.fx.attempts(untouched), [])
-        self.assertEqual(result.worker_results[0]["status"], "waiting_approval")
+        self.assertEqual(result.worker_results[0]["status"], "ready_for_integration")
 
     def test_limit_two_with_three_eligible_starts_two(self) -> None:
         set_disposable_fixture_capacity(self.fx.db_path, 2, fixture="step5-capacity-two")
@@ -135,7 +136,7 @@ class ParallelImplementationTests(SchedulerTestCase):
             sorted((Path(t["worktree_path"]), f"refs/heads/{t['branch']}") for t in tickets.values()),
         )
         for key in keys:
-            self.assertEqual(self.fx.status(key), "waiting_approval")
+            self.assertEqual(self.fx.status(key), "ready_for_integration")
             attempts = self.fx.attempts(key)
             self.assertEqual(len(attempts), 1)
             leases = self.fx.leases(key)
@@ -290,8 +291,8 @@ class ReviewFixSchedulerTests(SchedulerTestCase):
         self.assertEqual(len(result.not_started), 1)
         self.assertIn("worker left running", result.not_started[0][1])
         # wait=True waited for it; it claimed on its own and finished normally.
-        self.assertEqual(result.worker_results[0]["status"], "waiting_approval")
-        self.assertEqual(self.fx.status(key), "waiting_approval")
+        self.assertEqual(result.worker_results[0]["status"], "ready_for_integration")
+        self.assertEqual(self.fx.status(key), "ready_for_integration")
         self.assertEqual(self.fx.leases(key, active_only=True), [])
 
     def test_one_raising_candidate_does_not_abort_the_tick(self) -> None:

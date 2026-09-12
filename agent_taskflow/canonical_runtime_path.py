@@ -34,9 +34,19 @@ from agent_taskflow.tasks import normalize_task_key
 # Task statuses that end the claimed Attempt and release its lease. `failed`
 # and `needs_decision` are V1 Step 5's Ticket failure targets (SPEC §29);
 # without them a failed Ticket would hold its capacity slot until the lease
-# expired.
+# expired. `ready_for_integration` is V1 FOLLOWUPS F8's Ticket success target
+# for the same reason: it is where the Ticket success path now ends, so it must
+# release exactly as `waiting_approval` does for the legacy path.
 RUNTIME_RELEASE_TASK_STATUSES = frozenset(
-    {"blocked", "waiting_approval", "canceled", "completed", "failed", "needs_decision"}
+    {
+        "blocked",
+        "waiting_approval",
+        "ready_for_integration",
+        "canceled",
+        "completed",
+        "failed",
+        "needs_decision",
+    }
 )
 
 
@@ -210,7 +220,12 @@ class CanonicalRuntimeTaskStore(_LegacyTaskMirrorStore):
 
     @staticmethod
     def _terminal_attempt_status(task_status: str) -> tuple[str, str | None, str | None]:
-        if task_status == "waiting_approval":
+        # V1 FOLLOWUPS F8: a Ticket's success terminal is
+        # `ready_for_integration`, but the *Attempt* vocabulary is separate and
+        # is deliberately not renamed here. `waiting_approval` remains the
+        # Attempt spelling for "implementation done, validators passed", which
+        # is exactly what both task statuses mean at the Attempt layer.
+        if task_status in {"waiting_approval", "ready_for_integration"}:
             return "waiting_approval", "completed", "passed"
         if task_status == "completed":
             return "completed", "completed", "passed"
@@ -250,6 +265,7 @@ class CanonicalRuntimeTaskStore(_LegacyTaskMirrorStore):
         )
         reason_code = {
             "waiting_approval": "canonical_runtime_waiting_approval",
+            "ready_for_integration": "canonical_runtime_ready_for_integration",
             "completed": "canonical_runtime_completed",
             "canceled": "canonical_runtime_canceled",
             "blocked": "canonical_runtime_blocked",

@@ -29,6 +29,21 @@ from agent_taskflow.tasks import normalize_task_key
 TICKET_FAILED_STATUS = "failed"
 TICKET_NEEDS_DECISION_STATUS = "needs_decision"
 
+# The success terminal, split the same way the failure vocabulary is.
+#
+# V1 FOLLOWUPS F8 (RULINGS 53): a Ticket whose implementation and Taskflow
+# validators both pass goes straight to `ready_for_integration`, which is where
+# SPEC §22 depicts the per-repo Integration Queue holding it and what §22.1
+# keys FIFO order on. The human gate stays where SPEC §31 and §44 put it —
+# review of the GitHub PR before merge. §12's status model has no approval
+# state between `validating` and `ready_for_integration`, and §18's manual
+# controls list no "approve".
+#
+# The legacy GitHub-issue path keeps `waiting_approval` and its approve/reject
+# routes; that split is FOLLOWUPS F5.
+TICKET_SUCCESS_STATUS = "ready_for_integration"
+LEGACY_SUCCESS_STATUS = "waiting_approval"
+
 # Where a Ticket failure came from. Only VALIDATOR_RED stops for a decision.
 FAILURE_GOVERNANCE = "governance_refusal"
 FAILURE_WORKTREE = "worktree_preparation"
@@ -51,6 +66,15 @@ FAILURE_KINDS = frozenset(
 # A Ticket in one of these was stopped by the remap. Dispatching it again
 # writes nothing (SPEC §44); the retry path is scripts/reset_task_status.py.
 TICKET_STOPPED_STATUSES = frozenset({TICKET_FAILED_STATUS, TICKET_NEEDS_DECISION_STATUS})
+
+
+def ticket_success_status(*, ticket: bool) -> str:
+    """Return the persisted status a successful run ends in.
+
+    A Ticket ends `ready_for_integration` (SPEC §22, §43.12); a legacy mirror
+    row keeps `waiting_approval`.
+    """
+    return TICKET_SUCCESS_STATUS if ticket else LEGACY_SUCCESS_STATUS
 
 
 def ticket_failure_status(kind: str) -> str:
@@ -101,11 +125,14 @@ __all__ = [
     "FAILURE_VALIDATOR_ERROR",
     "FAILURE_VALIDATOR_RED",
     "FAILURE_WORKTREE",
+    "LEGACY_SUCCESS_STATUS",
     "TICKET_FAILED_STATUS",
     "TICKET_NEEDS_DECISION_STATUS",
     "TICKET_STOPPED_STATUSES",
+    "TICKET_SUCCESS_STATUS",
     "is_ticket",
     "is_ticket_in_connection",
     "tasks_has_ticket_columns",
     "ticket_failure_status",
+    "ticket_success_status",
 ]
