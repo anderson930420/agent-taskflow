@@ -321,6 +321,10 @@ def create_app(
 
         if task.status in {
             "waiting_approval",
+            # V1 FOLLOWUPS F8: a Ticket's success terminal. Restarting a
+            # finished Ticket would re-run an implementation that is already
+            # queued for integration.
+            "ready_for_integration",
             "waiting_for_review",
             "accepted",
             "rejected",

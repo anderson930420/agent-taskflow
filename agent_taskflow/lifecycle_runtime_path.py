@@ -407,6 +407,18 @@ class LifecycleRuntimeTaskStore(AttemptScopedRuntimeTaskStore):
                 "passed",
                 {},
             )
+        elif status == "ready_for_integration":
+            # V1 FOLLOWUPS F8: the Ticket success terminal. Same Attempt
+            # outcome as the legacy one — implementation done, validators
+            # passed — under its own reason code so the audit trail names
+            # which path released the claim.
+            outcome = _TerminalOutcome(
+                "waiting_approval",
+                "runtime_ready_for_integration",
+                "completed",
+                "passed",
+                {},
+            )
         elif status == "completed":
             outcome = _TerminalOutcome(
                 "completed", "runtime_completed", "completed", "passed", {}

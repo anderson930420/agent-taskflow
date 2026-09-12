@@ -63,7 +63,8 @@ class OneWorktreePerTicketTests(Step5WorktreeTestCase):
         executor = RecordingExecutor()
         result = self.fx.dispatch(ticket.task_key, executor)
 
-        self.assertEqual(result.status, "waiting_approval", result.summary)
+        # V1 FOLLOWUPS F8: a Ticket's success terminal.
+        self.assertEqual(result.status, "ready_for_integration", result.summary)
         self.assertEqual(
             git_worktrees(self.fx.repo),
             [(ticket.worktree_path, f"refs/heads/{ticket.branch}")],
@@ -93,7 +94,7 @@ class OneWorktreePerTicketTests(Step5WorktreeTestCase):
         second = RecordingExecutor()
         result = self.fx.dispatch(ticket.task_key, second)
 
-        self.assertEqual(result.status, "waiting_approval", result.summary)
+        self.assertEqual(result.status, "ready_for_integration", result.summary)
         self.assertIn("attempt-one.txt", second.seen_files[0])
         self.assertEqual(Path(second.contexts[0].worktree_path), ticket.worktree_path)
         self.assertNotEqual(first.contexts[0].attempt_id, second.contexts[0].attempt_id)
@@ -206,7 +207,7 @@ class MigrationRequiredTests(Step5WorktreeTestCase):
 
         result = self.fx.dispatch(ticket.task_key, RecordingExecutor())
 
-        self.assertNotEqual(result.status, "waiting_approval")
+        self.assertNotEqual(result.status, "ready_for_integration")
         self.assertIn(TICKET_WORKTREE_MIGRATION_SCRIPT, result.summary)
         self.assertEqual(self.fx.task_row(ticket.task_key), before)
         self.assertEqual(self.fx.events(ticket.task_key), events_before)
@@ -236,6 +237,7 @@ class MigrationRequiredTests(Step5WorktreeTestCase):
             )
         )
         result = self.fx.dispatch("AT-LEGACY-1", RecordingExecutor())
+        # A legacy mirror row keeps the legacy terminal (FOLLOWUPS F5).
         self.assertEqual(result.status, "waiting_approval", result.summary)
 
 
