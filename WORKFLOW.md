@@ -176,6 +176,40 @@ and may delete only the verified remote task branch with `git push
 local branches or worktrees, close issues, archive tasks, mark tasks complete,
 update task status, merge, approve, or run in the background.
 
+The V1 Step 2 Integration Controller (`agent_taskflow/integration_controller.py`)
+implements the V1 Master Spec Integration Controller: a per-repository
+serialized integration queue and Loose Integration Lock, initial rebase onto
+the latest target, merge-latest-target-into-an-already-published-branch for
+re-integration, deterministic Taskflow validators as the gate into
+`needs_review`, GitHub PR create/update, target-freshness and PR-state
+polling, merge verification, and cleanup.
+
+Its safety boundary is deliberately narrow:
+
+- It never force pushes. The only push it may make is
+  `git push origin <task-branch>` (optional `-u`); every other push form is
+  refused by an allowlist, and published PR branches are updated by merge
+  plus that normal push.
+- It never merges. The `gh` adapter rejects any merge subcommand, and the git
+  layer refuses to push the target or a protected branch. Human GitHub merge
+  remains the only way the target branch advances.
+- It never removes a worktree, branch, or artifact unless the GitHub merge
+  result SHA is verified present in the target branch history, or an operator
+  passes the explicit closed-unmerged cleanup confirmation.
+- It never deletes a remote branch: SPEC §37's optional remote-branch cleanup
+  is off in V1, and remote task branches are left to GitHub's automatic
+  head-branch deletion or to manual deletion.
+- Every entry point is dry-run by default and requires an explicit
+  confirmation flag before it touches git, GitHub, or the filesystem. Nothing
+  in Step 2 runs itself; a scheduler or an operator drives each tick.
+- GitHub CI status is recorded for review but is never a lifecycle authority.
+- Taskflow validator failure and unresolvable integration conflicts both stop
+  at `needs_decision` with full evidence. There is no auto retry.
+
+Step 2 owns the Ticket PR / integration fields listed in the V1 spec §32.1 and
+is their only writer; every other component reads them and must tolerate null.
+See `docs/v1-step2-integration-controller.md` for the module map.
+
 ## Task Lifecycle
 
 The intended task lifecycle is:
@@ -291,12 +325,20 @@ agent-taskflow should not provide:
 - self-selected tasks
 - self-validation
 - self-approval
-- automatic merge
-- automatic push
+- automatic merge: automated merge remains a **non-goal**. Taskflow never
+  merges a pull request and never pushes the target branch; every merge is a
+  human action on GitHub
+- automatic push of anything other than a task branch
 - automatic cleanup/delete
 - production GitHub issue sync yet
 - remote worker pools yet
 - multi-host scheduling yet
+
+Automated integration up to a draft PR is **in scope**, and is not covered by
+the "automatic merge" or "automatic push" entries above. The V1 Step 2
+Integration Controller may fetch, update the task branch against the latest
+target, run validators, push the task branch with a normal (never forced) push,
+and create or update a draft PR. It stops there: merging stays with a human.
 
 ## Future Machine-Readable Contract
 

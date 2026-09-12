@@ -81,6 +81,19 @@ TASK_EVENT_TYPES = {
     "runtime_execution_finished",
     "worktree_recorded",
     "cleanup_recorded",
+    # V1 Master Spec Step 2 integration controller lifecycle events.
+    "integration_queued",
+    "integration_started",
+    "integration_completed",
+    "integration_blocked",
+    "reintegration_required",
+    "pr_state_polled",
+    "pr_poll_failed",
+    "pr_review_changes_requested",
+    "pr_closed_unmerged",
+    "merge_detected",
+    "merge_verified",
+    "integration_cleanup_completed",
     "note",
 }
 
@@ -108,6 +121,13 @@ TASK_ARTIFACT_TYPES = {
     "runtime_handoff_execution",
     WORKFLOW_POLICY_SUMMARY_ARTIFACT_TYPE,
     WORKFLOW_POLICY_ARTIFACT_INDEX_TYPE,
+    # V1 Master Spec Step 2 integration controller proof-of-work.
+    # Conflict, review, and merge-verification evidence are recorded as
+    # queryable rows plus task events rather than as artifact files, so they
+    # deliberately have no artifact type here.
+    "integration_result",
+    "integration_validator_evidence",
+    "integration_cleanup",
     "other",
 }
 

@@ -81,6 +81,8 @@ SCHEMA_MIGRATIONS = (
     "tasks_blocked_reason",
     "tasks_executor_selection",
     "task_worktrees_base_sha",
+    "v1_step2_integration_tables",
+    "v1_step2_conflict_verification",
 )
 
 
@@ -143,10 +145,126 @@ def _migrate_task_worktrees_base_sha(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "task_worktrees", "base_sha", "TEXT")
 
 
+def _migrate_v1_step2_integration_tables(conn: sqlite3.Connection) -> None:
+    """Create the V1 Master Spec Step 2 integration tables.
+
+    ``task_pr_state`` holds exactly the §32.1 Ticket PR fields. Its column set
+    is generated from ``integration_schema.TICKET_PR_FIELDS`` so the two cannot
+    drift; the import is local to keep ``store`` free of an import cycle.
+
+    Step 2 is the only writer of every table created here.
+    """
+    from agent_taskflow.integration_schema import (
+        TICKET_PR_FIELDS,
+        sqlite_column_type,
+    )
+
+    pr_columns = ",\n                ".join(
+        f"{spec.name} {sqlite_column_type(spec)}" for spec in TICKET_PR_FIELDS
+    )
+    conn.executescript(
+        f"""
+        CREATE TABLE IF NOT EXISTS task_pr_state (
+            task_key TEXT PRIMARY KEY,
+            {pr_columns},
+            FOREIGN KEY(task_key) REFERENCES tasks(task_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS task_integration_state (
+            task_key TEXT PRIMARY KEY,
+            previous_integrated_base_sha TEXT,
+            new_target_sha TEXT,
+            behind_count INTEGER,
+            last_integration_run_id TEXT,
+            last_integration_status TEXT,
+            trigger_task_key TEXT,
+            merge_verified_at TEXT,
+            closed_unmerged_at TEXT,
+            cleanup_confirmed_at TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_key) REFERENCES tasks(task_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS integration_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_key TEXT NOT NULL UNIQUE,
+            repo TEXT NOT NULL,
+            enqueued_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            priority TEXT,
+            FOREIGN KEY(task_key) REFERENCES tasks(task_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_integration_queue_repo
+            ON integration_queue (repo, enqueued_at, id);
+
+        CREATE TABLE IF NOT EXISTS integration_locks (
+            repo TEXT PRIMARY KEY,
+            owner TEXT NOT NULL,
+            acquired_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS integration_validator_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_key TEXT NOT NULL,
+            integration_run_id TEXT NOT NULL,
+            validator TEXT NOT NULL,
+            command_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            exit_code INTEGER,
+            output TEXT,
+            branch_sha TEXT,
+            target_sha TEXT,
+            diff_context TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_key) REFERENCES tasks(task_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS integration_review_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_key TEXT NOT NULL,
+            pr_number INTEGER,
+            pr_url TEXT,
+            review_decision TEXT,
+            reviewer TEXT,
+            reviewed_at TEXT,
+            reviewed_head_sha TEXT,
+            comments_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_key) REFERENCES tasks(task_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS integration_conflict_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_key TEXT NOT NULL,
+            integration_run_id TEXT NOT NULL,
+            resolver TEXT NOT NULL,
+            resolved INTEGER NOT NULL,
+            conflict_hunks_json TEXT,
+            explanation TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_key) REFERENCES tasks(task_key)
+        );
+        """
+    )
+
+def _migrate_v1_step2_conflict_verification(conn: sqlite3.Connection) -> None:
+    """Record which post-resolution checks failed (§27.2.1, review blocker B2).
+
+    Additive and Step-2-private: one nullable column on the conflict evidence
+    table, holding the control plane's verdict alongside the resolver's claim.
+    """
+    _add_column_if_missing(
+        conn, "integration_conflict_evidence", "verification_json", "TEXT"
+    )
+
+
 _MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (
     ("tasks_blocked_reason", _migrate_tasks_blocked_reason),
     ("tasks_executor_selection", _migrate_tasks_executor_selection),
     ("task_worktrees_base_sha", _migrate_task_worktrees_base_sha),
+    ("v1_step2_integration_tables", _migrate_v1_step2_integration_tables),
+    ("v1_step2_conflict_verification", _migrate_v1_step2_conflict_verification),
 )
 
 

@@ -1,0 +1,360 @@
+"""Shared fixtures for the V1 Step 2 Integration Controller tests.
+
+Not collected as a test module (the name does not match ``test*.py``).
+
+The Step 2 tests use *real* throwaway git repositories rather than a faked
+git runner: rebase, merge, ``behind_count`` and ancestry containment are the
+behaviours under test, and a fake runner would only prove that the fake
+agrees with itself. GitHub is faked, because it is a remote service.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import json
+import re
+import subprocess
+from pathlib import Path
+from typing import Any
+
+
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "Step2 Test",
+    "GIT_AUTHOR_EMAIL": "step2@example.invalid",
+    "GIT_COMMITTER_NAME": "Step2 Test",
+    "GIT_COMMITTER_EMAIL": "step2@example.invalid",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+}
+
+
+def git(cwd: Path, *args: str, extra_env: dict[str, str] | None = None) -> str:
+    """Run a git command in ``cwd`` and return stdout, raising on failure."""
+    import os
+
+    env = dict(os.environ)
+    env.update(GIT_ENV)
+    env.update(extra_env or {})
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        env=env,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} failed in {cwd}: {completed.stderr.strip()}"
+        )
+    return completed.stdout
+
+
+@dataclass
+class GitFixture:
+    """An origin bare repo, a clone, and one task worktree on a task branch."""
+
+    root: Path
+    target_branch: str = "main"
+    origin: Path = field(init=False)
+    repo: Path = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.origin = self.root / "origin.git"
+        self.repo = self.root / "repo"
+        self.origin.mkdir(parents=True, exist_ok=True)
+        git(self.origin.parent, "init", "--bare", "--initial-branch", self.target_branch, str(self.origin))
+        seed = self.root / "seed"
+        seed.mkdir()
+        git(seed, "init", "--initial-branch", self.target_branch)
+        (seed / "README.md").write_text("seed\n", encoding="utf-8")
+        (seed / "shared.txt").write_text("line1\nline2\nline3\n", encoding="utf-8")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-m", "seed")
+        git(seed, "remote", "add", "origin", str(self.origin))
+        git(seed, "push", "origin", self.target_branch)
+        git(self.root, "clone", str(self.origin), str(self.repo))
+
+    def create_task_worktree(self, task_key: str, *, branch: str | None = None) -> Path:
+        """Create ``<repo>/.worktrees/<task_key>`` on a fresh task branch."""
+        branch_name = branch or f"task/{task_key}"
+        worktree_path = self.repo / ".worktrees" / task_key
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        git(
+            self.repo,
+            "worktree",
+            "add",
+            str(worktree_path),
+            "-b",
+            branch_name,
+            f"origin/{self.target_branch}",
+        )
+        return worktree_path
+
+    def commit_in(self, worktree: Path, relative_path: str, contents: str, message: str) -> str:
+        target = worktree / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents, encoding="utf-8")
+        git(worktree, "add", "-A")
+        git(worktree, "commit", "-m", message)
+        return git(worktree, "rev-parse", "HEAD").strip()
+
+    def advance_target(self, relative_path: str = "advanced.txt", contents: str = "advanced\n") -> str:
+        """Push a new commit onto the target branch of origin."""
+        staging = self.root / f"staging-{relative_path.replace('/', '-')}"
+        if staging.exists():
+            import shutil
+
+            shutil.rmtree(staging)
+        git(self.root, "clone", str(self.origin), str(staging))
+        (staging / relative_path).write_text(contents, encoding="utf-8")
+        git(staging, "add", "-A")
+        git(staging, "commit", "-m", f"advance target: {relative_path}")
+        git(staging, "push", "origin", self.target_branch)
+        return git(staging, "rev-parse", "HEAD").strip()
+
+    def target_sha(self) -> str:
+        return git(self.origin, "rev-parse", self.target_branch).strip()
+
+    def merge_branch_into_target(self, branch: str, *, method: str = "merge") -> str:
+        """Simulate a human GitHub merge, returning the resulting merge SHA.
+
+        Supports the three GitHub merge methods of §36.1. ``squash`` and
+        ``rebase`` deliberately produce commit SHAs that do not exist on the
+        task branch.
+        """
+        import shutil
+
+        staging = self.root / f"merge-{branch.replace('/', '-')}-{method}"
+        if staging.exists():
+            shutil.rmtree(staging)
+        git(self.root, "clone", str(self.origin), str(staging))
+        git(staging, "fetch", "origin", f"{branch}:{branch}")
+        if method == "merge":
+            git(staging, "merge", "--no-ff", "--no-edit", branch)
+        elif method == "squash":
+            git(staging, "merge", "--squash", branch)
+            git(staging, "commit", "-m", f"squash merge {branch}")
+        elif method == "rebase":
+            # GitHub's rebase merge replays the commits with a fresh committer,
+            # so the resulting SHAs never match the original task commits. The
+            # committer-date override reproduces that faithfully.
+            git(
+                staging,
+                "cherry-pick",
+                f"{self.target_branch}..{branch}",
+                extra_env={"GIT_COMMITTER_DATE": "2030-01-01T00:00:00+00:00"},
+            )
+        else:  # pragma: no cover - defensive
+            raise ValueError(f"unknown merge method: {method}")
+        git(staging, "push", "origin", self.target_branch)
+        return git(staging, "rev-parse", "HEAD").strip()
+
+
+# The fields real `gh pr view --json` accepts, copied verbatim from gh 2.45.0 on
+# the box that runs Taskflow (`gh pr view 196 --json zz_not_a_field` prints this
+# list). The fake rejects anything else exactly as real gh does, so a test can
+# never pass against a field the real binary does not have (review round 4,
+# Ruling 29c: the fake once answered `merged`, which real gh rejects).
+GH_PR_VIEW_JSON_FIELDS = frozenset(
+    {
+        "additions", "assignees", "author", "autoMergeRequest", "baseRefName",
+        "body", "changedFiles", "closed", "closedAt", "comments", "commits",
+        "createdAt", "deletions", "files", "headRefName", "headRefOid",
+        "headRepository", "headRepositoryOwner", "id", "isCrossRepository",
+        "isDraft", "labels", "latestReviews", "maintainerCanModify",
+        "mergeCommit", "mergeStateStatus", "mergeable", "mergedAt", "mergedBy",
+        "milestone", "number", "potentialMergeCommit", "projectCards",
+        "projectItems", "reactionGroups", "reviewDecision", "reviewRequests",
+        "reviews", "state", "statusCheckRollup", "title", "updatedAt", "url",
+    }
+)
+
+
+def unknown_gh_json_field_error(field: str) -> str:
+    """The stderr real gh 2.45.0 prints for an unknown ``--json`` field."""
+    listing = "\n".join(f"  {name}" for name in sorted(GH_PR_VIEW_JSON_FIELDS))
+    return f'Unknown JSON field: "{field}"\nAvailable fields:\n{listing}\n'
+
+
+# What real gh 2.45.0 prints, rc=1, for `gh pr edit` on this repository: the
+# Projects (classic) GraphQL deprecation error. Captured read-only with
+# `gh pr view 196 --json projectCards`, which fails with the same message and
+# field path (review round 5; Ruling 35c). The fake fails `gh pr edit` with
+# exactly this, so a regression back to `pr edit` fails a test.
+GH_PR_EDIT_PROJECTS_CLASSIC_ERROR = (
+    "GraphQL: Projects (classic) is being deprecated in favor of the new "
+    "Projects experience, see: "
+    "https://github.blog/changelog/2024-05-23-sunset-notice-projects-classic/. "
+    "(repository.pullRequest.projectCards)\n"
+)
+
+
+@dataclass
+class FakeCompletedProcess:
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+
+
+class FakeGhRunner:
+    """A scripted ``gh`` runner that records every argv it is handed.
+
+    It refuses to implement ``gh pr merge`` at all: if production code ever
+    reaches for it the call surfaces as an explicit failure rather than a
+    silently successful merge.
+
+    Like real gh it knows only the fields in ``GH_PR_VIEW_JSON_FIELDS``: a
+    ``--json`` request naming any other field fails with gh's own error, and
+    ``set_pr`` refuses to script one.
+
+    Like real gh 2.45.0 on this repository, ``gh pr edit`` always fails with
+    the Projects (classic) error; a PR is updated through the REST PATCH
+    ``gh api -X PATCH repos/<repo>/pulls/<n> -f key=value``. Any ``gh api``
+    call that names a merge endpoint or ``graphql`` raises, like ``pr merge``.
+    """
+
+    def __init__(self, *, repo: str = "owner/repo", start_number: int = 41) -> None:
+        self.repo = repo
+        self.calls: list[list[str]] = []
+        self._next_number = start_number
+        self.pulls: dict[int, dict[str, Any]] = {}
+        self.create_returncode = 0
+        self.create_stderr = ""
+
+    # -- scripting helpers -------------------------------------------------
+    def set_pr(self, number: int, **fields: Any) -> dict[str, Any]:
+        unknown = sorted(set(fields) - GH_PR_VIEW_JSON_FIELDS)
+        if unknown:
+            raise AssertionError(f"real gh has no PR field(s) {unknown}")
+        payload = self.pulls.setdefault(number, self._blank_pr(number))
+        payload.update(fields)
+        return payload
+
+    def _blank_pr(self, number: int) -> dict[str, Any]:
+        return {
+            "number": number,
+            "url": f"https://github.com/{self.repo}/pull/{number}",
+            "state": "OPEN",
+            "isDraft": True,
+            "mergedAt": None,
+            "mergeCommit": None,
+            "headRefName": "",
+            "baseRefName": "",
+            "headRefOid": "",
+            "reviewDecision": "",
+            "statusCheckRollup": [],
+            "reviews": [],
+            "title": "",
+            "body": "",
+        }
+
+    # -- runner protocol ---------------------------------------------------
+    def __call__(self, args: list[str], **kwargs: Any) -> FakeCompletedProcess:
+        self.calls.append(list(args))
+        if args[:3] == ["gh", "pr", "create"]:
+            return self._create(args)
+        if args[:3] == ["gh", "pr", "edit"]:
+            return self._edit(args)
+        if args[:3] == ["gh", "pr", "view"]:
+            return self._view(args)
+        if args[:3] == ["gh", "pr", "merge"]:
+            raise AssertionError("gh pr merge must never be invoked by Taskflow")
+        if args[:2] == ["gh", "api"]:
+            return self._api(args)
+        return FakeCompletedProcess(returncode=97, stderr=f"unexpected gh call: {args}")
+
+    def _flag(self, args: list[str], flag: str) -> str | None:
+        if flag in args:
+            return args[args.index(flag) + 1]
+        return None
+
+    def _create(self, args: list[str]) -> FakeCompletedProcess:
+        if self.create_returncode != 0:
+            return FakeCompletedProcess(
+                returncode=self.create_returncode, stderr=self.create_stderr
+            )
+        self._next_number += 1
+        number = self._next_number
+        payload = self._blank_pr(number)
+        payload.update(
+            {
+                "headRefName": self._flag(args, "--head") or "",
+                "baseRefName": self._flag(args, "--base") or "",
+                "title": self._flag(args, "--title") or "",
+                "body": self._flag(args, "--body") or "",
+                "isDraft": "--draft" in args,
+            }
+        )
+        self.pulls[number] = payload
+        return FakeCompletedProcess(returncode=0, stdout=f"{payload['url']}\n")
+
+    def _edit(self, args: list[str]) -> FakeCompletedProcess:
+        # Real gh 2.45.0 cannot edit a PR on this repository (Ruling 35).
+        return FakeCompletedProcess(returncode=1, stderr=GH_PR_EDIT_PROJECTS_CLASSIC_ERROR)
+
+    def _api(self, args: list[str]) -> FakeCompletedProcess:
+        method = "GET"
+        endpoint: str | None = None
+        fields: list[str] = []
+        rest = args[2:]
+        index = 0
+        while index < len(rest):
+            token = rest[index]
+            if token in ("-X", "--method"):
+                method = rest[index + 1].upper()
+                index += 2
+            elif token in ("-f", "--raw-field", "-F", "--field"):
+                fields.append(rest[index + 1])
+                index += 2
+            else:
+                endpoint = endpoint or token
+                index += 1
+        target = endpoint or ""
+        if "merge" in target or "graphql" in target:
+            raise AssertionError(f"a gh api merge must never be invoked by Taskflow: {args}")
+        match = re.fullmatch(rf"repos/{re.escape(self.repo)}/pulls/(\d+)", target)
+        if method != "PATCH" or match is None:
+            return FakeCompletedProcess(returncode=97, stderr=f"unexpected gh api call: {args}")
+        payload = self.pulls.get(int(match.group(1)))
+        if payload is None:
+            return FakeCompletedProcess(returncode=1, stderr="gh: Not Found (HTTP 404)\n")
+        for field_arg in fields:
+            key, _, value = field_arg.partition("=")
+            if key not in {"title", "body"}:
+                return FakeCompletedProcess(
+                    returncode=1, stderr="gh: Validation Failed (HTTP 422)\n"
+                )
+            payload[key] = value
+        # The REST pull-request object, in the few keys a caller might read.
+        return FakeCompletedProcess(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": payload["number"],
+                    "html_url": payload["url"],
+                    "state": "open" if payload["state"] == "OPEN" else "closed",
+                    "draft": payload["isDraft"],
+                    "title": payload["title"],
+                    "body": payload["body"],
+                }
+            ),
+        )
+
+    def _view(self, args: list[str]) -> FakeCompletedProcess:
+        number = int(args[3])
+        payload = self.pulls.get(number)
+        if payload is None:
+            return FakeCompletedProcess(returncode=1, stderr="no such PR")
+        requested = self._flag(args, "--json")
+        fields = requested.split(",") if requested else list(payload)
+        for field in fields:
+            if field not in GH_PR_VIEW_JSON_FIELDS:
+                return FakeCompletedProcess(
+                    returncode=1, stderr=unknown_gh_json_field_error(field)
+                )
+        return FakeCompletedProcess(
+            returncode=0,
+            stdout=json.dumps({key: payload.get(key) for key in fields}),
+        )
