@@ -115,12 +115,13 @@ class AcceptanceTestCase(unittest.TestCase):
     def complete_implementation(self, task_key: str, *, repo: str = "owner/repo"):
         """Finish a Ticket's implementation the way the pipeline does.
 
-        The dispatcher ends a completed implementation at `waiting_approval`
-        on a Ticket row carrying its repository's `github_repo`; V1 F4's
-        handoff is what turns that into a queue entry. This reproduces that
-        state and then calls the real handoff, so §43.12 below is driven, not
-        hand-written. The dispatcher itself is exercised end to end in
-        tests/test_v1_f4_integration_handoff.py.
+        The dispatcher ends a completed implementation at
+        `ready_for_integration` (V1 FOLLOWUPS F8) on a Ticket row carrying its
+        repository's `github_repo`; F4's handoff is what turns that into a
+        queue entry. This reproduces that state and then calls the real
+        handoff, so §43.12 below is driven, not hand-written. The dispatcher
+        itself is exercised end to end in
+        tests/test_v1_f8_ready_for_integration.py.
         """
         migrate_ticket_fields(self.db_path)
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
@@ -142,14 +143,14 @@ class AcceptanceTestCase(unittest.TestCase):
             )
         self.store.update_task_status(
             task_key,
-            "waiting_approval",
+            schema.READY_FOR_INTEGRATION,
             source="dispatcher",
             message="Dispatcher completed implementation and validation",
         )
         return handoff_completed_implementation(
             self.store,
             task_key,
-            task_status="waiting_approval",
+            task_status=schema.READY_FOR_INTEGRATION,
             integration_store=self.integration,
         )
 
@@ -242,16 +243,10 @@ class EndToEndJourneyTests(AcceptanceTestCase):
             [e.event_type for e in self.store.list_task_events("AT-101")],
         )
 
-        # F4 hands off; it does not move the Ticket's status. The human review
-        # gate at waiting_approval still owns the edge into
-        # ready_for_integration, so this test drives that edge itself.
-        self.store.update_task_status(
-            "AT-101",
-            schema.READY_FOR_INTEGRATION,
-            source="acceptance",
-            message="Operator released the Ticket for integration",
-            expected_current_status="waiting_approval",
-        )
+        # V1 FOLLOWUPS F8 closed the lifecycle half of §43.12: the successful
+        # implementation path writes `ready_for_integration` itself, so there
+        # is no operator edge for this test to drive any more.
+        self.assertEqual(self.status_of("AT-101"), schema.READY_FOR_INTEGRATION)
 
         # 14 — initial integration uses the latest target.
         advanced = self.fixture.advance_target("first.txt")

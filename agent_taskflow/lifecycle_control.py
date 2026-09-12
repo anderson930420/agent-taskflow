@@ -56,6 +56,9 @@ RUNTIME_REASON_CODES = frozenset(
         "runtime_implementing",
         "runtime_validating",
         "runtime_waiting_approval",
+        # V1 FOLLOWUPS F8: the Ticket success terminal releases its claim under
+        # its own reason code.
+        "runtime_ready_for_integration",
         "runtime_completed",
         "runtime_canceled",
         "executor_failed",

@@ -3,7 +3,12 @@
 The dispatcher advances one task through the local state mirror:
 
 created/queued/preparing -> preparing -> implementing -> validating
--> waiting_approval
+-> ready_for_integration (a Ticket) / waiting_approval (a legacy mirror row)
+
+A Ticket's success terminal is `ready_for_integration` (V1 FOLLOWUPS F8, SPEC
+§22, §43.12): the human gate is review of the GitHub PR before merge, not a
+pre-PR approval. The legacy GitHub-issue path keeps `waiting_approval` and its
+approve/reject routes; that split is FOLLOWUPS F5.
 
 Failures move a legacy task to blocked. A Ticket (V1 Step 5, SPEC §29) ends
 ``needs_decision`` when a validator returns ``failed`` and ``failed`` on every
@@ -53,8 +58,10 @@ from agent_taskflow.ticket_lifecycle import (
     FAILURE_VALIDATOR_ERROR,
     FAILURE_VALIDATOR_RED,
     FAILURE_WORKTREE,
+    TICKET_SUCCESS_STATUS,
     is_ticket,
     ticket_failure_status,
+    ticket_success_status,
 )
 from agent_taskflow.ticket_worktree import (
     WORKTREE_ABSENT,
@@ -92,6 +99,9 @@ UNTOUCHED_REFUSAL_STATUSES = {
 
 SKIPPED_STATUSES = {
     "waiting_approval",
+    # V1 FOLLOWUPS F8: a Ticket's success terminal. A finished Ticket is
+    # re-dispatched no more than a finished legacy task is.
+    TICKET_SUCCESS_STATUS,
     "waiting_for_review",
     "accepted",
     "rejected",
@@ -482,29 +492,41 @@ class Dispatcher:
                 )
 
         progress.validators_passed(validator_statuses)
+        # SPEC §22 / §43.12 (V1 FOLLOWUPS F8): a Ticket goes straight to
+        # `ready_for_integration`. A legacy mirror row keeps `waiting_approval`.
+        success_status = ticket_success_status(ticket=ticket)
         self.store.update_task_status(
             task.task_key,
-            "waiting_approval",
+            success_status,
             source="dispatcher",
             message="Dispatcher completed implementation and validation",
         )
-        self._handoff_to_integration(task.task_key, ticket=ticket)
+        self._handoff_to_integration(
+            task.task_key, ticket=ticket, task_status=success_status
+        )
 
         return DispatcherResult(
             task_key=task.task_key,
-            status="waiting_approval",
-            summary="Task dispatched successfully and is waiting for human approval.",
+            status=success_status,
+            summary=(
+                "Task dispatched successfully and is ready for integration."
+                if ticket
+                else "Task dispatched successfully and is waiting for human approval."
+            ),
             executor_status=executor_result.status,
             validator_statuses=validator_statuses,
         )
 
-    def _handoff_to_integration(self, task_key: str, *, ticket: bool) -> None:
+    def _handoff_to_integration(
+        self, task_key: str, *, ticket: bool, task_status: str
+    ) -> None:
         """SPEC §43.12: put the finished implementation in its repo's queue.
 
         Only a Ticket has a repository registry entry and an integration
         lifecycle, so a legacy mirror row is left alone. The handoff writes no
-        lifecycle status: the Ticket stays at ``waiting_approval`` and the
-        human review gate is untouched.
+        lifecycle status of its own — the status write above already moved the
+        Ticket to ``ready_for_integration``, and §22.1's FIFO key is the
+        timestamp of that write.
 
         Like the runtime progress writes, this is observation after the fact.
         The implementation is already complete and already recorded, so a queue
@@ -514,7 +536,7 @@ class Dispatcher:
             return
         try:
             handoff_completed_implementation(
-                self.store, task_key, task_status="waiting_approval"
+                self.store, task_key, task_status=task_status
             )
         except Exception as exc:
             reason = f"Integration handoff failed: {exc.__class__.__name__}: {exc}"

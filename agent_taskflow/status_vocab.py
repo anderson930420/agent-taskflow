@@ -63,11 +63,19 @@ DISPLAY_TO_PERSISTED: dict[str, str] = {
 #
 # Judgement calls, based on what the code actually does with each value:
 #
-# `waiting_approval` — written by the dispatcher once the executor and the
-#   validators have passed, and required by pr_handoff, branch_push_confirm,
-#   draft_pr_confirm and task_closeout_confirm before they will act. It is the
-#   repo's human review gate, so it displays as `needs_review` alongside the
-#   canonical `waiting_for_review`.
+# `waiting_approval` — the **legacy** GitHub-issue path's terminal, written by
+#   approved_task_runner and by the dispatcher for a legacy mirror row, and
+#   required by pr_handoff, branch_push_confirm, draft_pr_confirm and
+#   task_closeout_confirm before they will act. It is that path's human review
+#   gate, so it displays as `needs_review` alongside the canonical
+#   `waiting_for_review`.
+#
+#   V1 FOLLOWUPS F8 (RULINGS 53) moved the *Ticket* success path off it: a
+#   Ticket now ends `ready_for_integration`, which is already canonical in both
+#   directions below and needs no new mapping. The human gate for a Ticket is
+#   review of the GitHub PR before merge (SPEC §31, §44), not this status.
+#   Nothing here is renamed, removed or repurposed; FOLLOWUPS F5 owns the rest
+#   of the legacy/Ticket split.
 #
 # `accepted` — written by the approve route once an operator has attested to
 #   the proof-of-work. It does not push, merge or clean up (WORKFLOW.md), and

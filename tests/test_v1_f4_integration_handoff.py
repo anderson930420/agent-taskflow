@@ -120,15 +120,23 @@ class HandoffHappensTests(HandoffTestCase):
         self.assertNotEqual(ALPHA, self.fx.repository.repository)
         self.assertEqual(self.queue(self.fx.repository.repository), [])
 
-    def test_the_handoff_changes_no_lifecycle_status(self) -> None:
+    def test_the_handoff_itself_changes_no_lifecycle_status(self) -> None:
+        # V1 FOLLOWUPS F8 moved COMPLETION_STATUS to `ready_for_integration`,
+        # but that status is written by the dispatcher, not by the handoff.
+        # The handoff is still a pure queue producer: calling it again on an
+        # already-finished Ticket writes no further status.
         ticket = self.fx.create_ticket("Handoff leaves the status alone")
         key = ticket.task_key
         self.fx.dispatch(key)
 
         self.assertEqual(self.fx.status(key), COMPLETION_STATUS)
-        statuses = [e["payload"]["status"] for e in self.fx.status_events(key)]
-        self.assertEqual(statuses[-1], COMPLETION_STATUS)
-        self.assertNotIn("ready_for_integration", statuses)
+        before = self.fx.status_events(key)
+        self.assertEqual(before[-1]["payload"]["status"], COMPLETION_STATUS)
+
+        handoff_completed_implementation(self.store, key, task_status=COMPLETION_STATUS)
+
+        self.assertEqual(self.fx.status(key), COMPLETION_STATUS)
+        self.assertEqual(self.fx.status_events(key), before)
 
 
 class IdempotenceTests(HandoffTestCase):
@@ -156,8 +164,8 @@ class IdempotenceTests(HandoffTestCase):
         self.assertEqual(self.fx.dispatch(key).status, COMPLETION_STATUS)
         first = self.queue(ALPHA)[0]
 
-        # A second dispatch (waiting_approval is a skipped status) and two more
-        # calls, which is what a second and third scheduler tick would do.
+        # A second dispatch (the success terminal is a skipped status) and two
+        # more calls, which is what a second and third scheduler tick would do.
         self.fx.dispatch(key)
         for _ in range(2):
             again = handoff_completed_implementation(
@@ -201,7 +209,15 @@ class OnlyOnSuccessTests(HandoffTestCase):
 
     def test_the_handoff_refuses_every_non_completion_status(self) -> None:
         key = self.fx.create_ticket("Direct call guard").task_key
-        for status in ("failed", "blocked", "needs_decision", "paused", "created"):
+        for status in (
+            "failed",
+            "blocked",
+            "needs_decision",
+            "paused",
+            "created",
+            # The legacy terminal no longer hands off (FOLLOWUPS F8).
+            "waiting_approval",
+        ):
             with self.subTest(status=status):
                 result = handoff_completed_implementation(self.store, key, task_status=status)
                 self.assertEqual(result.status, SKIPPED)

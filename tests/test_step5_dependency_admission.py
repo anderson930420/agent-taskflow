@@ -157,7 +157,7 @@ class StartPathsRefuseTests(DependencyAdmissionTestCase):
         executor = RecordingExecutor()
         result = self.fx.dispatch(self.b, executor)
         self.assertEqual(executor.contexts, [])
-        self.assertNotEqual(result.status, "waiting_approval")
+        self.assertNotEqual(result.status, "ready_for_integration")
         self.assertIn(self.a, result.summary)
         self.assert_untouched(before)
 
@@ -199,7 +199,7 @@ class StartPathsRefuseTests(DependencyAdmissionTestCase):
     def test_completed_blocker_makes_the_reserved_retry_runnable(self) -> None:
         self.fx.set_status(self.a, "cleaned")
         result = self.fx.dispatch(self.b, RecordingExecutor())
-        self.assertEqual(result.status, "waiting_approval", result.summary)
+        self.assertEqual(result.status, "ready_for_integration", result.summary)
         self.assertEqual(self.lineage_states(self.b), ["claimed"])
 
 

@@ -8,6 +8,7 @@ CANONICAL_COMPATIBILITY_REASON_CODES = frozenset(
     {
         "canonical_runtime_pickup_claimed",
         "canonical_runtime_waiting_approval",
+        "canonical_runtime_ready_for_integration",
         "canonical_runtime_completed",
         "canonical_runtime_canceled",
         "canonical_runtime_blocked",

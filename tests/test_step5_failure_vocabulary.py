@@ -132,7 +132,8 @@ class RuntimeFailureEndsFailedTests(FailureVocabularyTestCase):
         self.fx.dispatch(self.key, RecordingExecutor("failed"))
         other = self.fx.create_ticket("Runs next")
         result = self.fx.dispatch(other.task_key, RecordingExecutor())
-        self.assertEqual(result.status, "waiting_approval", result.summary)
+        # V1 FOLLOWUPS F8: a Ticket's success terminal.
+        self.assertEqual(result.status, "ready_for_integration", result.summary)
 
 
 class LeaseExpiryTests(FailureVocabularyTestCase):
@@ -182,7 +183,7 @@ class StoppedTicketIsNotRedispatchedTests(FailureVocabularyTestCase):
                 events = self.fx.events(self.key)
                 executor = RecordingExecutor()
                 result = self.fx.dispatch(self.key, executor)
-                self.assertNotIn(result.status, {"waiting_approval", "preparing"})
+                self.assertNotIn(result.status, {"ready_for_integration", "preparing"})
                 self.assertEqual(executor.contexts, [])
                 self.assertEqual(self.fx.task_row(self.key), before)
                 self.assertEqual(self.fx.events(self.key), events)
@@ -239,7 +240,9 @@ class TicketRetryPathTests(FailureVocabularyTestCase):
         self.assertEqual(self.fx.status(self.key), "created")
         self.assertEqual(self.fx.status_events(self.key)[-1]["payload"]["status"], "created")
         self.assertIn("ticket_retry_reset", self.fx.event_kinds(self.key))
-        self.assertEqual(self.fx.dispatch(self.key, RecordingExecutor()).status, "waiting_approval")
+        self.assertEqual(
+            self.fx.dispatch(self.key, RecordingExecutor()).status, "ready_for_integration"
+        )
         self.assertEqual([a["attempt_number"] for a in self.fx.attempts(self.key)], [1, 2])
 
     def test_needs_decision_ticket_retries_to_created(self) -> None:
@@ -363,7 +366,7 @@ class ReviewFixRefusalTests(FailureVocabularyTestCase):
     """S2: refusing to start a Ticket never rewrites it."""
 
     def test_integration_and_other_statuses_are_refused_untouched(self) -> None:
-        for status in ("ready_for_integration", "integrating", "unknown", "archived"):
+        for status in ("integrating", "unknown", "archived"):
             with self.subTest(status=status):
                 self.fx.set_status(self.key, status)
                 before = self.fx.task_row(self.key)
@@ -372,6 +375,19 @@ class ReviewFixRefusalTests(FailureVocabularyTestCase):
                 self.assertIn("not runnable", result.summary)
                 self.assertEqual(self.fx.task_row(self.key), before)
                 self.assertEqual(self.fx.events(self.key), events)
+
+    def test_a_finished_ticket_is_skipped_untouched(self) -> None:
+        # V1 FOLLOWUPS F8: `ready_for_integration` is now the Ticket success
+        # terminal, so re-dispatching one is skipped like any other finished
+        # run rather than refused as "not runnable". Either way it is untouched.
+        self.fx.set_status(self.key, "ready_for_integration")
+        before = self.fx.task_row(self.key)
+        events = self.fx.events(self.key)
+        result = self.fx.dispatch(self.key, RecordingExecutor())
+        self.assertEqual(result.status, "skipped")
+        self.assertIn("ready_for_integration", result.summary)
+        self.assertEqual(self.fx.task_row(self.key), before)
+        self.assertEqual(self.fx.events(self.key), events)
 
 
 if __name__ == "__main__":

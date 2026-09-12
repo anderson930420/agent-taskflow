@@ -81,7 +81,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
 
-    return 0 if result.status in {"waiting_approval", "skipped"} else 1
+    # A successful run ends `ready_for_integration` for a Ticket and
+    # `waiting_approval` for a legacy mirror row (V1 FOLLOWUPS F8).
+    return 0 if result.status in {"ready_for_integration", "waiting_approval", "skipped"} else 1
 
 
 if __name__ == "__main__":
