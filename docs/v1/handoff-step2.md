@@ -1895,8 +1895,14 @@ every method spelling (`-X PUT`, `--method PUT`, `-X=PUT`, `-XPUT`,
 `--method=PUT`); and `gh pr merge`, `env gh pr merge`, `gh --repo o/r pr merge`,
 `git merge` and a `git push` with a `:` refspec are still refused.
 `test_a_trigger_naming_a_merge_path_still_updates_the_pr`
-(tests/test_integration_controller.py) drives it end to end: a re-integration
-triggered by `web/graphql` updates the same PR and does not stop for decision.
+(tests/test_integration_controller.py) covers the production path: a
+re-integration triggered by `web/graphql` updates the same PR and does not stop
+for decision. It is not a regression test — it passes before the fix too,
+because the old guard matched only a token ENDING in such a path and `_pr_body`
+appends the hint block after the trigger. The regression proof is
+`MergeGuardScopeTests`, where the body itself ends in the path. The
+overlapping-files-hint variant, where the path lands last, is covered at adapter
+level rather than end to end.
 
 **Validation.** Full suite `pytest -n 4`: 5356 passed, 8 skipped (5349 before,
 +7 = 6 new adapter tests + 1 controller test). `compileall`, workflow contract

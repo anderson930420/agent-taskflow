@@ -348,10 +348,13 @@ class ReIntegrationTests(ControllerTestCase):
         self.assertIn(result.integrated_base_sha, self.gh_runner.pulls[first_pr]["body"])
 
     def test_a_trigger_naming_a_merge_path_still_updates_the_pr(self) -> None:
-        # Ruling 42: the trigger and the reviewer hints are rendered into the PR
-        # body, so a body naming a path like `web/graphql` must not trip the
-        # merge guard. Before the guard was scoped to the endpoint and the
-        # method, this stopped re-integration in needs_decision.
+        # Ruling 42: the trigger and the reviewer hints are rendered into the
+        # PR body, so a body naming a path like `web/graphql` must reach GitHub.
+        # This case passes before the fix too — the old guard only matched a
+        # token ENDING in the path, and `_pr_body` appends the hint block after
+        # the trigger. What proves the fix is MergeGuardScopeTests, where the
+        # body does end in such a path. This test pins the production path: the
+        # controller still updates the same PR when the trigger names one.
         self._published()
         first_pr = self.integration.get_pr_state("AT-101")["pr_number"]
         self.fixture.advance_target()

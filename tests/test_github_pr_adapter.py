@@ -524,7 +524,6 @@ class MergeIsForbiddenTests(unittest.TestCase):
                     adapter.run(argv, cwd=Path("/tmp"))
 
 
-
 class MergeGuardScopeTests(unittest.TestCase):
     """Ruling 42 — the merge patterns see the endpoint and the method, never a
     field value.
@@ -613,6 +612,7 @@ class MergeGuardScopeTests(unittest.TestCase):
             with self.subTest(argv=" ".join(argv)):
                 with self.assertRaises(GitHubPrError):
                     assert_not_a_merge_command(argv)
+
 
 if __name__ == "__main__":
     unittest.main()
