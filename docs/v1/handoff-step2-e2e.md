@@ -1,8 +1,9 @@
 # HANDOFF — V1 Step 2 final gate: one real end-to-end run (Ruling 43)
 
-**Status: PHASE 1 COMPLETE AND GREEN — waiting on the owner to merge.**
+**Status: BOTH PHASES COMPLETE — THE END-TO-END GATE PASSED.**
 Every step ran against the real `git` and `gh`; every command exited 0.
-The run stopped at the point where the owner merges on GitHub.
+Phase 1 stopped at the owner's merge; phase 2 ran the merge detection,
+§36 verification and gated cleanup after it. See "Phase 2" at the end.
 
 Branch: `task/v1-step2` · PR under review: #196 (stays a DRAFT)
 Ruling: 43 — one real end-to-end run against a throwaway GitHub repository,
@@ -62,10 +63,15 @@ Initial `main` SHA: `9a5f2583c5de904e69df0210d9718f5ac556e27d`.
 
 ---
 
-## READ THIS FIRST — where the run stopped, and what is waiting for you
+## READ THIS FIRST — the outcome
 
-**Phase 1 is complete and green.** The run stopped exactly where ruling 43
-says it must: at the point where **you** merge on GitHub.
+**Both phases are complete and the gate PASSED.** Phase 1 (below) stopped
+exactly where ruling 43 says it must, at the owner's merge. The owner then
+merged PR #1 on GitHub, and **phase 2 — at the end of this file — ran the
+merge detection, the §36 verification and the gated cleanup, all green.**
+
+The phase-1 section below is kept as it was written at the time, so the
+"waiting for you" wording there describes that moment, not now.
 
 | | |
 | --- | --- |
@@ -420,3 +426,252 @@ Not exercised by phase 1, because it stops before the merge: §35/§36 merge
 detection and verification, and the gated cleanup. Those are phase 2, after
 you merge. A conflict path was not exercised either — this run was designed
 to be conflict-free.
+
+---
+
+# Phase 2 — after the owner merged PR #1
+
+**THE END-TO-END GATE PASSED.** The owner merged PR #1 on the throwaway
+repository through GitHub; the rest of the chain then ran here. Every command
+exited 0, nothing failed, no code was patched.
+
+The merge was a **merge commit**, so GitHub's merge result
+`1d9a89d85dc959c65b3d6509c0040b3b697751b2` is a different commit from the
+branch head `126be95fc3eacdb17c7f1bbbc66230bf858795a8`. That is what makes
+this a real test of §36: verifying the task SHA would have been wrong.
+
+State captured **before** anything in phase 2 ran, so the later removals are
+provable:
+
+    $ git worktree list
+    /tmp/e2e-20260912-1055/repo                     27db287 [main]
+    /tmp/e2e-20260912-1055/repo/.worktrees/AT-0001  126be95 [task/AT-0001-...]
+    $ git branch --list
+    * main
+    + task/AT-0001-add-a-trivial-marker-file-so-the-end-to
+    $ git ls-remote origin 'refs/heads/*'
+    1d9a89d…  refs/heads/main
+    126be95…  refs/heads/task/AT-0001-add-a-trivial-marker-file-so-the-end-to
+
+The worktree, the local branch and the remote branch were all intact at this
+point.
+
+## Step 1 — poll the PR through the adapter
+
+    $ (adapter) GitHubPrAdapter(<throwaway>).poll_pr(pr_number=1, cwd=<clone>)   exit=0
+
+The only argv it issued, recorded by a wrapping runner:
+
+    gh pr view 1 --repo anderson930420/agent-taskflow-e2e-20260912-1055 --json \
+      number,url,state,isDraft,mergedAt,mergeCommit,headRefName,baseRefName,\
+      headRefOid,reviewDecision,statusCheckRollup,reviews,title,body
+
+What the adapter returned:
+
+| | |
+| --- | --- |
+| `merged` | **True** |
+| `state` | `closed` (gh said `MERGED`; §32.1 carries the merge fact in `pr_merged`) |
+| `merged_at` | `2026-09-12T13:59:28Z` |
+| `merge_commit_sha` | `1d9a89d85dc959c65b3d6509c0040b3b697751b2` |
+| `head_sha` | `126be95fc3eacdb17c7f1bbbc66230bf858795a8` |
+| `is_draft` | False (the owner marked it ready to merge it) |
+| `review_decision` / `ci_status` | `none` / `none` |
+
+### Ruling 29: `merged` was derived, not read
+
+There is no `merged` field to read. Proven three ways:
+
+- `"merged" in PR_VIEW_FIELDS` → **False**;
+- the raw payload for that exact field list has keys
+  `["baseRefName","body","headRefName","headRefOid","isDraft","mergeCommit","mergedAt","number","reviewDecision","reviews","state","statusCheckRollup","title","url"]`
+  — **no `merged` key**;
+- the derivation itself: `_is_merged("MERGED", None, None)` → True,
+  `_is_merged("CLOSED", mergedAt, None)` → True,
+  `_is_merged("CLOSED", None, mergeCommit)` → True,
+  `_is_merged("CLOSED", None, None)` → **False**.
+
+This PR satisfied all three signals at once. Had the adapter still asked for
+`merged`, real gh would have failed the poll outright — which is the round-4
+defect Ruling 29 fixed.
+
+Then the watcher tick recorded it:
+
+    poll_pr_outcomes(WatcherRequest(..., confirm_poll=True))      exit=0
+    → merged=True, merge_commit_sha=1d9a89d…, pr_state='closed',
+      applied_transition=None, cleanup_performed=False
+
+**Detection alone changed nothing about the Ticket** — it stayed
+`waiting_for_review`, with no transition applied and no cleanup. §35 detects;
+§36 verification and §37 cleanup are separate, which is exactly the gate.
+
+### §32.1 after step 1 — ticket status `waiting_for_review`
+
+| field | value |
+| --- | --- |
+| pr_number | 1 |
+| pr_url | https://github.com/anderson930420/agent-taskflow-e2e-20260912-1055/pull/1 |
+| **pr_state** | **`closed`** |
+| **pr_merged** | **true** |
+| pr_head_sha | `126be95fc3eacdb17c7f1bbbc66230bf858795a8` |
+| **merge_commit_sha** | **`1d9a89d85dc959c65b3d6509c0040b3b697751b2`** |
+| review_decision | `none` |
+| ci_status | `none` |
+| integrated_base_sha | `27db287775d01efd6b132f0ff4a3f03c64a9c9ef` |
+| reintegration_count | 1 |
+| reintegration_required | false |
+| **pr_last_polled_at** | **`2026-09-12T14:01:02Z`** |
+
+## Step 2 — fetch the latest target and verify the merge (§35, §36, §36.1)
+
+    verify_merge(MergeVerificationRequest(task_key="AT-0001",
+        worktree_path=<clone>/.worktrees/AT-0001, remote="origin",
+        target_branch="main", pr_merged=True,
+        merge_commit_sha="1d9a89d85dc959c65b3d6509c0040b3b697751b2"))    exit=0
+
+The three git commands it ran, in order:
+
+    git fetch origin --prune
+    git rev-parse origin/main
+    git merge-base --is-ancestor 1d9a89d85dc959c65b3d6509c0040b3b697751b2 origin/main
+
+Verdict: `verified=True`, `contained_in_target=True`, `reasons=()`,
+`target_sha=1d9a89d85dc959c65b3d6509c0040b3b697751b2`,
+`verified_at=2026-09-12T14:01:16Z`.
+
+**The SHA verified was the PR's merge result, not the task SHA.** The
+containment test names `1d9a89d…`, GitHub's merge commit. The result carries
+`original_task_sha_used=False`, and neither the original task commit
+`177fcfd…` nor the branch head `126be95…` appears in any verification
+command. §32.1 is unchanged by this step — verification writes none of the
+twelve fields.
+
+## Step 3 — cleanup, gated on that verification (§37)
+
+    run_integration_cleanup(IntegrationCleanupRequest(task_key="AT-0001",
+        repo=<throwaway>, repo_path=<clone>, target_branch="main",
+        remote="origin", db_path=<scratch>, confirm_cleanup=True))       exit=0
+
+Result: `ok=True`, `status=cleaned`, **`route=verified_merge`**,
+`merge_verified=True`, `verification_reasons=()`, `force_pushed=False`.
+
+Cleanup re-ran the verification itself before touching anything — its own
+first three git commands are the same fetch/rev-parse/`--is-ancestor` trio —
+and only then removed things:
+
+    git fetch origin --prune
+    git rev-parse origin/main
+    git merge-base --is-ancestor 1d9a89d85dc959c65b3d6509c0040b3b697751b2 origin/main
+    git worktree remove /tmp/e2e-20260912-1055/repo/.worktrees/AT-0001
+    git branch -D task/AT-0001-add-a-trivial-marker-file-so-the-end-to
+
+**Removed:** the worktree (`worktree_removed=True`) and the local branch
+(`local_branch_deleted=True`).
+
+**Kept:** the remote branch (`remote_branch_deleted=False`) and all evidence
+(`evidence_archived=True`).
+
+Confirmed on disk afterwards:
+
+    $ git worktree list        → only /tmp/e2e-20260912-1055/repo [main]
+    $ git branch --list        → only main   (task branch gone)
+    $ ls .worktrees/AT-0001    → removed
+    $ git ls-remote origin 'refs/heads/*'
+    1d9a89d…  refs/heads/main
+    126be95…  refs/heads/task/AT-0001-add-a-trivial-marker-file-so-the-end-to   ← SURVIVES
+
+**Ruling 5 held: §37 remote-branch cleanup stays off in V1.** The remote task
+branch is still there, and no `git push --delete` was issued — the push
+allowlist would have refused it. `delete_remote_branch` was left at its
+default; the request refuses `True` up front.
+
+Evidence kept in `artifacts/AT-0001/integration/`: `cleanup-f8427971586a.json`,
+two `integration-*.json` and two `validators-*.json` — one pair per
+integration run. `merged=False` in the cleanup result is the safety flag
+meaning *Taskflow did not merge anything*; the human did.
+
+### §32.1 after step 3 — unchanged by cleanup, ticket status `cleaned`
+
+Cleanup writes no §32.1 field. All twelve are exactly as after step 1.
+
+## Step 4 — the Ticket reaches `completed`
+
+    persisted status: cleaned
+    display status  : completed      (§12 vocabulary, via status_vocab)
+
+The full audit trail for the whole run, in order — 19 events, no gaps:
+
+    1. created                        [mission_control]
+    2. worktree_recorded              [dispatcher]
+    3. status_changed -> ready_for_integration   [e2e-ruling-43]
+    4. status_changed -> integrating             [integration_controller]
+    5. integration_started (initial)             [integration_controller]
+    6. status_changed -> waiting_for_review      [integration_controller]
+    7. integration_completed (initial)           [integration_controller]
+    8. status_changed -> ready_for_integration   [integration_watcher]
+    9. reintegration_required  behind_count=1    [integration_watcher]
+   10. integration_queued                        [integration_watcher]
+   11. status_changed -> integrating             [integration_controller]
+   12. integration_started (reintegration)       [integration_controller]
+   13. status_changed -> waiting_for_review      [integration_controller]
+   14. integration_completed (reintegration)     [integration_controller]
+   15. pr_state_polled  PR #1                    [integration_watcher]
+   16. merge_detected   PR #1 reported merged    [integration_watcher]
+   17. merge_verified   1d9a89d… in target       [integration_cleanup]
+   18. status_changed -> cleaned                 [integration_cleanup]
+   19. integration_cleanup_completed             [integration_cleanup]
+
+Note the ordering that matters: **16 detect → 17 verify → 18 complete**. The
+Ticket was never marked complete on detection alone.
+
+## Step 5 — the total
+
+### Final §32.1, all twelve fields
+
+| field | final value |
+| --- | --- |
+| pr_number | 1 |
+| pr_url | https://github.com/anderson930420/agent-taskflow-e2e-20260912-1055/pull/1 |
+| pr_state | `closed` |
+| pr_merged | true |
+| pr_head_sha | `126be95fc3eacdb17c7f1bbbc66230bf858795a8` |
+| merge_commit_sha | `1d9a89d85dc959c65b3d6509c0040b3b697751b2` |
+| review_decision | `none` |
+| ci_status | `none` |
+| integrated_base_sha | `27db287775d01efd6b132f0ff4a3f03c64a9c9ef` |
+| reintegration_count | 1 |
+| reintegration_required | false |
+| pr_last_polled_at | `2026-09-12T14:01:02Z` |
+
+**Final Ticket status: `cleaned` (persisted) = `completed` (§12 display).**
+
+### Did the §43 items 28-33 chain hold?
+
+**Yes — end to end, against real `git` 2.43.0 and real `gh` 2.45.0, the chain
+held: a human merged on GitHub, Taskflow detected the merge without ever
+merging anything itself, verified GitHub's own merge commit was contained in
+the target before touching a file, and only then removed the worktree and
+local branch, left the remote branch alone, kept every piece of evidence and
+marked the Ticket completed.**
+
+## The throwaway repository — left in place for inspection
+
+| | |
+| --- | --- |
+| Repository | `anderson930420/agent-taskflow-e2e-20260912-1055` (private) |
+| URL | https://github.com/anderson930420/agent-taskflow-e2e-20260912-1055 |
+| PR | #1, MERGED, merge commit `1d9a89d85dc959c65b3d6509c0040b3b697751b2` |
+| Scratch tree | `/tmp/e2e-20260912-1055/` (clone, scratch DB, artifacts) |
+
+**Not deleted**, as instructed. The remote task branch is still there too, so
+the whole history is inspectable.
+
+## Safety, phase 2
+
+`anderson930420/agent-taskflow` stayed read-only: the only commands naming it
+were `gh pr view 196` and `git status`/`rev-parse` on the local worktree. Its
+`HEAD` is `fb2673f`, and **PR #196 is still OPEN and still a DRAFT** — the
+owner merges that one. `~/.agent-taskflow` and every production database were
+never opened; every store was constructed with the explicit scratch path.
+Nothing was merged by me anywhere, nothing was force-pushed, nothing was
+rebased.
