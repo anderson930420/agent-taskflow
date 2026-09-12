@@ -347,6 +347,25 @@ class ReIntegrationTests(ControllerTestCase):
         self.assertEqual(len(patches), 1)
         self.assertIn(result.integrated_base_sha, self.gh_runner.pulls[first_pr]["body"])
 
+    def test_a_trigger_naming_a_merge_path_still_updates_the_pr(self) -> None:
+        # Ruling 42: the trigger and the reviewer hints are rendered into the PR
+        # body, so a body naming a path like `web/graphql` must not trip the
+        # merge guard. Before the guard was scoped to the endpoint and the
+        # method, this stopped re-integration in needs_decision.
+        self._published()
+        first_pr = self.integration.get_pr_state("AT-101")["pr_number"]
+        self.fixture.advance_target()
+        self._requeue()
+        result = self.integrate("AT-101", trigger="web/graphql")
+        self.assertEqual(result.mode, "reintegration")
+        self.assertNotIn("decision", self.status_of("AT-101"))
+        patches = [
+            c for c in self.gh_runner.calls
+            if c[:5] == ["gh", "api", "-X", "PATCH", f"repos/owner/repo/pulls/{first_pr}"]
+        ]
+        self.assertEqual(len(patches), 1)
+        self.assertIn("web/graphql", self.gh_runner.pulls[first_pr]["body"])
+
     def test_reintegration_merges_rather_than_rebasing(self) -> None:
         worktree = self._published()
         published_sha = git_ops.head_sha(worktree)

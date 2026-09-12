@@ -1863,3 +1863,41 @@ Step 1's handoff is `docs/v1/handoff-step1.md`, which reached main with
 PR #195. While `task/v1-step1` was being merged into this branch, a copy of
 it was carried here as an appendix. That copy was an intermediate version;
 it was removed once main held the final one, so there is a single source.
+
+## Ruling 42 — the merge guard scanned field values
+
+**The defect (round-6 review, blocking).** `assert_not_a_merge_command` scanned
+every token after `gh` when the first positional was `api`, including the value
+of `-f body=…`. Before ruling 35 `update_pr` ran `gh pr edit`, so that branch
+never applied to a PR body. After it, a legitimate body or title whose last path
+component was `/merges`, `/graphql` or `pulls/<n>/merge` made `update_pr` raise,
+and `integration_controller.py` turned that into `stop_for_decision`. It is
+reachable in production through the overlapping-files reviewer hint, which
+embeds changed paths verbatim, and through `request.trigger`. It failed closed,
+so no merge-safety invariant was weakened; it was a liveness defect.
+
+**The fix.** `_gh_api_method_and_endpoints()` parses a `gh api` argv into its
+method and its endpoint positionals. Field-carrying flags (`-f`, `-F`,
+`--field`, `--raw-field`, `--input`, and their `--flag=value` spellings) are
+skipped with their values, so the merge patterns now see only the endpoint and
+the `-X` / `--method` value.
+
+**Why no hole opens.** `assert_gh_api_allowed` already refuses every merge
+vector on its own: it fullmatches the endpoint against
+`repos/<own repo>/pulls/<n>` and demands `-X PATCH`. The round-6 reviewer
+verified this independently, and `MergeGuardScopeTests` now pins it.
+
+**Tests.** `MergeGuardScopeTests` (tests/test_github_pr_adapter.py): five
+legitimate bodies and a title naming merge-like paths are accepted and sent as
+one PATCH each; the five merge vectors are refused by BOTH guards and by
+`adapter.run`, with the runner never called; a merge endpoint is refused in
+every method spelling (`-X PUT`, `--method PUT`, `-X=PUT`, `-XPUT`,
+`--method=PUT`); and `gh pr merge`, `env gh pr merge`, `gh --repo o/r pr merge`,
+`git merge` and a `git push` with a `:` refspec are still refused.
+`test_a_trigger_naming_a_merge_path_still_updates_the_pr`
+(tests/test_integration_controller.py) drives it end to end: a re-integration
+triggered by `web/graphql` updates the same PR and does not stop for decision.
+
+**Validation.** Full suite `pytest -n 4`: 5356 passed, 8 skipped (5349 before,
++7 = 6 new adapter tests + 1 controller test). `compileall`, workflow contract
+and workflow policy validators all pass.

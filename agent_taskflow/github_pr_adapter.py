@@ -116,6 +116,44 @@ def _positionals(tokens: Sequence[str], value_flags: frozenset[str]) -> list[str
     return positionals
 
 
+_GH_API_FIELD_FLAGS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
+_GH_API_METHOD_FLAGS = frozenset({"-X", "--method"})
+
+
+def _gh_api_method_and_endpoints(tokens: Sequence[str]) -> tuple[str | None, list[str]]:
+    """The method value and endpoint positionals of a ``gh api`` argv.
+
+    Field values are opaque (ruling 42). ``-f body=...`` carries user text such
+    as a PR body or a reviewer hint listing changed files; matching the merge
+    patterns against it refused legitimate updates and stopped re-integration
+    in ``needs_decision``.
+    """
+    method: str | None = None
+    endpoints: list[str] = []
+    index = 1 if tokens[:1] == ["api"] else 0
+    while index < len(tokens):
+        token = tokens[index]
+        flag, separator, inline = token.partition("=")
+        if flag in _GH_API_METHOD_FLAGS:
+            if separator:
+                method = inline
+                index += 1
+            else:
+                if index + 1 < len(tokens):
+                    method = tokens[index + 1]
+                index += 2
+            continue
+        if flag in _GH_API_FIELD_FLAGS:
+            index += 1 if separator else 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        endpoints.append(token)
+        index += 1
+    return method, endpoints
+
+
 def _refuse_merge(rendered: str) -> None:
     raise GitHubPrError(
         "Taskflow must never merge: refusing to run "
@@ -141,12 +179,20 @@ def assert_not_a_merge_command(argv: Sequence[str]) -> None:
         positionals = _positionals(tokens[gh + 1 :], _GH_GLOBAL_VALUE_FLAGS)
         if any(positionals[i : i + 2] == ["pr", "merge"] for i in range(len(positionals) - 1)):
             _refuse_merge(rendered)
-        if positionals[:1] == ["api"] and any(
-            pattern.search(token)
-            for token in tokens[gh + 1 :]
-            for pattern in (_API_PR_MERGE_RE, _API_BRANCH_MERGE_RE, _API_GRAPHQL_RE)
-        ):
-            _refuse_merge(rendered)
+        if positionals[:1] == ["api"]:
+            # Ruling 42: scan only the endpoint and the method, never a field
+            # value. A PR body may legitimately end in a path like `web/graphql`
+            # or `repos/o/r/merges`; scanning it made update_pr refuse and
+            # re-integration stop in needs_decision. assert_gh_api_allowed
+            # already refuses every merge vector on its own.
+            method, endpoints = _gh_api_method_and_endpoints(tokens[gh + 1 :])
+            scanned = [*endpoints, method] if method is not None else list(endpoints)
+            if any(
+                pattern.search(token)
+                for token in scanned
+                for pattern in (_API_PR_MERGE_RE, _API_BRANCH_MERGE_RE, _API_GRAPHQL_RE)
+            ):
+                _refuse_merge(rendered)
 
     git = _executable_index(tokens, "git")
     if git is not None:

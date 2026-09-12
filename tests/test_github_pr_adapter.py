@@ -524,5 +524,95 @@ class MergeIsForbiddenTests(unittest.TestCase):
                     adapter.run(argv, cwd=Path("/tmp"))
 
 
+
+class MergeGuardScopeTests(unittest.TestCase):
+    """Ruling 42 — the merge patterns see the endpoint and the method, never a
+    field value.
+
+    Before this, `assert_not_a_merge_command` scanned every token after `gh`
+    when the first positional was `api`, so a PR body whose last path component
+    was `/merges`, `/graphql` or `pulls/<n>/merge` made `update_pr` refuse and
+    re-integration stop in `needs_decision` (round-6 review of PR #196).
+    """
+
+    # Bodies the round-6 review reproduced as wrongly refused.
+    LEGITIMATE_BODIES = (
+        "see https://github.com/owner/repo/merges",
+        "changed files: src/graphql",
+        "ref repos/owner/repo/pulls/42/merge",
+        "base sha abc123\n\nFiles overlap with recently merged Ticket: api/graphql",
+        "Files overlap with recently merged Ticket: web/graphql",
+    )
+
+    # Every merge vector, which the allowlist refuses on its own.
+    MERGE_VECTORS = (
+        ["gh", "api", "-X", "PUT", "repos/owner/repo/pulls/42/merge"],
+        ["gh", "api", "-X", "POST", "repos/owner/repo/merges", "-f", "base=main", "-f", "head=task/x"],
+        ["gh", "api", "-X", "PUT", "repos/owner/repo/merges", "-f", "base=main", "-f", "head=task/x"],
+        ["gh", "api", "graphql", "-f", "query=mutation { mergePullRequest(input: {}) { clientMutationId } }"],
+        ["gh", "api", "-X", "PATCH", "repos/owner/repo/pulls/42/merge", "-f", "body=x"],
+    )
+
+    def setUp(self) -> None:
+        self.runner = FakeGhRunner()
+        self.adapter = GitHubPrAdapter("owner/repo", runner=self.runner)
+        self.runner.set_pr(42, state="OPEN", title="old title", body="old body")
+
+    def api_calls(self) -> list[list[str]]:
+        return [call for call in self.runner.calls if call[:2] == ["gh", "api"]]
+
+    def test_a_body_naming_a_merge_path_is_still_updated(self) -> None:
+        for body in self.LEGITIMATE_BODIES:
+            with self.subTest(body=body):
+                before = len(self.api_calls())
+                self.adapter.update_pr(pr_number=42, body=body, cwd=Path("/tmp"))
+                self.assertEqual(len(self.api_calls()), before + 1)
+                self.assertEqual(self.api_calls()[-1][-1], f"body={body}")
+                self.assertEqual(self.runner.pulls[42]["body"], body)
+
+    def test_a_title_naming_a_merge_path_is_still_updated(self) -> None:
+        self.adapter.update_pr(pr_number=42, title="web/graphql", cwd=Path("/tmp"))
+        self.assertEqual(self.runner.pulls[42]["title"], "web/graphql")
+
+    def test_every_merge_vector_is_refused_by_both_guards(self) -> None:
+        for argv in self.MERGE_VECTORS:
+            with self.subTest(argv=" ".join(argv)):
+                with self.assertRaises(GitHubPrError):
+                    assert_not_a_merge_command(argv)
+                with self.assertRaises(GitHubPrError):
+                    assert_gh_api_allowed(argv, repo="owner/repo")
+
+    def test_the_adapter_runs_no_merge_vector(self) -> None:
+        for argv in self.MERGE_VECTORS:
+            with self.subTest(argv=" ".join(argv)):
+                with self.assertRaises(GitHubPrError):
+                    self.adapter.run(argv, cwd=Path("/tmp"))
+        self.assertEqual(self.runner.calls, [])
+
+    def test_a_merge_endpoint_is_refused_in_every_method_spelling(self) -> None:
+        for argv in (
+            ["gh", "api", "-X", "PUT", "repos/owner/repo/pulls/42/merge"],
+            ["gh", "api", "--method", "PUT", "repos/owner/repo/pulls/42/merge"],
+            ["gh", "api", "-X=PUT", "repos/owner/repo/pulls/42/merge"],
+            ["gh", "api", "-XPUT", "repos/owner/repo/pulls/42/merge"],
+            ["gh", "api", "--method=PUT", "repos/owner/repo/merges"],
+        ):
+            with self.subTest(argv=" ".join(argv)):
+                with self.assertRaises(GitHubPrError):
+                    assert_not_a_merge_command(argv)
+
+    def test_the_non_api_guards_are_unchanged(self) -> None:
+        for argv in (
+            ["gh", "pr", "merge", "42"],
+            ["env", "gh", "pr", "merge", "42"],
+            ["gh", "--repo", "owner/repo", "pr", "merge", "42"],
+            ["/usr/bin/gh", "pr", "merge", "42"],
+            ["git", "merge", "origin/main"],
+            ["git", "push", "origin", "HEAD:refs/heads/main"],
+        ):
+            with self.subTest(argv=" ".join(argv)):
+                with self.assertRaises(GitHubPrError):
+                    assert_not_a_merge_command(argv)
+
 if __name__ == "__main__":
     unittest.main()
