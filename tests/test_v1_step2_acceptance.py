@@ -7,6 +7,8 @@ Each test names the item or invariant it covers.
 
 from __future__ import annotations
 
+from contextlib import closing
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -23,7 +25,12 @@ from agent_taskflow.integration_cleanup import (
 )
 from agent_taskflow.integration_controller import IntegrationRequest, integrate_task
 from agent_taskflow.integration_metrics import compute_integration_metrics
-from agent_taskflow.integration_queue import enqueue_for_integration, queue_for_repo
+from agent_taskflow.integration_handoff import (
+    ENQUEUED,
+    HANDOFF_EVENT,
+    handoff_completed_implementation,
+)
+from agent_taskflow.integration_queue import queue_for_repo
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.integration_validators import IntegrationValidatorSpec
 from agent_taskflow.integration_watcher import (
@@ -33,6 +40,8 @@ from agent_taskflow.integration_watcher import (
 )
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
+from agent_taskflow.ticket_models import AI_TITLE_NOT_ATTEMPTED, METADATA_SOURCE_FALLBACK
 from v1_step2_fixtures import FakeGhRunner, GitFixture, git as raw_git  # noqa: E402
 
 
@@ -102,6 +111,47 @@ class AcceptanceTestCase(unittest.TestCase):
             )
         )
         return worktree
+
+    def complete_implementation(self, task_key: str, *, repo: str = "owner/repo"):
+        """Finish a Ticket's implementation the way the pipeline does.
+
+        The dispatcher ends a completed implementation at `waiting_approval`
+        on a Ticket row carrying its repository's `github_repo`; V1 F4's
+        handoff is what turns that into a queue entry. This reproduces that
+        state and then calls the real handoff, so §43.12 below is driven, not
+        hand-written. The dispatcher itself is exercised end to end in
+        tests/test_v1_f4_integration_handoff.py.
+        """
+        migrate_ticket_fields(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "UPDATE tasks SET prompt = ?, priority = ?, base_branch = ?,"
+                " branch = ?, worktree_path = ?, ai_title_status = ?,"
+                " branch_slug_source = ?, github_repo = ? WHERE task_key = ?",
+                (
+                    f"{task_key} prompt",
+                    "normal",
+                    "main",
+                    f"task/{task_key}",
+                    str(self.fixture.repo / ".worktrees" / task_key),
+                    AI_TITLE_NOT_ATTEMPTED,
+                    METADATA_SOURCE_FALLBACK,
+                    repo,
+                    task_key,
+                ),
+            )
+        self.store.update_task_status(
+            task_key,
+            "waiting_approval",
+            source="dispatcher",
+            message="Dispatcher completed implementation and validation",
+        )
+        return handoff_completed_implementation(
+            self.store,
+            task_key,
+            task_status="waiting_approval",
+            integration_store=self.integration,
+        )
 
     def integrate(self, task_key: str, **overrides):
         kwargs = dict(
@@ -179,10 +229,28 @@ class EndToEndJourneyTests(AcceptanceTestCase):
     def test_full_lifecycle_from_queue_to_completed(self) -> None:
         worktree = self.make_task("AT-101")
 
-        # 12 — completed implementation enters the per-repo integration queue.
-        enqueue_for_integration(self.integration, "AT-101", repo="owner/repo")
+        # 12 — completed implementation enters the per-repo integration queue,
+        # through V1 F4's real handoff rather than a hand-written enqueue.
+        handoff = self.complete_implementation("AT-101")
+        self.assertEqual(handoff.status, ENQUEUED)
+        self.assertEqual(handoff.repo, "owner/repo")
         self.assertEqual(
             [e.task_key for e in queue_for_repo(self.integration, "owner/repo")], ["AT-101"]
+        )
+        self.assertIn(
+            HANDOFF_EVENT,
+            [e.event_type for e in self.store.list_task_events("AT-101")],
+        )
+
+        # F4 hands off; it does not move the Ticket's status. The human review
+        # gate at waiting_approval still owns the edge into
+        # ready_for_integration, so this test drives that edge itself.
+        self.store.update_task_status(
+            "AT-101",
+            schema.READY_FOR_INTEGRATION,
+            source="acceptance",
+            message="Operator released the Ticket for integration",
+            expected_current_status="waiting_approval",
         )
 
         # 14 — initial integration uses the latest target.
