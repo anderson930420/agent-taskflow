@@ -4,10 +4,26 @@ agent-taskflow is being repositioned as a Python-native, GitHub-oriented,
 multi-executor agent orchestration system inspired by Symphony-style workflow
 models.
 
-This is an architecture direction, not a runtime expansion in this phase.
-GitHub integration, OpenAI orchestration integration, external repository
-integration, new UI work, automatic PR creation, automatic merge, remote worker
-pools, and new workflow engines remain deferred.
+This was an architecture direction, not a runtime expansion in that pre-V1
+phase. The deferred items in this document retain their historical phase
+meaning; they are not a statement that every V1 foundation is absent today.
+For that phase, GitHub integration, OpenAI orchestration integration, external
+repository integration, new UI work, automatic PR creation, automatic merge,
+remote worker pools, and new workflow engines were deferred.
+
+## Current V1 Pointer
+
+Current V1 has implemented deterministic local workspace preparation in
+[`agent_taskflow.workspace_manager`](../agent_taskflow/workspace_manager.py)
+and the bounded integration mechanics described in the
+[V1 Step 2 controller map](v1-step2-integration-controller.md): an
+allowlisted normal task-branch push, draft-PR create/update, and cleanup only
+after either a verified human GitHub merge or explicit confirmed cancelled
+cleanup. [WORKFLOW.md](../WORKFLOW.md) remains the current repository
+boundary. This is not a deployment or autonomy claim: the tracked
+[V1 F8 handoff](v1/handoff-f8.md) records that no automated integration caller
+or queue consumer exists, while the remaining F9/F10 production caller work
+remains absent.
 
 ## New Positioning
 
@@ -21,9 +37,9 @@ agent-taskflow coordinates software tasks through a governed work lifecycle:
    and review requirements.
 3. **Orchestrator / dispatcher** - the component that owns run lifecycle,
    task state transitions, executor invocation, and validator sequencing.
-4. **Isolated workspace model** - the future per-task workspace boundary. The
-   current worktree path rules are a bridge toward this, but a full workspace
-   manager is not implemented yet.
+4. **Isolated workspace model** - the per-task workspace boundary. V1's
+   workspace manager prepares or reuses local task worktrees; this historical
+   document does not authorize a broader deployment or cleanup policy.
 5. **Executor adapters** - replaceable coding-agent backends such as Pi,
    OpenCode, shell, or manual executors. Executors execute within the contract;
    they do not own the architecture.
@@ -67,8 +83,8 @@ checks, and human review gates. AI workers are not trusted to enforce
 
 - **Dispatcher / orchestrator** - deterministic scheduler and lifecycle
   manager.
-- **Workspace manager** - planned deterministic workspace preparation and
-  cleanup policy executor, not implemented yet.
+- **Workspace manager** - deterministic local workspace preparation; cleanup
+  remains human-controlled or separately policy-gated.
 - **Executor adapter** - deterministic CLI wrapper and result normalizer.
 - **AI coding agent** - bounded implementation worker.
 - **Validator** - deterministic proof-of-work checker.
