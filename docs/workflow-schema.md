@@ -4,6 +4,17 @@ This document defines a draft machine-readable workflow policy for
 agent-taskflow. It is not enforced by dispatcher, executor, validator registry,
 API, Mission Control, or any runtime path yet.
 
+This draft is a pre-V1 policy-schema document. Its planned-workspace language
+describes the schema's intended enforcement role, not the absence of every
+workspace implementation. The current
+[`WorkspaceManager`](../agent_taskflow/workspace_manager.py) prepares or
+reuses local task worktrees, while [WORKFLOW.md](../WORKFLOW.md) and the
+[V1 Step 2 controller map](v1-step2-integration-controller.md) describe the
+current human-merge and integration boundaries. The tracked
+[V1 F8 handoff](v1/handoff-f8.md) records no automated integration caller or
+queue consumer, so the remaining F9/F10 production caller work is not a
+deployment or eligibility assertion in this draft.
+
 `WORKFLOW.md` remains the human-readable repository workflow contract. A
 machine-readable policy may later be paired with `WORKFLOW.md`, embedded into
 it, or referenced from it. The purpose of this draft is to align future parser,
@@ -108,8 +119,8 @@ Defines the intended workspace policy:
 }
 ```
 
-The workspace manager is planned but not implemented yet. This schema draft
-does not add workspace manager behavior.
+This schema field is still a planned policy-enforcement input. It does not make
+the implemented workspace manager read this draft or add workspace behavior.
 
 ### proof_of_work
 

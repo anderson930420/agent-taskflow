@@ -6,6 +6,24 @@ Python-native, GitHub-oriented, multi-executor orchestration architecture.
 No new runtime behavior is introduced by this document. It defines the boundary
 between the current bridge-hardened system and future architecture work.
 
+## Historical Phase Context and Current V1 Pointer
+
+This is a pre-V1 bridge-hardening boundary document. Its references below to
+planned workspace, GitHub, publication, and cleanup work preserve that phase's
+scope and acceptance surface; they are not a current-V1 inventory or a release
+decision.
+
+Current V1 sources record a narrower, implemented foundation: the
+[`WorkspaceManager`](../agent_taskflow/workspace_manager.py) prepares or
+reuses an isolated local task worktree from a resolved base SHA, and the
+[V1 Step 2 controller map](v1-step2-integration-controller.md) records the
+allowlisted task-branch push, draft-PR create/update, and cleanup paths gated
+by either a verified human merge or explicit confirmed cancelled cleanup. The
+current [workflow contract](../WORKFLOW.md) defines the human-review boundary.
+The tracked [V1 F8 handoff](v1/handoff-f8.md) establishes that no automated
+integration caller or queue consumer exists; the remaining F9/F10 production
+caller work is therefore not represented as deployed or eligible here.
+
 ## Component Map
 
 | Current component | Architecture role |
@@ -67,15 +85,15 @@ changed-files checks, workspace checks, git checks, and human review.
 | Component | Owner role |
 | --- | --- |
 | Dispatcher / orchestrator | Deterministic scheduler and lifecycle manager |
-| Workspace manager | Planned deterministic workspace preparation and cleanup policy executor |
+| Workspace manager | Deterministic local workspace preparation; cleanup remains a separately gated policy action |
 | Executor adapter | Deterministic CLI wrapper and result normalizer |
 | AI coding agent | Bounded implementation worker |
 | Validator | Deterministic proof-of-work checker |
 | Human reviewer | Final approval / reject / rerun / block decision maker |
 
-## Non-Goals
+## Historical Phase Non-Goals
 
-The current architecture explicitly does not include:
+The bridge-hardening phase explicitly did not include:
 
 - AI self-orchestration loops
 - an agent that chooses its own tasks
@@ -94,9 +112,9 @@ The current architecture explicitly does not include:
 - a new workspace manager
 - a new workflow engine
 
-## Current Acceptance Surface
+## Historical Acceptance Surface
 
-The current acceptance surface is intentionally local and deterministic:
+The bridge-hardening acceptance surface was intentionally local and deterministic:
 
 - Mission Control golden path smoke validates the API, dispatcher, store,
   artifact, validator, and review-evidence path.
