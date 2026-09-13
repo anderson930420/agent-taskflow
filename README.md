@@ -2,367 +2,169 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md)
 
-Agent Taskflow is a Python-native, GitHub-oriented orchestration system for
-human-gated AI engineering workflows.
+Agent Taskflow is a Practical V1 control plane for AI-assisted GitHub work. A
+deterministic Python lifecycle owns Tickets, attempts, leases, isolated
+worktrees, validator gates, integration evidence, and cleanup eligibility. AI
+is a bounded implementation executor; it does not own the delivery lifecycle.
 
-Its core principle is:
+The product promise is deliberately narrow: turn a Ticket into a reviewable
+GitHub pull request while preserving evidence and keeping the final merge under
+human control.
 
-> Manage work, not agents.
-
-AI coding tools such as Pi, OpenCode, Codex, Claude Code, or future executors are
-treated as bounded implementation workers. Agent Taskflow manages the work around
-them: task state, workspace isolation, executor invocation, validation,
-proof-of-work collection, and human review handoff.
-
-Agent Taskflow is **not** a chatbot, autonomous merge bot, or background coding
-daemon. It is an orchestration layer for turning GitHub issues or specs into
-reviewable engineering work under explicit human control.
-
----
-
-## Portfolio Snapshot
-
-| Area                   | What Agent Taskflow Demonstrates                                             |
-| ---------------------- | ---------------------------------------------------------------------------- |
-| AI engineering         | Bounded executor model for Pi, OpenCode, Codex, Claude Code, or future tools |
-| Workflow orchestration | Issue/spec intake, task state, dispatcher lifecycle, handoff flow            |
-| Software engineering   | Local SQLite state store, isolated worktrees, deterministic validators       |
-| Safety design          | Human approval gates, no self-approval, no automatic merge                   |
-| Evidence discipline    | Proof-of-work artifacts, validator results, logs, branch/PR handoff evidence |
-| Observability          | Mission Control as read-only review and evidence dashboard                   |
-
----
-
-## What Problem This Solves
-
-AI coding tools can generate code, but they should not own the full software
-delivery lifecycle.
-
-Agent Taskflow separates implementation from orchestration:
-
-1. A human-authored GitHub Issue or spec defines the work.
-2. Agent Taskflow mirrors the task into local state.
-3. The system prepares an isolated workspace.
-4. A bounded executor performs implementation work.
-5. Deterministic validators produce proof-of-work.
-6. Evidence artifacts are collected for review.
-7. A human decides whether to approve, publish, merge, or clean up.
-
-The goal is not to replace the human reviewer.
-The goal is to make AI-assisted software work traceable, reviewable, and governed.
-
----
-
-## System Overview
+## Current Practical V1 flow
 
 ```text
-GitHub Issue / Spec
-  → Local Task Intake
-  → SQLite Orchestrator State
-  → Isolated Git Worktree
-  → Bounded Executor Adapter
-  → Deterministic Validators
-  → Proof-of-Work Artifacts
-  → Waiting Approval
-  → Human Review
-  → Optional Branch Push / Draft PR Handoff
-  → Explicit Cleanup
+Create Ticket
+  -> runtime admission, one worktree, bounded executor
+  -> deterministic validation and persisted evidence
+  -> ready_for_integration and per-repository FIFO queue
+  -> when explicitly invoked: integrate against the latest target, validate,
+     push/update a PR
+  -> GitHub human review and human merge
+  -> when explicitly invoked: detect and verify GitHub's merge result, then
+     clean up
+  -> completed
 ```
 
-Agent Taskflow manages work lifecycle and evidence. Executors are replaceable
-implementation workers. Validators are deterministic proof-of-work gates.
-Mission Control is observability and review, not the execution core.
+The implemented producer half is automatic: a successful Ticket skips the
+legacy `waiting_approval` gate, transitions from validation to
+`ready_for_integration`, and is enqueued once for its repository. This is the
+current successful implementation path, not an extra approval step.
 
----
+The public display vocabulary uses names such as `needs_review` and
+`completed`; the existing persisted vocabulary has legacy spellings in places
+(for example `waiting_for_review`, `cleaned`, and `canceled`).
+`agent_taskflow/status_vocab.py` is the single mapping boundary.
 
-## Architecture Diagram
+### What is automated today
 
-```mermaid
-flowchart TD
-    A[Human-authored GitHub Issue / Spec] --> B[Task Intake]
-    B --> C[SQLite Orchestrator State]
+* Ticket admission enforces dependencies, leases, and configured concurrency.
+* Each Ticket owns an isolated worktree; attempts and lifecycle evidence are
+  persisted in SQLite.
+* The executor path records runtime progress and runs deterministic validators.
+* A successful implementation moves to `ready_for_integration` and enters its
+  repository's FIFO integration queue exactly once.
+* When explicitly confirmed by a caller, the integration controller can fetch
+  the latest target, perform initial integration or non-force-push
+  re-integration, rerun validators, and create or update the same GitHub PR.
+* Components exist to detect stale PRs, poll PR outcomes, verify a GitHub merge
+  commit in the target history, and perform gated cleanup.
 
-    C --> D[Workspace Manager]
-    D --> E[Isolated Git Worktree]
+### Current operator and human gates
 
-    E --> F[Executor Adapter]
-    F --> G[Implementation Worker<br/>Pi / OpenCode / Codex / Claude Code]
+F9, the integration-queue consumer tick, is not implemented yet. Consequently
+no current non-test caller drains `ready_for_integration`; an operator must
+explicitly invoke the integration controller with `dry_run=False` and
+`confirm_integration=True`. This is an integration trigger, not a merge
+approval. The controller defaults to dry-run/confirmation-required behavior.
 
-    G --> H[Deterministic Validators]
-    H --> I[Proof-of-Work Artifacts]
+After integration, Taskflow can push a task branch and create or update a draft
+PR, but **a human reviews and merges it in GitHub**. Taskflow never calls
+`gh pr merge`, cannot self-approve, and does not enable auto-merge.
 
-    I --> J[Waiting Approval]
-    J --> K[Human Review]
+F10 is also open. Its current scope is the remaining V1 invocation surface:
+target-freshness polling, PR-outcome polling, verified-merge cleanup, and
+scheduling of the parallel execution tick. These components must not be
+described as an installed, autonomous service. Ruling 65 records the
+missing-invoker history; FOLLOWUPS.md's execution-vehicle draft proposes short,
+idempotent cron ticks under SPEC §47, with human installation still separate.
+F10 must settle that deployment surface.
 
-    K --> L[Optional Branch Push]
-    K --> M[Optional Draft PR Handoff]
-    K --> N[Explicit Cleanup]
+## Safety boundaries and enforcement
 
-    C --> O[FastAPI State / Evidence API]
-    O --> P[Mission Control Review Dashboard]
+| Boundary | Enforcement point |
+| --- | --- |
+| AI is a bounded worker, not lifecycle authority | Runtime admission and dispatcher (`agent_taskflow/runtime_admission.py`, `agent_taskflow/dispatcher.py`) |
+| One Ticket owns one worktree; retries preserve auditable Ticket context | Ticket worktree and attempt-resource services (`agent_taskflow/ticket_worktree.py`, `agent_taskflow/attempt_resources.py`) |
+| Execution is bounded and dependency-safe | Atomic claim and capacity controls (`agent_taskflow/runtime_admission.py`, `agent_taskflow/runtime_capacity.py`) |
+| A blocked or paused Ticket cannot run | Claim and transition guards (`agent_taskflow/runtime_admission.py`, `agent_taskflow/ticket_lifecycle.py`) |
+| Integration is serialized per repository | Integration lock and queue (`agent_taskflow/integration_controller.py`, `agent_taskflow/integration_queue.py`) |
+| Published PR branches are never force-pushed | Integration Git policy (`agent_taskflow/integration_git.py`) |
+| Protected or target branches are never task-push targets | Branch normalization and push allowlist (`agent_taskflow/integration_git.py`) |
+| Validators, rather than GitHub CI, gate `needs_review` | Integration validators (`agent_taskflow/integration_validators.py`) |
+| Only GitHub human review can merge | Manual-merge invariant in `agent_taskflow/integration_controller.py`; no merge command is issued |
+| Cleanup requires a verified merge (or explicit cancelled-work approval) | `agent_taskflow/integration_cleanup.py` |
+| Lifecycle changes remain reviewable | SQLite task events and integration evidence |
 
-    subgraph Safety_Boundaries
-        Q[No automatic merge]
-        R[No worker self-approval]
-        S[No automatic cleanup]
-        T[No hidden background daemon]
-    end
-```
+GitHub CI is visible review information; it is not a separate Taskflow lifecycle
+authority. In the Ticket execution path, validation failures stop for
+`needs_decision` and runtime failures use `failed`; integration failures,
+including integration-validator failures, stop for `needs_decision`. The legacy
+GitHub-issue path retains its older `blocked`/`waiting_approval` vocabulary.
+A closed-but-unmerged PR is cancelled and its worktree is retained until an
+explicit cleanup confirmation.
 
----
+## Operational facts and source records
 
-## Current Capabilities
-
-* Human-authored GitHub Issue / spec intake
-* Local SQLite task mirror and orchestrator state storage
-* Explicit local-first ingestion flow
-* Isolated git worktree preparation
-* Bounded executor adapter model
-* Executor preflight before real executor runs
-* Deterministic validators:
-
-  * pytest
-  * optional openspec
-  * policy checks
-  * changed-files checks
-  * smoke tests
-* Proof-of-work artifact collection
-* Executor logs and changed-file evidence
-* Waiting-approval review summary generation
-* Local PR handoff package generation
-* Explicit branch publication preview
-* Explicit draft PR creation preview
-* Mission Control read-only review and evidence dashboard
-* Human review as final approval gate
-
----
-
-## Semi-Automatic Dogfood Loop
-
-The current dogfood loop is operator-driven and semi-automatic:
-
-1. A human discovers or selects a GitHub Issue or spec.
-2. The operator explicitly ingests the selected issue into the local SQLite mirror.
-3. The operator runs queued-task recommendation and explicitly selects the task key.
-4. The operator runs approved task execution in an isolated worktree.
-5. Deterministic validators record proof-of-work.
-6. The task reaches `waiting_approval` only after validation passes.
-7. The operator generates a waiting-approval review summary and local PR handoff package.
-8. Branch push is explicit and requires confirmation.
-9. Draft PR creation is explicit and requires confirmation.
-10. Cleanup is explicit and separate from validation success.
-11. A human reviews the evidence and decides what happens next.
-
-The explicit branch push and draft PR creation commands are dry-run by default and
-require confirmation flags before they mutate GitHub.
-
----
-
-## Operator Flow
-
-Run the local validation baseline before dogfood work:
-
-```bash
-source .venv/bin/activate
-python3 scripts/run_local_validation.py
-```
-
-Ingest one GitHub Issue into the local mirror:
-
-```bash
-python3 scripts/ingest_github_issue.py \
-  --repo owner/repo \
-  --issue-number 123 \
-  --db-path /absolute/path/to/state.db \
-  --local-repo-path /absolute/path/to/repo \
-  --artifact-root /absolute/path/to/artifacts \
-  --task-key AT-123
-```
-
-Prepare an isolated worktree:
-
-```bash
-python3 scripts/prepare_task_workspace.py \
-  --task-key AT-123 \
-  --db-path /absolute/path/to/state.db \
-  --base-branch main
-```
-
-Run executor preflight before a real executor path:
-
-```bash
-python3 scripts/run_real_executor_preflight.py \
-  --executor opencode \
-  --validators pytest,openspec
-```
-
-Dispatch the task explicitly:
-
-```bash
-python3 scripts/run_dispatcher.py \
-  --task-key AT-123 \
-  --db-path /absolute/path/to/state.db \
-  --executor opencode \
-  --validators pytest,openspec
-```
-
-Generate local PR handoff evidence after the task reaches `waiting_approval`:
-
-```bash
-python3 scripts/create_pr_handoff.py \
-  --task-key AT-123 \
-  --db-path /absolute/path/to/state.db \
-  --repo owner/repo
-```
-
-Preview branch publication:
-
-```bash
-python3 scripts/push_task_branch.py \
-  --task-key AT-123 \
-  --db-path /absolute/path/to/state.db \
-  --dry-run
-```
-
-Preview draft PR creation:
-
-```bash
-python3 scripts/create_draft_pr.py \
-  --task-key AT-123 \
-  --db-path /absolute/path/to/state.db \
-  --dry-run
-```
-
----
-
-## Evidence of Engineering Quality
-
-Agent Taskflow is structured around reviewable evidence rather than hidden
-automation.
-
-The system records or surfaces:
-
-* task state transitions
-* executor metadata
-* validator results
-* changed-file evidence
-* issue/spec artifacts
-* executor logs
-* handoff metadata
-* branch publication evidence
-* draft PR evidence
-* dogfood evidence readback in Mission Control
-
-Recommended validation entrypoint:
-
-```bash
-python3 scripts/run_local_validation.py
-```
-
----
-
-## Safety Boundaries
-
-Agent Taskflow intentionally does **not** claim to provide:
-
-* automatic merge
-* automatic approval
-* worker self-approval
-* automatic cleanup
-* hidden background GitHub sync
-* webhook-driven autonomous execution
-* brokered remote worker pools
-* unrestricted AI agent autonomy
-
-Current safety boundaries:
-
-* Executors are bounded implementation workers.
-* Validators are deterministic proof-of-work gates.
-* SQLite is orchestrator state storage.
-* FastAPI exposes state and evidence for review.
-* Mission Control is observability and review, not the execution core.
-* Approval metadata is a human review gate.
-* Workers cannot self-approve, push, merge, or clean up.
-* Validation success does not imply automatic publication, merge, or cleanup.
-
----
-
-## Scheduled Execution and ExecutionEngine Migration Status
-
-Beyond the operator-driven loop, a bounded scheduled path exists:
-
-* Scheduled one-task execution exists. A locked scheduler tick
-  (`scripts/run_github_issue_one_task_scheduler_tick.py`) can select, ingest,
-  and execute at most one confirmed task per tick under a non-overlap lock.
-  It is one tick only: no daemon, no scheduler loop, no multi-task batch.
-* Active cron observability exists. Scheduled tick runs record structured
-  observability evidence so cron-driven activity is reviewable.
-* Live cron remains execution-only. The active cron path never publishes,
-  pushes branches, creates PRs, merges, approves, or cleans up.
-* Publication, merge, and cleanup remain human-gated. Validation success never
-  implies publication; explicit human confirmation is required for every
-  outward-facing or destructive step.
-* ExecutionEngine is the authoritative confirmed Level 2 execution boundary
-  and the repository-wide authority for Level 2 work. The scheduler invokes it
-  at the existing runtime handoff, accepts successful results only after exact
-  canonical-store verification, and fails closed without legacy scheduler fallback.
-  Direct approved-runner, dispatcher,
-  queued-handoff, and injected-callback paths reject explicit non-legacy Level
-  2 tasks; PR handoff requires the exact Attempt returned by the engine. The
-  historical `--use-execution-engine` option remains accepted as a compatibility no-op;
-  it no longer selects authority. Engine results are still not approval
-  authority: deterministic validators and human review remain the validation
-  and approval gates.
-
----
-
-## Deferred Automation
-
-The following capabilities are intentionally deferred:
-
-* Continuous queue or polling automation. A locked, single-tick, one-task
-  scheduled execution path exists; an always-on scheduler loop, daemon, or
-  background worker does not.
-* Webhook or background GitHub issue sync.
-* Dispatcher-driven workspace creation.
-* Dispatcher-driven branch push or PR creation.
-* Automatic merge after approval.
-* Automatic cleanup, branch deletion, or worktree deletion.
-* Remote worker pools and multi-host scheduling.
-
-These are governance and lifecycle decisions, not executor behavior.
-
----
-
-## Portfolio Context
-
-Agent Taskflow is the AI engineering workflow orchestration project in my
-portfolio.
+The recorded production capacity is **2 active executor leases**, not an assumed
+configuration-file value. The operator deployment record is the read-only
+`~/agent-taskflow-ops/v1/RULINGS.md` 52; it also records the default as 1 and
+enforcement at the claim transaction. Raising capacity above 1 requires
+commit-bound rehearsal evidence. The production preparation recorded in rulings
+48 and 50 ran these explicit migrations against a backed-up database:
 
 ```text
-agent-taskflow
-  → demonstrates human-gated automation, validation, and proof-of-work workflows
-
-AlphaForge
-  → demonstrates ML-oriented quantitative research validation and artifact reporting
-
-SignalForge
-  → demonstrates standardized signal-generation artifacts for AlphaForge
-
-bs_pricer
-  → demonstrates financial engineering model implementation
+scripts/migrate_ticket_fields.py
+scripts/migrate_runtime_progress.py
+scripts/migrate_ticket_worktree_resources.py
 ```
 
-Together, these projects show a broader direction:
+Those records are deployment evidence, not instructions to run migrations
+against an arbitrary database. Migration scripts are explicit and idempotent;
+startup does not silently apply the Ticket-field migration.
 
-> building reproducible research and engineering systems with explicit boundaries,
-> deterministic validation, human review gates, and reviewable evidence.
+The implementation and real-GitHub evidence are documented in:
 
----
+* `docs/v1/handoff-step1.md` — Ticket fields and creation.
+* `docs/v1/handoff-step3.md` — runtime progress.
+* `docs/v1/handoff-step4.md` and `docs/v1/handoff-step5.md` — capacity,
+  admission, attempts, and parallel execution.
+* `docs/v1/handoff-step2.md` and `docs/v1/handoff-step2-e2e.md` — integration,
+  PR handling, merge verification, and cleanup components.
+* `docs/v1/handoff-f4.md`, `docs/v1/handoff-f8.md`, and
+  `docs/v1/handoff-f8-e2e.md` — automatic handoff to
+  `ready_for_integration`, queue evidence, and the remaining manual trigger.
 
-## Historical Note
+The governing read-only control records are
+`~/agent-taskflow-ops/v1/SPEC.md`, `~/agent-taskflow-ops/v1/RULINGS.md`, and
+`~/agent-taskflow-ops/v1/FOLLOWUPS.md`. The higher-level Master Spec and Level 2
+Roadmap remain design inputs only where they do not conflict with Practical V1
+or later human rulings. In particular, they do not authorize auto-merge or
+restoration of the legacy `waiting_approval` success path.
 
-Older Hermes/Kanban extraction scripts and docs may still exist as historical
-context, but they are not the current primary architecture. The current system is
-the local SQLite, explicit worktree, bounded executor, deterministic validator,
-proof-of-work, PR handoff, and human review loop described above.
+## Canonical ExecutionEngine authority
+
+Confirmed Level 2 scheduler execution routes through
+`SchedulerExecutionEngineAuthority` and its canonical `ExecutionEngine` result.
+`--use-execution-engine` remains a compatibility flag; it does not restore a
+legacy scheduler fallback. This authority remains canonical wherever confirmed
+Level 2 execution is invoked; it does not alter F8's specified Ticket success
+status or the human GitHub merge gate.
+
+## What remains before an unattended V1 round
+
+* **F7 (this documentation update):** reconciles the public description with
+  the merged F4/F8 behavior.
+* **F9:** build one idempotent integration tick that drains each repository
+  queue in FIFO order. It must call the existing controller; it must not change
+  the controller's lock or merge semantics.
+* **F10:** call the other existing consumer components and settle the cron
+  deployment surface, including non-overlap locks.
+* **F2:** complete the deferred repository-wide status vocabulary and explicit
+  migration cleanup.
+* **After F9/F10:** run the first real Ticket. Its observed friction, rather
+  than this documentation, prioritizes Step 6, F6, F5, and later work. An open
+  PR remains a human-review dependency until it is actually merged.
+
+## Development validation
+
+For a disposable development database and worktree, run the repository
+validators rather than treating this README as an operator runbook:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/validate_workflow_contract.py
+PYTHONPATH=. .venv/bin/python scripts/validate_workflow_policy.py
+PYTHONPATH=. .venv/bin/python -m unittest discover -s tests
+```
+
+Do not use a production database for local validation or experimentation.
