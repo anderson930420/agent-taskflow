@@ -4,6 +4,32 @@
 > Authority: `agent-taskflow-shortest-level2-roadmap-v2.md`  
 > Scope: Attempt Model, canonical execution path, lifecycle correctness, and M1 operational rehearsals
 
+## Later closeout evidence (retained 2026-09-13 reconciliation)
+
+The dated decision and gate matrix below remain the July 2026 findings; this
+section makes later evidence discoverable without rewriting those findings.
+
+- The historical M1 closeout at `4266c02` recorded 10 passed gates. Its retained
+  provenance manifest is
+  `/home/ubuntu/agent-taskflow-dev/.agent-taskflow/evidence/reconciliation/vps-native-20260914-01/historical-m1-provenance.json`
+  (SHA-256 `44a8b196ad15ee64c78e1299663d673990e776a52eb9094cab24f5ff1dcfdc43`),
+  including the historical final-audit artifact hash.
+- A later read-only audit at `5b238952c04d1e08c25419bef2dc18f35e5bf1d5`
+  reports 10 passed gates and no blocked, partial, or not-applicable gates in
+  `m1-current-copy-audit.json` (SHA-256
+  `081fd2784b7f6ded13c35041577b8d694da39956795bd74623b8894beb85eb45`).
+  The retained provenance records a SQLite backup from a read-only connection,
+  restored into an isolated audit copy with matching SHA-256, successful
+  integrity check, zero foreign-key violations, and no production tests or
+  migrations.
+
+These are bounded historical and isolated-copy audit facts. They do not deploy
+code, alter a production database, complete M2, establish shadow or task
+eligibility, enable autonomy or auto-merge, or replace human review. Reviewers
+can inspect the retained JSON and provenance under
+`/home/ubuntu/agent-taskflow-dev/.agent-taskflow/evidence/reconciliation/vps-native-20260914-01/`;
+they do not need to access a production database.
+
 ## Decision
 
 Milestone 0 is closed and deployed. Milestone 1 is **substantially implemented but not closed**.
