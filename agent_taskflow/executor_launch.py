@@ -29,6 +29,11 @@ from agent_taskflow.executor_process_schema import (
     migrate_executor_process_lifecycle,
 )
 from agent_taskflow.lifecycle_control import RuntimeControlStore
+from agent_taskflow.launch_evidence import (
+    launch_evidence_reference,
+    read_bound_attempt_snapshot,
+    write_launch_evidence,
+)
 from agent_taskflow.models import require_absolute_path, utc_now_iso
 from agent_taskflow.store import connect, default_db_path
 from agent_taskflow.tasks import normalize_task_key
@@ -1155,7 +1160,10 @@ def run_managed_process(
     launch_spec_path = binding.artifact_root / f"{role_label}-launch-spec-{safe_executor}.json"
     pid_manifest_path = binding.artifact_root / f"{role_label}-process-{safe_executor}.pid.json"
     process_id = f"process-{uuid4().hex}"
+    attempt_snapshot = read_bound_attempt_snapshot(binding)
+    evidence_reference = launch_evidence_reference(binding.artifact_root, process_id)
     spec_payload = spec.to_artifact(binding)
+    spec_payload["resolved_launch_evidence"] = evidence_reference
     atomic_write_json(launch_spec_path, spec_payload, sort_keys=True)
     manifest_base = {
         "schema_version": f"{role_label}_process_pid.v1",
@@ -1172,12 +1180,37 @@ def run_managed_process(
         "leader_start_ticks": None,
         "state": "pending_preflight",
         "created_at": utc_now_iso(),
+        "resolved_launch_evidence": evidence_reference,
     }
     atomic_write_json(pid_manifest_path, manifest_base, sort_keys=True)
 
     store = ExecutorProcessStore(binding.db_path)
+    preflight_started_at = utc_now_iso()
     preflight = check_executor_launch_preflight(binding, spec, run_env=run_env)
+    preflight_ended_at = utc_now_iso()
+
+    def record_launch(
+        outcome: str,
+        *,
+        identity: dict[str, int] | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        evidence_reference.update(write_launch_evidence(
+            binding, spec, process_id=process_id, snapshot=attempt_snapshot,
+            preflight=preflight, preflight_started_at=preflight_started_at,
+            preflight_ended_at=preflight_ended_at, launch_spec_path=launch_spec_path,
+            pid_manifest_path=pid_manifest_path, outcome=outcome,
+            parent_environment_inherited_by_popen=run_env is None,
+            process_identity=identity, error=error,
+        ))
+        try:
+            atomic_write_json(launch_spec_path, spec_payload, sort_keys=True)
+        except OSError as exc:
+            # Sidecar/link failures are observable, never process-lifecycle authority.
+            evidence_reference["reference_write_error"] = type(exc).__name__
+
     if not preflight.ok:
+        record_launch("preflight_failed")
         store.create(
             process_id=process_id,
             binding=binding,
@@ -1190,6 +1223,7 @@ def run_managed_process(
             metadata={
                 "blocking_errors": list(preflight.blocking_errors),
                 "warnings": list(preflight.warnings),
+                "resolved_launch_evidence": evidence_reference,
             },
         )
         atomic_write_json(
@@ -1230,6 +1264,7 @@ def run_managed_process(
         metadata={
             "resolved_executable": preflight.resolved_executable,
             "warnings": list(preflight.warnings),
+            "resolved_launch_evidence": evidence_reference,
         },
     )
 
@@ -1271,6 +1306,7 @@ def run_managed_process(
                 actor=binding.owner_id,
                 error=f"{exc.__class__.__name__}: {exc}",
             )
+            record_launch("start_failed", error={"type": type(exc).__name__, "errno": exc.errno})
             atomic_write_json(
                 pid_manifest_path,
                 {
@@ -1306,6 +1342,7 @@ def run_managed_process(
                 process.wait(timeout=spec.kill_wait_seconds)
             error = "could not read executor leader identity from /proc"
             store.mark_start_failed(process_id, actor=binding.owner_id, error=error)
+            record_launch("start_failed", error={"reason": "leader_identity_unavailable"})
             return ManagedProcessResult(
                 process_id=process_id,
                 exit_code=process.returncode,
@@ -1332,6 +1369,7 @@ def run_managed_process(
                 f"pid={pid} pgid={stat.pgrp} sid={stat.session_id}"
             )
             store.mark_start_failed(process_id, actor=binding.owner_id, error=error)
+            record_launch("start_failed", error={"reason": "process_group_identity_mismatch"})
             return ManagedProcessResult(
                 process_id=process_id,
                 exit_code=process.returncode,
@@ -1357,6 +1395,10 @@ def run_managed_process(
             leader_start_ticks=stat.start_ticks,
             actor=binding.owner_id,
         )
+        record_launch("started", identity={
+            "pid": pid, "pgid": stat.pgrp, "session_id": stat.session_id,
+            "leader_start_ticks": stat.start_ticks,
+        })
         atomic_write_json(
             pid_manifest_path,
             {
@@ -1373,6 +1415,7 @@ def run_managed_process(
                 "session_id": stat.session_id,
                 "leader_start_ticks": stat.start_ticks,
                 "started_at": utc_now_iso(),
+                "resolved_launch_evidence": evidence_reference,
             },
             sort_keys=True,
         )
