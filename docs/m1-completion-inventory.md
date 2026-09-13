@@ -10,6 +10,28 @@ Scope: what remains to take Milestone 1 from its current state to closed, agains
 the **existing** M1 definition in `docs/m1-exit-gate-status.md` and
 `docs/canonical-execution-engine-authority.md`. No new architecture is proposed.
 
+## Later closeout evidence (retained 2026-09-13 reconciliation)
+
+This August 2026 inventory remains a dated gap analysis and its findings below
+are not erased. Later retained evidence supplies the missing closeout pointer:
+the historical `4266c02` closeout recorded 10/10 gates, with provenance in
+`/home/ubuntu/agent-taskflow-dev/.agent-taskflow/evidence/reconciliation/vps-native-20260914-01/historical-m1-provenance.json`
+(SHA-256 `44a8b196ad15ee64c78e1299663d673990e776a52eb9094cab24f5ff1dcfdc43`).
+
+The later audit at `5b238952c04d1e08c25419bef2dc18f35e5bf1d5` recorded 10
+passed gates on an isolated SQLite copy restored from a read-only backup:
+`m1-current-copy-audit.json` (SHA-256
+`081fd2784b7f6ded13c35041577b8d694da39956795bd74623b8894beb85eb45`) and
+`readonly-backup-provenance.json` (SHA-256
+`884fef590bd33771b8f46807ef67cfd05aeaf5bef3cc9f944b3740360579a4d9`).
+The provenance records matching backup/restored hashes, integrity success, zero
+foreign-key violations, and no production tests or migrations. These audit
+facts do not deploy code, change production state, complete M2, establish
+eligibility or a shadow sample, enable autonomy or auto-merge, or replace human
+approval. Review the retained JSON under
+`/home/ubuntu/agent-taskflow-dev/.agent-taskflow/evidence/reconciliation/vps-native-20260914-01/`,
+not a production database.
+
 ## 0. How the current state was established
 
 1. Read `docs/m1-exit-gate-status.md`, `docs/canonical-execution-engine-authority.md`,
