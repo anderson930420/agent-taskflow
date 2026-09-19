@@ -91,7 +91,7 @@ loop, webhook worker, or implicit scheduler.
 | `scripts/recommend_post_merge_cleanup.py` | Recommend post-merge cleanup actions from evidence. | Read-only local DB/artifact and optional Git/GitHub state inspection. | No `--confirm-*`; recommendation only. | No - no background scheduler behavior. |
 | `scripts/confirm_local_cleanup.py` | Confirm local worktree and local branch cleanup. | Dry-run available; confirmed mode may remove local worktree and delete local branch. | Yes, `--confirm-local-cleanup`. | No - no background scheduler behavior. |
 | `scripts/confirm_remote_branch_cleanup.py` | Confirm remote branch cleanup after local cleanup evidence. | Dry-run available; confirmed mode may call `git push --delete`. | Yes, `--confirm-remote-branch-delete`. | No - no background scheduler behavior. |
-| `scripts/confirm_task_closeout.py` | Confirm local task closeout after PR and cleanup evidence. | Dry-run available; confirmed mode may update local task status/evidence. | Yes, `--confirm-task-closeout`. | No - no background scheduler behavior. |
+| `scripts/confirm_task_closeout.py` | Confirm local task closeout after PR and cleanup evidence. Optional `--attempt-id` appends the observed merge outcome to that exact Attempt's outcome ledger (see `docs/outcome-ledger.md`); omit it when the Attempt is unknown. | Dry-run available; confirmed mode may update local task status/evidence. | Yes, `--confirm-task-closeout`. | No - no background scheduler behavior. |
 | `scripts/kanban_accept_cleanup.py` | Legacy Hermes/Kanban accept and cleanup helper. | Dry-run available; confirmed mode may call `gh` and `git` cleanup commands. | Yes, `--confirm`. | No - no background scheduler behavior. |
 
 ## Mission Control / API Smoke

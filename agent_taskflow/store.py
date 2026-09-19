@@ -7,6 +7,7 @@ replace Hermes/Kanban as the task authority.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -38,8 +39,17 @@ def _db_path(path: str | Path | None) -> Path:
     return require_absolute_path(path, "db_path")
 
 
+logger = logging.getLogger(__name__)
+
 SQLITE_BUSY_TIMEOUT_MS = 5000
 SQLITE_ENABLE_WAL = True
+
+#: Task statuses that can make `runtime_terminal_status_releases_lease`
+#: terminalize an active Attempt from a plain status write. Kept in sync with
+#: `runtime_admission_schema._schema_statements`.
+_TRIGGER_TERMINAL_STATUSES = frozenset(
+    {"blocked", "waiting_approval", "canceled", "completed"}
+)
 
 LINEAGE_CONSUMPTION_SAFETY_FLAGS: dict[str, bool] = {
     "single_use_enforced": True,
@@ -51,6 +61,64 @@ LINEAGE_CONSUMPTION_SAFETY_FLAGS: dict[str, bool] = {
 
 def _should_attempt_wal(db_path: Path) -> bool:
     return SQLITE_ENABLE_WAL and str(db_path) != ":memory:"
+
+
+def _attempt_exposed_to_status_trigger(
+    conn: sqlite3.Connection, task_key: str, target_status: str
+) -> str | None:
+    """Return the Attempt a committed status write could terminalize, if any.
+
+    This mirrors the `WHEN` clause of `runtime_terminal_status_releases_lease`
+    and must run inside the same transaction as the status write, because the
+    trigger clears `tasks.active_attempt_id` and the binding would otherwise be
+    unrecoverable afterwards. Stores whose database predates the Attempt
+    lifecycle migration simply have no binding to observe.
+    """
+    if target_status not in _TRIGGER_TERMINAL_STATUSES:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT tasks.task_id, tasks.status, tasks.active_attempt_id,
+                   (
+                       SELECT COUNT(*) FROM runtime_claim_suppressions
+                       WHERE runtime_claim_suppressions.task_id = tasks.task_id
+                   ) AS suppressions
+            FROM tasks
+            WHERE tasks.task_key = ?
+            """,
+            (task_key,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or not row["active_attempt_id"]:
+        return None
+    if row["status"] == target_status or row["suppressions"]:
+        return None
+    return str(row["active_attempt_id"])
+
+
+def _publish_status_trigger_outcome_ledger(
+    db_path: Path, task_key: str, attempt_id: str
+) -> None:
+    """Write the M2 §2.3 closeout ledger for a trigger-only Attempt closure.
+
+    Runs after the status write has committed. The ledger writer re-reads the
+    exact Attempt and publishes nothing unless it is genuinely terminal, so a
+    suppressed or already-closed Attempt cannot produce a false record. Any
+    failure here is audited by the writer and must never change the committed
+    task status.
+    """
+    try:
+        from agent_taskflow.outcome_ledger import record_trigger_closeout_outcome
+
+        record_trigger_closeout_outcome(
+            db_path=db_path, task_key=task_key, attempt_id=attempt_id
+        )
+    except Exception as exc:  # pragma: no cover - defensive evidence path
+        logger.warning(
+            "Outcome ledger publication after a status-trigger closure failed: %s", exc
+        )
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
@@ -959,7 +1027,11 @@ class TaskMirrorStore:
             where_clause += " AND status = ?"
             update_params += (validated_expected_status,)
 
+        terminal_attempt_id: str | None = None
         with closing(connect(self.db_path)) as conn, conn:
+            terminal_attempt_id = _attempt_exposed_to_status_trigger(
+                conn, task_key, validated_status
+            )
             cursor = conn.execute(
                 f"""
                 UPDATE tasks
@@ -1009,6 +1081,11 @@ class TaskMirrorStore:
                     ),
                     now,
                 ),
+            )
+
+        if terminal_attempt_id is not None:
+            _publish_status_trigger_outcome_ledger(
+                self.db_path, task_key, terminal_attempt_id
             )
 
     def record_approval_decision(

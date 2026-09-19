@@ -16,6 +16,7 @@ from pathlib import Path
 
 from agent_taskflow.concurrency_rehearsal import (
     RUNTIME_STEPS,
+    _writer_rows_ok,
     add_rehearsal_task,
     create_rehearsal_fixture,
     integrity_errors,
@@ -23,7 +24,7 @@ from agent_taskflow.concurrency_rehearsal import (
     run_worker_processes,
 )
 from agent_taskflow.runtime_capacity import set_disposable_fixture_capacity
-from agent_taskflow.store import connect
+from agent_taskflow.store import TaskMirrorStore, connect
 
 WRITERS = 4
 HEARTBEATS = 5
@@ -142,12 +143,110 @@ class ConcurrentWriteRehearsalTests(unittest.TestCase):
                 "AND event_type = 'note' AND payload_json LIKE '%validation_result%'",
                 (item["task_key"],),
             )[0][0]
-            artifacts = self.query(
-                "SELECT COUNT(*) FROM task_artifacts WHERE task_key = ?",
-                (item["task_key"],),
-            )[0][0]
+            artifacts = [
+                Path(row["path"]).name
+                for row in self.query(
+                    "SELECT path FROM task_artifacts WHERE task_key = ? ORDER BY id",
+                    (item["task_key"],),
+                )
+            ]
             self.assertEqual(validations, EVIDENCE_ROWS)
-            self.assertEqual(artifacts, EVIDENCE_ROWS)
+            self.assertEqual(
+                [name for name in artifacts if name.startswith("step4-rehearsal-")],
+                [f"step4-rehearsal-evidence-{index}.json" for index in range(EVIDENCE_ROWS)],
+            )
+            # M2 §2.3: the terminal release also publishes exactly one Attempt
+            # outcome ledger beside the rehearsal evidence.
+            self.assertEqual(
+                [name for name in artifacts if name.startswith("outcome-ledger-")],
+                [f"outcome-ledger-{item['attempt_id']}.json"],
+            )
+            self.assertEqual(len(artifacts), EVIDENCE_ROWS + 1)
+
+    def test_section_19_2_writer_check_accepts_the_real_artifact_contract(self) -> None:
+        """The §19.2 rehearsal checker must agree with the rows actually written.
+
+        This is the check `run_concurrency_rehearsal.py` and the Step 4
+        concurrency gate consume, so it has to know that a terminal release
+        publishes one M2 §2.3 outcome ledger beside the rehearsal evidence.
+        """
+        for item in self.writer_results:
+            self.assertEqual(
+                _writer_rows_ok(
+                    self.fixture.db_path,
+                    item,
+                    heartbeats=HEARTBEATS,
+                    evidence_rows=EVIDENCE_ROWS,
+                ),
+                [],
+            )
+
+    def test_section_19_2_writer_check_still_detects_a_lost_or_extra_artifact(self) -> None:
+        """The relaxed count must not have become a blind spot.
+
+        A removed rehearsal artifact, a removed outcome ledger and an extra
+        artifact must each still be reported as a lost/wrong write.
+        """
+        item = self.writer_results[0]
+        task_key = item["task_key"]
+        ledger_name = f"outcome-ledger-{item['attempt_id']}.json"
+        rows = self.query(
+            "SELECT id, path FROM task_artifacts WHERE task_key = ? ORDER BY id",
+            (task_key,),
+        )
+        originals = [(row["id"], row["path"]) for row in rows]
+
+        def restore() -> None:
+            with closing(connect(self.fixture.db_path)) as conn, conn:
+                conn.execute("DELETE FROM task_artifacts WHERE task_key = ?", (task_key,))
+                conn.executemany(
+                    "INSERT INTO task_artifacts(id, task_key, artifact_type, path, created_at) "
+                    "VALUES (?, ?, 'other', ?, '2026-01-01T00:00:00Z')",
+                    [(identifier, task_key, path) for identifier, path in originals],
+                )
+
+        self.addCleanup(restore)
+
+        for victim in (originals[0][1], next(p for _, p in originals if p.endswith(ledger_name))):
+            with self.subTest(removed=Path(victim).name):
+                with closing(connect(self.fixture.db_path)) as conn, conn:
+                    conn.execute(
+                        "DELETE FROM task_artifacts WHERE task_key = ? AND path = ?",
+                        (task_key, victim),
+                    )
+                self.assertNotEqual(
+                    _writer_rows_ok(
+                        self.fixture.db_path,
+                        item,
+                        heartbeats=HEARTBEATS,
+                        evidence_rows=EVIDENCE_ROWS,
+                    ),
+                    [],
+                )
+                restore()
+
+        TaskMirrorStore(self.fixture.db_path).record_task_artifact(
+            task_key, "other", self.fixture.artifact_root / "unexpected-extra.json"
+        )
+        self.assertNotEqual(
+            _writer_rows_ok(
+                self.fixture.db_path,
+                item,
+                heartbeats=HEARTBEATS,
+                evidence_rows=EVIDENCE_ROWS,
+            ),
+            [],
+        )
+        restore()
+        self.assertEqual(
+            _writer_rows_ok(
+                self.fixture.db_path,
+                item,
+                heartbeats=HEARTBEATS,
+                evidence_rows=EVIDENCE_ROWS,
+            ),
+            [],
+        )
 
     def test_task_status_history_is_exactly_the_lifecycle(self) -> None:
         for item in self.writer_results:

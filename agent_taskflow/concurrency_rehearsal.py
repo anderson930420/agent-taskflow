@@ -66,6 +66,7 @@ from agent_taskflow.lifecycle_control_schema import (
     RECOVERY_ATTEMPT_TRANSITIONS,
 )
 from agent_taskflow.models import TaskRecord, utc_now_iso
+from agent_taskflow.outcome_ledger import ledger_filename
 from agent_taskflow.runtime_admission import (
     LeaseOwnershipError,
     RuntimeAdmissionError,
@@ -774,11 +775,26 @@ def _writer_rows_ok(
         "AND payload_json LIKE '%validation_result%'",
         (key,),
     )[0][0]
-    artifacts = _rows(
-        db_path, "SELECT COUNT(*) FROM task_artifacts WHERE task_key = ?", (key,)
-    )[0][0]
-    if validations != evidence_rows or artifacts != evidence_rows:
-        missing.append(f"{key}: evidence {validations} validations, {artifacts} artifacts")
+    artifacts = [
+        Path(row[0]).name
+        for row in _rows(
+            db_path,
+            "SELECT path FROM task_artifacts WHERE task_key = ? ORDER BY id",
+            (key,),
+        )
+    ]
+    # The writer records `evidence_rows` rehearsal artifacts, and the terminal
+    # admission release publishes exactly one M2 §2.3 outcome ledger for the
+    # Attempt it closed. Both are named, so a lost, duplicated or unexpected
+    # artifact still fails this check.
+    expected_artifacts = [
+        f"step4-rehearsal-evidence-{index}.json" for index in range(evidence_rows)
+    ] + [ledger_filename(attempt_id)]
+    if validations != evidence_rows or artifacts != expected_artifacts:
+        missing.append(
+            f"{key}: evidence {validations} validations, artifacts {artifacts}, "
+            f"expected {evidence_rows} validations and {expected_artifacts}"
+        )
     statuses = [
         row[0]
         for row in _rows(
