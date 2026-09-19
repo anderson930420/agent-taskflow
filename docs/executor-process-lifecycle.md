@@ -60,6 +60,53 @@ Prompt or mission text passed through argv by OpenCode and Pi is replaced with
 `<redacted>` in persisted launch evidence. Claude Code continues to receive its
 prompt over stdin rather than argv.
 
+## Captured launch provenance
+
+Each bound managed process also publishes one immutable
+`resolved-launch-process-<id>.json`. The existing exact Attempt/lease/resource
+verification and anchored, no-overwrite publication remain the evidence gate.
+The new metadata is observational and does not change launch permissions,
+subprocess outcomes, or lifecycle transitions.
+
+`configured_attempt` is the exact persisted Attempt snapshot read before launch;
+it never falls back to current task defaults or the latest Attempt.
+`requested_launch` separately records the adapter's selected executor, model,
+timeout and requested tools, plus the prepared resource base SHA. A null timeout
+means no timeout was configured. Pi reports its constructor model (it does not
+use the context model); OpenCode reports its constructor-or-context selection.
+Claude Code and shell accept opaque commands, so their effective model remains
+unknown. `observed_model` is unknown for every adapter until a backend provides
+a trustworthy effective-model observation.
+
+`prompt_reference` records the selected text's source, UTF-8 SHA-256 and byte
+length. Pi mission rendering and Claude implementer rendering point to the
+rendered prompt, while Pi legacy mode and OpenCode point to the supplied input.
+The digest uses the text already selected for argv or stdin, without reopening
+that path. References describe the launch input, not the file's later contents.
+`spec_reference` is captured from issue spec text when the approved runner reads
+it to generate a missing prompt. An existing prompt does not establish which
+spec produced it; that spec reference remains explicitly unknown.
+
+The dispatcher and approved runner capture `config_snapshot_reference` as a
+SHA-256 of a canonical JSON projection of selected runtime fields: executor,
+model, provider, tools, validators and timeout, plus the approved runner's base
+branch. Its source is `runner_selected_fields_json`, not a claimed hash of an
+unread configuration file. It remains distinct from the persisted Attempt's
+`config_snapshot_hash`. No raw prompt, environment or credential is copied into
+these new fields.
+
+`canonical_execution_path` comes from the direct runner: `dispatcher`,
+`approved_task_runner`, or `execution_engine` when the existing engine invocation
+scope matches the exact task and database. An Attempt binding alone does not
+attest the engine path. Direct adapter callers without path observations retain
+unknown. Requested policy/permission values remain unknown when the runner did
+not select them; persisted configuration stays in `configured_attempt`.
+Credential, network and environment enforcement policies and allowed-tool
+enforcement remain unknown with reasons, even when requested tools are known.
+Missing or invalid optional metadata does not block safe evidence publication.
+No migration is required; rollback is a revert of these additive capture fields
+and callsites, leaving historical evidence intact.
+
 ## Preflight
 
 A process is not started unless preflight proves all of the following:

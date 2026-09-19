@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
+from agent_taskflow.launch_provenance import launch_provenance_payload
 
 if TYPE_CHECKING:
     from agent_taskflow.executor_launch import (
@@ -240,15 +241,36 @@ def write_launch_evidence(
             observed_executable = redact(os.readlink(f"/proc/{process_identity['pid']}/exe"))
         except OSError:
             pass  # A fast process may already have exited; do not infer its executable.
+    captured = launch_provenance_payload(spec.provenance)
     unknown = {
         "observed_model": None,
-        "canonical_execution_path": None,
-        "prompt_reference": None,
-        "spec_reference": None,
-        "config_snapshot_reference": None,
+        "canonical_execution_path": captured["canonical_execution_path"],
+        "prompt_reference": captured["prompt_reference"],
+        "spec_reference": captured["spec_reference"],
+        "config_snapshot_reference": captured["config_snapshot_reference"],
         "allowed_tools": None,
         "environment_allowlist": None,
         "network_policy": None,
+        "credential_policy": None,
+    }
+    requested = {
+        "executor": spec.executor_name,
+        "model": captured["requested_model"],
+        "timeout_seconds": spec.timeout_seconds,
+        "base_commit": captured["base_commit"],
+        "policy_version": captured["policy_version"],
+        "permission_profile": captured["permission_profile"],
+        "tools": captured["requested_tools"],
+    }
+    unknown_reasons = {
+        **{key: "not_attested_at_managed_launch_boundary" for key, value in unknown.items()
+           if value is None},
+        **captured["unknown_reasons"],
+        "observed_model": "backend_effective_model_not_attested",
+        "allowed_tools": "requested_tools_are_not_enforcement_attestation",
+        "environment_allowlist": "environment_enforcement_policy_not_observed",
+        "network_policy": "network_enforcement_policy_not_observed",
+        "credential_policy": "credential_enforcement_policy_not_observed",
     }
     payload = {
         "schema_version": "resolved_launch_evidence.v1",
@@ -264,12 +286,18 @@ def write_launch_evidence(
             "linux_proc_exe" if observed_executable is not None else "not_observed"
         ),
         "configured_attempt": configured,
-        "model_provenance": "configured_attempt_model_only; runtime_model_not_attested",
+        "model_provenance": "requested_and_configured_models_only; backend_effective_model_not_attested",
+        "requested_launch": requested,
+        "runner_provenance": captured,
+        "unknown_field_reasons": unknown_reasons,
         "metadata_provenance": snapshot["provenance"],
         "launch_boundary": "run_managed_process",
         "unknown_field_provenance": "not_attested_at_managed_launch_boundary",
         **unknown,
-        "missing_fields": [*unknown, *(
+        "missing_fields": [*(key for key, value in unknown.items() if value is None), *(
+            f"requested_launch.{key}" for key, value in requested.items()
+            if value is None and key != "timeout_seconds"
+        ), *(
             f"configured_attempt.{key}" for key, value in configured.items() if value is None
         ), *(["observed_process_executable"] if observed_executable is None else []),
             *(["preflight.resolved_executable"] if executable_redacted else [])],

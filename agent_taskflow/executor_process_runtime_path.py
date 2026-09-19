@@ -12,6 +12,7 @@ import agent_taskflow.canonical_runtime_path as canonical_path
 from agent_taskflow.executor_launch import ExecutorLaunchBinding
 from agent_taskflow.executor_process_schema import migrate_executor_process_lifecycle
 from agent_taskflow.lifecycle_runtime_path import LifecycleRuntimeTaskStore
+from agent_taskflow.launch_provenance import ExecutorLaunchProvenance
 
 
 class ExecutorProcessRuntimeTaskStore(LifecycleRuntimeTaskStore):
@@ -36,7 +37,11 @@ class ExecutorProcessRuntimeTaskStore(LifecycleRuntimeTaskStore):
             worktree_path=resource.worktree_path,
             artifact_root=resource.artifact_root,
         )
-        return replace(bound, launch_binding=launch_binding)
+        provenance = bound.launch_provenance
+        if isinstance(provenance, ExecutorLaunchProvenance):
+            provenance = replace(provenance, base_commit=resource.base_sha,
+                                 base_source="claimed_attempt_resource.base_sha")
+        return replace(bound, launch_binding=launch_binding, launch_provenance=provenance)
 
     def classify_executor_result(self, task_key: str, result: Any) -> None:
         summary = (result.summary or "").lower()

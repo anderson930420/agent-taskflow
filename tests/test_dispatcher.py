@@ -596,6 +596,12 @@ class DispatcherTests(unittest.TestCase):
         dispatcher.dispatch_task("AT-0007", model="model-from-call")
 
         self.assertEqual(fake_executor.contexts[0].model, "model-from-call")
+        provenance = fake_executor.contexts[0].launch_provenance
+        self.assertEqual(provenance.canonical_execution_path, "dispatcher")
+        self.assertEqual(provenance.path_source, "Dispatcher.dispatch_task")
+        self.assertEqual(provenance.config_snapshot_reference.reference,
+                         "dispatcher.resolved_configuration")
+        self.assertIsNone(provenance.spec_reference)
 
     def test_context_worktree_and_artifact_dir_are_task_paths(self) -> None:
         self.add_task()

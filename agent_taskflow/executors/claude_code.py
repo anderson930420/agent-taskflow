@@ -356,6 +356,11 @@ class ClaudeCodeExecutor(Executor):
                 context.launch_binding,
                 ExecutorLaunchSpec(
                     executor_name=self.name,
+                    provenance=context.launch_provenance.for_adapter(
+                        model=None, model_source="opaque_command_model_not_resolved",
+                        prompt=prompt_text, prompt_path=prompt_path,
+                        prompt_source="claude_code_implementer_rendered",
+                    ),
                     argv=tuple(command),
                     cwd=context.worktree_path,
                     artifact_dir=context.artifact_dir,

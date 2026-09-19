@@ -34,6 +34,7 @@ from agent_taskflow.launch_evidence import (
     read_bound_attempt_snapshot,
     write_launch_evidence,
 )
+from agent_taskflow.launch_provenance import ExecutorLaunchProvenance
 from agent_taskflow.models import require_absolute_path, utc_now_iso
 from agent_taskflow.store import connect, default_db_path
 from agent_taskflow.tasks import normalize_task_key
@@ -149,6 +150,7 @@ class ExecutorLaunchSpec:
     redacted_arg_indexes: tuple[int, ...] = ()
     terminate_grace_seconds: float = 2.0
     kill_wait_seconds: float = 3.0
+    provenance: ExecutorLaunchProvenance | None = None
 
     def __post_init__(self) -> None:
         name = self.executor_name.strip()

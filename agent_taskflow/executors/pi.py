@@ -153,6 +153,12 @@ class PiExecutor(Executor):
                 context.launch_binding,
                 ExecutorLaunchSpec(
                     executor_name=self.name,
+                    provenance=context.launch_provenance.for_adapter(
+                        model=self.model, model_source="PiExecutor.model",
+                        prompt=prompt_text, prompt_path=protocol_prompt_path or context.prompt_path,
+                        prompt_source="pi_mission_rendered" if protocol_prompt_path else "input_prompt_text",
+                        tools=tuple(self.tools) if self.tools else None,
+                    ),
                     argv=tuple(command),
                     cwd=context.worktree_path,
                     artifact_dir=context.artifact_dir,

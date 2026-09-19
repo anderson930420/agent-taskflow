@@ -103,6 +103,11 @@ class OpenCodeExecutor(Executor):
                 context.launch_binding,
                 ExecutorLaunchSpec(
                     executor_name=self.name,
+                    provenance=context.launch_provenance.for_adapter(
+                        model=selected_model, model_source="OpenCodeExecutor.model_or_context",
+                        prompt=prompt_text, prompt_path=context.prompt_path,
+                        prompt_source="input_prompt_text",
+                    ),
                     argv=tuple(command),
                     cwd=context.worktree_path,
                     artifact_dir=context.artifact_dir,

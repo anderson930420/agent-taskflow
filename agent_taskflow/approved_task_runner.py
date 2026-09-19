@@ -34,6 +34,10 @@ from agent_taskflow.mission_contract import build_from_task_fields, write_missio
 from agent_taskflow.level2_execution_authority import (
     Level2ExecutionAuthorityError,
     level2_direct_execution_error,
+    execution_engine_primitive_active,
+)
+from agent_taskflow.launch_provenance import (
+    ExecutorLaunchProvenance, LaunchContentReference, runner_configuration,
 )
 from agent_taskflow.models import TaskRecord, require_absolute_path
 from agent_taskflow.preflight import PreflightResult, run_preflight
@@ -400,6 +404,22 @@ def run_approved_task(
             ),
         ),
         attempt_id=progress.attempt_id,
+        launch_provenance=ExecutorLaunchProvenance(
+            canonical_execution_path=("execution_engine" if execution_engine_primitive_active(
+                task_key=effective_task.task_key, db_path=current_store.db_path,
+            ) else "approved_task_runner"),
+            path_source="approved_task_runner.direct_engine_authority_scope",
+            base_commit=workspace_result.base_sha,
+            base_source="prepared_workspace.base_sha",
+            config_snapshot_reference=runner_configuration(
+                "approved_task_runner.resolved_configuration",
+                executor=request.executor, model=effective_task.model,
+                provider=effective_task.provider, tools=effective_task.tools,
+                base_branch=request.base_branch, validators=list(request.validators),
+                timeout_seconds=(request.claude_code_timeout_seconds
+                                 if request.executor == "claude-code" else None),
+            ),
+        ),
     )
     model_requirement_error = _model_requirement_error(request, effective_task)
     if model_requirement_error is not None:
@@ -415,7 +435,7 @@ def run_approved_task(
             workspace=_workspace_payload(workspace_result),
         )
     if request.executor in EXECUTORS_REQUIRING_PROMPT and executor_context.prompt_path is None:
-        prompt_path, prompt_error = _ensure_implementation_prompt(effective_task)
+        prompt_path, prompt_error, spec_reference = _ensure_implementation_prompt(effective_task)
         if prompt_error is not None:
             progress.prepare_failed("Implementation prompt is unavailable")
             _block_task(current_store, effective_task.task_key, prompt_error)
@@ -430,7 +450,10 @@ def run_approved_task(
             )
         assert prompt_path is not None
         _record_artifact(current_store, effective_task.task_key, "implementation_prompt", prompt_path)
-        executor_context = replace(executor_context, prompt_path=prompt_path)
+        executor_context = replace(
+            executor_context, prompt_path=prompt_path,
+            launch_provenance=replace(executor_context.launch_provenance, spec_reference=spec_reference),
+        )
     progress.prepare_passed(request.executor)
 
     executor_run_id = current_store.create_executor_run(
@@ -1313,28 +1336,30 @@ def _final_safety(
     }
 
 
-def _ensure_implementation_prompt(task: TaskRecord) -> tuple[Path | None, str | None]:
+def _ensure_implementation_prompt(
+    task: TaskRecord,
+) -> tuple[Path | None, str | None, LaunchContentReference | None]:
     """Generate a deterministic implementation prompt from the issue spec.
 
-    Returns ``(prompt_path, None)`` when the prompt already exists or was
-    generated from ``issue_spec.md``, and ``(None, reason)`` when the issue spec
-    needed to generate it is missing so the caller can block the task. It writes
+    Returns the path, optional error and digest of issue spec text read to render
+    the prompt. A pre-existing prompt has no observed spec. Missing issue spec
+    blocks the task as before. It writes
     only the prompt file and records nothing about approval, merge, push, or
     cleanup; the runner remains the artifact and review authority.
     """
 
     artifact_dir = task.artifact_dir
     if artifact_dir is None:  # pragma: no cover - guarded before the executor phase.
-        return None, "Task artifact_dir is required to generate implementation_prompt.md"
+        return None, "Task artifact_dir is required to generate implementation_prompt.md", None
     prompt_path = artifact_dir / IMPLEMENTATION_PROMPT_FILENAME
     if prompt_path.exists():
-        return prompt_path, None
+        return prompt_path, None, None
     issue_spec_path = artifact_dir / ISSUE_SPEC_FILENAME
     if not issue_spec_path.exists():
         return None, (
             "issue_spec.md is required to generate implementation_prompt.md for "
             f"{task.executor or 'opencode'} executor: {issue_spec_path}"
-        )
+        ), None
     issue_spec_text = issue_spec_path.read_text(encoding="utf-8")
     atomic_write_text(
         prompt_path,
@@ -1344,7 +1369,9 @@ def _ensure_implementation_prompt(task: TaskRecord) -> tuple[Path | None, str | 
             issue_spec=issue_spec_text,
         ),
     )
-    return prompt_path, None
+    return prompt_path, None, LaunchContentReference.from_text(
+        issue_spec_path, issue_spec_text, source="issue_spec_text_used_for_prompt_rendering",
+    )
 
 
 def _build_executor_context(
