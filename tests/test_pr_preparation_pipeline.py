@@ -13,6 +13,9 @@ from typing import Any
 from agent_taskflow.github_issue_ingestion import GitHubIssueSnapshot, render_issue_spec
 from agent_taskflow.mission_contract import build_mission_contract, write_mission_contract
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
+from agent_taskflow.pr_preparation_attempt_binding import (
+    resolve_pr_preparation_attempt_binding,
+)
 from agent_taskflow.pr_preparation_pipeline import (
     PRPreparationPipelineError,
     PRPreparationPipelineRequest,
@@ -888,6 +891,161 @@ class PRPreparationPipelineTests(unittest.TestCase):
                 preflight = result["stages"]["preflight"]
                 self.assertIsNone(preflight["runner_ok"])
                 self.assertIsNone(preflight["canonical_attempt_path"])
+
+    def test_level2_preflight_rejects_invalid_runtime_finished_payloads(self) -> None:
+        attempt = self._seed_level2_attempt()
+        self._record_recovery_audit(attempt)
+        invalid_payloads = (
+            None, "", " \n\t", "{", "null", "[]", '[{}]', '"text"', "1", "true", "false"
+        )
+        for recovery in (False, True):
+            for payload_json in invalid_payloads:
+                for valid_event_position in ("absent", "before", "after"):
+                    with self.subTest(
+                        recovery=recovery,
+                        payload_json=payload_json,
+                        valid_event_position=valid_event_position,
+                    ):
+                        self._clear_runtime_evidence()
+                        self._seed_runtime_evidence(
+                            attempt.attempt_id,
+                            runner_ok=not recovery,
+                            canonical_attempt_bound=not recovery,
+                            canonical_attempt_store_verified=not recovery,
+                        )
+                        with sqlite3.connect(self.db_path) as conn:
+                            valid_payload_json = conn.execute(
+                                "SELECT payload_json FROM task_events "
+                                "WHERE task_key = ? AND event_type = ?",
+                                (self.task_key, RUNTIME_FINISHED_EVENT_TYPE),
+                            ).fetchone()[0]
+                            conn.execute(
+                                "UPDATE task_events SET payload_json = ? "
+                                "WHERE task_key = ? AND event_type = ?",
+                                (payload_json, self.task_key, RUNTIME_FINISHED_EVENT_TYPE),
+                            )
+                        if valid_event_position != "absent":
+                            self.store.record_task_event(
+                                self.task_key,
+                                RUNTIME_FINISHED_EVENT_TYPE,
+                                RUNTIME_EXECUTION_SOURCE,
+                                payload=json.loads(valid_payload_json),
+                            )
+                            if valid_event_position == "before":
+                                with sqlite3.connect(self.db_path) as conn:
+                                    conn.execute(
+                                        "UPDATE task_events SET payload_json = "
+                                        "CASE WHEN payload_json IS ? THEN ? ELSE ? END "
+                                        "WHERE task_key = ? AND event_type = ?",
+                                        (
+                                            payload_json,
+                                            valid_payload_json,
+                                            payload_json,
+                                            self.task_key,
+                                            RUNTIME_FINISHED_EVENT_TYPE,
+                                        ),
+                                    )
+                        events_before = self.store.list_task_events(self.task_key)
+                        binding = resolve_pr_preparation_attempt_binding(
+                            db_path=self.db_path, task_key=self.task_key
+                        )
+                        reason = "runtime_execution_finished_event_payload_invalid"
+                        self.assertEqual(binding.reasons, (reason,))
+                        self.assertIsNone(binding.path)
+                        self.assertIsNone(binding.runner_ok)
+                        self.assertIsNone(binding.recovery_operator)
+                        self.assertFalse(binding.runtime_evidence_found)
+                        self.assertTrue(binding.runtime_evidence_recorded)
+                        self.assertEqual(binding.attempt_id, attempt.attempt_id)
+                        self.assertTrue(binding.canonical_attempt_verified)
+                        self.assertEqual(binding.artifact_count, 1)
+                        self.assertEqual(
+                            binding.finished_event_count,
+                            1 if valid_event_position == "absent" else 2,
+                        )
+                        self.assertEqual(
+                            canonical_attempt_binding_error(
+                                {
+                                    "stages": {
+                                        "runtime_execution": {
+                                            "execution_authority": "execution_engine",
+                                            "canonical_attempt_id": attempt.attempt_id,
+                                            "canonical_attempt_bound": not recovery,
+                                        }
+                                    }
+                                },
+                                db_path=self.db_path,
+                                task_key=self.task_key,
+                            ),
+                            reason,
+                        )
+                        self.assertEqual(
+                            self.store.list_task_events(self.task_key), events_before
+                        )
+                        branch = _FakeBranchPush()
+                        draft = _FakeDraftPR()
+                        result = run_pr_preparation_pipeline(
+                            self._request(
+                                dry_run=False,
+                                confirm_prepare_pr=True,
+                                confirm_github_mutations=True,
+                                confirm_branch_push=True,
+                                confirm_draft_pr=True,
+                            ),
+                            branch_push_fn=branch,
+                            draft_pr_fn=draft,
+                        )
+                        self.assertFalse(result["ok"])
+                        self.assertEqual(result["failed_stage"], "preflight")
+                        self.assertIn(reason, result["reasons"])
+                        preflight = result["stages"]["preflight"]
+                        self.assertIsNone(preflight["canonical_attempt_path"])
+                        self.assertFalse(preflight["runtime_evidence_found"])
+                        self.assertEqual(branch.call_count, 0)
+                        self.assertEqual(draft.call_count, 0)
+
+    def test_legacy_preflight_rejects_invalid_runtime_finished_payload(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_events SET payload_json = ? "
+                "WHERE task_key = ? AND event_type = ?",
+                ("{", self.task_key, RUNTIME_FINISHED_EVENT_TYPE),
+            )
+
+        result = run_pr_preparation_pipeline(self._request(dry_run=True))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failed_stage"], "preflight")
+        self.assertIn(
+            "runtime_execution_finished_event_payload_invalid", result["reasons"]
+        )
+        self.assertFalse(result["stages"]["preflight"]["runtime_evidence_found"])
+
+    def test_recovery_ignores_malformed_unrelated_event_payload(self) -> None:
+        attempt = self._seed_level2_attempt()
+        self._clear_runtime_evidence()
+        self._seed_runtime_evidence(
+            attempt.attempt_id,
+            runner_ok=False,
+            canonical_attempt_bound=False,
+            canonical_attempt_store_verified=False,
+        )
+        self._record_recovery_audit(attempt)
+        self.store.record_task_event(self.task_key, "note", "unrelated")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE task_events SET payload_json = ? "
+                "WHERE task_key = ? AND source = ?",
+                ("{", self.task_key, "unrelated"),
+            )
+
+        result = run_pr_preparation_pipeline(self._request(dry_run=True))
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            result["stages"]["preflight"]["canonical_attempt_path"], "audited_recovery"
+        )
+        self.assertFalse(result["stages"]["preflight"]["runner_ok"])
 
     def test_recovered_level2_task_requires_matching_recovery_audit(self) -> None:
         attempt = self._seed_level2_attempt()
