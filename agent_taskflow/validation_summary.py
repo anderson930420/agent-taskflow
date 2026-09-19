@@ -18,12 +18,32 @@ from typing import Any, Callable, Iterator, Sequence, TypeVar
 from uuid import uuid4
 
 from agent_taskflow.atomic_write import atomic_write_bytes, atomic_write_json
+from agent_taskflow.evidence_coverage import COVERAGE_ARTIFACT_NAME
 from agent_taskflow.tasks import normalize_task_key
 
 
 MAX_EVIDENCE_BYTES = 1_000_000
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
+
+# How the Attempt on a summary was obtained. A caller states which one it has;
+# the recorder never converts one into another.
+#
+# ``runtime_claim``    the caller holds the live runtime claim it is writing for.
+# ``producer_handoff`` the caller was handed the Attempt that produced the work
+#                      it is now acting on. It is not a runtime claim, and it
+#                      stays correct after that Attempt's claim is released.
+# ``unbound``          no authoritative Attempt. Never a guess from history.
+ATTEMPT_BINDING_RUNTIME_CLAIM = "runtime_claim"
+ATTEMPT_BINDING_PRODUCER_HANDOFF = "producer_handoff"
+ATTEMPT_BINDING_UNBOUND = "unbound"
+ATTEMPT_BINDINGS = frozenset(
+    {
+        ATTEMPT_BINDING_RUNTIME_CLAIM,
+        ATTEMPT_BINDING_PRODUCER_HANDOFF,
+        ATTEMPT_BINDING_UNBOUND,
+    }
+)
 
 
 def _now() -> str:
@@ -39,6 +59,35 @@ def _error(exc: BaseException) -> dict[str, Any]:
         if isinstance(output, str):
             detail[name] = output[:MAX_EVIDENCE_BYTES]
     return detail
+
+
+def _resolve_binding(attempt_id: str | None, attempt_binding: str | None) -> str:
+    """Return the caller's stated binding kind, refusing an unsupported claim."""
+    if attempt_binding is None:
+        return (
+            ATTEMPT_BINDING_RUNTIME_CLAIM if attempt_id is not None
+            else ATTEMPT_BINDING_UNBOUND
+        )
+    if attempt_binding not in ATTEMPT_BINDINGS:
+        raise ValueError(f"Unknown validation summary attempt binding: {attempt_binding!r}")
+    if attempt_id is None and attempt_binding != ATTEMPT_BINDING_UNBOUND:
+        # A binding kind without an Attempt would name an authority that the
+        # caller does not have.
+        raise ValueError(f"Attempt binding {attempt_binding!r} requires an attempt_id")
+    if attempt_id is not None and attempt_binding == ATTEMPT_BINDING_UNBOUND:
+        raise ValueError("An attempt_id cannot be recorded as an unbound summary")
+    return attempt_binding
+
+
+def _default_binding_reason(binding: str) -> str:
+    if binding == ATTEMPT_BINDING_RUNTIME_CLAIM:
+        return "Captured by the execution caller from its own runtime claim."
+    if binding == ATTEMPT_BINDING_PRODUCER_HANDOFF:
+        return (
+            "Captured at the execution handoff from the Attempt that produced this "
+            "work. It is not a live runtime claim."
+        )
+    return "Caller has no authoritative execution Attempt binding; no historical inference."
 
 
 def artifact_root_for_claim(
@@ -81,7 +130,10 @@ class ValidationSummaryRecorder:
     """Record the exact caller identity; never infer an Attempt from history.
 
     ``attempt_id`` is the caller's captured runtime claim, or None for an
-    unbound caller. Integration run ids are separate from execution Attempts.
+    unbound caller. A caller that was handed an Attempt instead of holding a
+    claim passes ``attempt_binding=ATTEMPT_BINDING_PRODUCER_HANDOFF`` with its
+    own provenance, so a completed producer is never recorded as a live runtime
+    claim. Integration run ids are separate from execution Attempts.
     ``complete`` concerns evidence; ``passed`` requires every configured check
     to pass. Neither field is a lifecycle decision or merge eligibility.
     """
@@ -96,11 +148,18 @@ class ValidationSummaryRecorder:
         validators: Sequence[str],
         config_reference: str | None = None,
         attempt_id: str | None = None,
+        attempt_binding: str | None = None,
+        attempt_binding_reason: str | None = None,
+        attempt_binding_provenance: dict[str, Any] | None = None,
         executor_run_id: int | str | None = None,
         integration_run_id: str | None = None,
+        coverage_builder: Callable[["ValidationSummaryRecorder"], dict[str, Any]] | None = None,
         on_error: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.on_error = on_error
+        self.coverage_builder = coverage_builder
+        binding = _resolve_binding(attempt_id, attempt_binding)
+        binding_reason = attempt_binding_reason or _default_binding_reason(binding)
         self.recording_failed = False
         self._published = False
         self._published_complete = False
@@ -114,12 +173,8 @@ class ValidationSummaryRecorder:
             "kind": "validation_summary",
             "task_key": normalize_task_key(task_key),
             "attempt_id": attempt_id,
-            "attempt_binding": "runtime_claim" if attempt_id is not None else "unbound",
-            "attempt_binding_reason": (
-                "Captured by the execution caller from its own runtime claim."
-                if attempt_id is not None else
-                "Caller has no authoritative execution Attempt binding; no historical inference."
-            ),
+            "attempt_binding": binding,
+            "attempt_binding_reason": binding_reason,
             "executor_run_id": executor_run_id,
             "integration_run_id": integration_run_id,
             "validation_run_id": run_id,
@@ -144,6 +199,8 @@ class ValidationSummaryRecorder:
                 for index, name in enumerate(validators)
             ],
         }
+        if attempt_binding_provenance is not None:
+            self.payload["attempt_binding_provenance"] = dict(attempt_binding_provenance)
         if artifact_dir is not None:
             try:
                 # Preserve the requested namespace. resolve() would silently
@@ -366,6 +423,62 @@ class ValidationSummaryRecorder:
             return None, "evidence_write_failed"
         return str(target), "evidence_truncated" if len(captured) > MAX_EVIDENCE_BYTES else None
 
+    def note_validator_identity(self, index: int, identity: dict[str, Any]) -> None:
+        """Record what the caller actually resolved for the validator at ``index``.
+
+        Called from inside the observed invocation, so a row that ends in a tool
+        error still names the command or configuration that was about to run.
+        An ``identity`` command is the argv of the resolved validator, not a
+        reconstruction from its output; ``config_reference`` replaces the
+        ordinal placeholder only when the caller supplies a real one.
+        """
+        row = self.payload["validators"][index]
+        existing = dict(row.get("config_identity") or {})
+        existing.update(identity)
+        row["config_identity"] = existing
+        command = existing.get("command")
+        if isinstance(command, (list, tuple)):
+            row["command"] = [str(part) for part in command]
+        reference = existing.get("config_reference")
+        if isinstance(reference, str) and reference:
+            row["config_reference"] = reference
+        self._flush()
+
+    def publish_evidence_coverage(self) -> None:
+        """Write this run's evidence coverage index beside the summary.
+
+        Coverage is published through the same anchored destination and identity
+        checks as every other artifact this recorder owns, so it cannot be
+        redirected and cannot be replaced unnoticed. A builder failure is
+        recorded as an unavailable index; it never converts missing evidence
+        into a pass, and it never changes the caller's verdict.
+        """
+        if self.coverage_builder is None or self.path is None or self.recording_failed:
+            return
+        try:
+            payload = self.coverage_builder(self)
+        except Exception as exc:  # noqa: BLE001 - coverage is an observation.
+            logger.warning("Evidence coverage could not be built: %s", exc)
+            self.payload["evidence_coverage"] = {
+                "status": "unavailable",
+                "path": None,
+                "error": _error(exc),
+            }
+            return
+        target = self.directory / COVERAGE_ARTIFACT_NAME if self.directory else None
+        if target is None or not self._write_json(COVERAGE_ARTIFACT_NAME, payload):
+            self.payload["evidence_coverage"] = {
+                "status": "write_failed",
+                "path": None if target is None else str(target),
+            }
+            return
+        self.payload["evidence_coverage"] = {
+            "status": "published",
+            "path": str(target),
+            "complete": bool(payload.get("complete")),
+            "unresolved": list(payload.get("unresolved") or []),
+        }
+
     def observe(
         self,
         index: int,
@@ -438,9 +551,17 @@ class ValidationSummaryRecorder:
                 if self._write_json(target.name, details):
                     row["artifact_path"] = str(target)
         else:
+            artifacts = dict(getattr(result, "artifacts", {}) or {})
+            if artifacts:
+                # Every artifact the validator reported, so coverage can link
+                # the exact file each evidence kind came from. Only the primary
+                # one below is snapshotted.
+                row["source_artifacts"] = {
+                    str(name): str(path) for name, path in artifacts.items()
+                }
             source = getattr(result, "log_path", None)
             if source is None:
-                sources = list(getattr(result, "artifacts", {}).values())
+                sources = list(artifacts.values())
                 source = sources[0] if sources else None
             if source is not None:
                 row["source_artifact_path"] = str(source)
@@ -455,6 +576,10 @@ class ValidationSummaryRecorder:
         self.payload.update(state=state, ended_at=_now())
         if reason is not None:
             self.payload["reason"] = reason
+        # Published before the closing flush so the summary can name the index,
+        # and on every terminal path so a stopped run still states what evidence
+        # it did and did not produce.
+        self.publish_evidence_coverage()
         rows = self.payload["validators"]
         complete = bool(rows) and self.path is not None and all(
             row["ended_at"] is not None

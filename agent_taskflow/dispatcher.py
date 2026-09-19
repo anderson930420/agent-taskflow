@@ -28,6 +28,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from agent_taskflow.evidence_coverage import (
+    RunnerEvidenceCollector,
+    validator_config_identity,
+)
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
 from agent_taskflow.executors.registry import get_executor
 from agent_taskflow.governance import (
@@ -383,17 +387,22 @@ class Dispatcher:
             prompt_path=executor_context.prompt_path,
         )
 
+        evidence_root = artifact_root_for_claim(
+            self.store, task.task_key, progress.attempt_id, task.artifact_dir,
+        )
+        coverage = RunnerEvidenceCollector(
+            source="dispatcher", artifact_roots=(evidence_root, task.artifact_dir),
+        )
         validation_summary = ValidationSummaryRecorder(
             task_key=task.task_key,
-            artifact_dir=artifact_root_for_claim(
-                self.store, task.task_key, progress.attempt_id, task.artifact_dir,
-            ),
+            artifact_dir=evidence_root,
             source="dispatcher",
             phase="implementation_validation",
             validators=self.validators,
             config_reference="Dispatcher.validators",
             attempt_id=progress.attempt_id,
             executor_run_id=executor_run_id,
+            coverage_builder=coverage.coverage,
             on_error=recording_error_sink(self.store),
         )
         validation_summary.register(self.store)
@@ -402,6 +411,7 @@ class Dispatcher:
             executor_result = executor.run(executor_context)
         except Exception as exc:  # pragma: no cover - exercised by integration failures.
             reason = f"Executor {selected_executor} raised {exc.__class__.__name__}: {exc}"
+            coverage.note_executor(selected_executor, ran=True, reason=reason)
             validation_summary.finish(state="stopped", reason=reason)
             progress.implementer_raised(selected_executor, exc)
             self.store.finish_executor_run(
@@ -420,6 +430,12 @@ class Dispatcher:
             )
 
         self._record_executor_result(task.task_key, executor_run_id, executor_result)
+        coverage.note_executor(
+            executor_result.executor,
+            ran=True,
+            artifacts=getattr(executor_result, "artifacts", None),
+            reason=f"executor returned {executor_result.status}",
+        )
 
         executor_failed = executor_result.status in {"failed", "blocked"}
         progress.implementer_finished(
@@ -461,10 +477,30 @@ class Dispatcher:
         validator_statuses: dict[str, str] = {}
         for validator_index, validator_name in enumerate(self.validators):
             progress.validator_running(validator_name)
+
+            def run_validator(index: int = validator_index, name: str = validator_name):
+                # Resolution stays inside the observed invocation, so an
+                # unavailable validator is still recorded as a tool error. The
+                # identity is captured from the object that is about to run.
+                validator = self._get_validator(name)
+                identity = validator_config_identity(
+                    validator,
+                    name=name,
+                    index=index,
+                    config_source="Dispatcher.validators",
+                    resolution=(
+                        "dispatcher_validator_registry"
+                        if name in self.validator_registry
+                        else "agent_taskflow.validators.registry.get_validator"
+                    ),
+                )
+                coverage.note_validator_identity(index, identity)
+                validation_summary.note_validator_identity(index, identity)
+                return validator.run(validator_context)
+
             try:
                 validator_result = validation_summary.observe(
-                    validator_index,
-                    lambda: self._get_validator(validator_name).run(validator_context),
+                    validator_index, run_validator
                 )
             except Exception as exc:  # pragma: no cover - exercised by integration failures.
                 reason = f"Validator {validator_name} raised {exc.__class__.__name__}: {exc}"
@@ -523,7 +559,10 @@ class Dispatcher:
             message="Dispatcher completed implementation and validation",
         )
         self._handoff_to_integration(
-            task.task_key, ticket=ticket, task_status=success_status
+            task.task_key,
+            ticket=ticket,
+            task_status=success_status,
+            producer_attempt_id=progress.attempt_id,
         )
 
         return DispatcherResult(
@@ -539,7 +578,12 @@ class Dispatcher:
         )
 
     def _handoff_to_integration(
-        self, task_key: str, *, ticket: bool, task_status: str
+        self,
+        task_key: str,
+        *,
+        ticket: bool,
+        task_status: str,
+        producer_attempt_id: str | None,
     ) -> None:
         """SPEC §43.12: put the finished implementation in its repo's queue.
 
@@ -549,6 +593,12 @@ class Dispatcher:
         Ticket to ``ready_for_integration``, and §22.1's FIFO key is the
         timestamp of that write.
 
+        ``producer_attempt_id`` is this run's own Attempt, captured from the
+        claim it made at dispatch and passed on unchanged. Integration reads it
+        back from the queue entry, which is why it is handed over here rather
+        than looked up later: the claim is released when the run ends, and the
+        task's active Attempt may by then belong to a different run (M2.2).
+
         Like the runtime progress writes, this is observation after the fact.
         The implementation is already complete and already recorded, so a queue
         failure is audited and never turns a finished run into a failure.
@@ -557,7 +607,10 @@ class Dispatcher:
             return
         try:
             handoff_completed_implementation(
-                self.store, task_key, task_status=task_status
+                self.store,
+                task_key,
+                task_status=task_status,
+                producer_attempt_id=producer_attempt_id,
             )
         except Exception as exc:
             reason = f"Integration handoff failed: {exc.__class__.__name__}: {exc}"
