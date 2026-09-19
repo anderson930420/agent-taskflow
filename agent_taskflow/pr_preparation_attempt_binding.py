@@ -118,9 +118,13 @@ def resolve_pr_preparation_attempt_binding(
         reasons.extend(payload_reasons)
         if payload is not None:
             payloads.append(payload)
+    event_payload_invalid = False
     for event in events:
         payload = _event_payload(event.payload_json)
-        if payload is not None:
+        if payload is None:
+            event_payload_invalid = True
+            reasons.append("runtime_execution_finished_event_payload_invalid")
+        else:
             payloads.append(payload)
 
     runner_values = [
@@ -131,7 +135,11 @@ def resolve_pr_preparation_attempt_binding(
     runner_ok_missing = any(
         not isinstance(payload.get("runner_ok"), bool) for payload in payloads
     )
-    runner_ok = runner_values[-1] if runner_values and not runner_ok_missing else None
+    runner_ok = (
+        runner_values[-1]
+        if runner_values and not runner_ok_missing and not event_payload_invalid
+        else None
+    )
     if runner_ok_missing:
         reasons.append("runtime_runner_ok_missing")
 
@@ -191,7 +199,7 @@ def resolve_pr_preparation_attempt_binding(
     except Level2ExecutionAuthorityError as exc:
         reasons.append(f"canonical_attempt_invalid: {exc}")
 
-    if runner_ok_missing:
+    if runner_ok_missing or event_payload_invalid:
         return _binding_result(
             level2_task=True,
             attempt_id=attempt_id,
