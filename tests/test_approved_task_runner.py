@@ -236,6 +236,130 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             codex_advisory_timeout_seconds=codex_advisory_timeout_seconds,
         )
 
+    def test_summary_is_bound_to_the_real_claim_and_artifact_root(self) -> None:
+        key = "AT-GH-401"
+        self._add_task(key)
+        self._write_codex_advisory_evidence(key)
+        executor = FakeExecutor(name="noop")
+        validator = FakeValidator(name="unit")
+        result = run_approved_task(
+            self._request(validators=("unit",), preflight=False), store=self.store,
+            executor_registry={"noop": executor}, validator_registry={"unit": validator},
+        )
+        self.assertTrue(result.ok, result.error)
+        paths = list(self.root.rglob("validation-summary.json"))
+        self.assertEqual(len(paths), 1)
+        data = json.loads(paths[0].read_text())
+        context = validator.calls[0]
+        self.assertEqual(data["attempt_id"], context.attempt_id)
+        self.assertIsNotNone(context.attempt_id)
+        self.assertEqual(data["source"], "approved_task_runner")
+        self.assertTrue(paths[0].is_relative_to(context.artifact_dir))
+        self.assertTrue(data["complete"])
+        self.assertTrue(data["passed"])
+        self.assertTrue(any(Path(a["path"]) == paths[0] for a in result.artifacts))
+
+    def test_summary_records_failure_and_remaining_validators_without_running_them(self) -> None:
+        self._add_task("AT-GH-401")
+        validators = {name: FakeValidator(name=name, status="failed" if name == "first" else "passed")
+                      for name in ("first", "last")}
+        result = run_approved_task(
+            self._request(validators=tuple(validators), preflight=False), store=self.store,
+            executor_registry={"noop": FakeExecutor(name="noop")}, validator_registry=validators,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(validators["last"].calls, [])
+        data = json.loads(next(self.root.rglob("validation-summary.json")).read_text())
+        self.assertEqual([row["result"] for row in data["validators"]], ["failed", "not_run"])
+        self.assertFalse(data["passed"])
+        self.assertIsNone(data["validators"][1]["exit_code"])
+
+    def test_summary_records_validator_exception_and_preserves_original_error(self) -> None:
+        self._add_task("AT-GH-401")
+        broken = FakeValidator(name="broken")
+        broken.run = mock.Mock(side_effect=RuntimeError("broken validator"))
+        result = run_approved_task(
+            self._request(validators=("broken",), preflight=False), store=self.store,
+            executor_registry={"noop": FakeExecutor(name="noop")}, validator_registry={"broken": broken},
+        )
+        self.assertFalse(result.ok)
+        data = json.loads(next(self.root.rglob("validation-summary.json")).read_text())
+        self.assertEqual(data["validators"][0]["error"]["message"], "broken validator")
+        self.assertEqual(data["state"], "error")
+        self.assertFalse(data["passed"])
+
+    def test_stopped_executor_has_an_incomplete_summary(self) -> None:
+        self._add_task("AT-GH-401")
+        validator = FakeValidator(name="unit")
+        result = run_approved_task(
+            self._request(validators=("unit",), preflight=False), store=self.store,
+            executor_registry={"noop": FakeExecutor(name="noop", status="failed")},
+            validator_registry={"unit": validator},
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(validator.calls, [])
+        data = json.loads(next(self.root.rglob("validation-summary.json")).read_text())
+        self.assertEqual(data["validators"][0]["result"], "not_run")
+        self.assertIsNone(data["validators"][0]["started_at"])
+        self.assertFalse(data["complete"])
+
+    def _assert_summary_error_and_closed_run(self) -> None:
+        errors = [json.loads(event.payload_json) for event in self.store.list_task_events("AT-GH-401")
+                  if event.payload_json and json.loads(event.payload_json).get("kind") == "validation_summary_error"]
+        self.assertEqual(len(errors), 1)
+        self.assertFalse(errors[0]["complete"])
+        self.assertFalse(errors[0]["passed"])
+        run = self.store.list_executor_runs("AT-GH-401")[0]
+        self.assertIsNotNone(run["status"])
+        self.assertIsNotNone(run["finished_at"])
+
+    def test_summary_construction_io_error_preserves_successful_closeout(self) -> None:
+        self._add_task("AT-GH-401")
+        self._write_codex_advisory_evidence("AT-GH-401")
+        with mock.patch("agent_taskflow.validation_summary.atomic_write_json", side_effect=OSError("summary unavailable")):
+            result = run_approved_task(
+                self._request(validators=("unit",), preflight=False), store=self.store,
+                executor_registry={"noop": FakeExecutor(name="noop")},
+                validator_registry={"unit": FakeValidator(name="unit")},
+            )
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(list(self.root.rglob("validation-summary.json")), [])
+        self._assert_summary_error_and_closed_run()
+
+    def test_summary_registration_io_error_does_not_interrupt_failing_executor_closeout(self) -> None:
+        self._add_task("AT-GH-401")
+        record = TaskMirrorStore.record_task_artifact
+        def register(store, task_key, artifact_type, path):
+            if Path(path).name == "validation-summary.json":
+                raise OSError("summary index unavailable")
+            return record(store, task_key, artifact_type, path)
+        with mock.patch.object(TaskMirrorStore, "record_task_artifact", new=register):
+            result = run_approved_task(
+                self._request(validators=("unit",), preflight=False), store=self.store,
+                executor_registry={"noop": FakeExecutor(name="noop", status="failed", summary="original executor failure")},
+                validator_registry={"unit": FakeValidator(name="unit")},
+            )
+        self.assertFalse(result.ok)
+        self.assertIn("original executor failure", result.error)
+        self._assert_summary_error_and_closed_run()
+
+    def test_summary_finish_io_error_does_not_mask_original_validator_failure(self) -> None:
+        from agent_taskflow.validation_summary import atomic_write_json
+        self._add_task("AT-GH-401")
+        def write(path, payload, **kwargs):
+            if payload.get("state") == "stopped":
+                raise OSError("summary finish unavailable")
+            return atomic_write_json(path, payload, **kwargs)
+        with mock.patch("agent_taskflow.validation_summary.atomic_write_json", side_effect=write):
+            result = run_approved_task(
+                self._request(validators=("unit",), preflight=False), store=self.store,
+                executor_registry={"noop": FakeExecutor(name="noop")},
+                validator_registry={"unit": FakeValidator(name="unit", status="failed", summary="original red validator")},
+            )
+        self.assertFalse(result.ok)
+        self.assertIn("original red validator", result.error)
+        self._assert_summary_error_and_closed_run()
+
     def _write_fake_claude_script(self, *, exit_code: int = 0) -> Path:
         """Write a fake Claude Code executable that mutates the worktree.
 
