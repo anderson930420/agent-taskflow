@@ -16,6 +16,7 @@ from agent_taskflow.context_validation import (
     validate_timeout as _validate_timeout,
 )
 from agent_taskflow.executor_launch import ExecutorLaunchBinding
+from agent_taskflow.launch_provenance import ExecutorLaunchProvenance
 from agent_taskflow.models import require_absolute_path
 from agent_taskflow.tasks import normalize_task_key
 
@@ -60,8 +61,12 @@ class ExecutorContext:
     repo_root: Path | None = None
     launch_binding: ExecutorLaunchBinding | None = None
     attempt_id: str | None = None
+    launch_provenance: ExecutorLaunchProvenance = field(default_factory=ExecutorLaunchProvenance)
 
     def __post_init__(self) -> None:
+        # Optional observations cannot turn invalid metadata into a launch gate.
+        if not isinstance(self.launch_provenance, ExecutorLaunchProvenance):
+            object.__setattr__(self, "launch_provenance", ExecutorLaunchProvenance())
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
         object.__setattr__(self, "project", _require_non_empty(self.project, "project"))
         object.__setattr__(

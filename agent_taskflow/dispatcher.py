@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
+from agent_taskflow.launch_provenance import ExecutorLaunchProvenance, runner_configuration
 from agent_taskflow.executors.registry import get_executor
 from agent_taskflow.governance import (
     assert_not_main_repo_write,
@@ -367,6 +368,17 @@ class Dispatcher:
             model=selected_model,
             timeout_seconds=self.executor_timeout_seconds,
             attempt_id=progress.attempt_id,
+            launch_provenance=ExecutorLaunchProvenance(
+                canonical_execution_path="dispatcher", path_source="Dispatcher.dispatch_task",
+                base_commit=worktree.base_sha, base_source="prepared_worktree.base_sha",
+                config_snapshot_reference=runner_configuration(
+                    "dispatcher.resolved_configuration",
+                    executor=selected_executor, model=selected_model,
+                    provider=task.provider, tools=task.tools,
+                    timeout_seconds=self.executor_timeout_seconds,
+                    validators=list(self.validators),
+                ),
+            ),
         )
         progress.prepare_passed(selected_executor)
 

@@ -72,6 +72,9 @@ class ShellExecutor(Executor):
                 context.launch_binding,
                 ExecutorLaunchSpec(
                     executor_name=self.name,
+                    provenance=context.launch_provenance.for_adapter(
+                        model=None, model_source="opaque_command_model_not_resolved",
+                    ),
                     argv=tuple(self.command),
                     cwd=context.worktree_path,
                     artifact_dir=context.artifact_dir,

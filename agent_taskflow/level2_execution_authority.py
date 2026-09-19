@@ -212,6 +212,12 @@ def execution_engine_primitive_authority(
         _ENGINE_PRIMITIVE_AUTHORITY.reset(token)
 
 
+def execution_engine_primitive_active(*, task_key: str, db_path: str | Path | None) -> bool:
+    """Observe the direct engine scope for launch evidence; grant no authority."""
+    expected = (normalize_task_key(task_key), str(_resolved_db_path(db_path)))
+    return _ENGINE_PRIMITIVE_AUTHORITY.get() == expected
+
+
 def level2_direct_execution_error(
     *,
     task_key: str,
