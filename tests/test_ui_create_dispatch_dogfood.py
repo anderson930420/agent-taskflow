@@ -623,7 +623,9 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         self.assertEqual(approvals[-1]["decided_by"], "operator_cli")
 
         # 6. Verify no forbidden actions were triggered (no push/merge/cleanup logs)
-        for artifact in self.artifact_dir.iterdir():
+        for artifact in self.artifact_dir.rglob("*"):
+            if not artifact.is_file():
+                continue
             if artifact.name == "mission_contract.json":
                 continue  # contract lists forbidden actions — skip
             content = artifact.read_text(errors="ignore")

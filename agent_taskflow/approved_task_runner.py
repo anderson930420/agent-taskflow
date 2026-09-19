@@ -45,6 +45,7 @@ from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
 from agent_taskflow.validators.registry import get_validator
+from agent_taskflow.validation_summary import ValidationSummaryRecorder, artifact_root_for_claim, recording_error_sink
 from agent_taskflow.workspace_manager import (
     WorkspacePreparationRequest,
     WorkspacePreparationResult,
@@ -446,11 +447,26 @@ def run_approved_task(
         message=f"Approved task runner running executor {request.executor}",
     )
 
+    validation_summary = ValidationSummaryRecorder(
+        task_key=effective_task.task_key,
+        artifact_dir=artifact_root_for_claim(
+            current_store, effective_task.task_key, progress.attempt_id, effective_task.artifact_dir,
+        ),
+        source="approved_task_runner",
+        phase="implementation_validation",
+        validators=request.validators,
+        config_reference="ApprovedTaskRunRequest.validators",
+        attempt_id=progress.attempt_id,
+        executor_run_id=executor_run_id,
+        on_error=recording_error_sink(current_store),
+    )
+    validation_summary.register(current_store)
     progress.implementer_running(request.executor)
     try:
         executor_result = executor.run(executor_context)
     except Exception as exc:  # pragma: no cover - defensive runtime failure path.
         reason = f"Executor {request.executor} raised {exc.__class__.__name__}: {exc}"
+        validation_summary.finish(state="stopped", reason=reason)
         progress.implementer_raised(request.executor, exc)
         current_store.finish_executor_run(
             effective_task.task_key,
@@ -483,6 +499,7 @@ def run_approved_task(
                 contract_path=contract_path,
                 executor_result=None,
                 validation_results=[],
+                validation_summary_path=validation_summary.path,
             ),
         )
 
@@ -504,6 +521,7 @@ def run_approved_task(
     )
     if executor_failed:
         reason = executor_result.summary or f"Executor {request.executor} returned {executor_result.status}"
+        validation_summary.finish(state="stopped", reason=reason)
         _block_task(current_store, effective_task.task_key, reason)
         return _blocked_failure(
             request,
@@ -527,6 +545,7 @@ def run_approved_task(
                 contract_path=contract_path,
                 executor_result=executor_result,
                 validation_results=[],
+                validation_summary_path=validation_summary.path,
             ),
         )
 
@@ -539,7 +558,7 @@ def run_approved_task(
 
     progress.validators_running(request.validators)
     validator_results: list[ValidatorResult] = []
-    for validator_name in request.validators:
+    for validator_index, validator_name in enumerate(request.validators):
         validator = _resolve_validator(validator_name, validator_registry=validator_registry)
         validator_context = ValidatorContext(
             task_key=effective_task.task_key,
@@ -550,7 +569,9 @@ def run_approved_task(
         )
         progress.validator_running(validator_name)
         try:
-            validator_result = validator.run(validator_context)
+            validator_result = validation_summary.observe(
+                validator_index, lambda: validator.run(validator_context)
+            )
         except Exception as exc:  # pragma: no cover - defensive runtime failure path.
             reason = f"Validator {validator_name} raised {exc.__class__.__name__}: {exc}"
             progress.validator_raised(validator_name, exc)
@@ -584,6 +605,7 @@ def run_approved_task(
                     contract_path=contract_path,
                     executor_result=executor_result,
                     validation_results=validator_results,
+                    validation_summary_path=validation_summary.path,
                 ),
             )
 
@@ -601,6 +623,7 @@ def run_approved_task(
 
         if validator_result.status in {"failed", "blocked"}:
             reason = validator_result.summary or f"Validator {validator_result.validator} returned {validator_result.status}"
+            validation_summary.finish(state="stopped", reason=reason)
             progress.validator_failed(validator_name, validator_result.status)
             _block_task(current_store, effective_task.task_key, reason)
             return _blocked_failure(
@@ -626,9 +649,11 @@ def run_approved_task(
                     contract_path=contract_path,
                     executor_result=executor_result,
                     validation_results=validator_results,
+                    validation_summary_path=validation_summary.path,
                 ),
             )
 
+    validation_summary.finish()
     progress.validators_passed({item.validator: item.status for item in validator_results})
 
     codex_advisory_generation = _generate_codex_advisory_evidence(
@@ -672,6 +697,7 @@ def run_approved_task(
                 contract_path=contract_path,
                 executor_result=executor_result,
                 validation_results=validator_results,
+                validation_summary_path=validation_summary.path,
                 additional_artifacts=codex_advisory_artifacts,
             ),
             codex_advisory_evidence=evidence_result.to_dict(),
@@ -710,6 +736,7 @@ def run_approved_task(
                 contract_path=contract_path,
                 executor_result=executor_result,
                 validation_results=validator_results,
+                validation_summary_path=validation_summary.path,
                 additional_artifacts=codex_advisory_artifacts,
             ),
             codex_advisory_evidence=(
@@ -749,6 +776,7 @@ def run_approved_task(
             contract_path=contract_path,
             executor_result=executor_result,
             validation_results=validator_results,
+            validation_summary_path=validation_summary.path,
             additional_artifacts=codex_advisory_artifacts,
         ),
         codex_advisory_evidence=(
@@ -1404,8 +1432,11 @@ def _collect_artifacts(
     executor_result: ExecutorResult | None,
     validation_results: Sequence[ValidatorResult],
     additional_artifacts: Sequence[Path] = (),
+    validation_summary_path: Path | None = None,
 ) -> list[dict[str, str]]:
     artifacts: list[dict[str, str]] = []
+    if validation_summary_path is not None:
+        artifacts.append({"kind": "validation_summary", "path": str(validation_summary_path)})
     if contract_path.exists():
         artifacts.append({"kind": "mission_contract", "path": str(contract_path)})
     if executor_result is not None:
@@ -1429,6 +1460,10 @@ def _collect_artifacts(
             continue
         seen.add(key)
         deduped.append(artifact)
+        if artifact["kind"] == "validation_summary":
+            # The recorder owns registration and its observation-error audit.
+            # Do not retry a failed index write during terminal result assembly.
+            continue
         if artifact["kind"] == "mission_contract":
             _record_artifact(store, task_key, "manifest", Path(artifact["path"]))
         elif artifact["kind"] == "executor_log":

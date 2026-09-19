@@ -28,6 +28,7 @@ from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.validation_summary import ValidationSummaryRecorder, recording_error_sink
 
 
 __all__ = [
@@ -85,6 +86,9 @@ class IntegrationValidatorOutcome:
     branch_sha: str | None
     target_sha: str | None
     diff_context: str | None
+    # Existing exit_code retains the compatibility adapter's 124/126/127.
+    # A summary must distinguish those from an observed subprocess exit.
+    tool_error: dict[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
@@ -165,6 +169,7 @@ def _run_one(
     diff_context: str | None,
 ) -> IntegrationValidatorOutcome:
     execute = runner or _default_runner
+    tool_error = None
     try:
         completed = execute(spec.command, worktree_path, spec.timeout_seconds)
         exit_code = completed.returncode
@@ -173,12 +178,19 @@ def _run_one(
         # A missing validator binary is a red gate, never a skip.
         exit_code = 127
         output = f"validator command could not be executed: {exc}"
+        tool_error = {"type": type(exc).__name__, "message": str(exc)}
     except subprocess.TimeoutExpired as exc:
         exit_code = 124
-        output = f"validator timed out after {exc.timeout}s"
+        def decoded(value: str | bytes | None) -> str:
+            return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+        output = _truncate(
+            f"{decoded(exc.stdout)}{decoded(exc.stderr)}\nvalidator timed out after {exc.timeout}s"
+        )
+        tool_error = {"type": type(exc).__name__, "message": str(exc)}
     except OSError as exc:  # pragma: no cover - defensive
         exit_code = 126
         output = f"validator command failed to start: {exc}"
+        tool_error = {"type": type(exc).__name__, "message": str(exc)}
 
     return IntegrationValidatorOutcome(
         name=spec.name,
@@ -189,6 +201,7 @@ def _run_one(
         branch_sha=branch_sha,
         target_sha=target_sha,
         diff_context=diff_context,
+        tool_error=tool_error,
     )
 
 
@@ -207,6 +220,19 @@ def run_integration_validators(
 ) -> IntegrationValidationReport:
     """Run every validator, persist §29 evidence, and return the gate decision."""
     key = normalize_task_key(task_key)
+    validation_summary = ValidationSummaryRecorder(
+        task_key=key,
+        artifact_dir=artifact_dir,
+        source="integration_validators",
+        phase="integration_validation",
+        validators=[spec.name for spec in specs],
+        config_reference="run_integration_validators.specs",
+        integration_run_id=integration_run_id,
+        on_error=recording_error_sink(integration_store.task_store),
+        # Integration has no recorded execution Attempt reference. A cleared
+        # active pointer or a latest-row guess is not an authoritative binding.
+    )
+    validation_summary.register(integration_store.task_store)
 
     if not specs:
         report = IntegrationValidationReport(
@@ -219,18 +245,24 @@ def run_integration_validators(
                 "gates nothing cannot admit a Ticket to needs_review."
             ),
         )
-        return _persist(report, artifact_dir, integration_store, key)
+        report = _persist(report, artifact_dir, integration_store, key)
+        validation_summary.finish()
+        return report
 
     outcomes = tuple(
-        _run_one(
-            spec,
-            worktree_path=Path(worktree_path),
-            runner=runner,
-            branch_sha=branch_sha,
-            target_sha=target_sha,
-            diff_context=diff_context,
+        validation_summary.observe(
+            index,
+            lambda: _run_one(
+                spec,
+                worktree_path=Path(worktree_path),
+                runner=runner,
+                branch_sha=branch_sha,
+                target_sha=target_sha,
+                diff_context=diff_context,
+            ),
+            evidence=lambda outcome: outcome.to_dict(),
         )
-        for spec in specs
+        for index, spec in enumerate(specs)
     )
 
     for outcome in outcomes:
@@ -261,7 +293,9 @@ def run_integration_validators(
         outcomes=outcomes,
         summary=summary,
     )
-    return _persist(report, artifact_dir, integration_store, key)
+    report = _persist(report, artifact_dir, integration_store, key)
+    validation_summary.finish()
+    return report
 
 
 def _persist(

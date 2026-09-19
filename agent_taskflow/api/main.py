@@ -565,31 +565,44 @@ def create_app(
     ) -> dict[str, object]:
         task = task_or_404(task_key, current_store)
 
-        # Use DB artifact records if available.
+        # Indexed evidence can coexist with legacy files recorded only in run
+        # events. An additive summary must not hide those files from review.
         db_artifacts = current_store.list_task_artifacts(task.task_key)
-        if db_artifacts:
-            return list_response([artifact_to_dict(a) for a in db_artifacts])
+        items = [artifact_to_dict(a) for a in db_artifacts]
 
-        # Fallback: scan the filesystem artifact directory directly.
         if task.artifact_dir is not None and task.artifact_dir.is_dir():
+            artifact_root = task.artifact_dir.resolve()
+            indexed_paths: set[Path] = set()
+            for artifact in db_artifacts:
+                try:
+                    resolved = artifact.path.resolve()
+                    resolved.relative_to(artifact_root)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                indexed_paths.add(resolved)
             summaries = build_artifact_file_summaries(task.artifact_dir)
-            items = [
-                {
-                    "name": s["name"],
-                    "kind": s["kind"],
-                    "size_bytes": s["size_bytes"],
-                    "preview_available": s["preview_available"],
-                    "has_secret_warning": s["has_secret_warning"],
-                    "is_binary": s["is_binary"],
-                    "is_validator_log": s["is_validator_log"],
-                    "is_executor_log": s["is_executor_log"],
-                    "is_mission_contract": s["is_mission_contract"],
-                }
-                for s in summaries
-            ]
-            return list_response(items)
+            for summary in summaries:
+                try:
+                    resolved = (artifact_root / summary["name"]).resolve()
+                    resolved.relative_to(artifact_root)
+                    if not resolved.is_file() or resolved in indexed_paths:
+                        continue
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                indexed_paths.add(resolved)
+                items.append({
+                    "name": summary["name"],
+                    "kind": summary["kind"],
+                    "size_bytes": summary["size_bytes"],
+                    "preview_available": summary["preview_available"],
+                    "has_secret_warning": summary["has_secret_warning"],
+                    "is_binary": summary["is_binary"],
+                    "is_validator_log": summary["is_validator_log"],
+                    "is_executor_log": summary["is_executor_log"],
+                    "is_mission_contract": summary["is_mission_contract"],
+                })
 
-        return list_response([])
+        return list_response(items)
 
     @app.get("/api/tasks/{task_key}/validations")
     def list_validations(

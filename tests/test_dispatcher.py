@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from agent_taskflow.dispatcher import Dispatcher
@@ -128,6 +130,137 @@ class DispatcherTests(unittest.TestCase):
 
     def event_payloads(self, task_key: str = "AT-0007") -> list[str]:
         return [event.payload_json or "" for event in self.store.list_task_events(task_key)]
+
+    def test_validation_summary_uses_the_claim_observed_by_the_executor(self) -> None:
+        self.add_task()
+        executor = FakeExecutor()
+        validator = FakeValidator("unit")
+
+        def validate(context):
+            log = context.artifact_dir / "unit.log"
+            log.write_text("observed unit result")
+            return ValidatorResult("unit", "passed", exit_code=0, log_path=log)
+
+        validator.run = validate
+        result = self.make_dispatcher(
+            executor=executor, validators={"unit": validator}, validator_names=("unit",),
+        ).dispatch_task("AT-0007")
+        self.assertEqual(result.status, "waiting_approval")
+        paths = list(self.root.rglob("validation-summary.json"))
+        self.assertEqual(len(paths), 1)
+        data = json.loads(paths[0].read_text())
+        self.assertEqual(data["attempt_id"], executor.contexts[0].attempt_id)
+        self.assertIsNotNone(data["attempt_id"])
+        self.assertEqual(data["attempt_binding"], "runtime_claim")
+        self.assertEqual(data["source"], "dispatcher")
+        self.assertTrue(data["passed"])
+        self.assertEqual(data["executor_run_id"], self.store.list_executor_runs("AT-0007")[0]["run_id"])
+        artifacts = self.store.list_task_artifacts("AT-0007")
+        self.assertTrue(any(Path(a.path) == paths[0] for a in artifacts))
+
+    def test_stopped_executor_leaves_validators_unrun_in_summary(self) -> None:
+        self.add_task()
+        result = self.make_dispatcher(executor=FakeExecutor("failed")).dispatch_task("AT-0007")
+        self.assertEqual(result.status, "blocked")
+        data = json.loads(next(self.root.rglob("validation-summary.json")).read_text())
+        self.assertEqual(data["state"], "stopped")
+        self.assertFalse(data["complete"])
+        self.assertTrue(all(row["started_at"] is None and row["result"] == "not_run" for row in data["validators"]))
+
+    def test_validator_exception_preserves_partial_summary(self) -> None:
+        self.add_task()
+        validators = {name: FakeValidator(name) for name in ("first", "broken", "last")}
+        validators["broken"].run = mock.Mock(side_effect=RuntimeError("validator crashed"))
+        result = self.make_dispatcher(validators=validators, validator_names=tuple(validators)).dispatch_task("AT-0007")
+        self.assertEqual(result.status, "blocked")
+        data = json.loads(next(self.root.rglob("validation-summary.json")).read_text())
+        self.assertEqual([row["result"] for row in data["validators"]], ["passed", "tool_error", "not_run"])
+        self.assertEqual(data["validators"][1]["error"]["message"], "validator crashed")
+        self.assertFalse(data["passed"])
+
+    def test_skipped_and_missing_logs_keep_lifecycle_but_never_summary_success(self) -> None:
+        self.add_task()
+        result = self.make_dispatcher().dispatch_task("AT-0007")
+        self.assertEqual(result.status, "waiting_approval")
+        data = json.loads(next(self.root.rglob("validation-summary.json")).read_text())
+        self.assertEqual([row["result"] for row in data["validators"]], ["passed", "skipped"])
+        self.assertFalse(data["complete"])
+        self.assertFalse(data["passed"])
+        self.assertIsNone(data["validators"][1]["exit_code"])
+
+    def test_empty_validators_keep_legacy_lifecycle_without_summary_success(self) -> None:
+        self.add_task()
+        result = self.make_dispatcher(validator_names=()).dispatch_task("AT-0007")
+        self.assertEqual(result.status, "waiting_approval")
+        data = json.loads(next(self.root.rglob("validation-summary.json")).read_text())
+        self.assertEqual(data["validators"], [])
+        self.assertFalse(data["passed"])
+
+    def _assert_summary_error_recorded_and_executor_closed(self) -> None:
+        errors = [json.loads(event.payload_json) for event in self.store.list_task_events("AT-0007")
+                  if event.payload_json and json.loads(event.payload_json).get("kind") == "validation_summary_error"]
+        self.assertEqual(len(errors), 1)
+        self.assertFalse(errors[0]["complete"])
+        self.assertFalse(errors[0]["passed"])
+        run = self.store.list_executor_runs("AT-0007")[0]
+        self.assertIsNotNone(run["status"])
+        self.assertIsNotNone(run["finished_at"])
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertIsNone(connection.execute("SELECT active_attempt_id FROM tasks WHERE task_key='AT-0007'").fetchone()[0])
+
+    def test_summary_construction_io_error_preserves_successful_runtime_closeout(self) -> None:
+        self.add_task()
+        executor = FakeExecutor()
+        with mock.patch("agent_taskflow.validation_summary.atomic_write_json", side_effect=OSError("summary unavailable")):
+            result = self.make_dispatcher(executor=executor).dispatch_task("AT-0007")
+        self.assertEqual(result.status, "waiting_approval")
+        self.assertEqual(len(executor.contexts), 1)
+        self.assertEqual(list(self.root.rglob("validation-summary.json")), [])
+        self._assert_summary_error_recorded_and_executor_closed()
+
+    def test_summary_registration_io_error_keeps_failing_executor_verdict(self) -> None:
+        self.add_task()
+        record = TaskMirrorStore.record_task_artifact
+        def register(store, task_key, artifact_type, path):
+            if Path(path).name == "validation-summary.json":
+                raise OSError("summary index unavailable")
+            return record(store, task_key, artifact_type, path)
+        with mock.patch.object(TaskMirrorStore, "record_task_artifact", new=register):
+            result = self.make_dispatcher(executor=FakeExecutor("failed", "original red executor")).dispatch_task("AT-0007")
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.blocked_reason, "original red executor")
+        self._assert_summary_error_recorded_and_executor_closed()
+        data = json.loads(next(self.root.rglob("validation-summary.json")).read_text())
+        self.assertFalse(data["passed"])
+
+    def test_summary_finish_io_error_does_not_mask_original_executor_exception(self) -> None:
+        from agent_taskflow.validation_summary import atomic_write_json
+        self.add_task()
+        executor = FakeExecutor()
+        executor.run = mock.Mock(side_effect=RuntimeError("original executor failure"))
+        def write(path, payload, **kwargs):
+            if payload.get("state") == "stopped":
+                raise OSError("summary finish unavailable")
+            return atomic_write_json(path, payload, **kwargs)
+        with mock.patch("agent_taskflow.validation_summary.atomic_write_json", side_effect=write):
+            result = self.make_dispatcher(executor=executor).dispatch_task("AT-0007")
+        self.assertIn("original executor failure", result.blocked_reason)
+        self.assertNotIn("summary finish unavailable", result.blocked_reason)
+        self._assert_summary_error_recorded_and_executor_closed()
+
+    def test_summary_error_write_does_not_mask_original_validator_exception(self) -> None:
+        from agent_taskflow.validation_summary import atomic_write_json
+        self.add_task()
+        validator = FakeValidator("broken")
+        validator.run = mock.Mock(side_effect=RuntimeError("original validator failure"))
+        def write(path, payload, **kwargs):
+            if Path(path).name.endswith("-error.json"):
+                raise OSError("summary error output unavailable")
+            return atomic_write_json(path, payload, **kwargs)
+        with mock.patch("agent_taskflow.validation_summary.atomic_write_json", side_effect=write):
+            result = self.make_dispatcher(validators={"broken": validator}, validator_names=("broken",)).dispatch_task("AT-0007")
+        self.assertIn("original validator failure", result.blocked_reason)
+        self._assert_summary_error_recorded_and_executor_closed()
 
     def test_queued_task_success_moves_to_waiting_approval(self) -> None:
         self.add_task()

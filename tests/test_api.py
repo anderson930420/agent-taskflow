@@ -230,6 +230,64 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(artifact["artifact_type"], "spec")
         self.assertIsInstance(artifact["path"], str)
 
+    def test_artifact_index_does_not_hide_unindexed_files_or_duplicate_indexed_paths(self) -> None:
+        directory = self.artifact_root / "AT-0008"
+        (directory / "spec.md").write_text("indexed spec")
+        (directory / "mission_contract.json").write_text("{}")
+        (directory / "worker-result.txt").write_text("unindexed worker output")
+        run = directory / "validation-runs" / "run-1"
+        run.mkdir(parents=True)
+        summary_path = run / "validation-summary.json"
+        summary_path.write_text("{}")
+        self.store.record_task_artifact("AT-0008", "other", summary_path)
+
+        items = self.client.get("/api/tasks/AT-0008/artifacts").json()["items"]
+        indexed = [item for item in items if item.get("path") == str(directory / "spec.md")]
+        self.assertEqual(len(indexed), 1)
+        self.assertEqual(indexed[0]["artifact_type"], "spec")
+        self.assertEqual(indexed[0]["task_key"], "AT-0008")
+        self.assertIn("created_at", indexed[0])
+        self.assertFalse(any(item.get("name") == "spec.md" for item in items))
+        self.assertTrue(any(item.get("path") == str(summary_path) for item in items))
+        names = {item.get("name") for item in items}
+        self.assertIn("mission_contract.json", names)
+        self.assertIn("worker-result.txt", names)
+        self.assertNotIn("validation-runs", names)
+        self.assertEqual(len(items), 4)
+
+    def test_mixed_artifact_listing_keeps_existing_safe_filter_and_secret_redaction(self) -> None:
+        directory = self.artifact_root / "AT-0008"
+        outside = self.root / "outside.txt"
+        outside.write_text("outside content must not be discovered")
+        (directory / "escape.txt").symlink_to(outside)
+        (directory / "nested-escape").symlink_to(self.root, target_is_directory=True)
+        (directory / "sensitive.log").write_text("OPENAI_API_KEY=sk-1234567890abcdef1234567890abcdef")
+        (directory / "public.txt").write_text("safe content")
+        (directory / "public-alias.txt").symlink_to(directory / "public.txt")
+
+        response = self.client.get("/api/tasks/AT-0008/artifacts")
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["items"]
+        names = [item.get("name") for item in items]
+        self.assertNotIn("escape.txt", names)
+        self.assertNotIn("outside.txt", names)
+        self.assertNotIn("nested-escape", names)
+        self.assertEqual(names.count("public.txt"), 1)
+        sensitive = next(item for item in items if item.get("name") == "sensitive.log")
+        self.assertTrue(sensitive["has_secret_warning"])
+        self.assertFalse(sensitive["preview_available"])
+        self.assertNotIn("sk-1234567890", response.text)
+
+    def test_indexed_internal_symlink_retains_metadata_without_a_duplicate_file(self) -> None:
+        directory = self.artifact_root / "AT-0008"
+        actual = directory / "real-spec.md"
+        actual.write_text("indexed through an internal alias")
+        (directory / "spec.md").symlink_to(actual)
+        items = self.client.get("/api/tasks/AT-0008/artifacts").json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["artifact_type"], "spec")
+        self.assertEqual(items[0]["path"], str(directory / "spec.md"))
+
     def test_validations_return_metadata(self) -> None:
         response = self.client.get("/api/tasks/AT-0008/validations")
 

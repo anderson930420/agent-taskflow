@@ -76,6 +76,7 @@ from agent_taskflow.ticket_worktree_schema import (
 )
 from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
 from agent_taskflow.validators.registry import get_validator
+from agent_taskflow.validation_summary import ValidationSummaryRecorder, artifact_root_for_claim, recording_error_sink
 
 
 DEFAULT_VALIDATORS = ("pytest", "openspec")
@@ -382,11 +383,26 @@ class Dispatcher:
             prompt_path=executor_context.prompt_path,
         )
 
+        validation_summary = ValidationSummaryRecorder(
+            task_key=task.task_key,
+            artifact_dir=artifact_root_for_claim(
+                self.store, task.task_key, progress.attempt_id, task.artifact_dir,
+            ),
+            source="dispatcher",
+            phase="implementation_validation",
+            validators=self.validators,
+            config_reference="Dispatcher.validators",
+            attempt_id=progress.attempt_id,
+            executor_run_id=executor_run_id,
+            on_error=recording_error_sink(self.store),
+        )
+        validation_summary.register(self.store)
         progress.implementer_running(selected_executor)
         try:
             executor_result = executor.run(executor_context)
         except Exception as exc:  # pragma: no cover - exercised by integration failures.
             reason = f"Executor {selected_executor} raised {exc.__class__.__name__}: {exc}"
+            validation_summary.finish(state="stopped", reason=reason)
             progress.implementer_raised(selected_executor, exc)
             self.store.finish_executor_run(
                 task.task_key,
@@ -414,6 +430,7 @@ class Dispatcher:
                 executor_result.summary
                 or f"Executor {executor_result.executor} returned {executor_result.status}"
             )
+            validation_summary.finish(state="stopped", reason=reason)
             # A Ticket executor that fails or returns `blocked` (a cooperative
             # operator kill included) ends `failed` (SPEC §29.2).
             return self._fail(
@@ -442,11 +459,13 @@ class Dispatcher:
 
         progress.validators_running(self.validators)
         validator_statuses: dict[str, str] = {}
-        for validator_name in self.validators:
+        for validator_index, validator_name in enumerate(self.validators):
             progress.validator_running(validator_name)
             try:
-                validator = self._get_validator(validator_name)
-                validator_result = validator.run(validator_context)
+                validator_result = validation_summary.observe(
+                    validator_index,
+                    lambda: self._get_validator(validator_name).run(validator_context),
+                )
             except Exception as exc:  # pragma: no cover - exercised by integration failures.
                 reason = f"Validator {validator_name} raised {exc.__class__.__name__}: {exc}"
                 progress.validator_raised(validator_name, exc)
@@ -475,6 +494,7 @@ class Dispatcher:
                     or f"Validator {validator_result.validator} returned {validator_result.status}"
                 )
                 progress.validator_failed(validator_name, validator_result.status)
+                validation_summary.finish(state="stopped", reason=reason)
                 # SPEC §29.1: only a red validator stops a Ticket for a
                 # decision; a validator that could not reach a verdict
                 # (`blocked`) is a runtime failure.
@@ -491,6 +511,7 @@ class Dispatcher:
                     validator_statuses=validator_statuses,
                 )
 
+        validation_summary.finish()
         progress.validators_passed(validator_statuses)
         # SPEC §22 / §43.12 (V1 FOLLOWUPS F8): a Ticket goes straight to
         # `ready_for_integration`. A legacy mirror row keeps `waiting_approval`.
