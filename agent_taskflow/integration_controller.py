@@ -44,6 +44,10 @@ from agent_taskflow.integration_conflict_resolver import (
     resolve_conflicts,
 )
 from agent_taskflow.integration_git import GitCommandLog, IntegrationGitError
+from agent_taskflow.integration_handoff import (
+    ProducerAttemptBinding,
+    resolve_producer_attempt_binding,
+)
 from agent_taskflow.integration_queue import (
     IntegrationLock,
     IntegrationLockUnavailable,
@@ -161,6 +165,9 @@ class IntegrationResult:
     git_commands: tuple[tuple[str, ...], ...] = ()
     integration_run_id: str | None = None
     integration_json_path: Path | None = None
+    # The Attempt that produced the tree this run integrates, or the recorded
+    # reason there is none. Never a guess from the task's Attempt history.
+    producer_attempt_binding: dict[str, Any] | None = None
 
     def to_summary_dict(self) -> dict[str, Any]:
         return {
@@ -191,6 +198,7 @@ class IntegrationResult:
             "hints": [{"code": h.code, "message": h.message} for h in self.hints],
             "git_commands": [list(command) for command in self.git_commands],
             "integration_run_id": self.integration_run_id,
+            "producer_attempt_binding": self.producer_attempt_binding,
             "dry_run": self.dry_run,
             "confirmation_required": self.confirmation_required,
             "safety": {
@@ -346,6 +354,13 @@ def _integrate_under_lock(
     target_ref = f"{request.remote}/{request.target_branch}"
     previous_base = pr_state["integrated_base_sha"]
 
+    # Resolved while the entry is still queued — this run removes it once it
+    # publishes — and bound to this run only, so a later tick re-resolves for
+    # its own entry (M2.2).
+    producer_binding = resolve_producer_attempt_binding(
+        task_store, integration, request.task_key, repo=request.repo
+    )
+
     task_store.update_task_status(
         request.task_key,
         schema.INTEGRATING,
@@ -358,7 +373,12 @@ def _integrate_under_lock(
         "integration_started",
         SOURCE,
         message=f"Integration run {run_id} ({mode})",
-        payload={"integration_run_id": run_id, "mode": mode, "repo": request.repo},
+        payload={
+            "integration_run_id": run_id,
+            "mode": mode,
+            "repo": request.repo,
+            "producer_attempt_binding": producer_binding.to_dict(),
+        },
     )
     integration.update_integration_state(
         request.task_key,
@@ -407,6 +427,7 @@ def _integrate_under_lock(
             previous_base=previous_base,
             pr_state=integration.get_pr_state(request.task_key),
             task=task,
+            producer_binding=producer_binding,
             **extra,
         )
 
@@ -562,6 +583,7 @@ def _integrate_under_lock(
             diff_context=diff_context,
             integration_run_id=run_id,
             integration_store=integration,
+            producer_binding=producer_binding,
         )
         if not report.passed:
             # §29.1 — red validators stop for decision. No auto retry, no triage.
@@ -700,6 +722,7 @@ def _integrate_under_lock(
                 "pr_number": snapshot.number,
                 "integrated_base_sha": target_sha,
                 "reintegration_count": projected_count,
+                "producer_attempt_binding": producer_binding.to_dict(),
             },
         )
 
@@ -720,6 +743,7 @@ def _integrate_under_lock(
             previous_base=previous_base,
             pr_state=integration.get_pr_state(request.task_key),
             task=task,
+            producer_binding=producer_binding,
             validation_report=report,
             conflict_detected=conflict_detected,
             conflict_resolved=conflict_resolved,
@@ -843,6 +867,7 @@ def _finish(
     previous_base: str | None,
     pr_state: dict[str, Any],
     task: Any,
+    producer_binding: ProducerAttemptBinding | None = None,
     validation_report: IntegrationValidationReport | None = None,
     conflict_detected: bool = False,
     conflict_resolved: bool = False,
@@ -876,6 +901,9 @@ def _finish(
         hints=tuple(hints),
         git_commands=log.as_tuple(),
         integration_run_id=run_id,
+        producer_attempt_binding=(
+            None if producer_binding is None else producer_binding.to_dict()
+        ),
     )
 
     if task.artifact_dir is None:

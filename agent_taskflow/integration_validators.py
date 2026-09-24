@@ -25,10 +25,16 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
 from agent_taskflow.atomic_write import atomic_write_json
+from agent_taskflow.evidence_coverage import RunnerEvidenceCollector
+from agent_taskflow.integration_handoff import ProducerAttemptBinding
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.tasks import normalize_task_key
-from agent_taskflow.validation_summary import ValidationSummaryRecorder, recording_error_sink
+from agent_taskflow.validation_summary import (
+    ATTEMPT_BINDING_PRODUCER_HANDOFF,
+    ValidationSummaryRecorder,
+    recording_error_sink,
+)
 
 
 __all__ = [
@@ -217,9 +223,21 @@ def run_integration_validators(
     integration_run_id: str,
     integration_store: IntegrationStore,
     runner: Runner | None = None,
+    producer_binding: ProducerAttemptBinding | None = None,
 ) -> IntegrationValidationReport:
-    """Run every validator, persist §29 evidence, and return the gate decision."""
+    """Run every validator, persist §29 evidence, and return the gate decision.
+
+    ``producer_binding`` is the Attempt that produced the tree being integrated,
+    resolved by the caller from this Ticket's own queue entry. It is recorded as
+    a producer handoff, never as a runtime claim: that Attempt's claim is
+    normally released by the time integration runs. Without a binding — a
+    manual, watcher or legacy run — the summary stays unbound, exactly as it was
+    before, because a cleared active pointer or a latest-row guess is not an
+    authoritative binding.
+    """
     key = normalize_task_key(task_key)
+    bound = producer_binding if producer_binding is not None and producer_binding.bound else None
+    coverage = RunnerEvidenceCollector(source=SOURCE, artifact_roots=(artifact_dir,))
     validation_summary = ValidationSummaryRecorder(
         task_key=key,
         artifact_dir=artifact_dir,
@@ -228,9 +246,14 @@ def run_integration_validators(
         validators=[spec.name for spec in specs],
         config_reference="run_integration_validators.specs",
         integration_run_id=integration_run_id,
+        attempt_id=None if bound is None else bound.attempt_id,
+        attempt_binding=None if bound is None else ATTEMPT_BINDING_PRODUCER_HANDOFF,
+        attempt_binding_reason=None if bound is None else bound.reason,
+        attempt_binding_provenance=(
+            producer_binding.to_dict() if producer_binding is not None else None
+        ),
+        coverage_builder=coverage.coverage,
         on_error=recording_error_sink(integration_store.task_store),
-        # Integration has no recorded execution Attempt reference. A cleared
-        # active pointer or a latest-row guess is not an authoritative binding.
     )
     validation_summary.register(integration_store.task_store)
 
@@ -249,8 +272,26 @@ def run_integration_validators(
         validation_summary.finish()
         return report
 
-    outcomes = tuple(
-        validation_summary.observe(
+    def observe(index: int, spec: IntegrationValidatorSpec) -> IntegrationValidatorOutcome:
+        # Recorded before the invocation, so a validator that never returns
+        # still leaves the exact argv and configuration it was about to run.
+        identity = {
+            "configured_name": spec.name,
+            "config_source": "run_integration_validators.specs",
+            "config_index": index,
+            "config_reference": f"IntegrationValidatorSpec[{index}].command",
+            "resolution": "integration_validator_spec",
+            "implementation": f"{__name__}._run_one",
+            "command": list(spec.command),
+            "command_reference": f"IntegrationValidatorSpec[{index}].command",
+            "command_availability": "resolved_before_invocation",
+            "timeout_seconds": spec.timeout_seconds,
+            "cwd": str(Path(worktree_path)),
+            "runner": "subprocess.run" if runner is None else "caller_supplied_runner",
+        }
+        coverage.note_validator_identity(index, identity)
+        validation_summary.note_validator_identity(index, identity)
+        return validation_summary.observe(
             index,
             lambda: _run_one(
                 spec,
@@ -262,8 +303,8 @@ def run_integration_validators(
             ),
             evidence=lambda outcome: outcome.to_dict(),
         )
-        for index, spec in enumerate(specs)
-    )
+
+    outcomes = tuple(observe(index, spec) for index, spec in enumerate(specs))
 
     for outcome in outcomes:
         integration_store.record_validator_evidence(

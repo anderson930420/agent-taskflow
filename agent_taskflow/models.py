@@ -83,6 +83,9 @@ TASK_EVENT_TYPES = {
     "cleanup_recorded",
     # V1 Master Spec Step 2 integration controller lifecycle events.
     "integration_queued",
+    # A second Attempt finished a Ticket whose queue entry another Attempt
+    # produced (Level 2 M2.2). Audit only: the entry keeps its FIFO position.
+    "integration_producer_superseded",
     "integration_started",
     "integration_completed",
     "integration_blocked",

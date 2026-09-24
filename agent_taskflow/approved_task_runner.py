@@ -22,6 +22,10 @@ from agent_taskflow.codex_advisory_evidence_gate import (
     check_required_codex_advisory_evidence,
 )
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS
+from agent_taskflow.evidence_coverage import (
+    RunnerEvidenceCollector,
+    validator_config_identity,
+)
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
 from agent_taskflow.executors.implementation_prompt import (
     EXECUTORS_REQUIRING_PROMPT,
@@ -470,17 +474,23 @@ def run_approved_task(
         message=f"Approved task runner running executor {request.executor}",
     )
 
+    evidence_root = artifact_root_for_claim(
+        current_store, effective_task.task_key, progress.attempt_id, effective_task.artifact_dir,
+    )
+    coverage = RunnerEvidenceCollector(
+        source="approved_task_runner",
+        artifact_roots=(evidence_root, effective_task.artifact_dir),
+    )
     validation_summary = ValidationSummaryRecorder(
         task_key=effective_task.task_key,
-        artifact_dir=artifact_root_for_claim(
-            current_store, effective_task.task_key, progress.attempt_id, effective_task.artifact_dir,
-        ),
+        artifact_dir=evidence_root,
         source="approved_task_runner",
         phase="implementation_validation",
         validators=request.validators,
         config_reference="ApprovedTaskRunRequest.validators",
         attempt_id=progress.attempt_id,
         executor_run_id=executor_run_id,
+        coverage_builder=coverage.coverage,
         on_error=recording_error_sink(current_store),
     )
     validation_summary.register(current_store)
@@ -489,6 +499,7 @@ def run_approved_task(
         executor_result = executor.run(executor_context)
     except Exception as exc:  # pragma: no cover - defensive runtime failure path.
         reason = f"Executor {request.executor} raised {exc.__class__.__name__}: {exc}"
+        coverage.note_executor(request.executor, ran=True, reason=reason)
         validation_summary.finish(state="stopped", reason=reason)
         progress.implementer_raised(request.executor, exc)
         current_store.finish_executor_run(
@@ -537,6 +548,12 @@ def run_approved_task(
         artifacts=executor_result.artifacts,
     )
     _record_executor_artifacts(current_store, effective_task.task_key, executor_result)
+    coverage.note_executor(
+        executor_result.executor,
+        ran=True,
+        artifacts=getattr(executor_result, "artifacts", None),
+        reason=f"executor returned {executor_result.status}",
+    )
 
     executor_failed = executor_result.status in {"failed", "blocked"}
     progress.implementer_finished(
@@ -591,6 +608,19 @@ def run_approved_task(
             attempt_id=progress.attempt_id,
         )
         progress.validator_running(validator_name)
+        identity = validator_config_identity(
+            validator,
+            name=validator_name,
+            index=validator_index,
+            config_source="ApprovedTaskRunRequest.validators",
+            resolution=(
+                "approved_task_runner_validator_registry"
+                if validator_registry and validator_name in validator_registry
+                else "agent_taskflow.validators.registry.get_validator"
+            ),
+        )
+        coverage.note_validator_identity(validator_index, identity)
+        validation_summary.note_validator_identity(validator_index, identity)
         try:
             validator_result = validation_summary.observe(
                 validator_index, lambda: validator.run(validator_context)
