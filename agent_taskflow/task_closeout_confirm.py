@@ -72,6 +72,10 @@ class TaskCloseoutConfirmRequest:
     dry_run: bool = False
     confirm_task_closeout: bool = False
     remote: str = DEFAULT_REMOTE
+    #: The exact Attempt this merge outcome belongs to, when the operator knows
+    #: it. Closeout is task-scoped, so an absent value stays unbound: the merge
+    #: outcome is never attached to the newest Attempt by inference.
+    attempt_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))
@@ -99,6 +103,12 @@ class TaskCloseoutConfirmRequest:
         if normalized_remote.startswith("-") or any(ch.isspace() for ch in normalized_remote):
             raise ValueError("remote must be a simple git remote name")
         object.__setattr__(self, "remote", normalized_remote)
+
+        if self.attempt_id is not None:
+            normalized_attempt = self.attempt_id.strip()
+            if not normalized_attempt:
+                raise ValueError("attempt_id must not be empty")
+            object.__setattr__(self, "attempt_id", normalized_attempt)
 
 
 @dataclass(frozen=True)
@@ -283,6 +293,12 @@ def confirm_task_closeout(
         artifact_root=request.artifact_root,
         artifact_payload=evidence,
     )
+    observation = _append_outcome_ledger_observation(
+        db_path=db_path,
+        request=request,
+        evidence=evidence,
+        artifact_path=artifact_path,
+    )
 
     updated_task = current_store.get_task(request.task_key)
     return _success_result(
@@ -297,6 +313,7 @@ def confirm_task_closeout(
         remote_branch=remote_branch,
         warnings=warnings,
         artifact_path=artifact_path,
+        outcome_ledger_observation=observation,
     )
 
 
@@ -965,6 +982,7 @@ def _success_result(
     remote_branch: dict[str, Any],
     warnings: list[str],
     artifact_path: Path | None,
+    outcome_ledger_observation: dict[str, Any] | None = None,
 ) -> TaskCloseoutConfirmResult:
     task_archived = new_task_status == "done"
     return TaskCloseoutConfirmResult(
@@ -989,6 +1007,10 @@ def _success_result(
             "requires_human_confirmation": True,
             "confirmation_flag": "--confirm-task-closeout",
             "task_closeout_performed": True,
+            "outcome_ledger_observation": outcome_ledger_observation,
+            "outcome_ledger_attempt_binding": (
+                "bound_exact_attempt" if request.attempt_id else "unbound_task_scoped"
+            ),
         },
         next_allowed_actions=[
             "manual GitHub issue close in a later phase if desired",
@@ -1122,6 +1144,54 @@ def _record_task_closeout_evidence(
         payload=artifact_payload,
     )
     return artifact_path
+
+
+def _append_outcome_ledger_observation(
+    *,
+    db_path: Path,
+    request: TaskCloseoutConfirmRequest,
+    evidence: dict[str, Any],
+    artifact_path: Path,
+) -> dict[str, Any] | None:
+    """Append the observed merge outcome to an exact Attempt's outcome ledger.
+
+    Closeout is task-scoped, so this runs only when the operator supplied the
+    exact Attempt. The observation is appended as its own artifact beside the
+    Attempt's immutable base ledger; nothing here rewrites the base ledger,
+    changes the closeout result, or claims a rollback that was not observed.
+    """
+    if request.attempt_id is None:
+        return None
+    from agent_taskflow.outcome_ledger import record_attempt_outcome_observation
+
+    pr = evidence.get("pr") or {}
+    return record_attempt_outcome_observation(
+        db_path=db_path,
+        attempt_id=request.attempt_id,
+        observation_type="task_closeout_confirmed",
+        observed_fields={
+            "human_decision": {
+                "decision": "merged_on_github",
+                "pr_number": evidence.get("pr_number"),
+                "pr_url": evidence.get("pr_url"),
+                "merged_at": evidence.get("merged_at"),
+                "merge_commit": evidence.get("merge_commit"),
+                "pr_state": pr.get("state"),
+            },
+            "post_merge_result": {
+                "task_status": evidence.get("new_task_status"),
+                "previous_task_status": evidence.get("previous_task_status"),
+                "task_completed": evidence.get("task_completed"),
+                "local_cleanup_verified": evidence.get("local_cleanup_verified"),
+                "remote_branch_cleanup_verified": evidence.get(
+                    "remote_branch_cleanup_verified"
+                ),
+            },
+        },
+        source_reference=str(artifact_path),
+        actor=SOURCE,
+        expected_task_key=request.task_key,
+    )
 
 
 def _resolve_closeout_artifact_root(task: TaskRecord, artifact_root: Path | None) -> Path:

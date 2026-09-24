@@ -28,6 +28,7 @@ from agent_taskflow.attempt_schema import (
     migrate_task_attempt_lifecycle,
 )
 from agent_taskflow.models import require_absolute_path, utc_now_iso
+from agent_taskflow.outcome_ledger import record_terminal_attempt_outcome
 from agent_taskflow.store import connect, default_db_path
 from agent_taskflow.tasks import normalize_task_key
 
@@ -356,7 +357,7 @@ class AttemptStore:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT attempts.*, tasks.active_attempt_id
+                SELECT attempts.*, tasks.active_attempt_id, tasks.task_key
                 FROM attempts
                 JOIN tasks ON tasks.task_id = attempts.task_id
                 WHERE attempts.attempt_id = ?
@@ -414,6 +415,16 @@ class AttemptStore:
                 metadata=metadata,
             )
 
+        # M2 §2.3: direct terminalization writes its closeout ledger after the
+        # transaction commits, through the same writer and idempotency key as
+        # the runtime admission routes.
+        record_terminal_attempt_outcome(
+            db_path=self.db_path,
+            attempt_id=attempt_id,
+            closeout_route="attempt_store_close",
+            task_key_hint=row["task_key"],
+            expected_task_id=row["task_id"],
+        )
         attempt = self.get_attempt(attempt_id)
         assert attempt is not None
         return attempt

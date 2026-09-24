@@ -21,6 +21,7 @@ from agent_taskflow.attempt_models import (
     validate_attempt_status,
 )
 from agent_taskflow.models import require_absolute_path, utc_now_iso, validate_task_status
+from agent_taskflow.outcome_ledger import record_terminal_attempt_outcome
 from agent_taskflow.runtime_capacity import (
     count_active_executor_leases_in_connection,
     runtime_capacity_in_connection,
@@ -716,6 +717,17 @@ class RuntimeAdmissionStore:
                 "DELETE FROM runtime_claim_suppressions WHERE task_id = ?",
                 (row["task_id"],),
             )
+        # M2 §2.3: the closeout ledger is written only after the terminal
+        # transaction has committed, and never changes this release's result.
+        # `LifecycleRuntimeTaskStore._release` delegates here, so this is the
+        # single hook for every releasing caller.
+        record_terminal_attempt_outcome(
+            db_path=self.db_path,
+            attempt_id=attempt_id,
+            closeout_route="runtime_admission_release",
+            task_key_hint=row["task_key"],
+            expected_task_id=row["task_id"],
+        )
         lease = self.get_lease(row["lease_id"])
         assert lease is not None
         return lease
@@ -725,6 +737,7 @@ class RuntimeAdmissionStore:
         self.init_db()
         now = utc_now_iso()
         expired_attempts: list[str] = []
+        expired_identities: list[tuple[str, str, str]] = []
         with closing(connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
@@ -815,6 +828,18 @@ class RuntimeAdmissionStore:
                     (row["task_id"],),
                 )
                 expired_attempts.append(row["attempt_id"])
+                expired_identities.append(
+                    (row["attempt_id"], row["task_key"], row["task_id"])
+                )
+        # M2 §2.3: one ledger per expired Attempt, after the reaper committed.
+        for attempt_id, task_key, task_id in expired_identities:
+            record_terminal_attempt_outcome(
+                db_path=self.db_path,
+                attempt_id=attempt_id,
+                closeout_route="runtime_lease_expiry",
+                task_key_hint=task_key,
+                expected_task_id=task_id,
+            )
         return expired_attempts
 
     def get_lease(self, lease_id: str) -> RuntimeLeaseRecord | None:

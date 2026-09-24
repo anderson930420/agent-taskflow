@@ -41,6 +41,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to a JSON fixture for offline PR status inspection.",
     )
     parser.add_argument(
+        "--attempt-id",
+        help=(
+            "Optional exact Attempt this merge outcome belongs to. When given, "
+            "the observed merge outcome is appended to that Attempt's outcome "
+            "ledger. Omit it when the Attempt is not known; the outcome then "
+            "stays unbound rather than being guessed."
+        ),
+    )
+    parser.add_argument(
         "--target-status",
         default="completed",
         help="Terminal task status to write on success. Default: completed.",
@@ -126,6 +135,7 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:
             target_status=args.target_status,
             dry_run=args.dry_run,
             confirm_task_closeout=args.confirm_task_closeout,
+            attempt_id=args.attempt_id,
         )
         result = confirm_task_closeout(request, runner=runner)
     except (ValueError, OSError, TaskCloseoutConfirmError) as exc:
