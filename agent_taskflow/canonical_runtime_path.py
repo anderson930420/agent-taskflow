@@ -10,14 +10,16 @@ second ownership implementation.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
 import threading
 from types import ModuleType
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 from uuid import uuid4
 
+from agent_taskflow.attempt_failure_class import failure_class_metadata
 from agent_taskflow.canonical_runtime_schema import (
     CANONICAL_RUNTIME_ADMISSION_MIGRATION,
     migrate_canonical_runtime_admission,
@@ -97,10 +99,34 @@ class CanonicalRuntimeTaskStore(_LegacyTaskMirrorStore):
         self.heartbeat_interval_seconds = interval
         self._runtime_claims: dict[str, _ClaimState] = {}
         self._reserved_claims: dict[str, RuntimeClaim] = {}
+        self._failure_kinds: dict[str, str] = {}
         self._runtime_claims_lock = threading.RLock()
 
     def init_db(self) -> None:
         migrate_canonical_runtime_admission(self.db_path)
+
+    @contextmanager
+    def failure_kind(self, task_key: str, kind: str) -> Iterator[None]:
+        """Name the Ticket failure kind behind the terminal write in this scope.
+
+        M2 Exit Gate row 2: a release inside the scope records the kind's
+        failure class on the Attempt's terminal lifecycle event
+        (:mod:`agent_taskflow.attempt_failure_class`). The kind is dropped when
+        the scope ends, so a later release never inherits it.
+        """
+        normalized = normalize_task_key(task_key)
+        with self._runtime_claims_lock:
+            self._failure_kinds[normalized] = kind
+        try:
+            yield
+        finally:
+            with self._runtime_claims_lock:
+                self._failure_kinds.pop(normalized, None)
+
+    def _failure_class_metadata(self, task_key: str, status: str) -> dict[str, Any]:
+        with self._runtime_claims_lock:
+            kind = self._failure_kinds.get(normalize_task_key(task_key))
+        return failure_class_metadata(status, kind)
 
     def _state_for(self, task_key: str) -> _ClaimState | None:
         normalized = normalize_task_key(task_key)
@@ -284,6 +310,7 @@ class CanonicalRuntimeTaskStore(_LegacyTaskMirrorStore):
                     "message": message,
                     "blocked_reason": blocked_reason,
                     "runtime_lease_id": state.claim.lease_id,
+                    **self._failure_class_metadata(normalized, status),
                 },
             )
         finally:
