@@ -83,7 +83,7 @@ Use these interpretations consistently:
 ## Operating Rules
 
 - Prefer small, reviewable changes.
-- Before editing, inspect relevant files and explain intended changes.
+- Inspect the relevant files before editing.
 - Reuse existing project patterns before introducing new abstractions.
 - Keep executor, validator, store, API, and frontend boundaries clean.
 - Do not edit unrelated files.
