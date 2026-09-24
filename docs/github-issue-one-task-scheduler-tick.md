@@ -176,7 +176,7 @@ PYTHONPATH=. .venv/bin/python3 scripts/run_github_issue_one_task_scheduler_tick.
   --local-repo-path /absolute/path/to/repo \
   --artifact-root /absolute/path/to/artifacts \
   --lock-path /absolute/path/to/github-issue-one-task.lock \
-  --model claude-sonnet-4-6 \
+  --model claude-opus-5-5 \
   --provider anthropic \
   --tools read --tools write \
   --confirmed \
