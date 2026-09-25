@@ -77,6 +77,8 @@ class HandoffTestCase(unittest.TestCase):
         (repo / "README.md").write_text("beta\n", encoding="utf-8")
         git(repo, "add", "README.md")
         git(repo, "commit", "-m", "initial")
+        # RULINGS 67: the second repository is runnable only with a policy.
+        self.fx.register_project("f4-beta", repo)
         return TicketRepository(
             repository="f4-beta",
             repo_path=repo,

@@ -28,7 +28,6 @@ from agent_taskflow.ticket_creation import (
 )
 from agent_taskflow.ticket_models import DEFAULT_TICKET_PRIORITY, TicketRecord
 from agent_taskflow.ticket_repositories import (
-    DEFAULT_PROJECTS_CONFIG_PATH,
     TicketRepositoryError,
     list_ticket_repositories,
 )
@@ -69,7 +68,7 @@ def ticket_event_to_dict(event: TaskEventRecord) -> dict[str, Any]:
 def build_ticket_router(
     ticket_store: TicketStore,
     *,
-    projects_config_path: str | Path = DEFAULT_PROJECTS_CONFIG_PATH,
+    projects_config_path: str | Path | None = None,
     ai_adapter: TicketAIMetadataAdapter | None = None,
 ) -> APIRouter:
     """Return the Ticket router bound to one store and repository registry."""

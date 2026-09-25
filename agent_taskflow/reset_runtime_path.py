@@ -32,6 +32,7 @@ from agent_taskflow.runtime_admission import (
     RuntimeClaim,
     assert_dependency_released,
     assert_runtime_capacity_available,
+    attempt_policy_fields,
 )
 from agent_taskflow.store import connect
 from agent_taskflow.tasks import normalize_task_key
@@ -141,6 +142,17 @@ class ResetAwareRuntimeAdmissionStore(canonical_path.CanonicalRuntimeAdmissionSt
             # Ruling 32: adopting a reserved retry Attempt starts the task as
             # surely as a fresh claim, so it is gated the same way.
             assert_dependency_released(conn, normalized)
+            # RULINGS 67 (OR-8.3): adopting a reserved retry is a claim, so a
+            # Ticket without a valid execution policy is refused here too.
+            fields = attempt_policy_fields(
+                conn,
+                normalized,
+                executor=executor or row["task_executor"],
+                model=model or row["task_model"],
+                policy_version=policy_version,
+                config_snapshot_hash=config_snapshot_hash,
+                permission_profile=permission_profile,
+            )
 
             active_lease = conn.execute(
                 """
@@ -180,13 +192,13 @@ class ResetAwareRuntimeAdmissionStore(canonical_path.CanonicalRuntimeAdmissionSt
                 WHERE attempt_id = ? AND status = 'created' AND is_active = 1
                 """,
                 (
-                    executor or row["task_executor"],
-                    model or row["task_model"],
+                    fields.executor,
+                    fields.model,
                     base_commit,
-                    policy_version,
-                    config_snapshot_hash,
+                    fields.policy_version,
+                    fields.config_snapshot_hash,
                     prompt_template_version,
-                    permission_profile,
+                    fields.permission_profile,
                     str(normalized_worktree) if normalized_worktree else None,
                     (
                         str(normalized_artifact)

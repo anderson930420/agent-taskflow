@@ -35,13 +35,18 @@ from agent_taskflow.ticket_models import TicketRecord
 
 
 VALIDATORS = (IntegrationValidatorSpec(
-    "seeded", (sys.executable, "-c", "from pathlib import Path; assert Path('README.md').is_file()")
+    "seeded", (sys.executable, "-c", "from pathlib import Path; assert Path('README.md').is_file()"),
+    120,
 ),)
 REVIEW = [{"author": {"login": "octocat"}, "state": "CHANGES_REQUESTED",
            "body": "please change", "submittedAt": "2026-09-25T00:00:00Z"}]
 
 
 class ConsumerFixture(TickFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.set_policy(VALIDATORS)
+
     def ticket(self, *, repo="owner/repo", priority="normal", enqueue=True,
                status=schema.READY_FOR_INTEGRATION):
         ticket = self.tickets.create_ticket(

@@ -317,7 +317,9 @@ class DispatcherCoverageTests(unittest.TestCase):
 
     def test_an_executor_without_a_managed_launch_says_so(self) -> None:
         key = self.fx.create_ticket("No launch spec").task_key
-        self.fx.dispatch(key)
+        # RULINGS 67: a Ticket that succeeds always has a managed launch, so
+        # an executor that reports none is one that failed without launching.
+        self.fx.dispatch(key, RecordingExecutor("failed"))
 
         item = self.item(self.coverage(key), EVIDENCE_EXECUTOR_LAUNCH_SPEC)
         self.assertEqual(item["applicability"], "applicable")
@@ -391,7 +393,10 @@ class DispatcherCoverageTests(unittest.TestCase):
         self.assertEqual(
             row["config_identity"]["resolution"], "dispatcher_validator_registry"
         )
-        self.assertEqual(row["config_identity"]["config_source"], "Dispatcher.validators")
+        # RULINGS 67: a Ticket's validators are its execution policy's.
+        self.assertEqual(
+            row["config_identity"]["config_source"], "execution_policy.implementation_validators"
+        )
 
 
 class ApprovedRunnerCoverageTests(unittest.TestCase):

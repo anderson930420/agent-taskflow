@@ -17,9 +17,13 @@
 #   {{DB}}                the Taskflow SQLite state database (explicit; there is no default)
 #   {{REPO}}              the exact GitHub owner/name key the Tickets are queued under
 #   {{REPO_PATH}}         that repository's local checkout (the Tickets' repo_path)
-#   {{VALIDATOR_CONFIG}}  the JSON list of integration validators for that repository
 #   {{REPO_LOG_KEY}}      a file-name key for that repository, e.g. owner@name
 #   {{LOG_DIR}}           an existing, writable log directory
+#
+# Integration validators are not configured here. They come only from the
+# repository's execution: policy in {{TASKFLOW_HOME}}/config/projects.yaml
+# (RULINGS 67); a repository without a valid policy is refused (exit 2), and
+# the former --validator-config flag is refused too.
 #
 # HUMAN CHOICE (human decision H4): each --confirm-* flag below authorizes ONE
 # phase to write. Delete every flag you have not approved; with none of them
@@ -59,4 +63,4 @@
 
 PATH=/usr/local/bin:/usr/bin:/bin
 
-2-59/5 * * * * "{{PYTHON}}" "{{TASKFLOW_HOME}}/scripts/run_integration_tick.py" --db-path "{{DB}}" --repo "{{REPO}}" --repo-path "{{REPO_PATH}}" --validator-config "{{VALIDATOR_CONFIG}}" --confirm-pr-poll --confirm-cleanup --confirm-freshness --confirm-integration --jsonl >> "{{LOG_DIR}}/integration-tick.{{REPO_LOG_KEY}}.jsonl" 2>> "{{LOG_DIR}}/integration-tick.{{REPO_LOG_KEY}}.stderr.log"
+2-59/5 * * * * "{{PYTHON}}" "{{TASKFLOW_HOME}}/scripts/run_integration_tick.py" --db-path "{{DB}}" --repo "{{REPO}}" --repo-path "{{REPO_PATH}}" --confirm-pr-poll --confirm-cleanup --confirm-freshness --confirm-integration --jsonl >> "{{LOG_DIR}}/integration-tick.{{REPO_LOG_KEY}}.jsonl" 2>> "{{LOG_DIR}}/integration-tick.{{REPO_LOG_KEY}}.stderr.log"

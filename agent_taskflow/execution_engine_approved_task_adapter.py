@@ -49,6 +49,7 @@ from agent_taskflow.level2_execution_authority import (
     is_level2_task,
     verify_canonical_attempt,
 )
+from agent_taskflow.ticket_lifecycle import legacy_entrypoint_ticket_refusal
 
 
 _MISSING = object()
@@ -99,6 +100,16 @@ class ApprovedTaskRunnerExecutionEngineAdapter:
         )
 
     def execute(self, request: ExecutionEngineRequest) -> ExecutionEngineResult:
+        # RULINGS 67: the ExecutionEngine and every runner behind it (the
+        # legacy one-task tick included) never run a V1 Ticket. Without a
+        # lifecycle database this adapter cannot tell; the approved runner it
+        # delegates to then checks the store it actually opens (and refuses).
+        if request.lifecycle_db_path is not None:
+            ticket_refusal = legacy_entrypoint_ticket_refusal(
+                request.lifecycle_db_path, request.task_key, entrypoint="the ExecutionEngine",
+            )
+            if ticket_refusal is not None:
+                return self._level2_failure_result(request, ticket_refusal)
         try:
             if (
                 is_level2_task(request.lifecycle_db_path, request.task_key)

@@ -11,6 +11,13 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from execution_policy_support import (  # noqa: E402
+    integration_entries,
+    policy_block,
+    project_entry,
+    use_registry,
+    write_registry,
+)
 from v1_step2_fixtures import (
     FakeGhRunner,
     GitFixture,
@@ -33,7 +40,8 @@ from agent_taskflow.ticket_store import TicketStore
 
 
 VALIDATORS = (IntegrationValidatorSpec(
-    "feature", (sys.executable, "-c", "from pathlib import Path; assert Path('feature.txt').read_text() == 'ok\\n'")
+    "feature", (sys.executable, "-c", "from pathlib import Path; assert Path('feature.txt').read_text() == 'ok\\n'"),
+    120,
 ),)
 
 
@@ -52,6 +60,21 @@ class TickFixture(unittest.TestCase):
         self.integration = IntegrationStore(self.db_path)
         self.gh = FakeGhRunner()
         self.github = GitHubPrAdapter("owner/repo", runner=self.gh)
+        # RULINGS 67: the drain runs a Ticket's policy's integration validators.
+        self.registry_path = self.root / "projects.yaml"
+        self.set_policy(VALIDATORS)
+        self.addCleanup(use_registry(self.registry_path).stop)
+
+    def set_policy(self, specs) -> None:
+        """Register the "fixture" project whose integration validators are ``specs``."""
+        execution = policy_block(integration_validators=integration_entries(specs))
+        write_registry(self.registry_path, {
+            "fixture": project_entry(self.fixture.repo, github_repo="owner/repo", execution=execution),
+            # A second repository key at the same checkout, for per-repo tests.
+            "fixture-other": project_entry(
+                self.fixture.repo, github_repo="owner/other", execution=execution,
+            ),
+        })
 
     def make_ticket(self, *, priority="normal", repo="owner/repo", at=None,
                     status=schema.READY_FOR_INTEGRATION, content="ok\n"):

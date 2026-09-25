@@ -70,6 +70,7 @@ from agent_taskflow.task_execution_package import (
     SCHEMA_VERSION,
 )
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_lifecycle import legacy_entrypoint_ticket_refusal
 from agent_taskflow.validators.base import Validator
 
 
@@ -1171,6 +1172,11 @@ def run_queued_task_handoff(
             phase="selection",
             error=f"Task not found: {request.task_key}",
         )
+    ticket_refusal = legacy_entrypoint_ticket_refusal(
+        current_store.db_path, task.task_key, entrypoint="queued_task_handoff",
+    )
+    if ticket_refusal is not None:
+        return _blocked(request, phase="execution_authority", error=ticket_refusal)
 
     try:
         authority_error = level2_direct_execution_error(

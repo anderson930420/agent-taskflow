@@ -5,7 +5,8 @@ One call of :func:`run_scheduler_tick` is one idempotent pass of::
     reap stale runtime                 (Step 4's reaper)
     release / stop dependencies        (SPEC §5.3, §5.4)
     while capacity_available:
-        pick the next eligible Ticket  (ready_queue: priority, FIFO, key)
+        pick the next eligible Ticket  (ready_queue: priority, FIFO, key,
+                                        runnable execution policy only)
         prepare its worktree           (SPEC §9: one worktree per Ticket)
         start an executor              (a worker process that claims atomically)
 
@@ -35,7 +36,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from agent_taskflow.models import require_absolute_path
-from agent_taskflow.ready_queue import eligible_tickets
+from agent_taskflow.ready_queue import ready_queue_selection
 from agent_taskflow.runtime_capacity import (
     count_active_executor_leases_in_connection,
     read_runtime_capacity,
@@ -80,6 +81,8 @@ class SchedulerTickResult:
     preparation_failed: tuple[tuple[str, str], ...]
     not_started: tuple[tuple[str, str], ...]
     worker_results: tuple[dict[str, Any], ...] = ()
+    # RULINGS 67: Tickets never picked because their project is not runnable.
+    policy_refused: tuple[dict[str, Any], ...] = ()
     workers: list[subprocess.Popen] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -96,6 +99,7 @@ class SchedulerTickResult:
             ],
             "not_started": [{"task_key": key, "reason": reason} for key, reason in self.not_started],
             "worker_results": list(self.worker_results),
+            "policy_refused": list(self.policy_refused),
         }
 
 
@@ -250,7 +254,7 @@ def run_scheduler_tick(
     dependencies = maintain_dependencies(path, actor=actor)
     capacity = read_runtime_capacity(path).max_concurrent_tasks
     active_at_start = _active_leases(path)
-    candidates = eligible_tickets(path)
+    candidates, refused = ready_queue_selection(path)
 
     started: list[StartedTicket] = []
     preparation_failed: list[tuple[str, str]] = []
@@ -321,6 +325,7 @@ def run_scheduler_tick(
         preparation_failed=tuple(preparation_failed),
         not_started=tuple(not_started),
         worker_results=tuple(worker_results),
+        policy_refused=tuple(r.to_dict() for r in refused),
         workers=workers,
     )
 

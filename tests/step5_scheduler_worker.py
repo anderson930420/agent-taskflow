@@ -12,6 +12,10 @@ Ticket, with a fake executor that records where it ran and, depending on
 * ``slow``: waits ``--delay`` seconds before dispatching (it has not claimed
   yet), then behaves like ``pass``.
 
+RULINGS 67: the worker points its policy resolver at the fixture's registry
+(``--projects-registry``), registers its fake under the policy's executor name,
+and completes by running the policy's fake claude executable for real.
+
 Not a test module and not production code.
 """
 
@@ -29,7 +33,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import agent_taskflow  # noqa: E402,F401  installs the layered runtime path
+import agent_taskflow.execution_policy as execution_policy  # noqa: E402
 from agent_taskflow.dispatcher import Dispatcher  # noqa: E402
+from agent_taskflow.executors.claude_code import ClaudeCodeExecutor  # noqa: E402
 from agent_taskflow.executors.base import ExecutorResult  # noqa: E402
 from agent_taskflow.validators.base import ValidatorResult  # noqa: E402
 
@@ -37,7 +43,7 @@ WAIT_SECONDS = 90.0
 
 
 class _Executor:
-    name = "fake"
+    name = "claude-code"
 
     def __init__(self, sync_dir: Path, mode: str, expect: int) -> None:
         self.sync_dir = sync_dir
@@ -78,11 +84,14 @@ class _Executor:
         (self.sync_dir / f"{context.task_key}.finished.json").write_text(
             json.dumps(record), encoding="utf-8"
         )
-        return ExecutorResult(executor=self.name, status="completed", summary="fake done")
+        policy = execution_policy.resolve_execution_policy(context.project)
+        return ClaudeCodeExecutor(
+            command=policy.resolved_argv(), enable_invocation=True, model=policy.model,
+        ).run(context)
 
 
 class _Validator:
-    name = "fake-validator"
+    name = "pytest"
 
     def run(self, context):
         return ValidatorResult(validator=self.name, status="passed", summary="fake passed")
@@ -96,16 +105,16 @@ def main() -> int:
     parser.add_argument("--mode", default="pass", choices=("pass", "hold", "fail", "slow"))
     parser.add_argument("--expect", type=int, default=1)
     parser.add_argument("--delay", type=float, default=0.0)
+    parser.add_argument("--projects-registry", type=Path, required=True)
     args = parser.parse_args()
+    execution_policy.PROJECTS_REGISTRY_PATH = args.projects_registry.resolve()
     if args.mode == "slow":
         time.sleep(args.delay)
         args.mode = "pass"
     dispatcher = Dispatcher(
         db_path=args.db_path,
-        executor_registry={"fake": _Executor(args.sync_dir, args.mode, args.expect)},
-        validator_registry={"fake-validator": _Validator()},
-        validators=("fake-validator",),
-        default_executor="fake",
+        executor_registry={"claude-code": _Executor(args.sync_dir, args.mode, args.expect)},
+        validator_registry={"pytest": _Validator()},
     )
     try:
         result = dispatcher.dispatch_task(args.task_key)

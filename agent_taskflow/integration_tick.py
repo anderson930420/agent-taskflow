@@ -43,6 +43,7 @@ from agent_taskflow.integration_watcher import (
     poll_pr_outcomes,
     poll_target_freshness,
 )
+from agent_taskflow.execution_policy import ExecutionPolicyError, resolve_execution_policy
 from agent_taskflow.integration_validators import IntegrationValidatorSpec
 from agent_taskflow.models import TASK_STATUSES, require_absolute_path, utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
@@ -61,6 +62,8 @@ PHASE_FRESHNESS = "target_freshness"
 PHASE_DRAIN = "queue_drain"
 # The documented, pinned order of one integration-tick pass (V1-F10).
 PHASE_ORDER = (PHASE_PR_OUTCOMES, PHASE_CLEANUP, PHASE_FRESHNESS, PHASE_DRAIN)
+# A drain entry whose request validators are not its policy's (RULINGS 67).
+POLICY_INTEGRATION_VALIDATORS_MISMATCH = "execution_policy_integration_validators_mismatch"
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,14 @@ def _binding_error(
         return "ticket_missing"
     if not ticket.github_repo or normalize_repo(ticket.github_repo) != normalize_repo(request.repo):
         return "ticket_repository_mismatch"
+    # RULINGS 67: integration validators are the Ticket's execution policy's,
+    # never a second list kept by a caller.
+    try:
+        policy = resolve_execution_policy(ticket.repository)
+    except ExecutionPolicyError as exc:
+        return exc.reason_code
+    if policy.integration_validator_specs() != tuple(request.validator_specs):
+        return POLICY_INTEGRATION_VALIDATORS_MISMATCH
     if ticket.repo_path.resolve() != request.repo_path.resolve():
         return "ticket_repo_path_mismatch"
     if ticket.base_branch != request.target_branch:

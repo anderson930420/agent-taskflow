@@ -2,6 +2,14 @@
 
 Not a test module (no ``test_`` prefix). Every database, repository and
 artifact directory lives in a TemporaryDirectory.
+
+RULINGS 67: a Ticket runs only under its project's execution policy, so the
+fixture registers the ``step5`` project with a policy whose executor is the fake
+claude executable (``tests/fake_claude_executable.py``), and points the resolver
+at that registry until ``cleanup()``. ``RecordingExecutor`` records the context
+and, when it is to complete, runs that real (fake) executable through the
+managed launch, because only a verified invocation that changes the worktree
+may reach ``ready_for_integration``.
 """
 
 from __future__ import annotations
@@ -16,20 +24,35 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
+from unittest import mock
+
+import yaml
 
 import agent_taskflow  # noqa: F401  installs the layered runtime path
 from agent_taskflow.attempt_schema import migrate_task_attempt_lifecycle
 from agent_taskflow.dispatcher import Dispatcher
+from agent_taskflow.execution_policy import resolve_execution_policy
 from agent_taskflow.executors.base import ExecutorContext, ExecutorResult
+from agent_taskflow.executors.claude_code import ClaudeCodeExecutor
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.runtime_progress_schema import migrate_runtime_progress
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.ticket_creation import TicketCreationRequest, create_ticket
 from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
+from agent_taskflow.ticket_lifecycle import is_ticket
 from agent_taskflow.ticket_repositories import TicketRepository
 from agent_taskflow.ticket_store import TicketStore
 from agent_taskflow.ticket_worktree_schema import migrate_ticket_worktree_resources
 from agent_taskflow.validators.base import ValidatorContext, ValidatorResult
+from agent_taskflow.validators.registry import list_validator_names
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from execution_policy_support import (  # noqa: E402
+    policy_block,
+    project_entry,
+    use_registry,
+    write_registry,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKER_SCRIPT = Path(__file__).resolve().parent / "step5_scheduler_worker.py"
@@ -62,8 +85,16 @@ def git_worktrees(repo: Path) -> list[tuple[Path, str | None]]:
     return [entry for entry in entries if entry[0].resolve() != repo.resolve()]
 
 
+POLICY_EXECUTOR = "claude-code"
+POLICY_VALIDATOR = "pytest"
+
+
 class RecordingExecutor:
-    """In-process executor that records the context and returns a fixed status."""
+    """In-process executor that records the context and returns a fixed status.
+
+    For ``completed`` it runs the policy's fake claude executable for real, so
+    the dispatcher sees a managed launch, exit 0 and a worktree change.
+    """
 
     def __init__(
         self,
@@ -73,7 +104,7 @@ class RecordingExecutor:
         raise_exc: BaseException | None = None,
         write_file: str | None = None,
     ) -> None:
-        self.name = "fake"
+        self.name = POLICY_EXECUTOR
         self.status = status
         self.summary = summary
         self.raise_exc = raise_exc
@@ -91,6 +122,12 @@ class RecordingExecutor:
             )
         if self.raise_exc is not None:
             raise self.raise_exc
+        binding = context.launch_binding
+        if self.status == "completed" and binding is not None and is_ticket(binding.db_path, context.task_key):
+            policy = resolve_execution_policy(context.project)
+            return ClaudeCodeExecutor(
+                command=policy.resolved_argv(), enable_invocation=True, model=policy.model,
+            ).run(context)
         return ExecutorResult(
             executor=self.name,
             status=self.status,
@@ -101,7 +138,7 @@ class RecordingExecutor:
 class RecordingValidator:
     def __init__(
         self,
-        name: str = "fake-validator",
+        name: str = POLICY_VALIDATOR,
         status: str = "passed",
         *,
         raise_exc: BaseException | None = None,
@@ -130,10 +167,36 @@ class Step5Fixture:
     artifacts: Path
     repository: TicketRepository
     tmp: Any = field(repr=False, default=None)
+    registry_path: Path | None = None
+    registry_patcher: Any = field(repr=False, default=None)
+    validator_names_patcher: Any = field(repr=False, default=None)
+    test_validator_names: set[str] = field(default_factory=set)
 
     def cleanup(self) -> None:
+        for name in ("registry_patcher", "validator_names_patcher"):
+            patcher = getattr(self, name)
+            if patcher is not None:
+                patcher.stop()
+                setattr(self, name, None)
         if self.tmp is not None:
             self.tmp.cleanup()
+
+    def set_policy_validators(self, names: tuple[str, ...]) -> None:
+        """Make ``names`` the step5 policy's implementation validators.
+
+        Test-only validator names are registered as known for this fixture's
+        lifetime, so the resolver's strict name check still applies to them.
+        """
+        self.test_validator_names.update(names)
+        self.register_project("step5", self.repo, policy_block(
+            implementation_validators=[{"name": name, "timeout_seconds": 60} for name in names],
+        ))
+
+    def register_project(self, name: str, repo: Path, execution: dict[str, Any] | None = None) -> None:
+        """Add or replace one registry entry, keeping the others."""
+        projects = yaml.safe_load(self.registry_path.read_text(encoding="utf-8"))["projects"]
+        projects[name] = project_entry(repo, execution=execution or policy_block())
+        write_registry(self.registry_path, projects)
 
     # ------------------------------------------------------------------
     def create_ticket(
@@ -177,10 +240,18 @@ class Step5Fixture:
     ) -> Dispatcher:
         executor = executor or RecordingExecutor()
         validators = validators if validators is not None else (RecordingValidator(),)
+        # A Ticket runs the policy's validators, so the policy lists the ones
+        # this test supplies (an empty tuple keeps the default stand-in).
+        self.set_policy_validators(tuple(v.name for v in validators) or (POLICY_VALIDATOR,))
+        # A Ticket takes its executor and validator names from the step5
+        # policy and ignores `validators`/`default_executor`; a legacy task
+        # still uses them. The registries only supply the in-process objects.
         return Dispatcher(
             db_path=self.db_path,
-            executor_registry={"fake": executor},
-            validator_registry={v.name: v for v in validators},
+            executor_registry={POLICY_EXECUTOR: executor, "fake": executor},
+            # A Ticket always runs the policy's validator; a passing stand-in
+            # answers for it unless the test supplies its own.
+            validator_registry={POLICY_VALIDATOR: RecordingValidator(), **{v.name: v for v in validators}},
             validators=tuple(v.name for v in validators),
             default_executor="fake",
         )
@@ -313,14 +384,29 @@ def make_fixture(*, migrate_step5: bool = True, worktrees_dir: Path | None = Non
         base_branch="main",
         branch_prefix="task/",
     )
-    return Step5Fixture(
+    registry_path = write_registry(
+        root / "projects.yaml",
+        {"step5": project_entry(repo, execution=policy_block(
+            implementation_validators=[{"name": POLICY_VALIDATOR, "timeout_seconds": 60}],
+        ))},
+    )
+    fixture = Step5Fixture(
         root=root,
         repo=repo,
         db_path=db_path,
         artifacts=artifacts,
         repository=repository,
         tmp=tmp,
+        registry_path=registry_path,
+        registry_patcher=use_registry(registry_path),
     )
+    builtin = list_validator_names()
+    fixture.validator_names_patcher = mock.patch(
+        "agent_taskflow.validators.registry.list_validator_names",
+        side_effect=lambda: [*builtin, *sorted(fixture.test_validator_names - set(builtin))],
+    )
+    fixture.validator_names_patcher.start()
+    return fixture
 
 
 def worker_env() -> dict[str, str]:
@@ -330,8 +416,20 @@ def worker_env() -> dict[str, str]:
     return env
 
 
-def worker_launcher(sync_dir: Path, *, mode: str = "pass", expect: int = 1, delay: float = 0.0):
-    """Return a scheduler launcher that runs tests/step5_scheduler_worker.py."""
+def worker_launcher(
+    sync_dir: Path,
+    *,
+    mode: str = "pass",
+    expect: int = 1,
+    delay: float = 0.0,
+    registry_path: Path | None = None,
+):
+    """Return a scheduler launcher that runs tests/step5_scheduler_worker.py.
+
+    ``registry_path`` is the fixture's policy registry, which the worker points
+    its resolver at (defaults to ``sync_dir/../projects.yaml``).
+    """
+    registry = registry_path or sync_dir.parent / "projects.yaml"
 
     def launch(db_path: Path, task_key: str) -> subprocess.Popen:
         return subprocess.Popen(
@@ -350,6 +448,8 @@ def worker_launcher(sync_dir: Path, *, mode: str = "pass", expect: int = 1, dela
                 str(expect),
                 "--delay",
                 str(delay),
+                "--projects-registry",
+                str(registry),
             ],
             cwd=REPO_ROOT,
             env=worker_env(),

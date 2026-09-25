@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_integration_consumer_tick import VALIDATORS, ConsumerFixture
+from execution_policy_support import install_release_registry, release_tree  # noqa: E402
 from test_tick_lock import (HOLDER, database_files, db_digest, file_states, recorded_pid,
                             wait_for)
 
@@ -65,28 +66,30 @@ def _flock_free(path):
 class ScriptFixture(ConsumerFixture):
     def setUp(self) -> None:
         super().setUp()
-        self.config = self.root / "validators.json"
-        self.write_config(VALIDATORS)
+        # RULINGS 67: the CLI reads the registry anchored to the package it
+        # runs from, so the subprocess runs a release copy with this registry.
+        self.release = release_tree(self.root / "taskflow-release", self.registry_path)
+        self.script = self.release / "scripts" / "run_integration_tick.py"
         stub = self.root / "bin"
         stub.mkdir()
         (stub / "gh").write_text("#!/bin/sh\necho 'gh must not be called by this test' >&2\nexit 97\n")
         (stub / "gh").chmod(0o755)
         self.env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}",
-                    "PYTHONPATH": str(SCRIPT.parents[1])}
+                    "PYTHONPATH": str(self.release)}
         self.lock_path = integration_tick_lock_path(self.db_path, "owner/repo")
 
     def write_config(self, specs):
-        self.config.write_text(json.dumps([
-            {"name": s.name, "command": list(s.command), "timeout_seconds": s.timeout_seconds}
-            for s in specs
-        ]))
+        """Make ``specs`` the policy's integration validators, here and in the release."""
+        self.set_policy(specs)
+        if hasattr(self, "release"):
+            install_release_registry(self.release, self.registry_path)
 
     def arguments(self, repo="owner/repo"):
         return ["--db-path", str(self.db_path), "--repo", repo,
-                "--repo-path", str(self.fixture.repo), "--validator-config", str(self.config)]
+                "--repo-path", str(self.fixture.repo)]
 
     def run_script(self, *extra, repo="owner/repo", **kwargs):
-        return subprocess.run([sys.executable, str(SCRIPT), *self.arguments(repo), *extra],
+        return subprocess.run([sys.executable, str(self.script), *self.arguments(repo), *extra],
                               capture_output=True, text=True, env=self.env, timeout=300,
                               check=False, **kwargs)
 
@@ -181,8 +184,8 @@ class ConsumerScriptTests(ScriptFixture):
     def test_missing_database_is_an_error_and_leaves_no_lock_file(self):
         missing = self.root / "missing.db"
         completed = subprocess.run(
-            [sys.executable, str(SCRIPT), "--db-path", str(missing), "--repo", "owner/repo",
-             "--repo-path", str(self.fixture.repo), "--validator-config", str(self.config)],
+            [sys.executable, str(self.script), "--db-path", str(missing), "--repo", "owner/repo",
+             "--repo-path", str(self.fixture.repo)],
             capture_output=True, text=True, env=self.env, timeout=300, check=False)
         self.assertEqual(completed.returncode, 2)
         self.assertEqual(json.loads(completed.stdout)["status"], "error")
@@ -278,9 +281,11 @@ class ConsumerScriptTests(ScriptFixture):
 class IntegrationTickOverlapTests(ScriptFixture):
     def start_holder(self, release: Path) -> subprocess.Popen:
         holder = subprocess.Popen(
-            [sys.executable, "-c", HOLDER, str(SCRIPT), "run_integration_tick", str(release),
+            [sys.executable, "-c", HOLDER, str(self.script), "run_integration_tick", str(release),
              *self.arguments(), "--confirm-integration"],
-            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            # `-c` puts the cwd first on sys.path; keep it off the source checkout
+            # so the holder imports the release copy and its registry.
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.root,
         )
 
         def reap():
@@ -335,9 +340,9 @@ class IntegrationTickOverlapTests(ScriptFixture):
         marker = self.root / "validator-started"
         self.write_config([IntegrationValidatorSpec("slow", (
             sys.executable, "-c",
-            f"import pathlib, time; pathlib.Path({str(marker)!r}).touch(); time.sleep(120)"))])
+            f"import pathlib, time; pathlib.Path({str(marker)!r}).touch(); time.sleep(120)"), 300)])
         killed, waiting = self.ticket(), self.ticket()
-        tick = subprocess.Popen([sys.executable, str(SCRIPT), *self.arguments(), "--confirm-integration"],
+        tick = subprocess.Popen([sys.executable, str(self.script), *self.arguments(), "--confirm-integration"],
                                 env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 start_new_session=True)
 

@@ -39,7 +39,6 @@ from agent_taskflow.ticket_models import (
     validate_ticket_priority,
 )
 from agent_taskflow.ticket_repositories import (
-    DEFAULT_PROJECTS_CONFIG_PATH,
     TicketRepository,
     TicketRepositoryError,
     resolve_ticket_repository,
@@ -163,7 +162,7 @@ def create_ticket(
     *,
     store: TicketStore,
     repository: TicketRepository | None = None,
-    projects_config_path: str | Path = DEFAULT_PROJECTS_CONFIG_PATH,
+    projects_config_path: str | Path | None = None,
     ai_adapter: TicketAIMetadataAdapter | None = None,
     ai_timeout_seconds: float | None = DEFAULT_AI_METADATA_TIMEOUT_SECONDS,
     actor: str = DEFAULT_TICKET_ACTOR,

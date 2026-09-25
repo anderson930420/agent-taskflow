@@ -20,6 +20,13 @@ from agent_taskflow.attempt_models import (
     require_non_empty,
     validate_attempt_status,
 )
+from agent_taskflow.execution_policy import (
+    POLICY_CHANGED,
+    POLICY_OVERRIDE_REFUSED,
+    ExecutionPolicyError,
+    resolve_execution_policy,
+    ticket_repo_path_refusal,
+)
 from agent_taskflow.models import require_absolute_path, utc_now_iso, validate_task_status
 from agent_taskflow.outcome_ledger import record_terminal_attempt_outcome
 from agent_taskflow.runtime_capacity import (
@@ -43,13 +50,16 @@ __all__ = [
     "DEFAULT_LEASE_TTL_SECONDS",
     "RUNTIME_ADMISSION_MIGRATION",
     "LeaseExpiredError",
+    "AttemptPolicyFields",
     "LeaseOwnershipError",
     "RuntimeAdmissionError",
     "RuntimeAdmissionStore",
     "RuntimeCapacityExceededError",
     "RuntimeClaim",
     "RuntimeDependencyUnreleasedError",
+    "RuntimeExecutionPolicyError",
     "assert_dependency_released",
+    "attempt_policy_fields",
     "RuntimeLeaseRecord",
     "assert_runtime_capacity_available",
     "migrate_runtime_admission",
@@ -123,6 +133,87 @@ def assert_dependency_released(conn: sqlite3.Connection, task_key: str) -> None:
             blocker=blocker,
             blocker_status=blocker_status,
         )
+
+
+class RuntimeExecutionPolicyError(RuntimeAdmissionError):
+    """Raised when a Ticket's project has no valid V1 execution policy (RULINGS 67)."""
+
+    def __init__(self, *, task_key: str, error: ExecutionPolicyError) -> None:
+        self.task_key = task_key
+        self.reason_code = error.reason_code
+        super().__init__(f"Ticket {task_key} is not runnable: {error}")
+
+
+@dataclass(frozen=True)
+class AttemptPolicyFields:
+    """What the claim records on the Attempt row about how it will run."""
+
+    executor: str | None
+    model: str | None
+    policy_version: str | None
+    config_snapshot_hash: str | None
+    permission_profile: str | None
+
+
+def attempt_policy_fields(
+    conn: sqlite3.Connection,
+    task_key: str,
+    *,
+    executor: str | None,
+    model: str | None,
+    policy_version: str | None,
+    config_snapshot_hash: str | None,
+    permission_profile: str | None,
+) -> AttemptPolicyFields:
+    """Gate a claim on the Ticket's execution policy and return the Attempt fields.
+
+    OR-8.3 (RULINGS 67): "no valid ``execution:`` policy -> not runnable" is
+    enforced inside the claim transaction, so every path that starts a Ticket is
+    gated, not only the scheduler's selection. The Ticket's stored repo_path
+    must also be its project's registry repo_path. Called before any write, so a
+    refusal rolls back and leaves everything untouched. A Ticket's Attempt
+    records the policy's executor, model, version, permission profile and sha256;
+    a caller value that disagrees is an override and is refused. A legacy task
+    keeps the caller's values unchanged.
+    """
+    normalized = normalize_task_key(task_key)
+    caller = AttemptPolicyFields(
+        executor, model, policy_version, config_snapshot_hash, permission_profile
+    )
+    if not is_ticket_in_connection(conn, normalized):
+        return caller
+    row = conn.execute(
+        "SELECT project, repo_path FROM tasks WHERE task_key = ?", (normalized,)
+    ).fetchone()
+    try:
+        policy = resolve_execution_policy(str(row[0] or "") if row is not None else "")
+    except ExecutionPolicyError as exc:
+        raise RuntimeExecutionPolicyError(task_key=normalized, error=exc) from exc
+    # The Ticket must belong to the repository its project's registry entry
+    # names, so the policy never runs against a repository it was not set for.
+    mismatch = ticket_repo_path_refusal(policy, row[1] if row is not None else None)
+    if mismatch is not None:
+        raise RuntimeExecutionPolicyError(task_key=normalized, error=mismatch)
+    effective = AttemptPolicyFields(
+        policy.executor,
+        policy.model,
+        policy.policy_version,
+        policy.sha256,
+        policy.permission_profile,
+    )
+    for name in AttemptPolicyFields.__dataclass_fields__:
+        supplied = getattr(caller, name)
+        if supplied is not None and supplied != getattr(effective, name):
+            code = POLICY_CHANGED if name == "config_snapshot_hash" else POLICY_OVERRIDE_REFUSED
+            raise RuntimeExecutionPolicyError(
+                task_key=normalized,
+                error=ExecutionPolicyError(
+                    code,
+                    f"{name} {supplied!r} differs from the execution policy's "
+                    f"{getattr(effective, name)!r}; change config/projects.yaml instead",
+                ),
+            )
+    return effective
 
 
 class LeaseOwnershipError(RuntimeAdmissionError):
@@ -384,6 +475,15 @@ class RuntimeAdmissionStore:
             # any write. SPEC §44: a dependency releases only after its blocker
             # completed.
             assert_dependency_released(conn, normalized_key)
+            fields = attempt_policy_fields(
+                conn,
+                normalized_key,
+                executor=executor or task["executor"],
+                model=model or task["model"],
+                policy_version=policy_version,
+                config_snapshot_hash=config_snapshot_hash,
+                permission_profile=permission_profile,
+            )
             active = conn.execute(
                 """
                 SELECT attempt_id FROM attempts
@@ -434,13 +534,13 @@ class RuntimeAdmissionStore:
                     attempt_id,
                     task["task_id"],
                     attempt_number,
-                    executor or task["executor"],
-                    model or task["model"],
+                    fields.executor,
+                    fields.model,
                     base_commit,
-                    policy_version,
-                    config_snapshot_hash,
+                    fields.policy_version,
+                    fields.config_snapshot_hash,
                     prompt_template_version,
-                    permission_profile,
+                    fields.permission_profile,
                     str(normalized_worktree) if normalized_worktree else None,
                     str(normalized_artifact)
                     if normalized_artifact

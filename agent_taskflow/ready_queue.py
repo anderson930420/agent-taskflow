@@ -9,7 +9,11 @@ Eligible (step5.md layer 2):
   ``completed`` status);
 * not owned: no active runtime lease;
 * not paused or killed by a runtime control (global, project, task);
-* with the Step 1 derived worktree path and branch it needs to run.
+* with the Step 1 derived worktree path and branch it needs to run;
+* in a project with a valid V1 execution policy (RULINGS 67, OR-8.3), whose
+  registry repo_path is the Ticket's own. A Ticket failing either is never
+  selected; :func:`policy_refused_tickets` names it with the reason code. The
+  claim transaction re-checks both.
 
 Order (ruling 28 D3): priority ``critical > high > normal > low``, then
 ``created_at`` (FIFO), then ``task_key``. There is no preferred-order column
@@ -23,11 +27,16 @@ own runner (ruling 27f).
 from __future__ import annotations
 
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import sqlite3
 from typing import Any
 
+from agent_taskflow.execution_policy import (
+    ExecutionPolicyError,
+    resolve_execution_policy,
+    ticket_repo_path_refusal,
+)
 from agent_taskflow.models import require_absolute_path
 from agent_taskflow.ticket_dependencies import COMPLETED_BLOCKER_STATUSES
 from agent_taskflow.ticket_lifecycle import tasks_has_ticket_columns
@@ -43,6 +52,8 @@ class ReadyTicket:
     created_at: str
     status: str
     project: str = ""
+    # Selection-only: compared with the project's registry repo_path.
+    repo_path: str = field(default="", compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,12 +65,72 @@ class ReadyTicket:
         }
 
 
+@dataclass(frozen=True)
+class PolicyRefusedTicket:
+    """A Ticket that would be eligible but whose project is not runnable."""
+
+    task_key: str
+    project: str
+    reason_code: str
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_key": self.task_key,
+            "project": self.project,
+            "reason_code": self.reason_code,
+            "reason": self.reason,
+        }
+
+
 def _sort_key(ticket: ReadyTicket) -> tuple[int, str, str]:
     return (PRIORITY_RANK.get(ticket.priority, PRIORITY_RANK["normal"]), ticket.created_at, ticket.task_key)
 
 
 def eligible_tickets(db_path: str | Path) -> list[ReadyTicket]:
     """Return eligible Tickets in scheduling order. Deterministic."""
+    return ready_queue_selection(db_path)[0]
+
+
+def policy_refused_tickets(db_path: str | Path) -> list[PolicyRefusedTicket]:
+    """Tickets left out of :func:`eligible_tickets` only because of the policy."""
+    return ready_queue_selection(db_path)[1]
+
+
+def ready_queue_selection(
+    db_path: str | Path,
+) -> tuple[list[ReadyTicket], list[PolicyRefusedTicket]]:
+    """Return (eligible Tickets in order, Tickets refused by the execution policy).
+
+    The policy is resolved once per project per call, from the package-anchored
+    registry (:mod:`agent_taskflow.execution_policy`).
+    """
+    candidates = _candidate_tickets(db_path)
+    policies: dict[str, Any] = {}
+    eligible: list[ReadyTicket] = []
+    refused: list[PolicyRefusedTicket] = []
+    for ticket in candidates:
+        if ticket.project not in policies:
+            try:
+                policies[ticket.project] = resolve_execution_policy(ticket.project)
+            except ExecutionPolicyError as exc:
+                policies[ticket.project] = exc
+        policy = policies[ticket.project]
+        refusal = (
+            policy
+            if isinstance(policy, ExecutionPolicyError)
+            else ticket_repo_path_refusal(policy, ticket.repo_path)
+        )
+        if refusal is None:
+            eligible.append(ticket)
+        else:
+            refused.append(
+                PolicyRefusedTicket(ticket.task_key, ticket.project, refusal.reason_code, str(refusal))
+            )
+    return eligible, refused
+
+
+def _candidate_tickets(db_path: str | Path) -> list[ReadyTicket]:
     path = require_absolute_path(db_path, "db_path")
     if not path.is_file():
         return []
@@ -83,7 +154,7 @@ def eligible_tickets(db_path: str | Path) -> list[ReadyTicket]:
         completed_placeholders = ", ".join("?" for _ in completed)
         rows = conn.execute(
             f"""
-            SELECT t.task_key, t.priority, t.created_at, t.status, t.project
+            SELECT t.task_key, t.priority, t.created_at, t.status, t.project, t.repo_path
             FROM tasks AS t
             WHERE t.prompt IS NOT NULL
               AND t.worktree_path IS NOT NULL AND t.branch IS NOT NULL
@@ -107,6 +178,7 @@ def eligible_tickets(db_path: str | Path) -> list[ReadyTicket]:
             created_at=str(row["created_at"] or ""),
             status=str(row["status"]),
             project=str(row["project"] or ""),
+            repo_path=str(row["repo_path"] or ""),
         )
         for row in rows
     ]
@@ -136,4 +208,12 @@ def _halted_scopes(conn: sqlite3.Connection) -> set[tuple[str, str]]:
     }
 
 
-__all__ = ["CLAIMABLE_STATUSES", "PRIORITY_RANK", "ReadyTicket", "eligible_tickets"]
+__all__ = [
+    "CLAIMABLE_STATUSES",
+    "PRIORITY_RANK",
+    "PolicyRefusedTicket",
+    "ReadyTicket",
+    "eligible_tickets",
+    "policy_refused_tickets",
+    "ready_queue_selection",
+]

@@ -117,12 +117,14 @@ class _Pipeline:
         self.integration = IntegrationStore(self.fx.db_path)
         self.integration.init_db()
         self.github = GitHubPrAdapter(REPO, runner=FakeGhRunner(repo=REPO))
+        # RULINGS 67: a Ticket's validators come from its execution policy.
+        self.fx.set_policy_validators(("changed-files", "policy"))
 
     def dispatch(self, prompt: str) -> str:
         key = self.fx.create_ticket(prompt).task_key
         dispatcher = Dispatcher(
             db_path=self.fx.db_path,
-            executor_registry={"fake": RecordingExecutor(write_file="feature.txt")},
+            executor_registry={"claude-code": RecordingExecutor(write_file="feature.txt")},
             validator_registry={
                 "changed-files": ChangedFilesValidator(),
                 "policy": PolicyCheckValidator(),
@@ -152,7 +154,7 @@ class _Pipeline:
         self.store.update_task_status(key, "queued", source="operator")
         dispatcher = Dispatcher(
             db_path=self.fx.db_path,
-            executor_registry={"fake": RecordingExecutor(status="failed")},
+            executor_registry={"claude-code": RecordingExecutor(status="failed")},
             validator_registry={
                 "changed-files": ChangedFilesValidator(),
                 "policy": PolicyCheckValidator(),
