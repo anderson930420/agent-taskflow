@@ -30,13 +30,15 @@ a repeat publication still collides on the same name.
 
 ## Recorded fields
 
-Each of the fourteen §2.3 fields is stored as
+Each of the fourteen §2.3 fields, plus `failure_class` (M2 Exit Gate row 2), is
+stored as
 `{"value", "provenance", "source", "reason", ...}`, where `provenance` is
 `observed`, `unknown` or `not_applicable`.
 
 | Field | Source when observed |
 | --- | --- |
 | `final_status` | `attempts.status` for this exact Attempt |
+| `failure_class` | `failure_class` in the `metadata_json` of this Attempt's terminal lifecycle event; `not_applicable` for a successful or canceled Attempt (see below) |
 | `phase_durations` | consecutive status transitions in this Attempt's own `lifecycle_events`, closed by `attempts.ended_at` |
 | `retry_count` | Attempts of this Task with `attempt_number` **less than** this Attempt |
 | `first_pass_success` | whether Attempt 1 of this Task itself reached `completed` or `waiting_approval` |
@@ -59,6 +61,43 @@ reason recorded.
 
 The Attempt's final status and the Task status observed at closeout are stored
 as separate facts (`fields.final_status` and `task_status_at_closeout`).
+
+### Failure class
+
+The M2 Exit Gate requires the runner to tell execution failure, validation
+failure and tool error apart. Attempt and Task statuses alone do not: an
+executor crash and a validator crash both end as Attempt `failed` /
+`execution_result=failed`. So when a release ends a failed Attempt (task status
+`failed`, `needs_decision` or `blocked`), the terminal lifecycle event records
+the class in its `metadata_json`, in the same transaction
+(`agent_taskflow/attempt_failure_class.py`). The dispatcher supplies the
+failure kind it already assigns:
+
+| Failure kind (`ticket_lifecycle.py`) | `failure_class` |
+| --- | --- |
+| `executor` (fails, returns `blocked`, raises, unavailable) | `execution_failure` |
+| `validator_red` (a validator returns `failed`) | `validation_failure` |
+| `validator_error` (a validator returns `blocked`, raises, unavailable) | `tool_error` |
+| any other kind, or no kind supplied | `unknown`, with `failure_class_reason` |
+
+The mapping fails closed: `governance_refusal`, `worktree_preparation` and
+`lease_expired` are not one of the three classes, and a release by a caller
+that names no kind (the legacy approved runner, for example) records
+`unknown` rather than a guess. The ledger copies the recorded value with its
+`failure_kind`. An Attempt whose terminal event carries no class (a lease
+expiry, a direct `close_attempt`, or one terminalized before this field
+existed) reads as `unknown` with reason
+`failure_class_not_recorded_on_terminal_event`. No status, event type or
+schema changes: `lifecycle_events` is append-only and already stores
+`metadata_json`, so there is no migration, and reverting drops only the extra
+key. `read_attempt_failure_class(db_path, attempt_id)` reads it back:
+
+```sql
+SELECT json_extract(metadata_json, '$.failure_class')
+FROM lifecycle_events
+WHERE attempt_id = ? AND json_extract(metadata_json, '$.failure_class') IS NOT NULL
+ORDER BY event_id DESC LIMIT 1;
+```
 
 ## Later observations
 

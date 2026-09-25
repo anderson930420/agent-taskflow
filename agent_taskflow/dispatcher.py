@@ -24,6 +24,7 @@ change the lifecycle outcome.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -875,7 +876,34 @@ class Dispatcher:
         ``expected_status`` makes a Ticket's pre-claim failure a compare-and-set
         on the status this dispatch read, so it can never overwrite a Ticket that
         another process has claimed since.
+
+        ``kind`` is also handed to a runtime store that accepts it, which
+        records its failure class on the released Attempt (M2 Exit Gate row 2).
+        The status written is unchanged by that.
         """
+        failure_scope = getattr(self.store, "failure_kind", None)
+        with failure_scope(task_key, kind) if callable(failure_scope) else nullcontext():
+            return self._fail_with_status(
+                task_key,
+                reason,
+                kind,
+                ticket=ticket,
+                executor_status=executor_status,
+                validator_statuses=validator_statuses,
+                expected_status=expected_status,
+            )
+
+    def _fail_with_status(
+        self,
+        task_key: str,
+        reason: str,
+        kind: str,
+        *,
+        ticket: bool,
+        executor_status: str | None,
+        validator_statuses: dict[str, str] | None,
+        expected_status: str | None,
+    ) -> DispatcherResult:
         if ticket:
             status = ticket_failure_status(kind)
             try:

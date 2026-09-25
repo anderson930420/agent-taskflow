@@ -43,6 +43,12 @@ import stat
 from typing import Any
 from uuid import uuid4
 
+from agent_taskflow.attempt_failure_class import (
+    FAILURE_CLASS_KEY,
+    FAILURE_CLASS_REASON_KEY,
+    FAILURE_KIND_KEY,
+    RECORDED_FAILURE_CLASSES,
+)
 from agent_taskflow.launch_evidence import (
     _open_directory_without_symlinks as open_directory_without_symlinks,
     _publish_once as publish_once,
@@ -93,6 +99,7 @@ CLOSEOUT_ROUTES = frozenset(
 
 LEDGER_FIELDS = (
     "final_status",
+    "failure_class",
     "phase_durations",
     "retry_count",
     "first_pass_success",
@@ -116,6 +123,10 @@ ENRICHABLE_FIELDS = ("human_decision", "post_merge_result", "rollback_result")
 #: Attempt-level success terminal for both the legacy approval path and the V1
 #: `ready_for_integration` path (see `lifecycle_runtime_path._release`).
 SUCCESS_ATTEMPT_STATUSES = frozenset({"completed", "waiting_approval"})
+
+#: Terminal Attempt statuses that are not failures, so carry no failure class.
+#: `canceled` is an operator decision.
+NON_FAILURE_ATTEMPT_STATUSES = SUCCESS_ATTEMPT_STATUSES | {"canceled"}
 
 #: Explicit, attributable, Attempt-bound human interventions. Counting is by
 #: documented reason code on this Attempt's own lifecycle events only. Actor
@@ -313,7 +324,7 @@ def _read_snapshot(db_path: Path, attempt_id: str) -> dict[str, Any]:
         events = conn.execute(
             """
             SELECT event_id, attempt_id, from_status, to_status, reason_code,
-                   actor, timestamp
+                   actor, timestamp, metadata_json
             FROM lifecycle_events
             WHERE attempt_id = ?
             ORDER BY event_id ASC
@@ -474,6 +485,50 @@ def _first_pass_success_field(history: list[Any]) -> dict[str, Any]:
     )
 
 
+def _failure_class_field(attempt: Any, events: list[Any]) -> dict[str, Any]:
+    """M2 Exit Gate row 2: the class recorded on this Attempt's terminal event.
+
+    Read, never derived from statuses: an Attempt that terminalized without a
+    recorded class (a lease expiry, a direct close, or one closed before the
+    class existed) is ``unknown``, not guessed.
+    """
+    attempt_id = attempt["attempt_id"]
+    if attempt["status"] in NON_FAILURE_ATTEMPT_STATUSES:
+        return _field(
+            None,
+            "not_applicable",
+            source=f"attempts.status@{attempt_id}",
+            reason="attempt_did_not_fail",
+        )
+    if not events:
+        return _unknown("no_attempt_bound_lifecycle_events")
+    terminal = events[-1]
+    source = f"lifecycle_events.event_id={terminal['event_id']}.metadata_json"
+    try:
+        metadata = json.loads(_row_value(terminal, "metadata_json") or "{}")
+    except ValueError:
+        return _unknown("terminal_event_metadata_unreadable", source=source)
+    if not isinstance(metadata, dict) or FAILURE_CLASS_KEY not in metadata:
+        return _unknown("failure_class_not_recorded_on_terminal_event", source=source)
+    value = metadata[FAILURE_CLASS_KEY]
+    if value not in RECORDED_FAILURE_CLASSES:
+        return _unknown(
+            "unrecognized_failure_class", source=source, recorded_value=value
+        )
+    return _field(
+        value,
+        "observed",
+        source=source,
+        reason=metadata.get(FAILURE_CLASS_REASON_KEY),
+        failure_kind=metadata.get(FAILURE_KIND_KEY),
+        semantics=(
+            "execution_failure, validation_failure or tool_error, mapped from the "
+            "runner's failure kind when the Attempt terminalized; `unknown` when "
+            "the kind was missing or unmapped. Not a status."
+        ),
+    )
+
+
 def _build_fields(snapshot: dict[str, Any], artifact_root: Path | None) -> dict[str, Any]:
     attempt = snapshot["attempt"]
     task = snapshot["task"]
@@ -492,6 +547,7 @@ def _build_fields(snapshot: dict[str, Any], artifact_root: Path | None) -> dict[
             validation_result=attempt["validation_result"],
             semantics="The Attempt's own final status, not the Task status.",
         ),
+        "failure_class": _failure_class_field(attempt, events),
         "phase_durations": _phase_durations_field(events, attempt_id, attempt["ended_at"]),
         "retry_count": _field(
             len(preceding),

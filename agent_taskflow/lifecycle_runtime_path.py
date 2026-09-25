@@ -460,6 +460,7 @@ class LifecycleRuntimeTaskStore(AttemptScopedRuntimeTaskStore):
                     "blocked_reason": blocked_reason,
                     "runtime_lease_id": state.claim.lease_id,
                     **outcome.metadata,
+                    **self._failure_class_metadata(normalized, status),
                 },
             )
         finally:
