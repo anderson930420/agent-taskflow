@@ -15,9 +15,11 @@ workers to finish; ``--no-wait`` returns once every started Ticket is claimed.
 The run holds a non-overlap lock keyed by the database (SPEC §47.3; V1-F10),
 for as long as the tick itself runs. A second invocation against the same
 database prints one ``skipped_overlap`` JSON result and exits 75 at once,
-doing no work. A lock that cannot be taken for any other reason (for example
-an unwritable directory, or a ``--lock-path`` naming the database) prints one
-error JSON result and exits 2. It never integrates (§47.4).
+doing no work. The lock is always ``<db>.execution-tick.lock``; there is no
+``--lock-path`` override (RULINGS 70, F10-FU4). A lock that cannot be taken for
+any other reason (for example an unwritable directory, or a lock file that is
+not a holder record) prints one error JSON result and exits 2. It never
+integrates (§47.4).
 """
 
 from __future__ import annotations
@@ -57,13 +59,6 @@ EXIT_ERROR = 2
 KIND = "parallel_scheduler_tick"
 
 
-def _absolute_path(value: str) -> Path:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        raise argparse.ArgumentTypeError("must be an absolute path")
-    return path
-
-
 def _emit(value: dict, *, jsonl: bool) -> None:
     if jsonl:
         print(json.dumps(value, sort_keys=True))
@@ -90,12 +85,6 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=DEFAULT_CLAIM_TIMEOUT_SECONDS,
     )
     parser.add_argument(
-        "--lock-path",
-        type=_absolute_path,
-        default=None,
-        help="Absolute non-overlap lock file (default: <db>.execution-tick.lock)",
-    )
-    parser.add_argument(
         "--jsonl",
         action="store_true",
         help="Print the result as one compact JSON line, for append-only logs",
@@ -112,7 +101,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if db_path.is_file():
         try:
             lock = TickLock(
-                args.lock_path or execution_tick_lock_path(db_path),
+                execution_tick_lock_path(db_path),
                 holder={"kind": KIND, "db_path": str(db_path)},
                 db_path=db_path,
             )
@@ -126,12 +115,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not acquired:
             _emit(skipped_overlap_result(KIND, lock, db_path=str(db_path)), jsonl=args.jsonl)
             return EXIT_SKIPPED_OVERLAP
+    # A corrupt holder record that the lock reclaimed is reported on this run's line.
+    reclaim = {"lock_reclaimed": lock.reclaimed} if lock is not None and lock.reclaimed else {}
     try:
         try:
             require_ticket_fields(db_path)
             require_ticket_worktree_resources(db_path)
         except (TicketFieldsMigrationRequired, TicketWorktreeMigrationRequired) as exc:
             print(str(exc), file=sys.stderr)
+            if reclaim:
+                print(json.dumps({"kind": KIND, **reclaim}, sort_keys=True), file=sys.stderr)
             return EXIT_MIGRATION_REQUIRED
         result = run_scheduler_tick(
             db_path,
@@ -139,7 +132,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             claim_timeout_seconds=args.claim_timeout_seconds,
         )
         _emit(
-            {**result.to_dict(), "daemon": False, "background_thread": False, "cron": False},
+            {**result.to_dict(), "daemon": False, "background_thread": False, "cron": False,
+             **reclaim},
             jsonl=args.jsonl,
         )
         return 0

@@ -9,11 +9,12 @@ These locks are separate from the §23.1 per-repository integration lock, which
 is a database row owned by ``integrate_task``. They protect one tick script
 from overlapping itself; they never serialize integration work.
 
-Lock files are derived only from the explicit ``--db-path`` (or an explicit
-absolute ``--lock-path``), beside the resolved database file. There is no
-default under ``~/.agent-taskflow``. Because the key is the resolved database
-path, a hand-run and a cron-run invocation of the same tick contend on the
-same lock:
+Lock files are derived only from the explicit ``--db-path``, beside the
+resolved database file. There is no default under ``~/.agent-taskflow`` and,
+since RULINGS 70 (F10-FU4), no ``--lock-path`` override on either tick script,
+so the derived path is the only lock a production tick can take and it stays
+stable across releases. Because the key is the resolved database path, a
+hand-run and a cron-run invocation of the same tick contend on the same lock:
 
 * execution tick:   ``<db>.execution-tick.lock``
 * integration tick: ``<db>.integration-tick.<owner>@<name>.lock`` — keyed by
@@ -25,16 +26,26 @@ worker child inherits it.
 
 A lock file is only ever empty or one holder record, so a lock never
 overwrites anything else. It refuses a path that is the database or one of
-its ``-wal``, ``-shm`` or ``-journal`` files, a symlink, and an existing file
-with any other content (review N2).
+its ``-wal``, ``-shm`` or ``-journal`` files, a symlink, any existing file
+larger than a holder record (review N2, R2-N1), and a file with any other
+content. The one exception is liveness (RULINGS 70): a lock file at this
+database's own derived tick-lock path whose content is at most a holder
+record's size but is not one, for example NULs or a partial record left by a
+power loss, is reclaimed once the flock is held, provided the file has no
+other name (``st_nlink == 1``, review B1). The new holder record
+replaces it and :attr:`TickLock.reclaimed` records what was there, so the tick
+reports the reclaim instead of exiting 2 on every run until a human empties
+the file.
 """
 
 from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +74,7 @@ SKIPPED_OVERLAP = "skipped_overlap"
 DATABASE_SIDE_FILES = ("", "-wal", "-shm", "-journal")
 # A holder record is one short JSON line; anything longer is not one.
 _MAX_RECORD_BYTES = 4096
+_SQLITE_HEADER = b"SQLite format 3\x00"
 
 
 class TickLockPathError(ValueError):
@@ -91,6 +103,30 @@ def integration_tick_lock_path(db_path: str | Path, repo: str) -> Path:
     db = _resolved_db_path(db_path)
     owner, name = normalize_repo(repo).split("/", 1)
     return db.with_name(f"{db.name}.integration-tick.{owner}@{name}.lock")
+
+
+def _is_derived_lock_path(path: Path, db_path: str | Path) -> bool:
+    """True if ``path`` is one of this database's derived tick-lock paths.
+
+    That is the execution tick's lock or an integration tick's lock for a
+    valid repository key, in the resolved database's own directory.
+    """
+    db = _resolved_db_path(db_path)
+    if path.parent.resolve() != db.parent:
+        return False
+    candidate = db.with_name(path.name)
+    if candidate == execution_tick_lock_path(db):
+        return True
+    prefix, suffix = f"{db.name}.integration-tick.", ".lock"
+    if not (path.name.startswith(prefix) and path.name.endswith(suffix)):
+        return False
+    owner, separator, name = path.name[len(prefix):-len(suffix)].partition("@")
+    if not separator:
+        return False
+    try:
+        return candidate == integration_tick_lock_path(db, f"{owner}/{name}")
+    except ValueError:
+        return False
 
 
 def _database_files(db_path: str | Path) -> frozenset[Path]:
@@ -128,7 +164,9 @@ class TickLock:
     Unlike ``NonOverlapLock`` it never creates directories and never blocks.
     While held, the file records who holds it, so a skipped invocation can
     report the holder; the record is cleared on a normal release. A record
-    left by a holder that was killed is replaced by the next holder.
+    left by a holder that was killed is replaced by the next holder, and so is
+    a corrupt one at a derived path (see the module docstring); ``reclaimed``
+    then records the replaced content's size and sha256, and is None otherwise.
     """
 
     def __init__(
@@ -144,7 +182,9 @@ class TickLock:
                 "-wal, -shm or -journal files; refused"
             )
         self._holder = dict(holder)
+        self._derived = _is_derived_lock_path(self.path, db_path)
         self._handle: Any | None = None
+        self.reclaimed: dict[str, Any] | None = None
 
     @property
     def held(self) -> bool:
@@ -154,8 +194,9 @@ class TickLock:
         """Take the lock without waiting. Returns False if another holds it.
 
         Raises :class:`TickLockPathError`, having written nothing, when the path
-        is a symlink, is the database under another name, or holds anything
-        but a holder record.
+        is a symlink, is the database under another name, is larger than a
+        holder record, or holds anything but a holder record, unless that last
+        file is a reclaimable corrupt record at a derived path.
         """
         if self._handle is not None:
             raise RuntimeError("lock is already held by this object")
@@ -187,12 +228,40 @@ class TickLock:
                     handle.close()
                     return False
                 raise
+            # Review R2-N1: judge the whole file, not a prefix, so padding
+            # cannot make a large file look empty.
+            current = os.fstat(handle.fileno())
+            size = current.st_size
             existing = handle.read(_MAX_RECORD_BYTES + 1)
-            if existing.strip() and _holder_record(existing) is None:
+            if max(size, len(existing)) > _MAX_RECORD_BYTES:
                 raise TickLockPathError(
-                    f"lock_path {self.path} holds something other than a tick holder "
-                    "record and is left untouched; refused"
+                    f"lock_path {self.path} is larger than any tick holder record "
+                    f"({max(size, len(existing))} bytes) and is left untouched; refused"
                 )
+            reclaimed = None
+            if existing.strip() and _holder_record(existing) is None:
+                # Review B1: a file with another name (a hard link) is someone
+                # else's file, whatever its content; it is never truncated.
+                if not (
+                    self._derived
+                    and stat.S_ISREG(current.st_mode)
+                    and current.st_nlink == 1
+                    and not existing.startswith(_SQLITE_HEADER)
+                ):
+                    raise TickLockPathError(
+                        f"lock_path {self.path} holds something other than a tick holder "
+                        "record and is left untouched; refused"
+                    )
+                # RULINGS 70: we hold the flock, so no live tick is writing this
+                # file; a small unparseable record at our own derived path is a
+                # torn write, and refusing it would stop every later tick.
+                reclaimed = {
+                    "lock_path": str(self.path),
+                    "reason": "corrupt_holder_record",
+                    "previous_size": len(existing),
+                    "previous_sha256": hashlib.sha256(existing).hexdigest(),
+                    "reclaimed_at": utc_now_iso(),
+                }
             record = {**self._holder, "pid": os.getpid(), "acquired_at": utc_now_iso()}
             handle.seek(0)
             handle.truncate()
@@ -202,6 +271,7 @@ class TickLock:
             handle.close()  # closing the descriptor also drops the flock
             raise
         self._handle = handle
+        self.reclaimed = reclaimed
         return True
 
     def release(self) -> None:

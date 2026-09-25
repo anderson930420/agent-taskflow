@@ -230,6 +230,171 @@ class TickLockUnitTests(unittest.TestCase):
             TickLock(link, holder={}, db_path=self.db).acquire()
         self.assertEqual(target.read_bytes(), b"")
 
+    def test_a_file_larger_than_a_holder_record_is_refused_even_if_blank(self) -> None:
+        """Review R2-N1: whitespace padding past the 4097-byte read was truncated."""
+        derived = execution_tick_lock_path(self.db)
+        for path, content in (
+            (self.root / "padded.txt", b" " * 4097),
+            (self.root / "padded.txt", b" " * 5000 + b"operator data\n"),
+            (self.root / "padded.txt", b"\n" * 8192),
+            (derived, b" " * 4097),  # not even at the tick's own derived path
+            (derived, b"\x00" * 8192),
+        ):
+            with self.subTest(path=path.name, size=len(content)):
+                path.write_bytes(content)
+                lock = TickLock(path, holder={"kind": "test"}, db_path=self.db)
+                with self.assertRaisesRegex(TickLockPathError, "larger than any tick holder record"):
+                    lock.acquire()
+                self.assertFalse(lock.held)
+                self.assertIsNone(lock.reclaimed)
+                self.assertEqual(path.read_bytes(), content)
+        # The boundary: 4096 blank bytes is at most a record's size and still empty.
+        blank = self.root / "blank.lock"
+        blank.write_bytes(b" " * 4096)
+        lock = TickLock(blank, holder={"kind": "test"}, db_path=self.db)
+        self.assertTrue(lock.acquire())
+        self.assertIsNone(lock.reclaimed)
+        lock.release()
+        self.assertEqual(blank.read_bytes(), b"")
+
+    def test_a_corrupt_record_at_a_derived_path_is_reclaimed_with_evidence(self) -> None:
+        """RULINGS 70: a torn holder record must not make every tick exit 2."""
+        for path, kind in ((execution_tick_lock_path(self.db), "parallel_scheduler_tick"),
+                           (integration_tick_lock_path(self.db, "owner/repo"), "integration_tick")):
+            for content in (
+                b"\x00" * 64,  # power loss: allocated but never written
+                b'{"kind": "' + kind.encode() + b'", "pid": 12',  # partial record
+                b"\xff\xfe not utf-8\n",
+                b'{"kind": "x"}\n',  # parseable, but not a holder record
+                b"x" * 4096,  # exactly the size limit
+            ):
+                with self.subTest(path=path.name, content=content[:24]):
+                    path.write_bytes(content)
+                    lock = TickLock(path, holder={"kind": kind}, db_path=self.db)
+                    self.assertTrue(lock.acquire())
+                    self.addCleanup(lock.release)
+                    self.assertEqual(lock.reclaimed["lock_path"], str(path))
+                    self.assertEqual(lock.reclaimed["reason"], "corrupt_holder_record")
+                    self.assertEqual(lock.reclaimed["previous_size"], len(content))
+                    self.assertEqual(lock.reclaimed["previous_sha256"],
+                                     hashlib.sha256(content).hexdigest())
+                    # Review N4: size and hash only; no file content in the logs.
+                    self.assertEqual(set(lock.reclaimed), {
+                        "lock_path", "reason", "previous_size", "previous_sha256",
+                        "reclaimed_at"})
+                    # The file now holds exactly our holder record.
+                    record = json.loads(path.read_bytes())
+                    self.assertEqual((record["kind"], record["pid"]), (kind, os.getpid()))
+                    lock.release()
+                    self.assertEqual(path.read_bytes(), b"")
+                    # Once repaired, the next holder reclaims nothing.
+                    again = TickLock(path, holder={"kind": kind}, db_path=self.db)
+                    self.assertTrue(again.acquire())
+                    self.assertIsNone(again.reclaimed)
+                    again.release()
+
+    def test_a_hard_link_at_a_derived_path_is_never_reclaimed(self) -> None:
+        """Review B1 (logs/04-adversarial-ticklock.log): a hard link at the
+        derived lock path to an operator's file was truncated to empty."""
+        notes = self.root / "notes.txt"
+        for path in (execution_tick_lock_path(self.db),
+                     integration_tick_lock_path(self.db, "owner/repo")):
+            for content in (b"operator secret notes\n", b"\x00" * 64, b'{"pid": 1'):
+                with self.subTest(path=path.name, content=content[:16]):
+                    notes.write_bytes(content)
+                    os.link(notes, path)
+                    self.assertEqual(os.stat(path).st_nlink, 2)
+                    lock = TickLock(path, holder={"kind": "test"}, db_path=self.db)
+                    with self.assertRaisesRegex(TickLockPathError, "left untouched"):
+                        lock.acquire()
+                    self.assertFalse(lock.held)
+                    self.assertIsNone(lock.reclaimed)
+                    self.assertEqual(notes.read_bytes(), content)
+                    self.assertEqual(os.stat(notes).st_ino, os.stat(path).st_ino)
+                    # The refused attempt kept no flock.
+                    with notes.open("rb") as handle:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    path.unlink()
+                    notes.unlink()
+
+    def test_a_single_link_corrupt_record_is_still_reclaimed(self) -> None:
+        """Review B1: the st_nlink guard keeps the R2-Q4 liveness fix."""
+        path = execution_tick_lock_path(self.db)
+        torn = b'{"kind": "parallel_scheduler_tick", "pid": 4'
+        path.write_bytes(torn)
+        # A second name existed once and was removed: the file is ours again.
+        spare = self.root / "spare"
+        os.link(path, spare)
+        spare.unlink()
+        self.assertEqual(os.stat(path).st_nlink, 1)
+        lock = TickLock(path, holder={"kind": "parallel_scheduler_tick"}, db_path=self.db)
+        self.assertTrue(lock.acquire())
+        self.assertEqual(lock.reclaimed["previous_size"], len(torn))
+        self.assertEqual(lock.reclaimed["previous_sha256"], hashlib.sha256(torn).hexdigest())
+        self.assertEqual(json.loads(path.read_bytes())["pid"], os.getpid())
+        lock.release()
+        self.assertEqual(path.read_bytes(), b"")
+
+    def test_a_corrupt_record_is_never_reclaimed_while_another_holds_the_flock(self) -> None:
+        path = execution_tick_lock_path(self.db)
+        path.write_bytes(b"\x00" * 16)
+        with path.open("rb") as other:
+            fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock = TickLock(path, holder={"kind": "test"}, db_path=self.db)
+            self.assertFalse(lock.acquire())
+            self.assertIsNone(lock.reclaimed)
+            self.assertEqual(path.read_bytes(), b"\x00" * 16)
+
+    def test_reclaim_is_limited_to_small_non_database_files_at_derived_paths(self) -> None:
+        derived = execution_tick_lock_path(self.db)
+        sqlite_like = b"SQLite format 3\x00" + b"\x00" * 84
+        other_db = self.root / "other.db"
+        other_db.touch()
+        refused = (
+            # Corrupt content anywhere but this database's own derived paths.
+            (self.root / "custom.lock", b"\x00" * 64),
+            (self.root / "state.db.execution-tick.lock.bak", b"\x00" * 64),
+            (self.root / "state.db.integration-tick.no-separator.lock", b"\x00" * 64),
+            (execution_tick_lock_path(other_db), b"\x00" * 64),
+            # SQLite content at a derived path.
+            (derived, sqlite_like),
+        )
+        for path, content in refused:
+            with self.subTest(path=path.name, content=content[:16]):
+                path.write_bytes(content)
+                lock = TickLock(path, holder={"kind": "test"}, db_path=self.db)
+                with self.assertRaisesRegex(TickLockPathError, "left untouched"):
+                    lock.acquire()
+                self.assertFalse(lock.held)
+                self.assertIsNone(lock.reclaimed)
+                self.assertEqual(path.read_bytes(), content)
+                path.unlink()
+        # A derived path through a symlinked directory is still ours.
+        link_dir = self.root / "link"
+        link_dir.symlink_to(self.root, target_is_directory=True)
+        derived.write_bytes(b"\x00")
+        via_link = TickLock(link_dir / derived.name, holder={}, db_path=self.db)
+        self.assertTrue(via_link.acquire())
+        self.assertIsNotNone(via_link.reclaimed)
+        via_link.release()
+        derived.unlink()
+        # A symlink or a hard link to the database at the derived path is refused.
+        with closing(sqlite3.connect(self.db)) as conn:
+            conn.execute("CREATE TABLE kept (value TEXT)")
+            conn.commit()
+        before = file_states(database_files(self.db))
+        derived.symlink_to(self.root / "target.lock")
+        (self.root / "target.lock").write_bytes(b"\x00")
+        with self.assertRaisesRegex(TickLockPathError, "symlink"):
+            TickLock(derived, holder={}, db_path=self.db).acquire()
+        self.assertEqual((self.root / "target.lock").read_bytes(), b"\x00")
+        derived.unlink()
+        os.link(self.db, derived)
+        with self.assertRaisesRegex(TickLockPathError, "database file"):
+            TickLock(derived, holder={}, db_path=self.db).acquire()
+        derived.unlink()
+        self.assertEqual(file_states(database_files(self.db)), before)
+
     def test_an_empty_file_or_a_record_left_by_a_killed_holder_is_reused(self) -> None:
         stale = json.dumps({"kind": "integration_tick", "pid": 4194305,
                             "acquired_at": "2026-09-25T00:00:00+00:00"}) + "\n"
@@ -338,18 +503,21 @@ class ExecutionTickOverlapTests(unittest.TestCase):
             return False
         return True
 
-    def test_explicit_lock_path_is_honoured_and_must_be_absolute(self) -> None:
+    def test_there_is_no_lock_path_override(self) -> None:
+        """RULINGS 70 (F10-FU4): production ticks cannot name another lock file."""
         custom = self.fx.root / "custom.lock"
-        holder = TickLock(custom, holder={"kind": "test"}, db_path=self.fx.db_path)
-        self.assertTrue(holder.acquire())
-        self.addCleanup(holder.release)
-        skipped = self.run_cli("--db-path", str(self.fx.db_path), "--lock-path", str(custom))
-        self.assertEqual(skipped.returncode, EXIT_SKIPPED_OVERLAP)
-        # The default lock is a different file, so this invocation runs.
-        self.assertEqual(self.run_cli("--db-path", str(self.fx.db_path)).returncode, 0)
-        relative = self.run_cli("--db-path", str(self.fx.db_path), "--lock-path", "relative.lock")
-        self.assertEqual(relative.returncode, 2)
-        self.assertIn("--lock-path", relative.stderr)
+        for value in (str(custom), str(self.fx.db_path), "relative.lock"):
+            with self.subTest(value=value):
+                before = file_states(database_files(self.fx.db_path))
+                completed = self.run_cli("--db-path", str(self.fx.db_path), "--lock-path", value)
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn("unrecognized arguments: --lock-path", completed.stderr)
+                self.assertEqual(completed.stdout, "")
+                self.assertEqual(file_states(database_files(self.fx.db_path)), before)
+        self.assertFalse(custom.exists())
+        self.assertFalse(self.lock_path.exists())
+        options = self.run_cli("--help").stdout.split("options:", 1)[1]
+        self.assertNotIn("--lock-path", options)
 
     def test_missing_database_fails_closed_without_leaving_a_lock_file(self) -> None:
         missing = self.fx.root / "missing.db"
@@ -367,30 +535,61 @@ class ExecutionTickOverlapTests(unittest.TestCase):
         self.assertIn(error, payload["reason"])
         self.assertNotIn("Traceback", completed.stderr)
 
-    def test_a_lock_path_naming_the_database_or_other_data_is_refused(self) -> None:
-        """Review N2 through the script: nothing is truncated and no work is done."""
+    def test_an_unusable_derived_lock_file_is_refused_and_nothing_runs(self) -> None:
+        """Review N2 / R2-N1 through the script: nothing is truncated, no work is done."""
         ticket = self.fx.create_ticket("eligible").task_key
-        notes = self.fx.root / "notes.txt"
-        notes.write_text("operator notes\n", encoding="utf-8")
-        watched = [*database_files(self.fx.db_path), notes]
-        before = file_states(watched)
-        for lock_path in watched:
-            with self.subTest(lock_path=str(lock_path)):
-                completed = self.run_cli("--db-path", str(self.fx.db_path),
-                                         "--lock-path", str(lock_path), "--jsonl")
-                self.assert_error_line(completed, "TickLockPathError")
-        self.assertEqual(file_states(watched), before)
-        self.assertEqual(self.fx.status(ticket), "created")
+        target = self.fx.root / "notes.txt"
+        target.write_text("operator notes\n", encoding="utf-8")
+        watched = [*database_files(self.fx.db_path), target]
+        for name, make, error in (
+            ("hard link to the database", lambda: os.link(self.fx.db_path, self.lock_path),
+             "TickLockPathError"),
+            ("symlink", lambda: self.lock_path.symlink_to(target), "TickLockPathError"),
+            ("hard link to a notes file", lambda: os.link(target, self.lock_path),
+             "TickLockPathError"),
+            ("padded file", lambda: self.lock_path.write_bytes(b" " * 5000 + b"data\n"),
+             "TickLockPathError"),
+            ("sqlite content", lambda: self.lock_path.write_bytes(b"SQLite format 3\x00" + b"\x00" * 84),
+             "TickLockPathError"),
+            ("directory", self.lock_path.mkdir, "IsADirectoryError"),
+        ):
+            with self.subTest(name=name):
+                make()
+                before = (file_states(watched), self.lock_state())
+                completed = self.run_cli("--db-path", str(self.fx.db_path), "--jsonl")
+                self.assert_error_line(completed, error)
+                self.assertEqual((file_states(watched), self.lock_state()), before)
+                self.assertEqual(self.fx.status(ticket), "created")
+                if self.lock_path.is_dir() and not self.lock_path.is_symlink():
+                    self.lock_path.rmdir()
+                else:
+                    self.lock_path.unlink()
 
-    def test_a_lock_that_cannot_be_opened_is_one_error_json_line(self) -> None:
-        """Review N8: exit 2 with a logged error, never a traceback and exit 1."""
-        missing = self.fx.root / "no-such-directory"
-        for flags in ((), ("--jsonl",)):
-            with self.subTest(flags=flags):
-                completed = self.run_cli("--db-path", str(self.fx.db_path),
-                                         "--lock-path", str(missing / "tick.lock"), *flags)
-                self.assert_error_line(completed, "FileNotFoundError")
-        self.assertFalse(missing.exists())
+    def lock_state(self):
+        if self.lock_path.is_symlink():
+            return ("symlink", os.readlink(self.lock_path))
+        if self.lock_path.is_dir():
+            return ("directory", sorted(os.listdir(self.lock_path)))
+        return ("file", os.stat(self.lock_path).st_ino, self.lock_path.read_bytes())
+
+    def test_a_corrupt_holder_record_is_reclaimed_and_reported(self) -> None:
+        """RULINGS 70: a torn record no longer makes every tick exit 2."""
+        partial = b'{"kind": "parallel_scheduler_tick", "pid": 4'
+        self.lock_path.write_bytes(partial)
+        completed = self.run_cli("--db-path", str(self.fx.db_path), "--jsonl")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        [line] = completed.stdout.splitlines()
+        payload = json.loads(line)
+        self.assertEqual(payload["started"], [])
+        reclaimed = payload["lock_reclaimed"]
+        self.assertEqual(reclaimed["lock_path"], str(self.lock_path))
+        self.assertEqual(reclaimed["previous_size"], len(partial))
+        self.assertEqual(reclaimed["previous_sha256"], hashlib.sha256(partial).hexdigest())
+        self.assertEqual(self.lock_path.read_bytes(), b"")
+        # The next run finds a clean lock and reports no reclaim.
+        after = self.run_cli("--db-path", str(self.fx.db_path), "--jsonl")
+        self.assertEqual(after.returncode, 0, after.stderr)
+        self.assertNotIn("lock_reclaimed", json.loads(after.stdout))
 
     @unittest.skipIf(os.geteuid() == 0, "root can write to a read-only directory")
     def test_an_unwritable_database_directory_is_one_error_json_line(self) -> None:

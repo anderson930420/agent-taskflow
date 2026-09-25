@@ -386,7 +386,18 @@ class PrOutcomeTests(ConsumerFixture):
         self.assertFalse(result["ok"])
         self.assertEqual(result["tick_status"], "not_ok")
         self.assertIn("pr_poll_failed", [row[1] for row in self.events(ticket)])
+        # RULINGS 70: one failure leaves the lifecycle alone; the 6th escalates.
+        self.assertEqual(self.status(ticket), schema.NEEDS_REVIEW)
+        for _ in range(4):
+            self.assertFalse(self.tick()["ok"])
+        self.assertEqual(self.status(ticket), schema.NEEDS_REVIEW)
+        sixth = self.tick()
+        (outcome,) = self.phase(sixth, "pr_outcomes")["outcomes"]
+        self.assertEqual(outcome["consecutive_poll_failures"], 6)
+        self.assertEqual(outcome["applied_transition"], schema.NEEDS_DECISION)
         self.assertEqual(self.status(ticket), schema.NEEDS_DECISION)
+        kinds = [row[1] for row in self.events(ticket)]
+        self.assertEqual((kinds.count("pr_poll_failed"), kinds.count("pr_poll_escalated")), (1, 1))
 
 
 class CleanupPhaseTests(ConsumerFixture):
@@ -543,13 +554,18 @@ class IdempotenceTests(ConsumerFixture):
         before_events = self.events()
         statuses = {key: self.store.get_task(key).status for key, _kind, _source in before_events}
         open_prs = [s["task_key"] for s in self.integration.list_open_pr_states("owner/repo")]
+        self.assertTrue(open_prs)
         calls = len(self.gh.calls)
-        self.tick()
+        heartbeat = "2099-01-01T00:00:00+00:00"
+        with patch("agent_taskflow.integration_watcher.utc_now_iso", return_value=heartbeat):
+            self.tick()
         new_events = self.events()[len(before_events):]
-        # The watcher's per-poll §32 audit: exactly one pr_state_polled event
-        # per open PR per confirmed poll, and nothing else.
-        self.assertEqual(sorted(new_events),
-                         sorted((key, "pr_state_polled", "integration_watcher") for key in open_prs))
+        # RULINGS 70 (F10-FU1): no §32.1 field changed, so a confirmed poll
+        # writes no event at all; pr_last_polled_at is the heartbeat instead.
+        self.assertEqual(new_events, [])
+        self.assertEqual(
+            {key: self.integration.get_pr_state(key)["pr_last_polled_at"] for key in open_prs},
+            {key: heartbeat for key in open_prs})
         self.assertEqual({key: self.store.get_task(key).status for key in statuses}, statuses)
         self.assertTrue(all(c[:3] == ["gh", "pr", "view"] for c in self.gh.calls[calls:]))
         # With the PR poll unconfirmed, a repeat tick writes nothing at all.
