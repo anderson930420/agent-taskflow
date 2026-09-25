@@ -552,21 +552,26 @@ class LegacyAndApiOverrideTests(unittest.TestCase):
     def test_api_start_refuses_overrides_for_a_ticket(self) -> None:
         from fastapi.testclient import TestClient
         from agent_taskflow.api.main import create_app
+        from agent_taskflow.ticket_lifecycle import LEGACY_ENTRYPOINT_REFUSED
 
         before = self.snapshot(self.key)
         with TestClient(create_app(self.fx.db_path)) as client:
+            # RULINGS 80/81 (G5): /start refuses every V1 Ticket before the
+            # override check, so no override reaches the policy.
             for body in ({"executor": "manual"}, {"model": "other"}, {"validators": []},
                          {"validators": ["pytest"], "dry_run": True}):
                 with self.subTest(body=body):
                     response = client.post(f"/api/tasks/{self.key}/start", json=body)
                     self.assertEqual(response.status_code, 409, response.text)
                     self.assertFalse(response.json()["ok"])
-                    self.assertIn(POLICY_OVERRIDE_REFUSED, response.json()["message"])
-            # Without an override the Ticket still runs only under its policy.
+                    self.assertIn(LEGACY_ENTRYPOINT_REFUSED, response.json()["message"])
+            # Without an override the Ticket is refused too: it runs only
+            # through the execution tick, under its policy.
             _no_policy_registry(self.fx)
             response = client.post(f"/api/tasks/{self.key}/start", json={})
+            self.assertEqual(response.status_code, 409, response.text)
             self.assertFalse(response.json()["ok"])
-            self.assertIn(POLICY_MISSING, response.json()["message"])
+            self.assertIn(LEGACY_ENTRYPOINT_REFUSED, response.json()["message"])
             # A legacy task keeps its per-request selection: it reaches the
             # dispatcher, which refuses it only for its own (missing) worktree.
             legacy = client.post("/api/tasks/AT-9100/start", json={"executor": "noop", "dry_run": True})

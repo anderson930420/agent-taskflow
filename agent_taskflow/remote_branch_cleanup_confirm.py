@@ -41,6 +41,7 @@ from agent_taskflow.remote_branch_cleanup_confirm_helpers import (
 )
 from agent_taskflow.store import TaskMirrorStore, default_db_path
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 from agent_taskflow.worktree import ensure_absolute_path
 
 
@@ -154,6 +155,24 @@ def confirm_remote_branch_cleanup(
     task = current_store.get_task(request.task_key)
     if task is None:
         return _not_found_result(request=request, error=f"Task not found: {request.task_key}")
+
+    # RULINGS 74/80/81: V1 never deletes a Ticket's remote branch. Refused
+    # before any git/gh call, in dry-run too.
+    try:
+        require_supported_in_v0(
+            current_store.db_path, request.task_key, entrypoint="confirm_remote_branch_cleanup",
+        )
+    except UnsupportedInV0 as exc:
+        return _blocked_result(
+            request=request,
+            task=task,
+            cleanup_recommendation=_empty_cleanup_recommendation(),
+            draft_pr=_empty_draft_pr_evidence(),
+            local_cleanup=_empty_local_cleanup_evidence(),
+            remote_branch=_empty_remote_branch(request.remote),
+            warnings=[str(exc)],
+            error=str(exc),
+        )
 
     if task.repo_path.resolve() != request.repo_path.resolve():
         error = f"Provided repo_path {request.repo_path} does not match task repo_path {task.repo_path}"

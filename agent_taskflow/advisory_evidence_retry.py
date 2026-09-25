@@ -64,6 +64,7 @@ from agent_taskflow.lifecycle_control_schema import (
 from agent_taskflow.runtime_admission import RuntimeAdmissionError
 from agent_taskflow.store import default_db_path
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 from agent_taskflow.validator_process_runtime_path import (
     ValidatorProcessRuntimeTaskStore,
 )
@@ -772,6 +773,12 @@ def run_advisory_evidence_retry(
     """
 
     db_path = _resolved_db_path(request)
+    # RULINGS 74/80/81: never move a V1 Ticket to the legacy waiting_approval.
+    # Refused before any read of evidence or any write, in dry-run too.
+    try:
+        require_supported_in_v0(db_path, request.task_key, entrypoint="run_advisory_evidence_retry")
+    except UnsupportedInV0 as exc:
+        raise AdvisoryEvidenceRetryError(str(exc)) from exc
     status_check, observed_status, attempt = _check_task_status(
         db_path,
         request.task_key,

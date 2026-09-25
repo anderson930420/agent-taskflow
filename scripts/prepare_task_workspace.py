@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from agent_taskflow.api.schemas import workspace_preparation_result_to_dict
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 from agent_taskflow.worktree import ensure_absolute_path
 from agent_taskflow.workspace_manager import (
     WorkspacePreparationRequest,
@@ -65,6 +66,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     store = TaskMirrorStore(db_path)
+    # RULINGS 74/80/81: only ensure_ticket_worktree owns a V1 Ticket's worktree.
+    # Refused before init_db and any git call.
+    try:
+        require_supported_in_v0(
+            store.db_path, task_key, entrypoint="scripts/prepare_task_workspace.py",
+        )
+    except UnsupportedInV0 as exc:
+        _emit({"ok": False, "task_key": task_key, "status": "blocked", "summary": str(exc)})
+        return 2
     store.init_db()
     task = store.get_task(task_key)
     if task is None:

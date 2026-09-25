@@ -165,15 +165,17 @@ class StartPathsRefuseTests(DependencyAdmissionTestCase):
         from fastapi.testclient import TestClient
 
         from agent_taskflow.api.main import create_app
+        from agent_taskflow.ticket_lifecycle import LEGACY_ENTRYPOINT_REFUSED
 
         before = self.snapshot(self.b)
         with TestClient(create_app(self.fx.db_path)) as client:
-            # RULINGS 67: no validator override for a Ticket (that alone is a
-            # 409); without one, the dependency gate is what refuses it.
+            # RULINGS 80/81 (G5): /start refuses a V1 Ticket before dispatch;
+            # the dependent Ticket only ever starts from the execution tick.
             response = client.post(f"/api/tasks/{self.b}/start", json={})
         body = response.json()
+        self.assertEqual(response.status_code, 409, body)
         self.assertFalse(body["ok"], body)
-        self.assertIn(self.a, json.dumps(body))
+        self.assertIn(LEGACY_ENTRYPOINT_REFUSED, json.dumps(body))
         self.assert_untouched(before)
 
     def test_iii_scheduler_tick_does_not_start_it(self) -> None:
