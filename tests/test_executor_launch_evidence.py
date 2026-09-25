@@ -134,8 +134,30 @@ class ExecutorLaunchEvidenceTests(unittest.TestCase):
             self.assertIn("configured_attempt." + field, evidence["missing_fields"])
 
     def test_running_process_executable_is_observed_separately_from_preflight(self):
-        result = self.run_spec(self.spec(argv=(sys.executable, "-c", "import time; time.sleep(0.2)")))
+        # The child stays alive until the real evidence writer has read /proc/<pid>/exe and
+        # returned; a fixed child lifetime races that read under load.
+        release = self.root / "release-child"
+        child = ("import pathlib, time\n"
+                 f"release = pathlib.Path({str(release)!r})\n"
+                 "deadline = time.monotonic() + 30\n"
+                 "while not release.exists() and time.monotonic() < deadline:\n"
+                 "    time.sleep(0.01)\n"
+                 "raise SystemExit(0 if release.exists() else 3)\n")
+        real_write = launch_evidence.write_launch_evidence
+
+        def write_then_release(*args, **kwargs):
+            try:
+                return real_write(*args, **kwargs)
+            finally:
+                release.touch()
+
+        with patch("agent_taskflow.executor_launch.write_launch_evidence",
+                   side_effect=write_then_release) as writer:
+            result = self.run_spec(self.spec(argv=(sys.executable, "-c", child), timeout_seconds=60))
+        writer.assert_called_once()
+        self.assertEqual(result.exit_code, 0)
         _, evidence = self.evidence(result)
+        self.assertEqual(evidence["launch_outcome"], "started")
         self.assertEqual(evidence["observed_process_executable"], str(Path(sys.executable).resolve()))
         self.assertEqual(evidence["observed_process_executable_provenance"], "linux_proc_exe")
 
