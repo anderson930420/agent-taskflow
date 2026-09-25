@@ -51,6 +51,7 @@ from agent_taskflow.runtime_progress_recorder import (
 )
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_lifecycle import legacy_entrypoint_ticket_refusal
 from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
 from agent_taskflow.validators.registry import get_validator
 from agent_taskflow.validation_summary import ValidationSummaryRecorder, artifact_root_for_claim, recording_error_sink
@@ -266,6 +267,11 @@ def run_approved_task(
     task = _load_task(current_store, request)
     if task is None:
         return _blocked_preview(request, phase="selection", error=f"Task not found: {request.task_key}")
+    ticket_refusal = legacy_entrypoint_ticket_refusal(
+        current_store.db_path, task.task_key, entrypoint="run_approved_task",
+    )
+    if ticket_refusal is not None:
+        return _blocked_preview(request, phase="execution_authority", error=ticket_refusal)
     try:
         authority_error = level2_direct_execution_error(
             task_key=task.task_key,

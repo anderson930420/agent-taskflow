@@ -117,7 +117,48 @@ def is_ticket(db_path: str | Path, task_key: str) -> bool:
         return is_ticket_in_connection(conn, task_key)
 
 
+# RULINGS 67: a legacy entry point never runs a V1 Ticket, so V1 has one
+# execution path and one policy. It refuses before writing anything.
+LEGACY_ENTRYPOINT_REFUSED = "v1_ticket_legacy_entrypoint_refused"
+
+
+def legacy_entrypoint_ticket_refusal(
+    db_path: str | Path | None,
+    task_key: str,
+    *,
+    entrypoint: str,
+) -> str | None:
+    """Return why ``entrypoint`` must not run ``task_key``, or None for a legacy task.
+
+    Fails closed: no database path, a database that cannot be read, or a task
+    key that cannot be normalized is refused too, since the task cannot be
+    shown not to be a Ticket. A caller that does not know its database must
+    leave the check to the component that opens it.
+    """
+    if db_path is None:
+        return (
+            f"{LEGACY_ENTRYPOINT_REFUSED}: {entrypoint} has no database path, so it cannot "
+            f"show that {task_key} is not a V1 Ticket"
+        )
+    try:
+        if not is_ticket(db_path, task_key):
+            return None
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        return (
+            f"{LEGACY_ENTRYPOINT_REFUSED}: {entrypoint} could not tell whether {task_key} "
+            f"is a V1 Ticket ({exc.__class__.__name__}: {exc})"
+        )
+    return (
+        f"{LEGACY_ENTRYPOINT_REFUSED}: {normalize_task_key(task_key)} is a V1 Ticket, and "
+        f"{entrypoint} does not run V1 Tickets. A Ticket runs only through the execution "
+        "tick (scripts/run_parallel_scheduler_tick.py) under its project's execution: "
+        "policy in config/projects.yaml (RULINGS 67)."
+    )
+
+
 __all__ = [
+    "LEGACY_ENTRYPOINT_REFUSED",
+    "legacy_entrypoint_ticket_refusal",
     "FAILURE_EXECUTOR",
     "FAILURE_GOVERNANCE",
     "FAILURE_KINDS",

@@ -32,6 +32,7 @@ def get_executor(
     claude_command: Sequence[str] | None = None,
     claude_enable_invocation: bool = False,
     worktree_root: str | None = None,
+    claude_model: str | None = None,
 ) -> Executor:
     """Return a built-in executor by name."""
 
@@ -63,6 +64,7 @@ def get_executor(
             command=claude_command,
             enable_invocation=claude_enable_invocation,
             worktree_root=worktree_root,
+            model=claude_model,
         )
 
     raise ValueError(f"Unknown executor: {name!r}")

@@ -567,6 +567,7 @@ def install_attempt_scoped_runtime_path(
             worktree: Any,
             executor_name: str,
             model: str | None,
+            **kwargs: Any,
         ) -> None:
             bound_task = self.store.bind_task(task)
             bound_worktree = self.store.bind_worktree(task.task_key, worktree)
@@ -575,6 +576,7 @@ def install_attempt_scoped_runtime_path(
                 bound_worktree,
                 executor_name,
                 model,
+                **kwargs,
             )
 
         def dispatch_task(

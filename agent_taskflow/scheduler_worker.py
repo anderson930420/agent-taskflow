@@ -6,6 +6,10 @@ process per Ticket. It runs the installed, fully layered Dispatcher, whose
 the Attempt's only owner and heartbeats its lease until the run ends. It prints
 the DispatcherResult as one JSON line. It is not a daemon: it handles exactly
 one Ticket.
+
+It passes no executor, model or validators: a Ticket runs only under its
+project's execution policy in config/projects.yaml (RULINGS 67), which the
+Dispatcher resolves and the claim re-checks.
 """
 
 from __future__ import annotations

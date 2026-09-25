@@ -69,6 +69,7 @@ from agent_taskflow.api.review import (
     build_task_evidence_readback,
 )
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS, Dispatcher
+from agent_taskflow.execution_policy import POLICY_OVERRIDE_REFUSED
 from agent_taskflow.governance import (
     assert_not_main_repo_write,
     assert_worktree_inside_repo_worktrees,
@@ -87,7 +88,7 @@ from agent_taskflow.api.tickets import build_ticket_router
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.ticket_ai_metadata import TicketAIMetadataAdapter
-from agent_taskflow.ticket_repositories import DEFAULT_PROJECTS_CONFIG_PATH
+from agent_taskflow.ticket_lifecycle import is_ticket
 from agent_taskflow.ticket_store import TicketStore
 from agent_taskflow.workspace_manager import (
     WorkspacePreparationRequest,
@@ -133,7 +134,7 @@ def create_app(
     *,
     dispatcher_factory: DispatcherFactory | None = None,
     realtime_options: RealtimeStreamOptions | None = None,
-    projects_config_path: str | Path = DEFAULT_PROJECTS_CONFIG_PATH,
+    projects_config_path: str | Path | None = None,
     ticket_ai_adapter: TicketAIMetadataAdapter | None = None,
 ) -> FastAPI:
     """Create the Mission Control API app.
@@ -146,7 +147,8 @@ def create_app(
     stream that runs until the client disconnects.
 
     projects_config_path and ticket_ai_adapter configure the V1 Ticket routes
-    (SPEC §10, §11). Ticket creation writes local state only.
+    (SPEC §10, §11). Ticket creation writes local state only. The default
+    (None) is the package-anchored registry the execution policy reads.
     """
     store = TaskMirrorStore(db_path)
     stream_options = realtime_options or RealtimeStreamOptions()
@@ -339,6 +341,20 @@ def create_app(
             )
 
         request = request or StartTaskRequest()
+        if is_ticket(current_store.db_path, task.task_key) and (
+            request.executor is not None
+            or request.model is not None
+            or request.validators is not None
+        ):
+            # RULINGS 67: a V1 Ticket's executor, model and validators come
+            # only from its project's execution policy.
+            return conflict(
+                "start",
+                task,
+                f"{POLICY_OVERRIDE_REFUSED}: Ticket {task.task_key} takes its executor, "
+                "model and validators from its project's execution: policy in "
+                "config/projects.yaml; change the policy (and its policy_version) instead",
+            )
         validators = tuple(request.validators) if request.validators is not None else DEFAULT_VALIDATORS
         try:
             authority_error = level2_direct_execution_error(

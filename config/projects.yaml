@@ -12,6 +12,31 @@
 #   worktrees_dir:   Where git worktrees are created
 #   default_branch:  Main branch name (default: main)
 #   branch_prefix:   Prefix for worktree branches (default: worktree/)
+#   execution:       The project's V1 execution policy (RULINGS 67). It is the
+#                    only repo-level source of how a V1 Ticket runs, and no CLI,
+#                    API or legacy runner may override it. A project WITHOUT a
+#                    valid execution: block is NOT runnable: its Tickets are
+#                    never claimed (agent_taskflow/execution_policy.py). Every
+#                    key below is required and no other key is accepted; bump
+#                    policy_version whenever anything in the block changes.
+#                    Never put a token, credential or environment value here.
+#
+# No project has an execution: block yet. Model, effort and auth are pending
+# the owner's separate-UID auth test, so nothing is runnable (the safe default).
+# Commented example, with placeholder values:
+#
+#   execution:
+#     executor: claude-code        # the only allowed executor (not manual/noop/shell)
+#     argv: [claude, --print, --model, "{model}", --effort, "{effort}"]
+#     model: <model id>            # substituted for {model}; must appear once
+#     effort: <effort level>       # substituted for {effort}; must appear once
+#     timeout_seconds: 3600        # executor wall clock, 1..86400; required
+#     permission_profile: <profile id>
+#     policy_version: "<version>"  # a quoted string
+#     implementation_validators:   # run by the dispatcher; registry names only
+#       - {name: pytest, timeout_seconds: 1800}
+#     integration_validators:      # run by the integration tick
+#       - {name: pytest, command: [python, -m, pytest, -q], timeout_seconds: 1800}
 
 projects:
   agent-taskflow:

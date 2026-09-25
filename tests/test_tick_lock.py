@@ -25,6 +25,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from step5_support import REPO_ROOT, make_fixture, worker_env  # noqa: E402
+from execution_policy_support import policy_block, project_entry, release_tree, write_registry  # noqa: E402
 
 from agent_taskflow.tick_lock import (  # noqa: E402
     DATABASE_SIDE_FILES,
@@ -661,11 +662,17 @@ class CronExampleTests(unittest.TestCase):
         self.addCleanup(fx.cleanup)
         logs = fx.root / "logs"
         logs.mkdir()
-        validators = fx.root / "validators.json"
-        validators.write_text(json.dumps([{"name": "noop", "command": ["true"]}]))
-        values = {"PYTHON": sys.executable, "TASKFLOW_HOME": str(REPO_ROOT), "DB": str(fx.db_path),
+        # RULINGS 67: the integration validators are the policy's, read from
+        # the deployed checkout's registry, so the lines run from a release copy.
+        write_registry(fx.registry_path, {"step5": project_entry(
+            fx.repo, github_repo="owner/repo", execution=policy_block(
+                integration_validators=[{"name": "noop", "command": ["true"], "timeout_seconds": 60}],
+            ),
+        )})
+        release = release_tree(fx.root / "release", fx.registry_path)
+        values = {"PYTHON": sys.executable, "TASKFLOW_HOME": str(release), "DB": str(fx.db_path),
                   "LOG_DIR": str(logs), "REPO": "owner/repo", "REPO_PATH": str(fx.repo),
-                  "VALIDATOR_CONFIG": str(validators), "REPO_LOG_KEY": "owner@repo"}
+                  "REPO_LOG_KEY": "owner@repo"}
         env = {**worker_env(), "PATH": "/usr/local/bin:/usr/bin:/bin"}
         for name, log in (("v1-execution-tick.cron.example", "execution-tick.jsonl"),
                           ("v1-integration-tick.cron.example", "integration-tick.owner@repo.jsonl")):

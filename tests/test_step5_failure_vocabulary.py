@@ -18,6 +18,7 @@ from step5_support import (  # noqa: E402
     make_fixture,
     worker_env,
 )
+from execution_policy_support import policy_block, project_entry, write_registry  # noqa: E402
 
 from agent_taskflow.models import TaskWorktreeRecord  # noqa: E402
 from agent_taskflow.runtime_admission import RuntimeAdmissionStore  # noqa: E402
@@ -79,7 +80,9 @@ class ValidatorFailureStopsForDecisionTests(FailureVocabularyTestCase):
 
     def test_unavailable_validator_ends_failed(self) -> None:
         dispatcher = self.fx.dispatcher(RecordingExecutor(), ())
-        dispatcher.validators = ("does-not-exist",)
+        # RULINGS 67: a Ticket's validators come from its policy, which names
+        # one that no registry provides.
+        self.fx.set_policy_validators(("does-not-exist",))
         try:
             result = dispatcher.dispatch_task(self.key)
         finally:
@@ -104,13 +107,19 @@ class RuntimeFailureEndsFailedTests(FailureVocabularyTestCase):
         self.assert_ends(result, "failed", "executor crashed")
 
     def test_unavailable_executor_ends_failed(self) -> None:
+        # RULINGS 67: the executor is the policy's argv, which names a binary
+        # that does not exist; a caller can no longer name another executor.
         dispatcher = self.fx.dispatcher(RecordingExecutor())
         dispatcher.executor_registry = {}
+        write_registry(self.fx.registry_path, {"step5": project_entry(
+            self.fx.repo,
+            execution=policy_block(argv=["/nonexistent/claude", "--model", "{model}", "--effort", "{effort}"]),
+        )})
         try:
-            result = dispatcher.dispatch_task(self.key, executor_name="does-not-exist")
+            result = dispatcher.dispatch_task(self.key)
         finally:
             dispatcher.store.shutdown_runtime_supervisors()
-        self.assert_ends(result, "failed", "does-not-exist is unavailable")
+        self.assert_ends(result, "failed", "/nonexistent/claude")
 
     def test_worktree_preparation_failure_ends_failed(self) -> None:
         self.ticket.worktree_path.mkdir(parents=True)

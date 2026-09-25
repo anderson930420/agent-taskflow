@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run the Agent Taskflow dispatcher for one task."""
+"""Run the Agent Taskflow dispatcher for one legacy task.
+
+A V1 Ticket is refused (exit 2) and nothing is written: Tickets run only
+through the execution tick under their project's execution policy (RULINGS 67).
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agent_taskflow.dispatcher import DEFAULT_VALIDATORS, dispatch_task
+from agent_taskflow.store import default_db_path
+from agent_taskflow.ticket_lifecycle import legacy_entrypoint_ticket_refusal
 
 
 def _parse_validators(raw: str) -> tuple[str, ...]:
@@ -61,6 +67,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    db_path = Path(args.db_path) if args.db_path else default_db_path()
+    refusal = legacy_entrypoint_ticket_refusal(
+        db_path, args.task_key, entrypoint="scripts/run_dispatcher.py",
+    )
+    if refusal is not None:
+        print(json.dumps({
+            "task_key": args.task_key, "status": "blocked",
+            "summary": refusal, "blocked_reason": refusal,
+        }, indent=2, sort_keys=True))
+        return 2
 
     result = dispatch_task(
         args.task_key,

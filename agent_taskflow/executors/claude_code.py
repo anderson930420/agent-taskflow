@@ -220,10 +220,14 @@ class ClaudeCodeExecutor(Executor):
         command: Sequence[str] | None = None,
         enable_invocation: bool = False,
         worktree_root: Path | str | None = None,
+        model: str | None = None,
     ) -> None:
         self.command = _normalize_command(command)
         self.enable_invocation = bool(enable_invocation)
         self.worktree_root = Path(worktree_root) if worktree_root is not None else None
+        # Set only when the caller put this model into ``command`` itself (the
+        # V1 execution policy does); otherwise the command's model is opaque.
+        self.model = model.strip() if isinstance(model, str) and model.strip() else None
 
         if self.enable_invocation and not self.command:
             raise ValueError(
@@ -352,7 +356,12 @@ class ClaudeCodeExecutor(Executor):
                 ExecutorLaunchSpec(
                     executor_name=self.name,
                     provenance=context.launch_provenance.for_adapter(
-                        model=None, model_source="opaque_command_model_not_resolved",
+                        model=self.model,
+                        model_source=(
+                            "execution_policy_argv"
+                            if self.model is not None
+                            else "opaque_command_model_not_resolved"
+                        ),
                         prompt=prompt_text, prompt_path=prompt_path,
                         prompt_source="claude_code_implementer_rendered",
                     ),

@@ -12,8 +12,15 @@ approve/reject routes; that split is FOLLOWUPS F5.
 
 Failures move a legacy task to blocked. A Ticket (V1 Step 5, SPEC §29) ends
 ``needs_decision`` when a validator returns ``failed`` and ``failed`` on every
-other failure; before its claim it gets its one worktree (SPEC §9). The
-dispatcher never approves, merges,
+other failure; before its claim it gets its one worktree (SPEC §9).
+
+A Ticket runs only under its project's V1 execution policy (RULINGS 67,
+:mod:`agent_taskflow.execution_policy`): the executor, argv, model, effort,
+timeout and implementation validators all come from ``config/projects.yaml``,
+and a caller's executor or model is refused. Its prompt becomes the Attempt's
+``implementation_prompt.md`` and the mission contract's goal. It succeeds only
+on the allowlist in :mod:`agent_taskflow.ticket_success_gate`. Legacy tasks keep
+the constructor's and caller's selection. The dispatcher never approves, merges,
 pushes, cleans worktrees, or runs raw subprocesses directly. It only calls the
 executor and validator abstractions.
 
@@ -24,17 +31,36 @@ change the lifecycle outcome.
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-from dataclasses import dataclass, field
+from contextlib import closing, nullcontext
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+import sqlite3
 from typing import Any, Mapping, Sequence
 
 from agent_taskflow.evidence_coverage import (
     RunnerEvidenceCollector,
     validator_config_identity,
 )
+from agent_taskflow.atomic_write import atomic_write_json
+from agent_taskflow.execution_policy import (
+    POLICY_CHANGED,
+    POLICY_OVERRIDE_REFUSED,
+    POLICY_SNAPSHOT_FILENAME,
+    ExecutionPolicy,
+    ExecutionPolicyError,
+    resolve_execution_policy,
+    ticket_repo_path_refusal,
+)
 from agent_taskflow.executors.base import Executor, ExecutorContext, ExecutorResult
-from agent_taskflow.launch_provenance import ExecutorLaunchProvenance, runner_configuration
+from agent_taskflow.executors.claude_code import (
+    CLAUDE_CODE_EXECUTION_ARTIFACT_FILENAME,
+    CLAUDE_CODE_PROMPT_FILENAME,
+)
+from agent_taskflow.launch_provenance import (
+    ExecutorLaunchProvenance,
+    LaunchContentReference,
+    runner_configuration,
+)
 from agent_taskflow.executors.registry import get_executor
 from agent_taskflow.governance import (
     assert_not_main_repo_write,
@@ -69,6 +95,18 @@ from agent_taskflow.ticket_lifecycle import (
     ticket_failure_status,
     ticket_success_status,
 )
+from agent_taskflow.ticket_prompt import (
+    TicketPromptError,
+    read_ticket_prompt,
+    write_ticket_implementation_prompt,
+)
+from agent_taskflow.ticket_success_gate import (
+    executor_result_refusal,
+    managed_invocation_refusal,
+    required_evidence_refusal,
+    validator_status_refusal,
+    worktree_diff_refusal,
+)
 from agent_taskflow.ticket_worktree import (
     WORKTREE_ABSENT,
     WORKTREE_READY,
@@ -86,6 +124,16 @@ from agent_taskflow.validation_summary import ValidationSummaryRecorder, artifac
 
 
 DEFAULT_VALIDATORS = ("pytest", "openspec")
+
+# RULINGS 67: what a V1 Ticket's Attempt root must hold before success. The
+# executor's own launch evidence is checked separately, against the database.
+TICKET_REQUIRED_EVIDENCE = (
+    "implementation_prompt.md",
+    POLICY_SNAPSHOT_FILENAME,
+    "mission_contract.json",
+    CLAUDE_CODE_PROMPT_FILENAME,
+    CLAUDE_CODE_EXECUTION_ARTIFACT_FILENAME,
+)
 
 RUNNABLE_STATUSES = {
     # Persisted spelling of the §12 display status `ready` (status_vocab);
@@ -244,7 +292,15 @@ class Dispatcher:
                 blocked_reason=reason,
             )
 
+        policy: ExecutionPolicy | None = None
         if ticket:
+            # RULINGS 67: a Ticket runs under its project's execution policy
+            # and nothing else. Refusing writes nothing, like the dependency
+            # refusal below; the claim transaction re-checks the policy.
+            policy_refusal = self._ticket_policy_refusal(task, executor_name, model)
+            if isinstance(policy_refusal, DispatcherResult):
+                return policy_refusal
+            policy = policy_refusal
             # Ruling 32 (SPEC §44): a dependency releases only after its blocker
             # completed. The claim transaction enforces it for every path; this
             # earlier check refuses before worktree preparation, writing nothing.
@@ -287,8 +343,16 @@ class Dispatcher:
         assert worktree is not None
         assert task.artifact_dir is not None
 
-        selected_executor = self._selected_executor_name(task, executor_name)
-        selected_model = self._selected_model(task, model)
+        if policy is not None:
+            selected_executor = policy.executor
+            selected_model: str | None = policy.model
+            validators = policy.implementation_validator_names
+            executor_timeout_seconds: int | None = policy.timeout_seconds
+        else:
+            selected_executor = self._selected_executor_name(task, executor_name)
+            selected_model = self._selected_model(task, model)
+            validators = self.validators
+            executor_timeout_seconds = self.executor_timeout_seconds
         prompt_path = self._prompt_path(task.artifact_dir)
 
         if selected_executor == "opencode" and not prompt_path.is_file():
@@ -336,11 +400,30 @@ class Dispatcher:
         progress = self._progress(task.task_key, previous_attempt_id)
         progress.prepare_running(selected_executor)
 
+        goal: str | None = None
+        if policy is not None:
+            # RULINGS 67: the claimed Attempt must carry this policy, and gets
+            # the Ticket's prompt and a copy of the policy before anything runs.
+            prepared = self._prepare_ticket_attempt(task, policy, progress.attempt_id)
+            if isinstance(prepared, str):
+                progress.prepare_failed("Ticket Attempt preparation failed")
+                return self._fail(
+                    task.task_key,
+                    prepared,
+                    FAILURE_GOVERNANCE,
+                    ticket=ticket,
+                    executor_status="blocked",
+                )
+            goal, prompt_path = prepared
+
         # Phase 20: write mission contract before executor runs.
         # The contract documents task intent, executor config, validators,
         # and governance rules. It must be on disk before the executor starts
         # so it can be audited if the run fails. It is never written in dry_run.
-        self._write_mission_contract(task, worktree, selected_executor, selected_model)
+        self._write_mission_contract(
+            task, worktree, selected_executor, selected_model,
+            goal=goal, validators=validators,
+        )
 
         try:
             executor = self._get_executor(
@@ -349,6 +432,7 @@ class Dispatcher:
                 provider=task.provider,
                 tools=task.tools,
                 pi_bin=task.pi_bin,
+                policy=policy,
             )
         except Exception as exc:
             reason = (
@@ -371,18 +455,23 @@ class Dispatcher:
             artifact_dir=task.artifact_dir,
             prompt_path=prompt_path if prompt_path.exists() else None,
             model=selected_model,
-            timeout_seconds=self.executor_timeout_seconds,
+            timeout_seconds=executor_timeout_seconds,
+            repo_root=task.repo_path if policy is not None else None,
             attempt_id=progress.attempt_id,
-            launch_provenance=ExecutorLaunchProvenance(
-                canonical_execution_path="dispatcher", path_source="Dispatcher.dispatch_task",
-                base_commit=worktree.base_sha, base_source="prepared_worktree.base_sha",
-                config_snapshot_reference=runner_configuration(
-                    "dispatcher.resolved_configuration",
-                    executor=selected_executor, model=selected_model,
-                    provider=task.provider, tools=task.tools,
-                    timeout_seconds=self.executor_timeout_seconds,
-                    validators=list(self.validators),
-                ),
+            launch_provenance=(
+                self._policy_launch_provenance(policy, worktree)
+                if policy is not None
+                else ExecutorLaunchProvenance(
+                    canonical_execution_path="dispatcher", path_source="Dispatcher.dispatch_task",
+                    base_commit=worktree.base_sha, base_source="prepared_worktree.base_sha",
+                    config_snapshot_reference=runner_configuration(
+                        "dispatcher.resolved_configuration",
+                        executor=selected_executor, model=selected_model,
+                        provider=task.provider, tools=task.tools,
+                        timeout_seconds=self.executor_timeout_seconds,
+                        validators=list(self.validators),
+                    ),
+                )
             ),
         )
         progress.prepare_passed(selected_executor)
@@ -411,8 +500,12 @@ class Dispatcher:
             artifact_dir=evidence_root,
             source="dispatcher",
             phase="implementation_validation",
-            validators=self.validators,
-            config_reference="Dispatcher.validators",
+            validators=validators,
+            config_reference=(
+                "execution_policy.implementation_validators"
+                if policy is not None
+                else "Dispatcher.validators"
+            ),
             attempt_id=progress.attempt_id,
             executor_run_id=executor_run_id,
             coverage_builder=coverage.coverage,
@@ -451,14 +544,23 @@ class Dispatcher:
         )
 
         executor_failed = executor_result.status in {"failed", "blocked"}
+        reason = (
+            executor_result.summary
+            or f"Executor {executor_result.executor} returned {executor_result.status}"
+        )
+        if policy is not None and not executor_failed:
+            # RULINGS 67: allowlist, not "absent from the failure list". A
+            # skipped, dry-run, unknown or change-free run is a failure.
+            gate_refusal = self._ticket_execution_refusal(
+                task, policy, progress.attempt_id, executor_result, worktree,
+            )
+            if gate_refusal is not None:
+                executor_failed = True
+                reason = gate_refusal
         progress.implementer_finished(
             selected_executor, executor_result.status, passed=not executor_failed
         )
         if executor_failed:
-            reason = (
-                executor_result.summary
-                or f"Executor {executor_result.executor} returned {executor_result.status}"
-            )
             validation_summary.finish(state="stopped", reason=reason)
             # A Ticket executor that fails or returns `blocked` (a cooperative
             # operator kill included) ends `failed` (SPEC §29.2).
@@ -486,12 +588,21 @@ class Dispatcher:
             attempt_id=progress.attempt_id,
         )
 
-        progress.validators_running(self.validators)
+        progress.validators_running(validators)
         validator_statuses: dict[str, str] = {}
-        for validator_index, validator_name in enumerate(self.validators):
+        for validator_index, validator_name in enumerate(validators):
             progress.validator_running(validator_name)
+            if policy is not None:
+                validator_context = replace(
+                    validator_context,
+                    timeout_seconds=policy.implementation_validator_timeout(validator_name),
+                )
 
-            def run_validator(index: int = validator_index, name: str = validator_name):
+            def run_validator(
+                index: int = validator_index,
+                name: str = validator_name,
+                context: ValidatorContext = validator_context,
+            ):
                 # Resolution stays inside the observed invocation, so an
                 # unavailable validator is still recorded as a tool error. The
                 # identity is captured from the object that is about to run.
@@ -500,7 +611,11 @@ class Dispatcher:
                     validator,
                     name=name,
                     index=index,
-                    config_source="Dispatcher.validators",
+                    config_source=(
+                        "execution_policy.implementation_validators"
+                        if policy is not None
+                        else "Dispatcher.validators"
+                    ),
                     resolution=(
                         "dispatcher_validator_registry"
                         if name in self.validator_registry
@@ -509,7 +624,7 @@ class Dispatcher:
                 )
                 coverage.note_validator_identity(index, identity)
                 validation_summary.note_validator_identity(index, identity)
-                return validator.run(validator_context)
+                return validator.run(context)
 
             try:
                 validator_result = validation_summary.observe(
@@ -537,11 +652,19 @@ class Dispatcher:
             self._record_validator_result(task.task_key, validator_result)
             validator_statuses[validator_result.validator] = validator_result.status
 
-            if validator_result.status in {"failed", "blocked"}:
-                reason = (
-                    validator_result.summary
-                    or f"Validator {validator_result.validator} returned {validator_result.status}"
-                )
+            validator_refused = validator_result.status in {"failed", "blocked"}
+            reason = (
+                validator_result.summary
+                or f"Validator {validator_result.validator} returned {validator_result.status}"
+            )
+            if policy is not None and not validator_refused:
+                # RULINGS 67: only `passed` passes; `skipped` or an unknown
+                # status is a validator that reached no verdict.
+                status_refusal = validator_status_refusal(validator_name, validator_result.status)
+                if status_refusal is not None:
+                    validator_refused = True
+                    reason = status_refusal
+            if validator_refused:
                 progress.validator_failed(validator_name, validator_result.status)
                 validation_summary.finish(state="stopped", reason=reason)
                 # SPEC §29.1: only a red validator stops a Ticket for a
@@ -555,6 +678,19 @@ class Dispatcher:
                         if validator_result.status == "failed"
                         else FAILURE_VALIDATOR_ERROR
                     ),
+                    ticket=ticket,
+                    executor_status=executor_result.status,
+                    validator_statuses=validator_statuses,
+                )
+
+        if policy is not None:
+            evidence_refusal = required_evidence_refusal(evidence_root, TICKET_REQUIRED_EVIDENCE)
+            if evidence_refusal is not None:
+                validation_summary.finish(state="stopped", reason=evidence_refusal)
+                return self._fail(
+                    task.task_key,
+                    evidence_refusal,
+                    FAILURE_GOVERNANCE,
                     ticket=ticket,
                     executor_status=executor_result.status,
                     validator_statuses=validator_statuses,
@@ -649,6 +785,118 @@ class Dispatcher:
     def _selected_model(self, task: TaskRecord, model: str | None) -> str | None:
         return model or getattr(task, "model", None) or self.default_model
 
+    def _ticket_policy_refusal(
+        self,
+        task: TaskRecord,
+        executor_name: str | None,
+        model: str | None,
+    ) -> ExecutionPolicy | DispatcherResult:
+        """Resolve a Ticket's policy, or refuse without writing (RULINGS 67)."""
+        if executor_name is not None or model is not None:
+            reason = (
+                f"{POLICY_OVERRIDE_REFUSED}: Ticket {task.task_key} takes its executor and "
+                "model from its project's execution policy in config/projects.yaml; "
+                "change the policy (and its policy_version) instead of overriding it"
+            )
+        else:
+            try:
+                policy = resolve_execution_policy(task.project)
+            except ExecutionPolicyError as exc:
+                reason = f"Ticket {task.task_key} is not runnable: {exc}"
+            else:
+                mismatch = ticket_repo_path_refusal(policy, task.repo_path)
+                if mismatch is None:
+                    return policy
+                reason = f"Ticket {task.task_key} is not runnable: {mismatch}"
+        return DispatcherResult(
+            task_key=task.task_key,
+            status="blocked",
+            summary=reason,
+            blocked_reason=reason,
+        )
+
+    def _prepare_ticket_attempt(
+        self,
+        task: TaskRecord,
+        policy: ExecutionPolicy,
+        attempt_id: str | None,
+    ) -> tuple[str, Path] | str:
+        """Bind the claimed Attempt to ``policy``; write its prompt and policy copy.
+
+        Returns (goal, prompt path), or the reason the Attempt cannot run. The
+        claim recorded the policy it resolved; a different sha256 here means the
+        policy changed between this dispatch's resolution and its claim.
+        """
+        if attempt_id is None:
+            return f"Ticket {task.task_key} has no claimed Attempt"
+        recorded = self._attempt_policy_hash(attempt_id)
+        if recorded != policy.sha256:
+            return (
+                f"{POLICY_CHANGED}: Attempt {attempt_id} was claimed under policy "
+                f"{recorded!r}, not {policy.sha256!r}"
+            )
+        root = artifact_root_for_claim(self.store, task.task_key, attempt_id, task.artifact_dir)
+        if root is None:
+            return f"Ticket {task.task_key} has no Attempt artifact root"
+        try:
+            prompt = read_ticket_prompt(self.store.db_path, task.task_key)
+            prompt_path = write_ticket_implementation_prompt(prompt, root)
+            atomic_write_json(root / POLICY_SNAPSHOT_FILENAME, policy.snapshot(), sort_keys=True)
+        except (OSError, TicketPromptError) as exc:
+            return f"Ticket Attempt preparation failed: {exc}"
+        return prompt, prompt_path
+
+    def _attempt_policy_hash(self, attempt_id: str) -> str | None:
+        with closing(
+            sqlite3.connect(f"file:{self.store.db_path}?mode=ro", uri=True)
+        ) as conn:
+            row = conn.execute(
+                "SELECT config_snapshot_hash FROM attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        return row[0] if row is not None else None
+
+    @staticmethod
+    def _policy_launch_provenance(
+        policy: ExecutionPolicy,
+        worktree: TaskWorktreeRecord,
+    ) -> ExecutorLaunchProvenance:
+        """Launch provenance for a policy run: version, profile and policy digest."""
+        return ExecutorLaunchProvenance(
+            canonical_execution_path="dispatcher",
+            path_source="Dispatcher.dispatch_task",
+            base_commit=worktree.base_sha,
+            base_source="prepared_worktree.base_sha",
+            policy_version=policy.policy_version,
+            permission_profile=policy.permission_profile,
+            config_snapshot_reference=LaunchContentReference.from_text(
+                f"config/projects.yaml#projects.{policy.project}.execution",
+                policy.canonical_json(),
+                source="execution_policy_canonical_json",
+            ),
+        )
+
+    def _ticket_execution_refusal(
+        self,
+        task: TaskRecord,
+        policy: ExecutionPolicy,
+        attempt_id: str | None,
+        result: ExecutorResult,
+        worktree: TaskWorktreeRecord,
+    ) -> str | None:
+        """The executor half of the RULINGS 67 allowlist; None when it holds."""
+        refusal = executor_result_refusal(result.status, result.exit_code)
+        if refusal is None:
+            refusal = managed_invocation_refusal(self.store.db_path, attempt_id, policy)
+        if refusal is None:
+            resource_lookup = getattr(self.store, "attempt_resource", None)
+            resource = resource_lookup(task.task_key) if resource_lookup is not None else None
+            if resource is not None:
+                refusal = worktree_diff_refusal(resource.worktree_path, resource.base_sha)
+            else:
+                refusal = worktree_diff_refusal(worktree.worktree_path, worktree.base_sha)
+        return refusal
+
     def _get_executor(
         self,
         executor_name: str,
@@ -657,9 +905,19 @@ class Dispatcher:
         provider: str | None = None,
         tools: list[str] | None = None,
         pi_bin: str | None = None,
+        policy: ExecutionPolicy | None = None,
     ) -> Executor:
         if executor_name in self.executor_registry:
             return self.executor_registry[executor_name]
+        if policy is not None:
+            # RULINGS 67: the policy's argv, invoked for real. Model and effort
+            # are already in that argv; there is no dry-run for a Ticket.
+            return get_executor(
+                policy.executor,
+                claude_command=policy.resolved_argv(),
+                claude_enable_invocation=True,
+                claude_model=policy.model,
+            )
         # Phase 13: pass pi-specific options from task record
         return get_executor(
             executor_name,
@@ -684,6 +942,9 @@ class Dispatcher:
         worktree: TaskWorktreeRecord,
         executor_name: str,
         model: str | None,
+        *,
+        goal: str | None = None,
+        validators: Sequence[str] | None = None,
     ) -> None:
         """Write mission_contract.json to the task artifact directory.
 
@@ -694,7 +955,8 @@ class Dispatcher:
         The file is written unconditionally (not skipped in dry_run, since
         dry_run returns before reaching this point).
         """
-        goal = task.title or f"Task {task.task_key}"
+        # A Ticket's goal is its prompt (RULINGS 67); a legacy task's, its title.
+        goal = goal or task.title or f"Task {task.task_key}"
         contract = build_from_task_fields(
             task_key=task.task_key,
             goal=goal,
@@ -704,7 +966,7 @@ class Dispatcher:
             executor=executor_name,
             model=model,
             provider=getattr(task, "provider", None),
-            required_validators=tuple(self.validators),
+            required_validators=tuple(self.validators if validators is None else validators),
             implementation_prompt_path=self._prompt_path(task.artifact_dir),
         )
         write_mission_contract(contract, artifact_dir=task.artifact_dir)

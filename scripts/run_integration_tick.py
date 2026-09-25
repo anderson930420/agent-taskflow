@@ -13,6 +13,12 @@ The run holds a non-overlap lock keyed by (database, repository) (§47.3). A
 second invocation for the same pair prints one skipped_overlap JSON result and
 exits immediately, doing no work. Exit codes: 0 ok, 1 not ok (a phase or
 drain outcome needs attention), 2 error, 75 skipped_overlap.
+
+The integration validators are the execution policy's (RULINGS 67): the one
+project registered in config/projects.yaml for --repo at --repo-path must have
+a valid execution: block, whose integration_validators the drain runs. A
+repository without one is refused (exit 2) before anything runs. The former
+--validator-config JSON, a second validator list kept by cron, is refused too.
 """
 
 from __future__ import annotations
@@ -27,8 +33,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from agent_taskflow.execution_policy import (
+    ExecutionPolicyError,
+    resolve_repository_execution_policy,
+)
 from agent_taskflow.integration_tick import IntegrationTickRequest, run_integration_tick
-from agent_taskflow.integration_validators import IntegrationValidatorSpec
 from agent_taskflow.tick_lock import (
     EXIT_SKIPPED_OVERLAP,
     TickLock,
@@ -37,29 +46,7 @@ from agent_taskflow.tick_lock import (
 )
 
 KIND = "integration_tick"
-
-
-def _validator_specs(path: Path) -> tuple[IntegrationValidatorSpec, ...]:
-    values = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(values, list) or not values:
-        raise ValueError("validator config must be a nonempty JSON array")
-    specs = []
-    for value in values:
-        if not isinstance(value, dict) or set(value) - {"name", "command", "timeout_seconds"}:
-            raise ValueError("each validator needs name, command and optional timeout_seconds")
-        name, command = value.get("name"), value.get("command")
-        timeout = value.get("timeout_seconds")
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("validator name must be a nonempty string")
-        if (
-            not isinstance(command, list) or not command
-            or any(not isinstance(arg, str) or not arg for arg in command)
-        ):
-            raise ValueError("validator command must be a nonempty array of nonempty strings")
-        if timeout is not None and (type(timeout) is not int or timeout <= 0):
-            raise ValueError("validator timeout_seconds must be a positive integer or null")
-        specs.append(IntegrationValidatorSpec(name, tuple(command), timeout))
-    return tuple(specs)
+VALIDATOR_CONFIG_REFUSED = "validator_config_refused"
 
 
 def _emit(value: dict[str, Any], *, jsonl: bool) -> None:
@@ -74,7 +61,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--db-path", required=True, type=Path)
     parser.add_argument("--repo", required=True, help="Exact GitHub owner/name key stored in the queue")
     parser.add_argument("--repo-path", required=True, type=Path)
-    parser.add_argument("--validator-config", required=True, type=Path)
+    # Refused, not merely ignored, so a stale cron line fails loudly.
+    parser.add_argument("--validator-config", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--target-branch", default="main")
     parser.add_argument("--remote", default="origin")
     mode = parser.add_mutually_exclusive_group()
@@ -91,10 +79,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.dry_run and (args.confirm_pr_poll or args.confirm_cleanup or args.confirm_freshness):
         parser.error("--dry-run cannot be combined with a --confirm-* flag")
+    if args.validator_config is not None:
+        print(json.dumps({
+            "kind": KIND, "ok": False, "status": "error", "reason_code": VALIDATOR_CONFIG_REFUSED,
+            "reason": (
+                "--validator-config is no longer accepted: integration validators come only "
+                "from the project's execution: policy in config/projects.yaml (RULINGS 67)"
+            ),
+        }, sort_keys=True))
+        return 2
+    try:
+        policy = resolve_repository_execution_policy(
+            github_repo=args.repo.strip(), repo_path=args.repo_path,
+        )
+    except ExecutionPolicyError as exc:
+        print(json.dumps({"kind": KIND, "ok": False, "status": "error",
+                          "reason_code": exc.reason_code, "reason": str(exc)}, sort_keys=True))
+        return 2
     try:
         request = IntegrationTickRequest(
             repo=args.repo, repo_path=args.repo_path, db_path=args.db_path,
-            validator_specs=_validator_specs(args.validator_config),
+            validator_specs=policy.integration_validator_specs(),
             target_branch=args.target_branch, remote=args.remote,
             dry_run=not args.confirm_integration,
             confirm_integration=args.confirm_integration,
@@ -132,6 +137,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     finally:
         lock.release()
+    result["execution_policy"] = {
+        "project": policy.project,
+        "policy_version": policy.policy_version,
+        "policy_sha256": policy.sha256,
+    }
     _emit({**result, **reclaim}, jsonl=args.jsonl)
     if result.get("tick_status") == "error":
         return 2

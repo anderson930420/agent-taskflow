@@ -168,7 +168,9 @@ class StartPathsRefuseTests(DependencyAdmissionTestCase):
 
         before = self.snapshot(self.b)
         with TestClient(create_app(self.fx.db_path)) as client:
-            response = client.post(f"/api/tasks/{self.b}/start", json={"validators": []})
+            # RULINGS 67: no validator override for a Ticket (that alone is a
+            # 409); without one, the dependency gate is what refuses it.
+            response = client.post(f"/api/tasks/{self.b}/start", json={})
         body = response.json()
         self.assertFalse(body["ok"], body)
         self.assertIn(self.a, json.dumps(body))

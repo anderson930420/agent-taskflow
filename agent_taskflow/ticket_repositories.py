@@ -2,8 +2,11 @@
 
 Mission Control's repository dropdown and all Python-derived Ticket metadata
 resolve through this module. It reads the existing project registry
-(`config/projects.yaml`) via :mod:`agent_taskflow.projects` and never writes
-to it. The registry's `task_key_prefix` is deliberately not read: Ticket task
+(`config/projects.yaml`) and never writes to it. By default that is the same
+package-anchored absolute file, read by the same strict reader, as the V1
+execution policy (:mod:`agent_taskflow.execution_policy`, RULINGS 67), so a
+Ticket's repo_path comes from the registry its policy is resolved from; the
+working directory never selects it. The registry's `task_key_prefix` is deliberately not read: Ticket task
 keys come from one global `AT-NNNN` counter.
 """
 
@@ -13,12 +16,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_taskflow import execution_policy
 from agent_taskflow._helpers import require_non_empty
 from agent_taskflow.models import require_absolute_path
-from agent_taskflow.projects import get_project_config, load_projects_config
+from agent_taskflow.projects import get_project_config
 
 
-DEFAULT_PROJECTS_CONFIG_PATH = Path("config/projects.yaml")
+# The package-anchored registry, as imported. Functions default to None, which
+# reads execution_policy.PROJECTS_REGISTRY_PATH at call time.
+DEFAULT_PROJECTS_CONFIG_PATH = execution_policy.PROJECTS_REGISTRY_PATH
 
 DEFAULT_BASE_BRANCH = "main"
 DEFAULT_BRANCH_PREFIX = "task/"
@@ -114,14 +120,23 @@ def repository_from_config(name: str, config: dict[str, Any]) -> TicketRepositor
     )
 
 
+def _load_registry(config_path: str | Path | None) -> dict[str, Any]:
+    """The registry's projects, read like the execution policy reads them.
+
+    ``None`` is the package-anchored registry. An explicit path must be
+    absolute; a relative one would depend on the working directory.
+    """
+    try:
+        return execution_policy.load_registry_projects(config_path)[1]
+    except execution_policy.ExecutionPolicyError as exc:
+        raise TicketRepositoryError(str(exc)) from exc
+
+
 def list_ticket_repositories(
-    config_path: str | Path = DEFAULT_PROJECTS_CONFIG_PATH,
+    config_path: str | Path | None = None,
 ) -> list[TicketRepository]:
     """Return every registry entry, sorted by name, for the repo dropdown."""
-    try:
-        raw = load_projects_config(config_path)
-    except (FileNotFoundError, ValueError) as exc:
-        raise TicketRepositoryError(str(exc)) from exc
+    raw = _load_registry(config_path)
 
     repositories: list[TicketRepository] = []
     for name in sorted(raw):
@@ -136,14 +151,14 @@ def list_ticket_repositories(
 
 def resolve_ticket_repository(
     repository: str,
-    config_path: str | Path = DEFAULT_PROJECTS_CONFIG_PATH,
+    config_path: str | Path | None = None,
 ) -> TicketRepository:
     """Return one normalized registry entry or raise TicketRepositoryError."""
     name = require_non_empty(repository, "repository")
+    raw = _load_registry(config_path)
     try:
-        raw = load_projects_config(config_path)
         config = get_project_config(raw, name)
-    except (FileNotFoundError, ValueError) as exc:
+    except ValueError as exc:
         raise TicketRepositoryError(str(exc)) from exc
     return repository_from_config(name, config)
 
