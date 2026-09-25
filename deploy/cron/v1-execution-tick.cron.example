@@ -1,0 +1,39 @@
+# Example only. Copy and adapt outside the repository before installing.
+# Do NOT embed GitHub tokens, SSH keys, API keys, or other secrets here.
+# Credentials come from the cron user's existing environment (gh auth, SSH).
+#
+# V1 execution tick (SPEC §47.2): one run of scripts/run_parallel_scheduler_tick.py.
+# It reaps stale runtime, releases or stops dependencies, then starts eligible
+# Tickets up to the free max_concurrent_tasks capacity, and exits. It never
+# integrates (SPEC §47.4). Nothing here is installed: installing or changing a
+# cron entry is a human operator action (SPEC §47.4).
+#
+# Replace every {{PLACEHOLDER}} with an absolute path before installing:
+#   {{PYTHON}}         the Python of the deployed checkout's environment
+#   {{TASKFLOW_HOME}}  the deployed agent-taskflow checkout (deployment target: human decision H2)
+#   {{DB}}             the Taskflow SQLite state database (explicit; there is no default)
+#   {{LOG_DIR}}        an existing, writable log directory
+#
+# Non-overlap (SPEC §47.3): the tick holds its own flock on
+# {{DB}}.execution-tick.lock for its whole run. An overlapping invocation, from
+# cron or by hand, appends one {"status": "skipped_overlap", ...} line to the
+# JSONL log and exits 75 without doing any work. Do NOT also wrap this line in
+# flock(1) on that same file: the tick would then contend with its own wrapper
+# and skip every run. Do not add timeout(1) either: a skip that repeats is the
+# visible signal that the cadence is wrong or a run is stuck.
+#
+# Exit codes: 0 ran, 2 missing migration (message in the stderr log) or a lock
+# that cannot be taken (one error JSON line in the log), 75 skipped_overlap.
+#
+# HUMAN CHOICE: by default the tick waits for its workers, so the lock is held
+# until they finish. Append --no-wait to return once every started Ticket is
+# claimed; workers keep running and the next tick may start more work.
+#
+# Cadence: every 5 minutes. Provisional (SPEC §47.2); revisit after the first
+# real Ticket runs.
+#
+# How to disable: comment out or remove the line below with `crontab -e`.
+
+PATH=/usr/local/bin:/usr/bin:/bin
+
+*/5 * * * * "{{PYTHON}}" "{{TASKFLOW_HOME}}/scripts/run_parallel_scheduler_tick.py" --db-path "{{DB}}" --jsonl >> "{{LOG_DIR}}/execution-tick.jsonl" 2>> "{{LOG_DIR}}/execution-tick.stderr.log"

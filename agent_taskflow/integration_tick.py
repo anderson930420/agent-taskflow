@@ -2,25 +2,49 @@
 
 The snapshot bounds the invocation. The controller owns each integration,
 its lock, lifecycle writes and dequeue; this consumer owns none of them.
+
+V1-F10 (SPEC §47.2) composes the rest of the integration side around that
+drain. With ``consumer_phases=True`` one pass runs, in this fixed order and
+once each: the PR-outcome poll, verified-merge cleanup of this repository's
+merged-unverified Tickets, the target-freshness poll, then the drain. Outcomes
+first, so closed PRs are cancelled and dequeued and merges are recorded
+before anything else; cleanup next, so a verified merge completes; freshness
+after that, so a target the merge just advanced re-queues stale siblings; and
+the drain last, so those re-queued Tickets are re-integrated in the same
+pass. Each phase has its own confirmation and is a read-only preview without
+it. No phase takes the per-repository integration lock (ruling 62), and none
+ever confirms §37.1 cancelled-route cleanup or deletes a remote branch. Every
+pass also reports, read-only and never repaired, the lock row, ready Tickets
+missing from the queue, and verified merges whose Tickets are not completed.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
 
+from agent_taskflow import integration_schema as schema
 from agent_taskflow.github_pr_adapter import GitHubPrAdapter
 from agent_taskflow.governance import (
     assert_not_main_repo_write,
     assert_worktree_inside_repo_worktrees,
 )
+from agent_taskflow.integration_cleanup import (
+    IntegrationCleanupRequest,
+    run_integration_cleanup,
+)
 from agent_taskflow.integration_controller import IntegrationRequest, integrate_task
 from agent_taskflow.integration_queue import queue_for_repo
-from agent_taskflow.integration_schema import normalize_repo
+from agent_taskflow.integration_schema import normalize_repo, repo_from_pr_url
 from agent_taskflow.integration_store import IntegrationStore
+from agent_taskflow.integration_watcher import (
+    WatcherRequest,
+    poll_pr_outcomes,
+    poll_target_freshness,
+)
 from agent_taskflow.integration_validators import IntegrationValidatorSpec
-from agent_taskflow.models import require_absolute_path, utc_now_iso
+from agent_taskflow.models import TASK_STATUSES, require_absolute_path, utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.ticket_fields_schema import require_ticket_fields
 from agent_taskflow.ticket_store import TicketStore
@@ -29,6 +53,14 @@ from agent_taskflow.ticket_worktree import (
     TicketWorktree,
     inspect_ticket_worktree,
 )
+
+
+PHASE_PR_OUTCOMES = "pr_outcomes"
+PHASE_CLEANUP = "verified_merge_cleanup"
+PHASE_FRESHNESS = "target_freshness"
+PHASE_DRAIN = "queue_drain"
+# The documented, pinned order of one integration-tick pass (V1-F10).
+PHASE_ORDER = (PHASE_PR_OUTCOMES, PHASE_CLEANUP, PHASE_FRESHNESS, PHASE_DRAIN)
 
 
 @dataclass(frozen=True)
@@ -42,6 +74,13 @@ class IntegrationTickRequest:
     dry_run: bool = True
     confirm_integration: bool = False
     owner: str = "integration_tick"
+    # V1-F10: the consumer phases before the drain. Off by default, so F9's
+    # drain-only contract is unchanged. ``dry_run`` and ``confirm_integration``
+    # keep governing only the drain; each phase has its own confirmation.
+    consumer_phases: bool = False
+    confirm_pr_poll: bool = False
+    confirm_cleanup: bool = False
+    confirm_freshness: bool = False
 
     def __post_init__(self) -> None:
         # Keep the queue's existing exact repository key; normalize only for
@@ -55,9 +94,14 @@ class IntegrationTickRequest:
             if not isinstance(value, str) or not value.strip() or value.strip().startswith("-"):
                 raise ValueError(f"{name} must be a nonempty name, not an option")
             object.__setattr__(self, name, value.strip())
-        for name in ("dry_run", "confirm_integration"):
+        for name in ("dry_run", "confirm_integration", "consumer_phases",
+                     "confirm_pr_poll", "confirm_cleanup", "confirm_freshness"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
+        if not self.consumer_phases and (
+            self.confirm_pr_poll or self.confirm_cleanup or self.confirm_freshness
+        ):
+            raise ValueError("a consumer phase confirmation requires consumer_phases=True")
         specs = tuple(self.validator_specs)
         if not specs or any(not isinstance(spec, IntegrationValidatorSpec) for spec in specs):
             raise ValueError("explicit nonempty integration validator_specs are required")
@@ -115,6 +159,10 @@ def run_integration_tick(
     later snapshot entries may proceed. Lock contention or an escaping
     exception ends the tick. Entries added/re-enqueued during the pass wait
     for a later invocation. No queue row is deleted by the tick itself.
+
+    With ``consumer_phases`` the drain is the last phase of the pass (see
+    :data:`PHASE_ORDER`), and its snapshot is taken after the freshness poll.
+    A consumer phase that raises ends the pass before the drain.
     """
     if not request.db_path.is_file():
         raise ValueError(f"db_path must name an existing initialized database: {request.db_path}")
@@ -124,7 +172,11 @@ def run_integration_tick(
     tasks = TaskMirrorStore(request.db_path)
     integration = IntegrationStore(store=tasks)
     tickets = TicketStore(request.db_path)
-    entries = queue_for_repo(integration, request.repo)
+    consumer = (
+        _run_consumer_phases(request, tasks, integration, github)
+        if request.consumer_phases else None
+    )
+    entries = [] if consumer and consumer["error"] else queue_for_repo(integration, request.repo)
     effective_dry_run = request.dry_run or not request.confirm_integration
     outcomes: list[dict[str, Any]] = []
     stopped_reason = None
@@ -173,7 +225,7 @@ def run_integration_tick(
             break
     remaining = queue_for_repo(integration, request.repo)
     ok = all(outcome["ok"] for outcome in outcomes)
-    return {
+    result = {
         "kind": "integration_tick", "ok": ok,
         "status": (
             "stopped" if stopped_reason else "dry_run" if effective_dry_run
@@ -193,3 +245,226 @@ def run_integration_tick(
         "remaining_task_keys": [entry.task_key for entry in remaining],
         "generated_at": utc_now_iso(),
     }
+    if consumer is None:
+        return result
+    return _with_consumer_phases(result, consumer, request, integration, tickets)
+
+
+# -- V1-F10 consumer phases ------------------------------------------------
+
+
+def _run_consumer_phases(
+    request: IntegrationTickRequest,
+    tasks: TaskMirrorStore,
+    integration: IntegrationStore,
+    github: GitHubPrAdapter | None,
+) -> dict[str, Any]:
+    """Run the three pre-drain phases once each, in :data:`PHASE_ORDER`."""
+    # Read-only: a row left by a killed integration is reported, never touched.
+    holder = integration.get_integration_lock(request.repo)
+    watcher = WatcherRequest(
+        repo=request.repo, repo_path=request.repo_path,
+        target_branch=request.target_branch, remote=request.remote,
+        db_path=request.db_path,
+    )
+    runners = (
+        (PHASE_PR_OUTCOMES, request.confirm_pr_poll,
+         lambda: _pr_outcomes_phase(request, watcher, tasks, integration, github)),
+        (PHASE_CLEANUP, request.confirm_cleanup,
+         lambda: _cleanup_phase(request, tasks, integration)),
+        (PHASE_FRESHNESS, request.confirm_freshness,
+         lambda: _freshness_phase(request, watcher, tasks, integration)),
+    )
+    phases: dict[str, dict[str, Any]] = {}
+    error: dict[str, str] | None = None
+    for name, confirmed, run in runners:
+        if error:
+            phases[name] = {"ran": False, "confirmed": confirmed, "ok": False,
+                            "status": "not_run", "reason": f"phase {error['phase']} raised"}
+            continue
+        try:
+            phases[name] = {"ran": True, "confirmed": confirmed, **run()}
+        except Exception as exc:
+            # Like an escaping drain error: observable, no retry, pass ends.
+            error = {"phase": name, "reason": f"{type(exc).__name__}: {exc}"}
+            phases[name] = {"ran": True, "confirmed": confirmed, "ok": False,
+                            "status": "error", "reason": error["reason"]}
+    return {
+        "phases": phases,
+        "error": error,
+        "integration_lock_at_start": (
+            {"held": False} if holder is None else {
+                "held": True, "repo": holder["repo"], "owner": holder["owner"],
+                "acquired_at": holder["acquired_at"],
+                "note": "Read-only report. The tick never takes or releases this lock "
+                        "(ruling 62); a row left by a killed integration stays until "
+                        "an operator acts.",
+            }
+        ),
+    }
+
+
+def _pr_outcomes_phase(
+    request: IntegrationTickRequest, watcher: WatcherRequest, tasks: TaskMirrorStore,
+    integration: IntegrationStore, github: GitHubPrAdapter | None,
+) -> dict[str, Any]:
+    outcomes = poll_pr_outcomes(
+        replace(watcher, confirm_poll=request.confirm_pr_poll),
+        store=tasks, integration_store=integration, github=github,
+    )
+    # A failed poll is audited by the watcher when confirmed and always
+    # reported here; it is never swallowed.
+    return {
+        "ok": not any(outcome.poll_error for outcome in outcomes),
+        "outcomes": [asdict(outcome) for outcome in outcomes],
+    }
+
+
+def _cleanup_phase(
+    request: IntegrationTickRequest, tasks: TaskMirrorStore, integration: IntegrationStore,
+) -> dict[str, Any]:
+    candidates = [
+        state["task_key"]
+        for state in integration.list_merged_unverified_pr_states(request.repo)
+    ]
+    outcomes: list[dict[str, Any]] = []
+    for task_key in candidates:
+        try:
+            result = run_integration_cleanup(
+                IntegrationCleanupRequest(
+                    task_key=task_key, repo=request.repo, repo_path=request.repo_path,
+                    target_branch=request.target_branch, remote=request.remote,
+                    db_path=request.db_path, confirm_cleanup=request.confirm_cleanup,
+                    # The §37.1 cancelled route is never automated, and remote
+                    # branch cleanup is off in V1 (ruling 5).
+                    confirm_cancelled_cleanup=False, delete_remote_branch=False,
+                ),
+                store=tasks, integration_store=integration,
+            )
+            outcomes.append(result.to_summary_dict())
+        except Exception as exc:
+            outcomes.append({"kind": "integration_cleanup", "task_key": task_key,
+                             "ok": False, "status": "error",
+                             "summary": f"{type(exc).__name__}: {exc}"})
+    return {
+        "ok": all(outcome["ok"] for outcome in outcomes),
+        "candidates": candidates,
+        "outcomes": outcomes,
+    }
+
+
+def _freshness_phase(
+    request: IntegrationTickRequest, watcher: WatcherRequest, tasks: TaskMirrorStore,
+    integration: IntegrationStore,
+) -> dict[str, Any]:
+    candidates = [state["task_key"] for state in integration.list_open_pr_states(request.repo)]
+    outcomes = poll_target_freshness(
+        replace(watcher, confirm_poll=request.confirm_freshness),
+        store=tasks, integration_store=integration,
+    )
+    examined = {outcome.task_key for outcome in outcomes}
+    # The poll skips a Ticket whose worktree is missing or unreadable without
+    # an outcome; name it, so a blind watcher is never mistaken for a fresh one.
+    not_examined = [key for key in candidates if key not in examined]
+    return {
+        "ok": not not_examined,
+        "outcomes": [asdict(outcome) for outcome in outcomes],
+        "requeued": [outcome.task_key for outcome in outcomes if outcome.requeued],
+        "would_requeue": [
+            outcome.task_key for outcome in outcomes
+            if outcome.stale and not outcome.requeued
+            and outcome.task_status == schema.NEEDS_REVIEW and not request.confirm_freshness
+        ],
+        "not_examined": not_examined,
+    }
+
+
+def _ready_unqueued(
+    request: IntegrationTickRequest, integration: IntegrationStore, tickets: TicketStore,
+) -> list[dict[str, Any]]:
+    """This repository's ready_for_integration Tickets missing from any queue.
+
+    Detected and reported only (orchestrator ruling OR-3, orphan G3c): the
+    dispatcher's handoff audits an enqueue failure rather than failing the
+    run, so such a Ticket is never integrated. Re-enqueueing is lifecycle
+    behaviour that is not ruled, so the tick never does it.
+    """
+    wanted = normalize_repo(request.repo)
+    found = []
+    for ticket in tickets.list_tickets(statuses=(schema.READY_FOR_INTEGRATION,)):
+        try:
+            same_repo = bool(ticket.github_repo) and normalize_repo(ticket.github_repo) == wanted
+        except ValueError:
+            same_repo = False
+        if same_repo and not integration.is_queued(ticket.task_key):
+            found.append({"task_key": ticket.task_key, "github_repo": ticket.github_repo,
+                          "status": ticket.status, "updated_at": ticket.updated_at})
+    return sorted(found, key=lambda item: item["task_key"])
+
+
+def _merge_verified_not_completed(
+    request: IntegrationTickRequest, integration: IntegrationStore, tickets: TicketStore,
+) -> list[dict[str, Any]]:
+    """This repository's Tickets whose merge is verified but not completed.
+
+    Detected and reported only, on every tick (review N4). Cleanup records
+    ``merge_verified_at`` before it removes anything (Step 2's order; changing
+    it is F10-FU3, an owner decision), so when git then declines part of the
+    removal (``cleanup_incomplete``) the Ticket leaves every pick-up: its PR is
+    closed, its merge is no longer unverified, and it is not queued. A
+    human-confirmed ``run_integration_cleanup`` retry finishes it; the tick
+    never retries it. Scoped like the cleanup pick-up, by the PR's own URL.
+    """
+    wanted = normalize_repo(request.repo)
+    found = []
+    for ticket in tickets.list_tickets(statuses=TASK_STATUSES - {schema.COMPLETED}):
+        state = integration.get_integration_state(ticket.task_key)
+        if not state["merge_verified_at"]:
+            continue
+        pr = integration.get_pr_state(ticket.task_key)
+        if not pr["pr_merged"] or repo_from_pr_url(pr["pr_url"]) != wanted:
+            continue
+        found.append({"task_key": ticket.task_key, "status": ticket.status,
+                      "pr_url": pr["pr_url"], "merge_commit_sha": pr["merge_commit_sha"],
+                      "merge_verified_at": state["merge_verified_at"],
+                      "cleanup_confirmed_at": state["cleanup_confirmed_at"],
+                      "worktree_path": str(ticket.worktree_path), "branch": ticket.branch})
+    return sorted(found, key=lambda item: item["task_key"])
+
+
+def _with_consumer_phases(
+    result: dict[str, Any], consumer: dict[str, Any], request: IntegrationTickRequest,
+    integration: IntegrationStore, tickets: TicketStore,
+) -> dict[str, Any]:
+    """Add the consumer phases to F9's drain result; F9's keys keep their meaning."""
+    error = consumer["error"]
+    drain_ok = result["ok"]
+    if error:
+        result.update(status="stopped", stopped_reason=f"phase_error:{error['phase']}")
+    phases = dict(consumer["phases"])
+    phases[PHASE_DRAIN] = {
+        "ran": not error, "confirmed": not request.dry_run and request.confirm_integration,
+        "ok": drain_ok and not error, "status": result["status"],
+        "detail": "F9's drain result is the top-level outcomes, status and stopped_reason",
+    }
+    unqueued = _ready_unqueued(request, integration, tickets)
+    uncompleted = _merge_verified_not_completed(request, integration, tickets)
+    ok = all(phase["ok"] for phase in phases.values()) and not unqueued and not uncompleted
+    result.update(
+        ok=ok,
+        drain_ok=drain_ok,
+        tick_status="error" if error else "ok" if ok else "not_ok",
+        phase_order=list(PHASE_ORDER),
+        phases=phases,
+        confirmations={
+            PHASE_PR_OUTCOMES: request.confirm_pr_poll,
+            PHASE_CLEANUP: request.confirm_cleanup,
+            PHASE_FRESHNESS: request.confirm_freshness,
+            PHASE_DRAIN: not request.dry_run and request.confirm_integration,
+        },
+        integration_lock_at_start=consumer["integration_lock_at_start"],
+        ready_for_integration_unqueued=unqueued,
+        merge_verified_not_completed=uncompleted,
+        generated_at=utc_now_iso(),
+    )
+    return result
