@@ -15,13 +15,24 @@ Remote branch deletion is OFF in V1 (human decision): §37 calls it
 "optional", ``git push --delete`` is outside the push allowlist, and remote
 task branches are left to GitHub's automatic head-branch deletion or manual
 deletion. A request that asks for it is refused before anything is removed.
+
+Cleanup fails closed on its target (V1-F10, orchestrator ruling OR-3), because
+the integration tick may now run it unattended:
+
+* it removes only the git-registered, clean worktree at the recorded path on
+  the recorded branch, and never deletes a directory git has not registered;
+* it deletes the local branch only when its tip is already published in the
+  recorded PR head or the remote task branch, never newer local work, and
+  only if the tip is still the one that check proved published;
+* an unsafe target is refused before anything is recorded, and a cleanup that
+  still leaves the worktree or branch behind never completes the Ticket;
+* an unconfirmed (preview) request persists nothing at all.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import shutil
 from typing import Any
 from uuid import uuid4
 
@@ -40,6 +51,12 @@ from agent_taskflow.merge_verification import (
 from agent_taskflow.models import TaskWorktreeRecord, utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.ticket_worktree import (
+    WORKTREE_ABSENT,
+    WORKTREE_READY,
+    TicketWorktree,
+    inspect_ticket_worktree,
+)
 from agent_taskflow.worktree import ensure_absolute_path
 
 
@@ -244,6 +261,11 @@ def run_integration_cleanup(
                 ),
                 confirmation_required=True,
             )
+        refusal, verified_tip = _cleanup_target_refusal(request, worktree, pr_state, log=log)
+        if refusal:
+            return result(
+                ok=False, status="cleanup_refused", summary=f"Cleanup refused: {refusal}."
+            )
         if not request.confirm_cleanup:
             return result(
                 ok=False,
@@ -260,14 +282,21 @@ def run_integration_cleanup(
             integration=integration,
             log=log,
             verification=None,
+            verified_tip=verified_tip,
             complete_task=False,
         )
 
     # -- verified-merge route ---------------------------------------------
+    # A retry after an incomplete cleanup may find the worktree already
+    # removed; the fetch and ancestry check then run in the repository itself.
     verification = verify_merge(
         MergeVerificationRequest(
             task_key=request.task_key,
-            worktree_path=worktree.worktree_path,
+            worktree_path=(
+                worktree.worktree_path
+                if worktree.worktree_path.is_dir()
+                else request.repo_path
+            ),
             remote=request.remote,
             target_branch=request.target_branch,
             pr_merged=bool(pr_state["pr_merged"]),
@@ -283,6 +312,17 @@ def run_integration_cleanup(
                 "Cleanup refused: the merge is not verified per §36 — "
                 + "; ".join(verification.reasons)
             ),
+            verification=verification,
+        )
+
+    # Checked before merge_verified_at is recorded, so a refused Ticket stays
+    # in the merged-unverified pick-up and is reported again on the next tick.
+    refusal, verified_tip = _cleanup_target_refusal(request, worktree, pr_state, log=log)
+    if refusal:
+        return result(
+            ok=False,
+            status="cleanup_refused",
+            summary=f"Cleanup refused: {refusal}.",
             verification=verification,
         )
 
@@ -318,6 +358,7 @@ def run_integration_cleanup(
         integration=integration,
         log=log,
         verification=verification,
+        verified_tip=verified_tip,
         complete_task=True,
     )
 
@@ -332,17 +373,24 @@ def _perform_cleanup(
     integration: IntegrationStore,
     log: GitCommandLog,
     verification: MergeVerificationResult | None,
+    verified_tip: str | None,
     complete_task: bool,
 ) -> IntegrationCleanupResult:
     worktree_removed = _remove_worktree(request, worktree, log=log)
-    local_branch_deleted = _delete_local_branch(request, worktree, log=log)
+    # git refuses to delete a branch a worktree still has checked out.
+    branch_retained = (
+        _delete_local_branch(request, worktree, verified_tip=verified_tip, log=log)
+        if worktree_removed
+        else None
+    )
+    local_branch_deleted = worktree_removed and branch_retained is None
     # SPEC §37 optional remote-branch cleanup is off in V1 (human decision).
     remote_branch_deleted = False
 
     # "Archive evidence" (§37) means retain and index it, never delete it.
     evidence_archived = bool(request.archive_evidence and task.artifact_dir)
 
-    if worktree_removed:
+    if worktree_removed and worktree.status != "cleaned":
         task_store.upsert_task_worktree(
             TaskWorktreeRecord(
                 task_key=request.task_key,
@@ -355,6 +403,30 @@ def _perform_cleanup(
                 created_at=worktree.created_at,
                 cleaned_at=utc_now_iso(),
             )
+        )
+
+    if not (worktree_removed and local_branch_deleted):
+        # Nothing is forced: the retained worktree or branch waits for a human,
+        # and the Ticket is neither completed nor marked cleaned up.
+        return _finish(
+            request,
+            task=task,
+            task_store=task_store,
+            ok=False,
+            status="cleanup_incomplete",
+            route=route,
+            final_task_status=task_store.get_task(request.task_key).status,
+            summary=(
+                "Cleanup is incomplete and the Ticket is not completed: "
+                f"worktree_removed={worktree_removed}, "
+                f"local_branch_deleted={local_branch_deleted}"
+                + (f"; {branch_retained}." if branch_retained else ".")
+            ),
+            verification=verification,
+            log=log,
+            worktree_removed=worktree_removed,
+            local_branch_deleted=local_branch_deleted,
+            evidence_archived=evidence_archived,
         )
 
     integration.update_integration_state(
@@ -421,9 +493,11 @@ def _remove_worktree(
     *,
     log: GitCommandLog,
 ) -> bool:
+    """Remove the task worktree through git only. True once it is gone."""
     path = worktree.worktree_path
     if not path.exists():
-        return False
+        # Already removed, e.g. by an earlier incomplete attempt.
+        return True
     try:
         # Refuse to remove anything that is not a task worktree under the repo.
         assert_worktree_inside_repo_worktrees(path, request.repo_path)
@@ -432,13 +506,9 @@ def _remove_worktree(
 
     # No --force flag: cleanup is already gated on a verified merge plus an
     # explicit confirmation, and keeping every argv force-free makes "no code
-    # path force-pushes" checkable by inspection.
-    result = git_ops.run_git(
-        request.repo_path, ["worktree", "remove", str(path)], log=log
-    )
-    if not result.ok and path.exists():
-        shutil.rmtree(path, ignore_errors=True)
-        git_ops.run_git(request.repo_path, ["worktree", "prune"], log=log)
+    # path force-pushes" checkable by inspection. A worktree git declines to
+    # remove is retained as it is; nothing falls back to deleting the path.
+    git_ops.run_git(request.repo_path, ["worktree", "remove", str(path)], log=log)
     return not path.exists()
 
 
@@ -446,15 +516,111 @@ def _delete_local_branch(
     request: IntegrationCleanupRequest,
     worktree: TaskWorktreeRecord,
     *,
+    verified_tip: str | None,
     log: GitCommandLog,
-) -> bool:
+) -> str | None:
+    """Delete the local task branch. None once it is gone, else why it is kept."""
     branch = worktree.branch
     if branch in git_ops.PROTECTED_BRANCHES or branch == request.target_branch:
-        return False
+        return f"the branch {branch} is protected and is retained"
+    current = git_ops.run_git(
+        request.repo_path,
+        ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        log=log,
+    )
+    if not current.ok:
+        # Already deleted, e.g. by an earlier incomplete attempt.
+        return None
+    tip = current.stdout.strip()
+    if tip != verified_tip:
+        # Re-read after the worktree is gone: a commit made while it was being
+        # removed moved the branch past the tip the target check proved
+        # published. The branch is kept; a retry checks its new tip.
+        return (
+            f"the local branch {branch} moved to {tip} after the target check "
+            f"verified {verified_tip or 'no branch'}, and is retained"
+        )
     # -D rather than -d: a merge commit / squash / rebase merge means the task
     # branch is often not an ancestor of the target, so -d would refuse even
-    # though §36 verification has already proved the work landed.
-    return git_ops.run_git(request.repo_path, ["branch", "-D", branch], log=log).ok
+    # though §36 verification has already proved the work landed. The target
+    # check proved this exact tip published.
+    deleted = git_ops.run_git(request.repo_path, ["branch", "-D", branch], log=log)
+    if deleted.ok:
+        return None
+    return f"git branch -D {branch} failed: {deleted.combined}"
+
+
+def _cleanup_target_refusal(
+    request: IntegrationCleanupRequest,
+    worktree: TaskWorktreeRecord,
+    pr_state: dict[str, Any],
+    *,
+    log: GitCommandLog,
+) -> tuple[str | None, str | None]:
+    """Return ``(refusal, verified_tip)`` for the recorded cleanup target (OR-3).
+
+    Read-only. The worktree must be absent, or registered with git at exactly
+    the recorded path on exactly the recorded branch and clean. The local
+    branch must be absent, or have a tip already contained in the recorded PR
+    head or the remote task branch, so deleting it can lose no commit.
+
+    ``refusal`` says why the target is unsafe, or is None. ``verified_tip`` is
+    the local branch tip proved published (None when there is no branch);
+    the branch is deleted later only if its tip is still exactly this one.
+    """
+    if worktree.repo_path.resolve() != request.repo_path.resolve():
+        return (
+            f"the recorded worktree belongs to {worktree.repo_path}, "
+            f"not {request.repo_path}"
+        ), None
+    branch = worktree.branch
+    normalized = git_ops.normalize_branch_ref(branch)
+    if normalized in git_ops.PROTECTED_BRANCHES or normalized == git_ops.normalize_branch_ref(
+        request.target_branch
+    ):
+        return f"the recorded branch {branch!r} is a protected branch", None
+    try:
+        assert_worktree_inside_repo_worktrees(worktree.worktree_path, request.repo_path)
+    except ValueError as exc:
+        return str(exc), None
+
+    inspection = inspect_ticket_worktree(
+        TicketWorktree(
+            task_key=request.task_key,
+            repo_path=request.repo_path,
+            worktree_path=worktree.worktree_path,
+            branch=branch,
+            base_branch=worktree.base_branch or request.target_branch,
+        )
+    )
+    if inspection.state not in {WORKTREE_READY, WORKTREE_ABSENT}:
+        return f"the worktree is not the registered task worktree ({inspection.detail})", None
+    if inspection.dirty:
+        return (
+            f"the worktree {worktree.worktree_path} has uncommitted or untracked "
+            "changes and is retained"
+        ), None
+
+    resolved = git_ops.run_git(
+        request.repo_path,
+        ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        log=log,
+    )
+    if not resolved.ok:
+        if inspection.state == WORKTREE_READY:
+            return f"the registered worktree's branch {branch} cannot be resolved", None
+        return None, None
+    tip = resolved.stdout.strip()
+    published = (pr_state.get("pr_head_sha"), f"refs/remotes/{request.remote}/{branch}")
+    if any(
+        ref and git_ops.commit_in_history(request.repo_path, tip, ref, log=log)
+        for ref in published
+    ):
+        return None, tip
+    return (
+        f"the local branch {branch} has commits that are in neither the recorded "
+        "PR head nor the remote task branch, and is retained"
+    ), None
 
 
 def _finish(
@@ -495,7 +661,9 @@ def _finish(
         git_commands=log.as_tuple(),
     )
 
-    if task.artifact_dir is None or status == "dry_run":
+    # A preview (confirm_cleanup=False) persists nothing, not even the record
+    # of a refusal: the integration tick runs cleanup in preview unattended.
+    if task.artifact_dir is None or status == "dry_run" or not request.confirm_cleanup:
         return result
 
     directory = Path(task.artifact_dir) / "integration"

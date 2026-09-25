@@ -1,0 +1,62 @@
+# Example only. Copy and adapt outside the repository before installing.
+# Do NOT embed GitHub tokens, SSH keys, API keys, or other secrets here.
+# Credentials come from the cron user's existing environment (gh auth, SSH).
+#
+# V1 integration tick (SPEC §47.2): one bounded pass of
+# scripts/run_integration_tick.py for ONE repository, then exit. In a fixed
+# order, once each: PR-outcome polling, verified-merge cleanup,
+# target-freshness polling, then the FIFO integration queue drain. It never
+# claims a Ticket for execution (SPEC §47.4), never merges or approves a PR,
+# never confirms cancelled-work cleanup (§37.1) and never deletes a remote
+# branch. Nothing here is installed: installing or changing a cron entry is a
+# human operator action (SPEC §47.4).
+#
+# Use one line per repository. Replace every {{PLACEHOLDER}} before installing:
+#   {{PYTHON}}            the Python of the deployed checkout's environment
+#   {{TASKFLOW_HOME}}     the deployed agent-taskflow checkout (deployment target: human decision H2)
+#   {{DB}}                the Taskflow SQLite state database (explicit; there is no default)
+#   {{REPO}}              the exact GitHub owner/name key the Tickets are queued under
+#   {{REPO_PATH}}         that repository's local checkout (the Tickets' repo_path)
+#   {{VALIDATOR_CONFIG}}  the JSON list of integration validators for that repository
+#   {{REPO_LOG_KEY}}      a file-name key for that repository, e.g. owner@name
+#   {{LOG_DIR}}           an existing, writable log directory
+#
+# HUMAN CHOICE (human decision H4): each --confirm-* flag below authorizes ONE
+# phase to write. Delete every flag you have not approved; with none of them
+# the tick is a read-only preview that writes nothing to the database, pushes
+# nothing and changes no PR. (A preview still runs `git fetch origin --prune`,
+# which updates remote-tracking refs and adds origin's tags that point into
+# fetched history; it moves or deletes no local branch or tag.)
+#   --confirm-pr-poll      record PR state; cancel closed-unmerged Tickets;
+#                          move changes-requested Tickets to needs_decision
+#   --confirm-cleanup      after a merge verified per §36, remove the worktree,
+#                          safe-delete the local branch and complete the Ticket.
+#                          It acts only on merges a confirmed PR poll recorded:
+#                          without --confirm-pr-poll it cleans up no new merge.
+#   --confirm-freshness    re-queue a needs_review Ticket whose target advanced
+#   --confirm-integration  integrate queued Tickets: push the task branch and
+#                          create or update its draft PR (never merge)
+#
+# Non-overlap (SPEC §47.3): the tick holds its own flock on
+# {{DB}}.integration-tick.<owner>@<name>.lock, keyed by database and
+# repository, so different repositories run concurrently. An overlapping
+# invocation for the same repository, from cron or by hand, appends one
+# {"status": "skipped_overlap", ...} line to the JSONL log and exits 75
+# without doing any work. Do NOT also wrap this line in flock(1) on that same
+# file: the tick would contend with its own wrapper and skip every run. Do not
+# add timeout(1) either: killing a tick mid-integration leaves the per-repo
+# integration lock row held (a known, owner-reserved liveness gap).
+#
+# Exit codes: 0 ok, 1 not ok (some phase or drain outcome needs attention,
+# including a verified merge whose cleanup is incomplete: it is listed in
+# merge_verified_not_completed on every run until a human-confirmed cleanup
+# retry), 2 error (one JSON line in the log), 75 skipped_overlap.
+#
+# Cadence: every 5 minutes, offset by 2 minutes from the execution tick.
+# Provisional (SPEC §47.2); revisit after the first real Ticket runs.
+#
+# How to disable: comment out or remove the line below with `crontab -e`.
+
+PATH=/usr/local/bin:/usr/bin:/bin
+
+2-59/5 * * * * "{{PYTHON}}" "{{TASKFLOW_HOME}}/scripts/run_integration_tick.py" --db-path "{{DB}}" --repo "{{REPO}}" --repo-path "{{REPO_PATH}}" --validator-config "{{VALIDATOR_CONFIG}}" --confirm-pr-poll --confirm-cleanup --confirm-freshness --confirm-integration --jsonl >> "{{LOG_DIR}}/integration-tick.{{REPO_LOG_KEY}}.jsonl" 2>> "{{LOG_DIR}}/integration-tick.{{REPO_LOG_KEY}}.stderr.log"

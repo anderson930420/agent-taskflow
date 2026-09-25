@@ -212,6 +212,48 @@ class IntegrationStore:
             states.append({"task_key": row["task_key"], **state})
         return states
 
+    def list_merged_unverified_pr_states(self, repo: str) -> list[dict[str, Any]]:
+        """Return one repository's merged Tickets still awaiting §36 verification.
+
+            repo == tick repo AND pr_merged = 1 AND merge_verified_at IS NULL
+
+        The integration tick's cleanup pick-up (V1-F10). Read-only, and scoped
+        exactly like :meth:`list_open_pr_states`: the repository filter runs in
+        SQL on the §32.1 ``pr_url``, and each row's URL is then compared
+        exactly. A closed-unmerged (cancelled) Ticket has ``pr_merged = 0`` and
+        is never returned.
+        """
+        wanted = normalize_repo(repo)
+        columns = ", ".join(f"p.{name}" for name in TICKET_PR_FIELD_NAMES)
+        with closing(connect(self.db_path)) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT p.task_key, {columns}
+                FROM task_pr_state AS p
+                LEFT JOIN task_integration_state AS i ON i.task_key = p.task_key
+                WHERE p.pr_merged = 1
+                  AND i.merge_verified_at IS NULL
+                  AND p.pr_url IS NOT NULL
+                  AND instr(lower(p.pr_url), ?) > 0
+                ORDER BY p.task_key
+                """,
+                (pr_url_repo_marker(wanted),),
+            ).fetchall()
+
+        states: list[dict[str, Any]] = []
+        for row in rows:
+            if repo_from_pr_url(row["pr_url"]) != wanted:
+                continue
+            state = default_pr_state()
+            for name in TICKET_PR_FIELD_NAMES:
+                value = row[name]
+                if name in _BOOL_PR_FIELDS:
+                    state[name] = bool(value)
+                elif value is not None:
+                    state[name] = value
+            states.append({"task_key": row["task_key"], **state})
+        return states
+
     # -- Step-2-private integration state ---------------------------------
     def get_integration_state(self, task_key: str) -> dict[str, Any]:
         key = normalize_task_key(task_key)

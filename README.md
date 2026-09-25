@@ -62,13 +62,19 @@ After integration, Taskflow can push a task branch and create or update a draft
 PR, but **a human reviews and merges it in GitHub**. Taskflow never calls
 `gh pr merge`, cannot self-approve, and does not enable auto-merge.
 
-F10 is also open. Its current scope is the remaining V1 invocation surface:
-target-freshness polling, PR-outcome polling, verified-merge cleanup, and
-scheduling of the parallel execution tick. These components must not be
+F10's real end-to-end gate (ruling 56) passed on 2026-09-25 against a private
+throwaway repository, with the two cron lines as the only drivers. F10 is the
+rest of the V1 invocation surface (SPEC §47): one
+`scripts/run_integration_tick.py` pass per repository polls PR
+outcomes, runs verified-merge cleanup, polls target freshness, then drains the
+queue; each phase is a read-only preview unless its own `--confirm-*` flag is
+passed. Both tick scripts hold a non-overlap lock and log a `skipped_overlap`
+result, and `deploy/cron/v1-execution-tick.cron.example` and
+`deploy/cron/v1-integration-tick.cron.example` show the cron lines. Nothing is
+installed: installing cron is a human operator action (SPEC §47.4), and which
+confirmations cron passes is a human choice. The ticks must not be
 described as an installed, autonomous service. Ruling 65 records the
-missing-invoker history; FOLLOWUPS.md's execution-vehicle draft proposes short,
-idempotent cron ticks under SPEC §47, with human installation still separate.
-F10 must settle that deployment surface.
+missing-invoker history.
 
 ## Safety boundaries and enforcement
 
@@ -148,8 +154,9 @@ status or the human GitHub merge gate.
 * **F9:** build one idempotent integration tick that drains each repository
   queue in FIFO order. It must call the existing controller; it must not change
   the controller's lock or merge semantics.
-* **F10:** call the other existing consumer components and settle the cron
-  deployment surface, including non-overlap locks.
+* **F10:** call the other existing consumer components from the integration
+  tick, add non-overlap locks to both ticks, and ship uninstalled cron examples.
+  Its real end-to-end run is the gate; installing cron stays a human action.
 * **F2:** complete the deferred repository-wide status vocabulary and explicit
   migration cleanup.
 * **After F9/F10:** run the first real Ticket. Its observed friction, rather

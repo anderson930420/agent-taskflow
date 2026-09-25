@@ -56,12 +56,17 @@ Integration 後，Taskflow 可以 push task branch 並建立或更新 draft PR�
 **GitHub review 與 merge 一律由 human 完成**。Taskflow 不會呼叫 `gh pr merge`，
 不能 self-approve，也不會啟用 auto-merge。
 
-F10 也尚未完成。目前 scope 是其餘 V1 invocation surface：target-freshness
-polling、PR-outcome polling、verified-merge cleanup，以及 parallel execution tick
-的 scheduling。這些 component 不能被描述為已安裝的 autonomous service。Ruling 65
-記錄 missing-invoker history；FOLLOWUPS.md 的 execution-vehicle draft 依 SPEC §47
-propose short、idempotent cron tick，human installation 仍是另一個動作。F10 必須
-決定 deployment surface。
+F10 的 real end-to-end gate（ruling 56）已於 2026-09-25 在一個 private throwaway
+repository 上通過，全程只由兩條 cron line 驅動。F10 是其餘 V1 invocation surface
+（SPEC §47）：每個 repository 每次
+`scripts/run_integration_tick.py` pass 依序 poll PR outcomes、執行 verified-merge
+cleanup、poll target freshness，最後 drain queue；每個 phase 沒有自己的
+`--confirm-*` flag 時都是 read-only preview。兩個 tick script 都持有 non-overlap
+lock，並把 `skipped_overlap` 結果寫進 log；`deploy/cron/v1-execution-tick.cron.example`
+與 `deploy/cron/v1-integration-tick.cron.example` 示範 cron line。沒有安裝任何東西：
+安裝 cron 是 human operator action（SPEC §47.4），cron 要傳哪些 confirmation 也是
+human choice。這些 tick 不能被描述為已安裝的 autonomous service。Ruling 65 記錄
+missing-invoker history。
 
 ## 安全邊界與 enforcement points
 
@@ -134,8 +139,9 @@ fallback。此 authority 在所有 confirmed Level 2 execution 仍是 canonical�
 * **F7（本文件更新）：** 使 public description 與已 merge 的 F4/F8 behavior 一致。
 * **F9：** 建立一個 idempotent integration tick，依 FIFO drain 各 repository queue。
   它必須呼叫既有 controller，不得更動 controller 的 lock 或 merge semantics。
-* **F10：** 呼叫其餘既有 consumer components，並確定 cron deployment surface，
-  包括 non-overlap locks。
+* **F10：** 由 integration tick 呼叫其餘既有 consumer components，為兩個 tick
+  加上 non-overlap locks，並提供未安裝的 cron examples。它的 real end-to-end run
+  是 gate；安裝 cron 仍是 human action。
 * **F2：** 完成 deferred repository-wide status vocabulary 與 explicit migration
   cleanup。
 * **F9/F10 後：** 跑第一張真實 Ticket。由它的 observed friction，而不是這份

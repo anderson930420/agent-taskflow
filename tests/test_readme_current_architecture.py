@@ -129,6 +129,21 @@ class ReadmeCurrentArchitectureTests(unittest.TestCase):
         self.assertIn("must not be\ndescribed as an installed", self.readme)
         self.assertIn("不能被描述為已安裝", self.readme_zh_tw)
 
+    def test_f10_invocation_surface_is_described_as_uninstalled(self) -> None:
+        cron_examples = (
+            "deploy/cron/v1-execution-tick.cron.example",
+            "deploy/cron/v1-integration-tick.cron.example",
+        )
+        for readme in (self.readme, self.readme_zh_tw):
+            for fact in ("scripts/run_integration_tick.py", "`--confirm-*`", "skipped_overlap",
+                         "SPEC §47.4", *cron_examples):
+                self.assertIn(fact, readme)
+        for path in (*cron_examples, "scripts/run_integration_tick.py",
+                     "scripts/run_parallel_scheduler_tick.py"):
+            self.assertTrue((REPO_ROOT / path).is_file(), path)
+        self.assertIn("Nothing is\ninstalled", self.readme)
+        self.assertIn("沒有安裝任何東西", self.readme_zh_tw)
+
     def test_safety_boundaries_name_concrete_enforcement_points(self) -> None:
         for readme in (self.readme, self.readme_zh_tw):
             for path in (
