@@ -147,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Executor profile model recorded on the ingested task and passed "
-            "to the approved task runner, for example claude-sonnet-4-6."
+            "to the approved task runner, for example claude-opus-5-5."
         ),
     )
     parser.add_argument(
