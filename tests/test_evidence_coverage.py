@@ -34,6 +34,7 @@ from agent_taskflow.evidence_coverage import (  # noqa: E402
     EVIDENCE_PREFLIGHT_PR_CHECK,
     EVIDENCE_VALIDATION_SUMMARY,
     EVIDENCE_VALIDATOR_LOGS,
+    PREFLIGHT_NOT_APPLICABLE_REASON,
     RunnerEvidenceCollector,
     validator_config_identity,
 )
@@ -248,17 +249,39 @@ class DispatcherCoverageTests(unittest.TestCase):
         self.assertFalse(coverage["complete"])
 
     def test_unobserved_evidence_is_unknown_and_never_invented(self) -> None:
+        """dual-write-consistency.json: nothing observed, so nothing claimed.
+
+        This used to cover preflight-pr-check.json too. L2-M2-B2 made an
+        unproduced preflight check not_applicable with its reason; that case
+        is now test_a_pr_preflight_check_nothing_produces_is_not_applicable.
+        """
         key = self.fx.create_ticket("Nothing observed").task_key
         self.fx.dispatch(key)
 
         coverage = self.coverage(key)
-        for evidence in (EVIDENCE_PREFLIGHT_PR_CHECK, EVIDENCE_DUAL_WRITE_CONSISTENCY):
-            item = self.item(coverage, evidence)
-            self.assertEqual(item["applicability"], "unknown", evidence)
-            self.assertEqual(item["status"], "unknown", evidence)
-            self.assertEqual(item["references"], [], evidence)
-            self.assertTrue(item["reason"])
-            self.assertNotIn(evidence, coverage["unresolved"])
+        item = self.item(coverage, EVIDENCE_DUAL_WRITE_CONSISTENCY)
+        self.assertEqual(item["applicability"], "unknown")
+        self.assertEqual(item["status"], "unknown")
+        self.assertEqual(item["references"], [])
+        self.assertTrue(item["reason"])
+        self.assertNotIn(EVIDENCE_DUAL_WRITE_CONSISTENCY, coverage["unresolved"])
+
+    def test_a_pr_preflight_check_nothing_produces_is_not_applicable(self) -> None:
+        # L2-M2-B2: no seam performs a PR preflight check, so the index says so
+        # with its reason instead of leaving it unknown — and writes nothing.
+        key = self.fx.create_ticket("No PR preflight").task_key
+        self.fx.dispatch(key)
+
+        coverage = self.coverage(key)
+        item = self.item(coverage, EVIDENCE_PREFLIGHT_PR_CHECK)
+        self.assertEqual(item["applicability"], "not_applicable")
+        self.assertEqual(item["status"], "not_applicable")
+        self.assertEqual(item["references"], [])
+        self.assertEqual(item["reason"], PREFLIGHT_NOT_APPLICABLE_REASON)
+        self.assertNotIn(EVIDENCE_PREFLIGHT_PR_CHECK, coverage["unresolved"])
+        self.assertEqual(
+            list((self.fx.artifacts / key).rglob(EVIDENCE_PREFLIGHT_PR_CHECK)), []
+        )
 
     def test_the_executor_launch_spec_is_linked_when_the_executor_reports_it(self) -> None:
         key = self.fx.create_ticket("Launch spec").task_key

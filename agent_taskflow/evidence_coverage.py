@@ -61,6 +61,11 @@ __all__ = [
     "EVIDENCE_VALIDATOR_LOGS",
     "COVERAGE_ARTIFACT_NAME",
     "COVERAGE_KIND",
+    "PREFLIGHT_NOT_APPLICABLE_REASON",
+    "ROOT_ATTEMPT",
+    "ROOT_ATTEMPT_ELSEWHERE",
+    "ROOT_NO_ATTEMPT",
+    "ROOT_NONE",
     "RunnerEvidenceCollector",
     "validator_config_identity",
 ]
@@ -78,6 +83,31 @@ EVIDENCE_VALIDATOR_LOGS = "validator-specific-logs"
 EVIDENCE_PREFLIGHT_PR_CHECK = "preflight-pr-check.json"
 EVIDENCE_EXECUTOR_LAUNCH_SPEC = "executor-launch-spec.json"
 EVIDENCE_DUAL_WRITE_CONSISTENCY = "dual-write-consistency.json"
+
+# L2-M2-B2: nothing in this repository writes preflight-pr-check.json and no
+# validation run performs a PR preflight check, so a run that neither observed
+# one nor found one is not_applicable, with this reason, rather than unknown. A
+# seam that gains a real check reports it through
+# RunnerEvidenceCollector.note_operation; nothing here writes the file.
+PREFLIGHT_NOT_APPLICABLE_REASON = (
+    "No validation run performs a PR preflight check, and nothing in Taskflow "
+    "writes preflight-pr-check.json. Execution validation never opens or checks "
+    "a PR. V1 integration gates the PR it publishes with the Taskflow "
+    "integration validators recorded in the validation summary (SPEC §29, "
+    "§30), and GitHub CI has no lifecycle authority. The legacy path's PR "
+    "preparation preflight (pr_preparation_pipeline.py) is a separate explicit "
+    "operator command after waiting_approval and writes no such file. No check "
+    "ran in this run and none was found in the artifact root."
+)
+
+# Why the recorder's artifact root is where it is (L2-M2-B2). Attempt-scoped
+# resources always put an Attempt's root at ``<artifact base>/<attempt_id>``
+# (attempt_resources.allocate), so a root named after the run's own Attempt is
+# that Attempt's root.
+ROOT_ATTEMPT = "attempt_artifact_root"
+ROOT_ATTEMPT_ELSEWHERE = "attempt_bound_outside_attempt_root"
+ROOT_NO_ATTEMPT = "no_attempt_bound"
+ROOT_NONE = "no_artifact_root"
 
 EVIDENCE_KINDS = (
     EVIDENCE_VALIDATION_SUMMARY,
@@ -467,6 +497,9 @@ class RunnerEvidenceCollector:
             "generated_at": _now(),
             "artifact_roots": [str(root) for root in roots],
             "recorder_artifact_root": None if recorder_root is None else str(recorder_root),
+            "artifact_root_binding": _artifact_root_binding(
+                payload.get("attempt_id"), recorder_root
+            ),
             "executor": self._executor,
             # complete means every applicable kind resolved to a reference this
             # run may claim: readable and inside the recorder's own boundary.
@@ -720,20 +753,21 @@ class RunnerEvidenceCollector:
                 detail={**observation["detail"], "observed": False},
                 ran=False,
             )
+        if observation is not None:
+            return _Item(
+                evidence=EVIDENCE_PREFLIGHT_PR_CHECK,
+                applicability=UNKNOWN,
+                reason=observation["reason"],
+                producers=[],
+                detail={"observed": False},
+                ran=False,
+            )
         return _Item(
             evidence=EVIDENCE_PREFLIGHT_PR_CHECK,
-            applicability=UNKNOWN,
-            reason=(
-                observation["reason"]
-                if observation is not None
-                else (
-                    "No PR preflight check ran in this validation run and none was "
-                    "found in the artifact root. This seam does not determine "
-                    "whether one applies, so nothing is claimed either way."
-                )
-            ),
+            applicability=NOT_APPLICABLE,
+            reason=PREFLIGHT_NOT_APPLICABLE_REASON,
             producers=[],
-            detail={"observed": False},
+            detail={"observed": False, "producer": None},
             ran=False,
         )
 
@@ -845,6 +879,44 @@ class RunnerEvidenceCollector:
             ),
             producers=[],
         )
+
+
+def _artifact_root_binding(
+    attempt_id: str | None, recorder_root: Path | None
+) -> dict[str, Any]:
+    """Say whether the recorder's root is the run's Attempt root, and why."""
+    if recorder_root is None:
+        return {
+            "scope": "none",
+            "reason_code": ROOT_NONE,
+            "reason": "The run had no artifact root, so nothing was written.",
+        }
+    if attempt_id is None:
+        return {
+            "scope": "task",
+            "reason_code": ROOT_NO_ATTEMPT,
+            "reason": (
+                "The run is bound to no Attempt (it held no runtime claim, or it "
+                "is an integration run without a producer Attempt), so no Attempt "
+                f"root exists and the evidence is written to {recorder_root}."
+            ),
+        }
+    if recorder_root.name == attempt_id:
+        return {
+            "scope": "attempt",
+            "reason_code": ROOT_ATTEMPT,
+            "reason": f"Written under the artifact root of Attempt {attempt_id}.",
+        }
+    return {
+        "scope": "task",
+        "reason_code": ROOT_ATTEMPT_ELSEWHERE,
+        "reason": (
+            f"The run is bound to Attempt {attempt_id}, but that Attempt has no "
+            f"usable Attempt-scoped artifact root, so the evidence is written to "
+            f"{recorder_root}. An integration run records the exact reason in "
+            "its evidence_root."
+        ),
+    }
 
 
 def _recorder_rejection(row: Mapping[str, Any]) -> str | None:

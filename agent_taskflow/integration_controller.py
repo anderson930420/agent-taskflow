@@ -43,6 +43,10 @@ from agent_taskflow.integration_conflict_resolver import (
     ConflictResolver,
     resolve_conflicts,
 )
+from agent_taskflow.integration_evidence_root import (
+    IntegrationEvidenceRoot,
+    resolve_integration_evidence_root,
+)
 from agent_taskflow.integration_git import GitCommandLog, IntegrationGitError
 from agent_taskflow.integration_handoff import (
     ProducerAttemptBinding,
@@ -168,6 +172,9 @@ class IntegrationResult:
     # The Attempt that produced the tree this run integrates, or the recorded
     # reason there is none. Never a guess from the task's Attempt history.
     producer_attempt_binding: dict[str, Any] | None = None
+    # Where this run's evidence was written: the producer Attempt's root, or
+    # the task level with the reason (L2-M2 Exit Gate row 3).
+    evidence_root: dict[str, Any] | None = None
 
     def to_summary_dict(self) -> dict[str, Any]:
         return {
@@ -199,6 +206,7 @@ class IntegrationResult:
             "git_commands": [list(command) for command in self.git_commands],
             "integration_run_id": self.integration_run_id,
             "producer_attempt_binding": self.producer_attempt_binding,
+            "evidence_root": self.evidence_root,
             "dry_run": self.dry_run,
             "confirmation_required": self.confirmation_required,
             "safety": {
@@ -360,6 +368,14 @@ def _integrate_under_lock(
     producer_binding = resolve_producer_attempt_binding(
         task_store, integration, request.task_key, repo=request.repo
     )
+    # Evidence follows the producer: its Attempt root when one is bound and
+    # usable, the task level otherwise, with the reason recorded either way.
+    evidence_root = resolve_integration_evidence_root(
+        task_store.db_path,
+        task_key=request.task_key,
+        task_artifact_dir=task.artifact_dir,
+        producer_binding=producer_binding,
+    )
 
     task_store.update_task_status(
         request.task_key,
@@ -378,6 +394,7 @@ def _integrate_under_lock(
             "mode": mode,
             "repo": request.repo,
             "producer_attempt_binding": producer_binding.to_dict(),
+            "evidence_root": evidence_root.to_dict(),
         },
     )
     integration.update_integration_state(
@@ -428,6 +445,7 @@ def _integrate_under_lock(
             pr_state=integration.get_pr_state(request.task_key),
             task=task,
             producer_binding=producer_binding,
+            evidence_root=evidence_root,
             **extra,
         )
 
@@ -576,7 +594,7 @@ def _integrate_under_lock(
         report = run_integration_validators(
             task_key=request.task_key,
             worktree_path=worktree_path,
-            artifact_dir=task.artifact_dir,
+            artifact_dir=evidence_root.path,
             specs=request.validator_specs,
             branch_sha=branch_sha,
             target_sha=target_sha,
@@ -744,6 +762,7 @@ def _integrate_under_lock(
             pr_state=integration.get_pr_state(request.task_key),
             task=task,
             producer_binding=producer_binding,
+            evidence_root=evidence_root,
             validation_report=report,
             conflict_detected=conflict_detected,
             conflict_resolved=conflict_resolved,
@@ -868,6 +887,7 @@ def _finish(
     pr_state: dict[str, Any],
     task: Any,
     producer_binding: ProducerAttemptBinding | None = None,
+    evidence_root: IntegrationEvidenceRoot | None = None,
     validation_report: IntegrationValidationReport | None = None,
     conflict_detected: bool = False,
     conflict_resolved: bool = False,
@@ -904,12 +924,16 @@ def _finish(
         producer_attempt_binding=(
             None if producer_binding is None else producer_binding.to_dict()
         ),
+        evidence_root=None if evidence_root is None else evidence_root.to_dict(),
     )
 
-    if task.artifact_dir is None:
+    directory_root = (
+        evidence_root.path if evidence_root is not None else task.artifact_dir
+    )
+    if directory_root is None:
         return result
 
-    directory = Path(task.artifact_dir) / "integration"
+    directory = Path(directory_root) / "integration"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"integration-{run_id}.json"
     atomic_write_json(path, result.to_summary_dict(), sort_keys=True)
