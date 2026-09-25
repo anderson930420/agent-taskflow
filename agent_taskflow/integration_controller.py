@@ -8,12 +8,23 @@ The pipeline follows §23.1 exactly, including the ordering that matters most:
 
     acquire repo lock -> fetch -> update against latest target ->
     resolve conflicts -> validators -> push/update PR ->
-    record integrated_base_sha -> release lock -> needs_review
+    record integrated_base_sha -> needs_review -> release lock
 
-``needs_review`` is set *after* the lock is released, which is what makes
-"the integration lock does not wait for human review" (§44) structurally true
-rather than merely intended, and what lets several same-repo PRs sit in
-``needs_review`` simultaneously (§43.17).
+The lock is the repository's OS flock (:mod:`integration_repo_lock`, RULINGS
+69), taken and released by each call; the ``integration_locks`` row is only a
+journal of it. Every integration write, the ``needs_review`` hand-off
+included, happens while it is held: a successor that took the lock in a gap
+before ``needs_review`` would reconcile the same Ticket (crash case E) and
+race this run's write. The lock is still released when this call returns, so
+it never waits for human review (§23.1, §44) and several same-repo PRs can
+sit in ``needs_review`` at once (§43.17).
+
+Each acquire first reconciles the repository's Tickets that a dead holder
+left in ``integrating`` (:mod:`integration_crash_reconciliation`). The run
+records checkpoints in ``last_integration_status`` for that: ``running``
+before the Ticket enters ``integrating``, ``publishing`` before the push,
+``creating_pr`` before a PR is created, and ``integrated`` together with the
+base, the count and the dequeue in one transaction.
 
 Two integration modes:
 
@@ -38,6 +49,13 @@ from agent_taskflow import integration_git as git_ops
 from agent_taskflow import integration_schema as schema
 from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.github_pr_adapter import GitHubPrAdapter, GitHubPrError
+from agent_taskflow.integration_crash_reconciliation import (
+    RUN_CREATING_PR,
+    RUN_INTEGRATED,
+    RUN_PUBLISHING,
+    RUN_STARTED,
+    reconcile_integrating_tickets,
+)
 from agent_taskflow.integration_conflict_resolver import (
     ConflictResolutionRequest,
     ConflictResolver,
@@ -52,10 +70,10 @@ from agent_taskflow.integration_handoff import (
     ProducerAttemptBinding,
     resolve_producer_attempt_binding,
 )
-from agent_taskflow.integration_queue import (
-    IntegrationLock,
-    IntegrationLockUnavailable,
-    remove_from_queue,
+from agent_taskflow.integration_repo_lock import (
+    ExternalHoldProbe,
+    IntegrationRepoLock,
+    LockAcquisition,
 )
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.integration_validators import (
@@ -110,6 +128,12 @@ class IntegrationRequest:
     title: str | None = None
     body: str | None = None
     trigger: str | None = None
+    # The integration flock's directory; None resolves the explicit setting or
+    # its default (integration_repo_lock.resolve_lock_dir).
+    lock_dir: Path | None = None
+    # Proves a recorded external hold gone before takeover (OR-8.1); None
+    # fails closed on any recorded hold.
+    external_hold_probe: ExternalHoldProbe | None = None
 
     # Ambiguity watchlist (see docs/v1/handoff-step2.md): the spec does not say whether a
     # re-integration that is already up to date should still push. The default
@@ -128,6 +152,10 @@ class IntegrationRequest:
                 self, "db_path", ensure_absolute_path(self.db_path, name="db_path")
             )
         object.__setattr__(self, "validator_specs", tuple(self.validator_specs))
+        if self.lock_dir is not None:
+            object.__setattr__(
+                self, "lock_dir", ensure_absolute_path(self.lock_dir, name="lock_dir")
+            )
 
 
 @dataclass(frozen=True)
@@ -175,6 +203,9 @@ class IntegrationResult:
     # Where this run's evidence was written: the producer Attempt's root, or
     # the task level with the reason (L2-M2 Exit Gate row 3).
     evidence_root: dict[str, Any] | None = None
+    # The integration flock this run took, and what crash reconciliation did
+    # on acquiring it (RULINGS 69). None when no lock was attempted.
+    integration_lock: dict[str, Any] | None = None
 
     def to_summary_dict(self) -> dict[str, Any]:
         return {
@@ -207,6 +238,7 @@ class IntegrationResult:
             "integration_run_id": self.integration_run_id,
             "producer_attempt_binding": self.producer_attempt_binding,
             "evidence_root": self.evidence_root,
+            "integration_lock": self.integration_lock,
             "dry_run": self.dry_run,
             "confirmation_required": self.confirmation_required,
             "safety": {
@@ -267,6 +299,124 @@ def integrate_task(
             pr_state=pr_state,
         )
 
+    guard = _entry_guard(request, task=task, mode=mode, pr_state=pr_state)
+    confirmed = not request.dry_run and request.confirm_integration
+    # A Ticket in `integrating` may have been left there by a dead holder;
+    # only the lock holder can tell, after reconciling it (RULINGS 69).
+    if guard is not None and not (confirmed and task.status == schema.INTEGRATING):
+        return guard
+
+    if not confirmed:
+        return _simple_result(
+            ok=True,
+            status="dry_run",
+            mode=mode,
+            request=request,
+            final_task_status=task.status,
+            summary=(
+                "Dry run only; no git, GitHub, or lifecycle mutation was performed. "
+                "Pass confirm_integration=True with dry_run=False to integrate."
+            ),
+            pr_state=pr_state,
+            confirmation_required=not request.confirm_integration,
+        )
+
+    run_id = uuid4().hex[:12]
+    # Refusals (a corrupt record, another host or clone) raise and change
+    # nothing: they need a human, not a retry.
+    lock = IntegrationRepoLock(
+        request.repo,
+        git_common_dir=git_ops.git_common_dir(worktree.worktree_path),
+        run_id=run_id,
+        task_key=request.task_key,
+        db_path=task_store.db_path,
+        owner=request.owner,
+        lock_dir=request.lock_dir,
+        external_hold_probe=request.external_hold_probe,
+    )
+    acquisition = lock.acquire()
+    if not acquisition.acquired:
+        # §22 — the repo is already integrating. Stay queued and try next tick.
+        return _simple_result(
+            ok=False,
+            status="lock_unavailable",
+            mode=mode,
+            request=request,
+            final_task_status=task.status,
+            summary=acquisition.detail,
+            pr_state=pr_state,
+            integration_lock=_lock_evidence(lock, acquisition),
+        )
+
+    try:
+        with lock.inherited_by_children():
+            lock_evidence = _lock_evidence(lock, acquisition)
+            # A journal row found now was written by a holder that died.
+            leftover = integration.get_integration_lock(request.repo)
+            lock_evidence["leftover_journal_row"] = leftover
+            lock_evidence["crash_reconciliation"] = reconcile_integrating_tickets(
+                task_store=task_store,
+                integration=integration,
+                repo_key=lock.key,
+                git_common_dir=lock.git_common_dir,
+                reconciler_run_id=run_id,
+                lock_evidence={
+                    key: value
+                    for key, value in lock_evidence.items()
+                    if key != "crash_reconciliation"
+                },
+            )
+            if leftover is not None:
+                integration.clear_integration_lock(request.repo)
+            integration.acquire_integration_lock(lock.key, owner=request.owner)
+
+            task = task_store.get_task(request.task_key) or task
+            pr_state = integration.get_pr_state(request.task_key)
+            mode = "initial" if pr_state["pr_number"] is None else "reintegration"
+            guard = _entry_guard(
+                request, task=task, mode=mode, pr_state=pr_state,
+                integration_lock=lock_evidence,
+            )
+            if guard is not None:
+                return guard
+            return _integrate_under_lock(
+                request,
+                task=task,
+                worktree=worktree,
+                mode=mode,
+                pr_state=pr_state,
+                task_store=task_store,
+                integration=integration,
+                github=github,
+                run_id=run_id,
+                lock_evidence=lock_evidence,
+            )
+    finally:
+        try:
+            integration.release_integration_lock(lock.key, owner=request.owner)
+        finally:
+            lock.release()
+
+
+def _lock_evidence(lock: IntegrationRepoLock, acquisition: LockAcquisition) -> dict[str, Any]:
+    return {
+        "key": lock.key,
+        "lock_path": str(lock.lock_path),
+        "record_path": str(lock.record_path),
+        "git_common_dir": lock.git_common_dir,
+        "acquisition": acquisition.to_dict(),
+    }
+
+
+def _entry_guard(
+    request: IntegrationRequest,
+    *,
+    task: Any,
+    mode: str,
+    pr_state: dict[str, Any],
+    integration_lock: dict[str, Any] | None = None,
+) -> IntegrationResult | None:
+    """Refuse a Ticket that is not ready, or whose PR already merged."""
     if task.status != schema.READY_FOR_INTEGRATION:
         return _simple_result(
             ok=False,
@@ -279,6 +429,7 @@ def integrate_task(
                 f"integrate, got {task.status!r}"
             ),
             pr_state=pr_state,
+            integration_lock=integration_lock,
         )
 
     if pr_state["pr_merged"]:
@@ -296,52 +447,9 @@ def integrate_task(
                 "is nothing left to integrate. Run merge verification and cleanup."
             ),
             pr_state=pr_state,
+            integration_lock=integration_lock,
         )
-
-    if request.dry_run or not request.confirm_integration:
-        return _simple_result(
-            ok=True,
-            status="dry_run",
-            mode=mode,
-            request=request,
-            final_task_status=task.status,
-            summary=(
-                "Dry run only; no git, GitHub, or lifecycle mutation was performed. "
-                "Pass confirm_integration=True with dry_run=False to integrate."
-            ),
-            pr_state=pr_state,
-            confirmation_required=not request.confirm_integration,
-        )
-
-    try:
-        lock = IntegrationLock(integration, request.repo, owner=request.owner)
-        lock.__enter__()
-    except IntegrationLockUnavailable as exc:
-        # §22 — the repo is already integrating. Stay queued and try next tick.
-        return _simple_result(
-            ok=False,
-            status="lock_unavailable",
-            mode=mode,
-            request=request,
-            final_task_status=task.status,
-            summary=str(exc),
-            pr_state=pr_state,
-        )
-
-    try:
-        return _integrate_under_lock(
-            request,
-            task=task,
-            worktree=worktree,
-            mode=mode,
-            pr_state=pr_state,
-            task_store=task_store,
-            integration=integration,
-            github=github,
-            lock=lock,
-        )
-    finally:
-        lock.__exit__(None, None, None)
+    return None
 
 
 def _integrate_under_lock(
@@ -354,9 +462,9 @@ def _integrate_under_lock(
     task_store: TaskMirrorStore,
     integration: IntegrationStore,
     github: GitHubPrAdapter | None,
-    lock: IntegrationLock,
+    run_id: str,
+    lock_evidence: dict[str, Any],
 ) -> IntegrationResult:
-    run_id = uuid4().hex[:12]
     log = GitCommandLog()
     worktree_path = worktree.worktree_path
     target_ref = f"{request.remote}/{request.target_branch}"
@@ -377,6 +485,14 @@ def _integrate_under_lock(
         producer_binding=producer_binding,
     )
 
+    # Checkpoint first, so a Ticket in `integrating` never carries a previous
+    # run's checkpoint (crash case A, RULINGS 69).
+    integration.update_integration_state(
+        request.task_key,
+        last_integration_run_id=run_id,
+        last_integration_status=RUN_STARTED,
+        trigger_task_key=request.trigger,
+    )
     task_store.update_task_status(
         request.task_key,
         schema.INTEGRATING,
@@ -395,13 +511,10 @@ def _integrate_under_lock(
             "repo": request.repo,
             "producer_attempt_binding": producer_binding.to_dict(),
             "evidence_root": evidence_root.to_dict(),
+            "integration_lock": {
+                key: lock_evidence[key] for key in ("key", "lock_path", "git_common_dir")
+            },
         },
-    )
-    integration.update_integration_state(
-        request.task_key,
-        last_integration_run_id=run_id,
-        last_integration_status="running",
-        trigger_task_key=request.trigger,
     )
 
     def stop_for_decision(
@@ -446,6 +559,7 @@ def _integrate_under_lock(
             task=task,
             producer_binding=producer_binding,
             evidence_root=evidence_root,
+            integration_lock=lock_evidence,
             **extra,
         )
 
@@ -614,8 +728,11 @@ def _integrate_under_lock(
             )
 
         # -- hints, PR body ----------------------------------------------------
+        # A Ticket with a PR but no recorded base is finishing its initial
+        # integration after a crash (case D), so this run is not a re-integration.
+        increments_count = mode == "reintegration" and previous_base is not None
         reintegration_count = pr_state["reintegration_count"] or 0
-        projected_count = reintegration_count + (1 if mode == "reintegration" else 0)
+        projected_count = reintegration_count + (1 if increments_count else 0)
         hints = tuple(
             build_reviewer_hints(
                 ai_resolved_conflict=conflict_resolved,
@@ -655,6 +772,19 @@ def _integrate_under_lock(
         should_push = not (mode == "reintegration" and already_up_to_date) or (
             request.push_no_op_reintegration
         )
+        if not should_push:
+            # A re-integration whose push a crash cut short is up to date with
+            # the target locally but not on the remote (crash case D, RULINGS
+            # 69). Its validated commit must still be published.
+            should_push = (
+                git_ops.remote_branch_sha(
+                    worktree_path, request.remote, worktree.branch, log=log
+                )
+                != branch_sha
+            )
+        integration.update_integration_state(
+            request.task_key, last_integration_status=RUN_PUBLISHING
+        )
         if should_push:
             try:
                 git_ops.push_branch(
@@ -670,6 +800,9 @@ def _integrate_under_lock(
         adapter = github or GitHubPrAdapter(request.repo)
         try:
             if mode == "initial":
+                integration.update_integration_state(
+                    request.task_key, last_integration_status=RUN_CREATING_PR
+                )
                 snapshot = adapter.create_pr(
                     base=request.target_branch,
                     head=worktree.branch,
@@ -698,30 +831,28 @@ def _integrate_under_lock(
         except GitHubPrError as exc:
             return stop_for_decision(f"GitHub PR operation failed: {exc}")
 
-        # -- record integrated_base_sha (§23.1) --------------------------------
-        integration.update_pr_state(
+        # -- record integrated_base_sha (§23.1) and dequeue, atomically --------
+        recorded = integration.record_integration_completed(
             request.task_key,
-            pr_number=snapshot.number,
-            pr_url=snapshot.url,
-            pr_state=snapshot.state or "open",
-            pr_head_sha=branch_sha,
-            integrated_base_sha=target_sha,
-            reintegration_required=False,
+            pr_fields=dict(
+                pr_number=snapshot.number,
+                pr_url=snapshot.url,
+                pr_state=snapshot.state or "open",
+                pr_head_sha=branch_sha,
+                integrated_base_sha=target_sha,
+                reintegration_required=False,
+            ),
+            increment_reintegration=increments_count,
+            state_fields=dict(
+                previous_integrated_base_sha=previous_base,
+                new_target_sha=target_sha,
+                behind_count=behind,
+                last_integration_status=RUN_INTEGRATED,
+            ),
         )
-        if mode == "reintegration":
-            projected_count = integration.increment_reintegration_count(request.task_key)
-        integration.update_integration_state(
-            request.task_key,
-            previous_integrated_base_sha=previous_base,
-            new_target_sha=target_sha,
-            behind_count=behind,
-            last_integration_status="integrated",
-        )
-        remove_from_queue(integration, request.task_key)
+        projected_count = int(recorded["reintegration_count"] or 0)
 
-        # -- release the lock, *then* enter review (§23.1, §44) ----------------
-        lock.__exit__(None, None, None)
-
+        # -- enter review, still under the lock; it is released on return ------
         task_store.update_task_status(
             request.task_key,
             schema.NEEDS_REVIEW,
@@ -763,6 +894,7 @@ def _integrate_under_lock(
             task=task,
             producer_binding=producer_binding,
             evidence_root=evidence_root,
+            integration_lock=lock_evidence,
             validation_report=report,
             conflict_detected=conflict_detected,
             conflict_resolved=conflict_resolved,
@@ -853,6 +985,7 @@ def _simple_result(
     summary: str,
     pr_state: dict[str, Any],
     confirmation_required: bool = False,
+    integration_lock: dict[str, Any] | None = None,
 ) -> IntegrationResult:
     return IntegrationResult(
         ok=ok,
@@ -868,6 +1001,7 @@ def _simple_result(
         pr_url=pr_state["pr_url"],
         integrated_base_sha=pr_state["integrated_base_sha"],
         reintegration_count=pr_state["reintegration_count"] or 0,
+        integration_lock=integration_lock,
     )
 
 
@@ -888,6 +1022,7 @@ def _finish(
     task: Any,
     producer_binding: ProducerAttemptBinding | None = None,
     evidence_root: IntegrationEvidenceRoot | None = None,
+    integration_lock: dict[str, Any] | None = None,
     validation_report: IntegrationValidationReport | None = None,
     conflict_detected: bool = False,
     conflict_resolved: bool = False,
@@ -925,6 +1060,7 @@ def _finish(
             None if producer_binding is None else producer_binding.to_dict()
         ),
         evidence_root=None if evidence_root is None else evidence_root.to_dict(),
+        integration_lock=integration_lock,
     )
 
     directory_root = (

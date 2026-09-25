@@ -11,12 +11,17 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from v1_step2_fixtures import FakeGhRunner, GitFixture
+from v1_step2_fixtures import (
+    FakeGhRunner,
+    GitFixture,
+    hold_integration_lock,
+    isolate_integration_lock_dir,
+)
 
 from agent_taskflow import integration_schema as schema
 from agent_taskflow.github_pr_adapter import GitHubPrAdapter
 from agent_taskflow.integration_controller import integrate_task
-from agent_taskflow.integration_queue import IntegrationLock, enqueue_for_integration, queue_for_repo
+from agent_taskflow.integration_queue import enqueue_for_integration, queue_for_repo
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.integration_tick import IntegrationTickRequest, run_integration_tick
 from agent_taskflow.integration_validators import IntegrationValidatorSpec
@@ -34,6 +39,7 @@ VALIDATORS = (IntegrationValidatorSpec(
 
 class TickFixture(unittest.TestCase):
     def setUp(self) -> None:
+        self.lock_dir = isolate_integration_lock_dir(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -143,13 +149,15 @@ class IntegrationTickTests(TickFixture):
 
     def test_lock_unavailable_stops_before_second_ticket_without_retry(self):
         first, second = self.make_ticket(), self.make_ticket()
-        with IntegrationLock(self.integration, "owner/repo", owner="other-runtime"):
-            with patch("agent_taskflow.integration_tick.integrate_task", wraps=integrate_task) as call:
-                result = self.tick()
-            self.assertEqual(call.call_count, 1)
-            self.assertEqual(result["stopped_reason"], "lock_unavailable")
-            self.assertEqual(result["remaining_task_keys"], [first.task_key, second.task_key])
-            self.assertEqual(self.integration.get_integration_lock("owner/repo")["owner"], "other-runtime")
+        # RULINGS 69: another writer holds the repository's flock.
+        lock = hold_integration_lock(self, "owner/repo", self.fixture.repo)
+        with patch("agent_taskflow.integration_tick.integrate_task", wraps=integrate_task) as call:
+            result = self.tick()
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(result["stopped_reason"], "lock_unavailable")
+        self.assertEqual(result["remaining_task_keys"], [first.task_key, second.task_key])
+        self.assertEqual(lock.read_record()["holder"]["owner"], "other-runtime")
+        lock.release()
         self.assertEqual(self.gh.calls, [])
         self.assertTrue(self.tick()["ok"])
 

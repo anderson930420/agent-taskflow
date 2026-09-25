@@ -33,6 +33,34 @@ cli = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cli)
 
 
+def _pid_alive(pid):
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return state not in {"Z", "X", "x"}
+
+
+def _kill_group(pgid):
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _flock_free(path):
+    import fcntl
+
+    descriptor = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+    return True
+
+
 class ScriptFixture(ConsumerFixture):
     def setUp(self) -> None:
         super().setUp()
@@ -230,13 +258,15 @@ class IntegrationTickOverlapTests(ScriptFixture):
         self.assertEqual([o["task_key"] for o in json.loads(after.stdout)["outcomes"]],
                          [queued.task_key])
 
-    def test_sigkill_mid_integration_releases_the_tick_lock_and_reports_the_wedged_row(self):
-        """The known liveness gap (orchestrator ruling OR-4), made visible.
+    def test_sigkill_mid_integration_no_longer_wedges_the_repository(self):
+        """RULINGS 69 closes the liveness gap orchestrator ruling OR-4 recorded.
 
-        Killing a tick during validation leaves the per-repo integration lock
-        row, which only integrate_task may release (ruling 62). The non-overlap
-        lock is gone at once, even though the validator child is still alive,
-        and the next tick reports the row's holder instead of hanging.
+        Killing a tick during validation used to leave the per-repo lock row
+        and wedge the repository. The non-overlap lock is still gone at once.
+        The integration flock stays held while the orphaned validator is
+        alive, because the validator inherited its descriptor. The next tick's
+        integrate_task terminates that orphan, takes the flock, reconciles the
+        killed Ticket (crash case A), clears the row and integrates both.
         """
         marker = self.root / "validator-started"
         self.write_config([IntegrationValidatorSpec("slow", (
@@ -257,19 +287,42 @@ class IntegrationTickOverlapTests(ScriptFixture):
         self.addCleanup(reap)
         wait_for(marker.exists, timeout=120)
         self.assertEqual(recorded_pid(self.lock_path), tick.pid)
+        record_path = self.lock_dir / "owner@repo.json"
+        record = json.loads(record_path.read_text())
+        self.assertEqual(record["holder"]["pid"], tick.pid)
+        child, = record["holder"]["children"]
+        self.addCleanup(lambda: _kill_group(child["pgid"]))
         os.kill(tick.pid, signal.SIGKILL)
         tick.wait(timeout=60)
         row = self.integration.get_integration_lock("owner/repo")
         self.assertEqual(row["owner"], "integration_tick")
         self.assertEqual(self.status(killed), schema.INTEGRATING)
+        # The orphaned validator is alive and still holds the flock.
+        self.assertTrue(_pid_alive(child["pid"]))
+        self.assertFalse(_flock_free(self.lock_dir / "owner@repo.lock"))
 
+        self.write_config(VALIDATORS)
         after = self.run_script("--confirm-integration")
+        # The gh stub fails every call, so each integration stops at
+        # `gh pr create`; what matters is that neither hits the lock.
         self.assertEqual(after.returncode, 1, after.stderr + after.stdout)
         result = json.loads(after.stdout)
         self.assertEqual(result["integration_lock_at_start"]["owner"], "integration_tick")
         self.assertEqual(result["integration_lock_at_start"]["acquired_at"], row["acquired_at"])
-        # The killed Ticket is stuck in integrating; the next one hits the row.
-        self.assertEqual([o["status"] for o in result["outcomes"]], ["blocked", "lock_unavailable"])
-        self.assertEqual(result["stopped_reason"], "lock_unavailable")
-        self.assertEqual(self.status(waiting), schema.READY_FOR_INTEGRATION)
-        self.assertEqual(self.integration.get_integration_lock("owner/repo"), row)
+        self.assertEqual([o["status"] for o in result["outcomes"]],
+                         ["needs_decision", "needs_decision"])
+        self.assertTrue(all("gh pr create failed with 97" in o["reason"]
+                            for o in result["outcomes"]))
+        self.assertIsNone(result["stopped_reason"])
+        lock = result["outcomes"][0]["integration"]["integration_lock"]
+        self.assertEqual(lock["leftover_journal_row"], row)
+        self.assertEqual([c["pid"] for c in lock["acquisition"]["terminated_children"]],
+                         [child["pid"]])
+        self.assertEqual(lock["acquisition"]["previous_holder"]["pid"], tick.pid)
+        reconciled, = lock["crash_reconciliation"]
+        self.assertEqual((reconciled["task_key"], reconciled["case"]), (killed.task_key, "A"))
+        self.assertFalse(_pid_alive(child["pid"]))
+        self.assertEqual(self.status(killed), schema.NEEDS_DECISION)
+        self.assertEqual(self.status(waiting), schema.NEEDS_DECISION)
+        self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
+        self.assertIsNone(json.loads(record_path.read_text())["holder"])

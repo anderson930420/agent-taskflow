@@ -28,6 +28,53 @@ GIT_ENV = {
 }
 
 
+def isolate_integration_lock_dir(test: Any) -> Path:
+    """Give one test its own integration flock directory (RULINGS 69).
+
+    A confirmed ``integrate_task`` takes a flock in the explicit lock
+    directory setting, and binds it to the clone it integrates. Tests must
+    never use the live default under ``~/.agent-taskflow``, and two tests
+    must never share a directory, so each test gets its own through the
+    setting; subprocesses inherit it through the environment.
+    """
+    import os
+    import tempfile
+    from unittest import mock
+
+    from agent_taskflow.integration_repo_lock import LOCK_DIR_ENV
+
+    directory = tempfile.TemporaryDirectory(prefix="integration-locks-")
+    test.addCleanup(directory.cleanup)
+    patcher = mock.patch.dict(os.environ, {LOCK_DIR_ENV: directory.name})
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    return Path(directory.name)
+
+
+def hold_integration_lock(
+    test: Any, repo: str, clone: Path, *, owner: str = "other-runtime"
+) -> Any:
+    """Hold ``repo``'s integration flock, bound to ``clone``, until cleanup.
+
+    This is what another live integration writer looks like since RULINGS 69.
+    """
+    from agent_taskflow.integration_repo_lock import IntegrationRepoLock
+
+    lock = IntegrationRepoLock(
+        repo,
+        git_common_dir=(Path(clone) / ".git").resolve(),
+        run_id=f"{owner}-run",
+        task_key="AT-0",
+        db_path=Path(clone) / "other.db",
+        owner=owner,
+    )
+    acquisition = lock.acquire()
+    if not acquisition.acquired:
+        raise AssertionError(f"could not hold the integration lock: {acquisition}")
+    test.addCleanup(lock.release)
+    return lock
+
+
 def git(cwd: Path, *args: str, extra_env: dict[str, str] | None = None) -> str:
     """Run a git command in ``cwd`` and return stdout, raising on failure."""
     import os

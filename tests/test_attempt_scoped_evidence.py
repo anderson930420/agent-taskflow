@@ -31,7 +31,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from step5_support import RecordingExecutor, git, make_fixture  # noqa: E402
-from v1_step2_fixtures import FakeGhRunner  # noqa: E402
+from v1_step2_fixtures import FakeGhRunner, isolate_integration_lock_dir  # noqa: E402
 
 from agent_taskflow import attempt_scoped_runtime_path  # noqa: E402
 from agent_taskflow import integration_schema as schema  # noqa: E402
@@ -102,6 +102,7 @@ class _Pipeline:
 
     def __init__(self, test: unittest.TestCase) -> None:
         self.test = test
+        isolate_integration_lock_dir(test)
         self.fx = make_fixture()
         test.addCleanup(self.fx.cleanup)
         self.fx.repository = replace(self.fx.repository, github_repo=REPO)

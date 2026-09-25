@@ -27,6 +27,7 @@ from typing import Any, Callable, Protocol, Sequence
 from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.evidence_coverage import RunnerEvidenceCollector
 from agent_taskflow.integration_handoff import ProducerAttemptBinding
+from agent_taskflow.integration_repo_lock import run_integration_child
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.tasks import normalize_task_key
@@ -150,7 +151,9 @@ def _truncate(text: str) -> str:
 
 
 def _default_runner(argv: Sequence[str], cwd: Path, timeout: int | None) -> CompletedProcessLike:
-    return subprocess.run(
+    # Under the integration lock the validator runs in its own process group
+    # and a timeout terminates the whole group (RULINGS 69).
+    return run_integration_child(
         list(argv),
         cwd=cwd,
         shell=False,

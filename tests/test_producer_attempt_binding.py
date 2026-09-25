@@ -20,7 +20,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from step5_support import make_fixture  # noqa: E402
-from v1_step2_fixtures import FakeGhRunner, GitFixture  # noqa: E402
+from v1_step2_fixtures import FakeGhRunner, GitFixture, isolate_integration_lock_dir  # noqa: E402
 
 from agent_taskflow import integration_schema as schema  # noqa: E402
 from agent_taskflow.attempt_schema import migrate_task_attempt_lifecycle  # noqa: E402
@@ -421,6 +421,7 @@ class ProducerReachesIntegrationTests(unittest.TestCase):
     """The bound producer travels into the integration run and its evidence."""
 
     def setUp(self) -> None:
+        isolate_integration_lock_dir(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
