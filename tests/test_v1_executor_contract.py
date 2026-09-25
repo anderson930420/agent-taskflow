@@ -181,14 +181,15 @@ class ResolverTests(unittest.TestCase):
         with registry(self.path, {"demo": project_entry(self.root / "repo", execution=policy_block())}):
             self.assertIsNone(execution_policy.execution_policy_refusal("demo"))
 
-    def test_shipped_registry_makes_no_project_runnable(self) -> None:
-        # RULINGS 67: model, effort and auth are pending, so no real project
-        # has a policy yet; the safe default is "nothing is runnable".
+    def test_shipped_registry_makes_only_agent_taskflow_runnable(self) -> None:
+        # RULINGS 67: a project without a policy is not runnable. V0 (OR-10 Q3)
+        # gives agent-taskflow the only policy; its content is checked in
+        # tests/test_v0_executor_local_path.py.
         _, projects = execution_policy.load_registry_projects(
             REPO_ROOT / "config" / "projects.yaml"
         )
-        self.assertTrue(projects)
-        for name in projects:
+        self.assertIn("agent-taskflow", projects)
+        for name in set(projects) - {"agent-taskflow"}:
             refusal = execution_policy.execution_policy_refusal(
                 name, config_path=REPO_ROOT / "config" / "projects.yaml"
             )

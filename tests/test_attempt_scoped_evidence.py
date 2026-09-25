@@ -172,10 +172,15 @@ class _Pipeline:
         )
 
     def commit_implementation(self, key: str) -> None:
-        """The executor's change becomes the task branch's commit."""
+        """The executor's change is already the task branch's commit.
+
+        The dispatcher's control-plane commit made it (OR-10 Q2), so this only
+        checks that, and nothing is committed here.
+        """
         worktree = Path(self.store.get_task_worktree(key).worktree_path)
-        git(worktree, "add", "feature.txt")
-        git(worktree, "commit", "-q", "-m", f"{key}: implementation")
+        self.test.assertEqual(git(worktree, "status", "--porcelain").strip(), "")
+        self.test.assertIn("feature.txt", git(worktree, "show", "--name-only", "--format=", "HEAD"))
+        self.test.assertTrue(git(worktree, "log", "-1", "--format=%s").startswith(f"{key}: "))
 
     def integrate(self, key: str, **overrides):
         kwargs = dict(

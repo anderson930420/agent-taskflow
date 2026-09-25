@@ -21,8 +21,12 @@
 #                    policy_version whenever anything in the block changes.
 #                    Never put a token, credential or environment value here.
 #
-# No project has an execution: block yet. Model, effort and auth are pending
-# the owner's separate-UID auth test, so nothing is runnable (the safe default).
+# Only agent-taskflow has an execution: block (V0 local/dev, RULINGS 77 and
+# OR-10 Q3): the executor runs as the current OS user with that user's own
+# logged-in claude CLI; argv[0] is a version-pinned, root-owned copy of the
+# binary, not the self-updating ~/.local/bin/claude symlink. This is not an
+# isolation boundary: the Ticket's output runs under the pytest validator as
+# the same user (hardened mode is D2). bullet_journal is not runnable.
 # Commented example, with placeholder values:
 #
 #   execution:
@@ -49,6 +53,36 @@ projects:
     default_branch: main
     branch_prefix: task/
     hermes_board: agent-taskflow
+    execution:
+      executor: claude-code
+      argv:
+        - /opt/claude-code/2.1.281/claude
+        - --print
+        - --model
+        - "{model}"
+        - --effort
+        - "{effort}"
+        - --permission-mode
+        - acceptEdits                # edits are allowed ...
+        - --permission-prompts
+        - none                       # ... and anything that would prompt is denied
+        - --tools
+        - Read,Edit,Write,Glob,Grep  # no Bash tool in the session; its output still runs under the validators as this user
+        - --setting-sources
+        - project                    # no user settings or hooks; the repo's own apply
+        - --strict-mcp-config
+        - --no-session-persistence
+      model: claude-opus-5-5
+      effort: medium
+      timeout_seconds: 3600
+      permission_profile: local-dev-accept-edits-no-bash
+      policy_version: "v0-2"
+      implementation_validators:
+        - {name: pytest, timeout_seconds: 3600}
+      integration_validators:
+        - name: pytest
+          command: [/home/ubuntu/agent-taskflow-runtime/current/.venv/bin/python, -m, pytest, -q]
+          timeout_seconds: 3600
 
   bullet_journal:
     project_slug: bullet_journal
