@@ -20,7 +20,9 @@ The rehearsal proves, against disposable databases only, the three properties
     The lease expires on schedule, :func:`reap_stale_runtime` recovers the
     Ticket, ``scripts/reset_task_status.py`` (the existing retry path) brings
     it back, nothing stays running, ownership is never doubled, and the killed
-    Attempt stays readable with its events.
+    Attempt stays readable with its events. Each wait polls its condition
+    under a generous deadline instead of sleeping a fixed time, and a wait
+    that runs out fails the section with the condition it waited for.
 
 :func:`run_concurrency_rehearsal` runs all three in a fresh output directory and
 writes ``concurrency-rehearsal.json``, the evidence
@@ -105,14 +107,19 @@ DISPATCHER_PATH_REFUSALS = EXPLICIT_CLAIM_REFUSALS + ("ValueError",)
 __all__ = [
     "DISPATCHER_PATH_REFUSALS",
     "EXPLICIT_CLAIM_REFUSALS",
+    "LeaseObservation",
     "RUNTIME_STEPS",
+    "CRASH_LEASE_TTL_SECONDS",
+    "CRASH_WAIT_TIMEOUT_SECONDS",
     "RehearsalFixture",
+    "RehearsalWaitTimeout",
     "add_rehearsal_task",
     "create_rehearsal_fixture",
     "dispatcher_preparing_claim",
     "dispatcher_runtime_store",
     "explicit_claim",
     "integrity_errors",
+    "kill_point_state",
     "lifecycle_log_errors",
     "ownership_violations",
     "read_worker_line",
@@ -123,6 +130,9 @@ __all__ = [
     "run_thread_race",
     "run_worker_processes",
     "start_worker_process",
+    "wait_for_condition",
+    "wait_for_kill_point",
+    "wait_for_lease_expiry",
 ]
 
 
@@ -905,10 +915,156 @@ def _parse_utc(value: str) -> float:
     )
 
 
+class RehearsalWaitTimeout(RuntimeError):
+    """A rehearsal wait ran out of time before its condition held."""
+
+
+# The crash holder's lease TTL. The holder's heartbeat runs every TTL/3 and
+# leases are stamped in whole seconds, so a TTL of 2 let a holder stalled
+# just over a second on a loaded runner lose its lease before the kill. 10
+# tolerates a stall of over 5 seconds. The checks mean the same at any TTL.
+CRASH_LEASE_TTL_SECONDS = 10
+# §19.3 waits poll the database, never a fixed sleep. The deadline is generous,
+# so a slow or loaded runner makes the rehearsal slower rather than failing it.
+CRASH_WAIT_TIMEOUT_SECONDS = 120.0
+CRASH_WAIT_POLL_SECONDS = 0.05
+# Kill the holder only while its lease has at least this share of one TTL
+# left, so the early reap has room to run before the lease can expire. Leases
+# are stamped in whole seconds, so a fixed sleep could leave only a sliver.
+KILL_MIN_LEASE_LEFT_FRACTION = 0.75
+
+
+@dataclass(frozen=True)
+class LeaseObservation:
+    lease_id: str
+    is_active: bool
+    heartbeat_at: str
+    expires_at: str
+
+
+def _observe_lease(db_path: Path, lease_id: str) -> LeaseObservation | None:
+    """Read one lease read-only, so polling never takes the write lock."""
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+        row = conn.execute(
+            "SELECT is_active, heartbeat_at, expires_at FROM runtime_leases "
+            "WHERE lease_id = ?",
+            (lease_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return LeaseObservation(lease_id, bool(row[0]), str(row[1]), str(row[2]))
+
+
+def wait_for_condition(
+    condition: str,
+    probe: Callable[[], tuple[bool, Any]],
+    *,
+    timeout: float = CRASH_WAIT_TIMEOUT_SECONDS,
+    poll_interval: float = CRASH_WAIT_POLL_SECONDS,
+) -> Any:
+    """Poll ``probe`` until it reports done; return its last observation.
+
+    ``probe`` returns ``(done, observation)``. When ``timeout`` passes first,
+    :class:`RehearsalWaitTimeout` names ``condition`` and the last observation.
+    """
+    started = time.monotonic()
+    deadline = started + timeout
+    while True:
+        done, observation = probe()
+        if done:
+            return observation
+        if time.monotonic() >= deadline:
+            raise RehearsalWaitTimeout(
+                f"timed out after {time.monotonic() - started:.1f}s waiting for "
+                f"{condition}; last observation: {observation}"
+            )
+        time.sleep(poll_interval)
+
+
+def kill_point_state(
+    lease: Any,
+    *,
+    acquired_at: str,
+    lease_ttl_seconds: int,
+    now: float,
+) -> str:
+    """Classify a live holder's lease: ``ready``, ``wait`` or ``lapsed``.
+
+    ``ready`` means the lease has outlived its first TTL, so only the holder's
+    heartbeat can be keeping it, and it has enough left for the early reap.
+    ``lapsed`` means it closed or expired while the holder lived; waiting
+    longer cannot help, so the kill goes ahead and the checks report it.
+    """
+    if lease is None or not lease.is_active:
+        return "lapsed"
+    left = _parse_utc(lease.expires_at) - now
+    if left <= 0:
+        return "lapsed"
+    if (
+        now - _parse_utc(acquired_at) > lease_ttl_seconds
+        and left >= lease_ttl_seconds * KILL_MIN_LEASE_LEFT_FRACTION
+    ):
+        return "ready"
+    return "wait"
+
+
+def wait_for_kill_point(
+    db_path: str | Path,
+    holder: Mapping[str, Any],
+    *,
+    lease_ttl_seconds: int,
+    timeout: float = CRASH_WAIT_TIMEOUT_SECONDS,
+) -> Any:
+    """Wait until the live holder's lease is ready to kill; return it as observed."""
+
+    def probe() -> tuple[bool, Any]:
+        lease = _observe_lease(Path(db_path), holder["lease_id"])
+        state = kill_point_state(
+            lease,
+            acquired_at=holder["acquired_at"],
+            lease_ttl_seconds=lease_ttl_seconds,
+            now=time.time(),
+        )
+        return state != "wait", lease
+
+    return wait_for_condition(
+        f"lease {holder['lease_id']} to outlive its {lease_ttl_seconds}s TTL "
+        "through the holder's heartbeat with "
+        f"{lease_ttl_seconds * KILL_MIN_LEASE_LEFT_FRACTION:g}s left",
+        probe,
+        timeout=timeout,
+    )
+
+
+def wait_for_lease_expiry(
+    db_path: str | Path,
+    lease_id: str,
+    *,
+    timeout: float = CRASH_WAIT_TIMEOUT_SECONDS,
+) -> Any:
+    """Wait until ``lease_id`` is past its persisted ``expires_at``; return it.
+
+    The reaper and :func:`running_without_live_lease` compare ``expires_at``
+    with a whole-second clock, so a lease is expired for them once the wall
+    clock reaches it. A lease that is already closed ends the wait too.
+    """
+
+    def probe() -> tuple[bool, Any]:
+        lease = _observe_lease(Path(db_path), lease_id)
+        if lease is None or not lease.is_active:
+            return True, lease
+        return time.time() >= _parse_utc(lease.expires_at), lease
+
+    return wait_for_condition(
+        f"lease {lease_id} to pass its expires_at", probe, timeout=timeout
+    )
+
+
 def rehearse_crash_recovery(
     workdir: str | Path,
     *,
-    lease_ttl_seconds: int = 2,
+    lease_ttl_seconds: int = CRASH_LEASE_TTL_SECONDS,
+    wait_timeout_seconds: float = CRASH_WAIT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     fixture = create_rehearsal_fixture(Path(workdir))
     db = fixture.db_path
@@ -927,7 +1083,11 @@ def rehearse_crash_recovery(
     )
     try:
         holder = read_worker_line(process, timeout=60)
-        time.sleep(lease_ttl_seconds + 1)
+        wait_started = time.monotonic()
+        wait_for_kill_point(
+            db, holder, lease_ttl_seconds=lease_ttl_seconds, timeout=wait_timeout_seconds
+        )
+        kill_wait_seconds = time.monotonic() - wait_started
         lease_at_kill = admission.get_lease(holder["lease_id"])
         killed_at = time.time()
         os.kill(process.pid, signal.SIGKILL)
@@ -944,11 +1104,12 @@ def rehearse_crash_recovery(
     )
 
     early = reap_stale_runtime(db)
+    early_reap_finished_at = time.time()
     early_lease = admission.get_lease(holder["lease_id"])
     violations = {"after_kill": ownership_violations(db)}
-    remaining = lease_ttl_seconds + 0.5 - (time.time() - killed_at)
-    if remaining > 0:
-        time.sleep(remaining)
+    wait_started = time.monotonic()
+    wait_for_lease_expiry(db, holder["lease_id"], timeout=wait_timeout_seconds)
+    expiry_wait_seconds = time.monotonic() - wait_started
     running_before_reap = running_without_live_lease(db)
     reap = reap_stale_runtime(db)
     second_reap = reap_stale_runtime(db)
@@ -1092,6 +1253,21 @@ def rehearse_crash_recovery(
             "holder_return_code": return_code,
             "killed_attempt_id": holder["attempt_id"],
             "heartbeat_outlived_ttl": heartbeat_outlived_ttl,
+            "waits": {
+                "timeout_seconds": wait_timeout_seconds,
+                "kill_point_seconds": round(kill_wait_seconds, 3),
+                "lease_seconds_left_at_kill": (
+                    round(_parse_utc(lease_at_kill.expires_at) - killed_at, 3)
+                    if lease_at_kill is not None
+                    else None
+                ),
+                "early_reap_seconds_before_expiry": (
+                    round(_parse_utc(lease_at_kill.expires_at) - early_reap_finished_at, 3)
+                    if lease_at_kill is not None
+                    else None
+                ),
+                "lease_expiry_seconds": round(expiry_wait_seconds, 3),
+            },
             "early_reap": early.to_dict(),
             "reap": reap.to_dict(),
             "second_reap": second_reap.to_dict(),
@@ -1144,7 +1320,7 @@ def run_concurrency_rehearsal(
     processes: int = 4,
     heartbeats: int = 5,
     evidence_rows: int = 4,
-    lease_ttl_seconds: int = 2,
+    lease_ttl_seconds: int = CRASH_LEASE_TTL_SECONDS,
 ) -> dict[str, Any]:
     """Run §19.1-§19.3 in a fresh ``output_dir`` and write the evidence JSON."""
     output = Path(output_dir).expanduser().resolve()
