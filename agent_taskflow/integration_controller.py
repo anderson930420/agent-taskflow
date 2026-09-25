@@ -25,6 +25,9 @@ records checkpoints in ``last_integration_status`` for that: ``running``
 before the Ticket enters ``integrating``, ``publishing`` before the push,
 ``creating_pr`` before a PR is created, and ``integrated`` together with the
 base, the count and the dequeue in one transaction.
+:func:`reconcile_repository` takes the same lock for that reconciliation
+alone, so a lone Ticket left in ``integrating`` does not wait for another
+Ticket's integration.
 
 Two integration modes:
 
@@ -99,6 +102,7 @@ __all__ = [
     "IntegrationRequest",
     "IntegrationResult",
     "integrate_task",
+    "reconcile_repository",
 ]
 
 
@@ -350,24 +354,10 @@ def integrate_task(
 
     try:
         with lock.inherited_by_children():
-            lock_evidence = _lock_evidence(lock, acquisition)
-            # A journal row found now was written by a holder that died.
-            leftover = integration.get_integration_lock(request.repo)
-            lock_evidence["leftover_journal_row"] = leftover
-            lock_evidence["crash_reconciliation"] = reconcile_integrating_tickets(
-                task_store=task_store,
-                integration=integration,
-                repo_key=lock.key,
-                git_common_dir=lock.git_common_dir,
-                reconciler_run_id=run_id,
-                lock_evidence={
-                    key: value
-                    for key, value in lock_evidence.items()
-                    if key != "crash_reconciliation"
-                },
+            lock_evidence = _reconcile_on_acquire(
+                lock, acquisition, repo=request.repo, task_store=task_store,
+                integration=integration, run_id=run_id,
             )
-            if leftover is not None:
-                integration.clear_integration_lock(request.repo)
             integration.acquire_integration_lock(lock.key, owner=request.owner)
 
             task = task_store.get_task(request.task_key) or task
@@ -396,6 +386,103 @@ def integrate_task(
             integration.release_integration_lock(lock.key, owner=request.owner)
         finally:
             lock.release()
+
+
+def reconcile_repository(
+    repo: str,
+    *,
+    repo_path: Path,
+    task_key: str,
+    db_path: Path | None = None,
+    owner: str = "integration_controller",
+    lock_dir: Path | None = None,
+    external_hold_probe: ExternalHoldProbe | None = None,
+    store: TaskMirrorStore | None = None,
+    integration_store: IntegrationStore | None = None,
+) -> dict[str, Any]:
+    """Take the repository's flock, run only the on-acquire reconciliation, release.
+
+    The same reconciliation :func:`integrate_task` runs on every acquire
+    (RULINGS 69), for a caller with no Ticket to integrate: a lone Ticket a
+    dead holder left in ``integrating`` is otherwise never reconciled.
+    ``task_key`` names the Ticket that prompted the pass in the holder record.
+    Nothing is integrated and no journal row of its own is written. Refusals
+    (a corrupt record, another host or clone) raise and change nothing.
+    """
+    task_store = store or TaskMirrorStore(db_path)
+    task_store.init_db()
+    integration = integration_store or IntegrationStore(store=task_store)
+    run_id = uuid4().hex[:12]
+    # The clone's common dir, the same one integrate_task derives from any of
+    # its worktrees, so both bind the lock to one clone.
+    lock = IntegrationRepoLock(
+        repo,
+        git_common_dir=git_ops.git_common_dir(repo_path),
+        run_id=run_id,
+        task_key=normalize_task_key(task_key),
+        db_path=task_store.db_path,
+        owner=owner,
+        lock_dir=lock_dir,
+        external_hold_probe=external_hold_probe,
+    )
+    acquisition = lock.acquire()
+    if not acquisition.acquired:
+        return {
+            "ok": False,
+            "status": "lock_unavailable",
+            "summary": acquisition.detail,
+            "reconciler_run_id": run_id,
+            "integration_lock": _lock_evidence(lock, acquisition),
+            "reports": [],
+        }
+    try:
+        with lock.inherited_by_children():
+            lock_evidence = _reconcile_on_acquire(
+                lock, acquisition, repo=repo, task_store=task_store,
+                integration=integration, run_id=run_id,
+            )
+    finally:
+        lock.release()
+    reports = lock_evidence.pop("crash_reconciliation")
+    return {
+        "ok": True,
+        "status": "reconciled",
+        "summary": f"{len(reports)} Ticket(s) reconciled",
+        "reconciler_run_id": run_id,
+        "integration_lock": lock_evidence,
+        "reports": reports,
+    }
+
+
+def _reconcile_on_acquire(
+    lock: IntegrationRepoLock,
+    acquisition: LockAcquisition,
+    *,
+    repo: str,
+    task_store: TaskMirrorStore,
+    integration: IntegrationStore,
+    run_id: str,
+) -> dict[str, Any]:
+    """What every flock acquire runs first: reconcile, then clear a dead holder's row."""
+    lock_evidence = _lock_evidence(lock, acquisition)
+    # A journal row found now was written by a holder that died.
+    leftover = integration.get_integration_lock(repo)
+    lock_evidence["leftover_journal_row"] = leftover
+    lock_evidence["crash_reconciliation"] = reconcile_integrating_tickets(
+        task_store=task_store,
+        integration=integration,
+        repo_key=lock.key,
+        git_common_dir=lock.git_common_dir,
+        reconciler_run_id=run_id,
+        lock_evidence={
+            key: value
+            for key, value in lock_evidence.items()
+            if key != "crash_reconciliation"
+        },
+    )
+    if leftover is not None:
+        integration.clear_integration_lock(repo)
+    return lock_evidence
 
 
 def _lock_evidence(lock: IntegrationRepoLock, acquisition: LockAcquisition) -> dict[str, Any]:

@@ -334,8 +334,9 @@ class IntegrationTickOverlapTests(ScriptFixture):
         and wedge the repository. The non-overlap lock is still gone at once.
         The integration flock stays held while the orphaned validator is
         alive, because the validator inherited its descriptor. The next tick's
-        integrate_task terminates that orphan, takes the flock, reconciles the
-        killed Ticket (crash case A), clears the row and integrates both.
+        crash reconciliation (reconcile_repository, OR-11) terminates that
+        orphan, takes the flock, reconciles the killed Ticket (crash case A)
+        and clears the row; its drain then integrates both.
         """
         marker = self.root / "validator-started"
         self.write_config([IntegrationValidatorSpec("slow", (
@@ -383,12 +384,17 @@ class IntegrationTickOverlapTests(ScriptFixture):
         self.assertTrue(all("gh pr create failed with 97" in o["reason"]
                             for o in result["outcomes"]))
         self.assertIsNone(result["stopped_reason"])
-        lock = result["outcomes"][0]["integration"]["integration_lock"]
+        crash = result["crash_reconciliation"]
+        self.assertEqual((crash["status"], crash["ok"]), ("reconciled", True))
+        lock = crash["integration_lock"]
         self.assertEqual(lock["leftover_journal_row"], row)
         self.assertEqual([c["pid"] for c in lock["acquisition"]["terminated_children"]],
                          [child["pid"]])
         self.assertEqual(lock["acquisition"]["previous_holder"]["pid"], tick.pid)
-        reconciled, = lock["crash_reconciliation"]
+        drained = result["outcomes"][0]["integration"]["integration_lock"]
+        self.assertEqual((drained["leftover_journal_row"], drained["crash_reconciliation"]),
+                         (None, []))
+        reconciled, = crash["reports"]
         self.assertEqual((reconciled["task_key"], reconciled["case"]), (killed.task_key, "A"))
         self.assertFalse(_pid_alive(child["pid"]))
         self.assertEqual(self.status(killed), schema.NEEDS_DECISION)

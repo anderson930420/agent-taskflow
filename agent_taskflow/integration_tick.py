@@ -16,6 +16,14 @@ it. No phase takes the per-repository integration lock (ruling 62), and none
 ever confirms §37.1 cancelled-route cleanup or deletes a remote branch. Every
 pass also reports, read-only and never repaired, the lock row, ready Tickets
 missing from the queue, and verified merges whose Tickets are not completed.
+
+Before any of that, a confirmed pass (the drain's confirmation) that finds
+this repository's Tickets in ``integrating`` has the controller reconcile
+them (``reconcile_repository``, OR-11): only a dead holder leaves a Ticket
+there (RULINGS 69), and a lone one would otherwise never be reconciled,
+because only the controller's flock acquire does that. The tick itself still
+takes no lock. With no such Ticket nothing is locked or written; a dry run
+only lists them.
 """
 
 from __future__ import annotations
@@ -34,7 +42,11 @@ from agent_taskflow.integration_cleanup import (
     IntegrationCleanupRequest,
     run_integration_cleanup,
 )
-from agent_taskflow.integration_controller import IntegrationRequest, integrate_task
+from agent_taskflow.integration_controller import (
+    IntegrationRequest,
+    integrate_task,
+    reconcile_repository,
+)
 from agent_taskflow.integration_queue import queue_for_repo
 from agent_taskflow.integration_schema import normalize_repo, repo_from_pr_url
 from agent_taskflow.integration_store import IntegrationStore
@@ -183,12 +195,18 @@ def run_integration_tick(
     tasks = TaskMirrorStore(request.db_path)
     integration = IntegrationStore(store=tasks)
     tickets = TicketStore(request.db_path)
+    effective_dry_run = request.dry_run or not request.confirm_integration
+    # Read before the reconciliation below, which clears a dead holder's row.
+    holder = integration.get_integration_lock(request.repo)
+    integrating = _integrating_tickets(request, tasks, integration, tickets)
+    crash = _crash_reconciliation(
+        request, tasks, integration, integrating, confirmed=not effective_dry_run,
+    )
     consumer = (
-        _run_consumer_phases(request, tasks, integration, github)
+        _run_consumer_phases(request, tasks, integration, github, holder)
         if request.consumer_phases else None
     )
     entries = [] if consumer and consumer["error"] else queue_for_repo(integration, request.repo)
-    effective_dry_run = request.dry_run or not request.confirm_integration
     outcomes: list[dict[str, Any]] = []
     stopped_reason = None
     for entry in entries:
@@ -235,7 +253,7 @@ def run_integration_tick(
         if stopped_reason:
             break
     remaining = queue_for_repo(integration, request.repo)
-    ok = all(outcome["ok"] for outcome in outcomes)
+    ok = all(outcome["ok"] for outcome in outcomes) and crash["ok"]
     result = {
         "kind": "integration_tick", "ok": ok,
         "status": (
@@ -254,11 +272,67 @@ def run_integration_tick(
         "queued_count": len(entries), "visited_count": len(outcomes),
         "outcomes": outcomes, "stopped_reason": stopped_reason,
         "remaining_task_keys": [entry.task_key for entry in remaining],
+        "integrating_tickets": integrating,
+        "crash_reconciliation": crash,
         "generated_at": utc_now_iso(),
     }
     if consumer is None:
         return result
     return _with_consumer_phases(result, consumer, request, integration, tickets)
+
+
+def _integrating_tickets(
+    request: IntegrationTickRequest, tasks: TaskMirrorStore, integration: IntegrationStore,
+    tickets: TicketStore,
+) -> list[dict[str, Any]]:
+    """This repository's Tickets in ``integrating``, read-only.
+
+    A Ticket belongs to the repository when its ``github_repo``, its queue
+    row or its PR URL names it; the reconciler filters again under the lock.
+    """
+    wanted = normalize_repo(request.repo)
+    queue_repos = integration.list_queue_repos()
+    found = []
+    for task in tasks.list_tasks(status=schema.INTEGRATING):
+        ticket = tickets.get_ticket(task.task_key)
+        pr = integration.get_pr_state(task.task_key)
+        names = set()
+        for name in (ticket.github_repo if ticket else None, queue_repos.get(task.task_key)):
+            try:
+                names.add(normalize_repo(name) if name else None)
+            except ValueError:
+                continue
+        names.add(repo_from_pr_url(pr["pr_url"]))
+        if wanted in names:
+            state = integration.get_integration_state(task.task_key)
+            found.append({"task_key": task.task_key, "status": task.status,
+                          "checkpoint": state["last_integration_status"],
+                          "queued": task.task_key in queue_repos,
+                          "pr_number": pr["pr_number"], "pr_url": pr["pr_url"]})
+    return sorted(found, key=lambda item: item["task_key"])
+
+
+def _crash_reconciliation(
+    request: IntegrationTickRequest, tasks: TaskMirrorStore, integration: IntegrationStore,
+    integrating: list[dict[str, Any]], *, confirmed: bool,
+) -> dict[str, Any]:
+    """Have the controller reconcile this repository's ``integrating`` Tickets."""
+    report: dict[str, Any] = {"ran": False, "confirmed": confirmed, "ok": True, "reports": []}
+    if not integrating:
+        return {**report, "status": "not_needed"}
+    if not confirmed:
+        return {**report, "status": "dry_run"}
+    try:
+        result = reconcile_repository(
+            request.repo, repo_path=request.repo_path,
+            task_key=integrating[0]["task_key"], db_path=request.db_path,
+            owner=request.owner, store=tasks, integration_store=integration,
+        )
+    except Exception as exc:
+        # Like a drain error: observable, not retried in this tick.
+        return {**report, "ran": True, "ok": False, "status": "error",
+                "reason": f"{type(exc).__name__}: {exc}"}
+    return {**report, "ran": True, **result}
 
 
 # -- V1-F10 consumer phases ------------------------------------------------
@@ -269,10 +343,9 @@ def _run_consumer_phases(
     tasks: TaskMirrorStore,
     integration: IntegrationStore,
     github: GitHubPrAdapter | None,
+    holder: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Run the three pre-drain phases once each, in :data:`PHASE_ORDER`."""
-    # Read-only: a row left by a killed integration is reported, never touched.
-    holder = integration.get_integration_lock(request.repo)
     watcher = WatcherRequest(
         repo=request.repo, repo_path=request.repo_path,
         target_branch=request.target_branch, remote=request.remote,
@@ -307,9 +380,9 @@ def _run_consumer_phases(
             {"held": False} if holder is None else {
                 "held": True, "repo": holder["repo"], "owner": holder["owner"],
                 "acquired_at": holder["acquired_at"],
-                "note": "Read-only report. The tick never takes or releases this lock "
-                        "(ruling 62); a row left by a killed integration stays until "
-                        "an operator acts.",
+                "note": "Read-only report, taken at the start of the tick. The row is "
+                        "a journal of the flock (RULINGS 69); the next flock holder "
+                        "reconciles and clears a row left by a killed integration.",
             }
         ),
     }
@@ -449,7 +522,7 @@ def _with_consumer_phases(
 ) -> dict[str, Any]:
     """Add the consumer phases to F9's drain result; F9's keys keep their meaning."""
     error = consumer["error"]
-    drain_ok = result["ok"]
+    drain_ok = all(outcome["ok"] for outcome in result["outcomes"])
     if error:
         result.update(status="stopped", stopped_reason=f"phase_error:{error['phase']}")
     phases = dict(consumer["phases"])
@@ -460,7 +533,10 @@ def _with_consumer_phases(
     }
     unqueued = _ready_unqueued(request, integration, tickets)
     uncompleted = _merge_verified_not_completed(request, integration, tickets)
-    ok = all(phase["ok"] for phase in phases.values()) and not unqueued and not uncompleted
+    ok = (
+        all(phase["ok"] for phase in phases.values()) and not unqueued and not uncompleted
+        and result["crash_reconciliation"]["ok"]
+    )
     result.update(
         ok=ok,
         drain_ok=drain_ok,

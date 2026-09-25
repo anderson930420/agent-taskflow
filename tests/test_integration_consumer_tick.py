@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_integration_tick import TickFixture
-from v1_step2_fixtures import git
+from v1_step2_fixtures import git, hold_integration_lock
 
 from agent_taskflow import integration_schema as schema
 from agent_taskflow.integration_cleanup import IntegrationCleanupRequest, run_integration_cleanup
@@ -309,6 +309,9 @@ class FreshnessTests(ConsumerFixture):
 
     def test_integrating_is_deferred_and_paused_or_needs_decision_is_never_requeued(self):
         integrating, paused, deciding = self.integrated(3)
+        # A live integration: the flock is held (RULINGS 69). Without a live
+        # holder the tick would reconcile the Ticket as a dead holder's.
+        hold_integration_lock(self, "owner/repo", self.fixture.repo)
         self.store.update_task_status(integrating.task_key, schema.INTEGRATING, source="test")
         self.store.update_task_status(paused.task_key, "paused", source="test")
         self.store.update_task_status(deciding.task_key, schema.NEEDS_DECISION, source="test")
@@ -452,6 +455,8 @@ class CleanupPhaseTests(ConsumerFixture):
         sha = self.fixture.merge_branch_into_target(ticket.branch, method="merge")
         self.integration.update_pr_state(ticket.task_key, pr_state="closed", pr_merged=True,
                                          merge_commit_sha=sha)
+        # A live integration holds the flock; see the freshness test above.
+        hold_integration_lock(self, "owner/repo", self.fixture.repo)
         self.store.update_task_status(ticket.task_key, schema.INTEGRATING, source="test")
         for _ in range(2):
             result = self.tick()
