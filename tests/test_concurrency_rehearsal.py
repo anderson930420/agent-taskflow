@@ -146,7 +146,10 @@ class RehearsalSafetyTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            self.assertEqual(completed.returncode, 0, completed.stderr[-4000:])
+            # stdout carries the failed checks when the rehearsal exits 2.
+            self.assertEqual(
+                completed.returncode, 0, completed.stderr[-4000:] + completed.stdout[-4000:]
+            )
             summary = json.loads(completed.stdout)
             self.assertTrue(summary["ok"])
             self.assertEqual(summary["gate"]["gate"], "passed")

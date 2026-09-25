@@ -17,18 +17,20 @@ import signal
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
 from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.concurrency_rehearsal import (
+    CRASH_LEASE_TTL_SECONDS,
     add_rehearsal_task,
     create_rehearsal_fixture,
     dispatcher_preparing_claim,
     ownership_violations,
     read_worker_line,
     start_worker_process,
+    wait_for_kill_point,
+    wait_for_lease_expiry,
 )
 from agent_taskflow.runtime_admission import RuntimeAdmissionStore
 from agent_taskflow.runtime_progress_store import RuntimeProgressStore
@@ -36,7 +38,7 @@ from agent_taskflow.runtime_reaper import reap_stale_runtime, running_without_li
 from agent_taskflow.store import TaskMirrorStore, connect
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LEASE_TTL_SECONDS = 2
+LEASE_TTL_SECONDS = CRASH_LEASE_TTL_SECONDS
 
 
 def _parse_utc(value: str) -> datetime:
@@ -63,21 +65,26 @@ class SigkilledLeaseHolderTests(unittest.TestCase):
         )
         cls.holder = read_worker_line(cls.process, timeout=60)
         # Outlive one TTL: only the holder's heartbeat thread can keep the
-        # lease live that long.
-        time.sleep(LEASE_TTL_SECONDS + 1)
+        # lease live that long. Kill while enough of it is left for the
+        # early reap below to run before it expires.
+        try:
+            wait_for_kill_point(db, cls.holder, lease_ttl_seconds=LEASE_TTL_SECONDS)
+        except BaseException:
+            # tearDownClass does not run when setUpClass fails.
+            cls.process.kill()
+            cls.process.wait()
+            cls.tmp.cleanup()
+            raise
         cls.lease_before_kill = RuntimeAdmissionStore(db).get_lease(cls.holder["lease_id"])
         cls.kill_wallclock = datetime.now(timezone.utc)
         os.kill(cls.process.pid, signal.SIGKILL)
         cls.return_code = cls.process.wait(timeout=30)
-        cls.killed_at = time.monotonic()
 
         cls.early_reap = reap_stale_runtime(db)
         cls.early_lease = RuntimeAdmissionStore(db).get_lease(cls.holder["lease_id"])
         cls.early_violations = ownership_violations(db)
 
-        remaining = LEASE_TTL_SECONDS + 0.5 - (time.monotonic() - cls.killed_at)
-        if remaining > 0:
-            time.sleep(remaining)
+        wait_for_lease_expiry(db, cls.holder["lease_id"])
         cls.running_before_reap = running_without_live_lease(db)
         cls.reap = reap_stale_runtime(db)
         cls.second_reap = reap_stale_runtime(db)

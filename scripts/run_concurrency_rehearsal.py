@@ -23,7 +23,10 @@ from agent_taskflow.concurrency_gate import (  # noqa: E402
     CONCURRENCY_EVIDENCE_FILENAME,
     evaluate_concurrency_evidence,
 )
-from agent_taskflow.concurrency_rehearsal import run_concurrency_rehearsal  # noqa: E402
+from agent_taskflow.concurrency_rehearsal import (  # noqa: E402
+    CRASH_LEASE_TTL_SECONDS,
+    run_concurrency_rehearsal,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--processes", type=int, default=4)
-    parser.add_argument("--lease-ttl-seconds", type=int, default=2)
+    parser.add_argument("--lease-ttl-seconds", type=int, default=CRASH_LEASE_TTL_SECONDS)
     return parser
 
 
