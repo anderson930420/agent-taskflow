@@ -477,9 +477,11 @@ def run_approved_task(
     evidence_root = artifact_root_for_claim(
         current_store, effective_task.task_key, progress.attempt_id, effective_task.artifact_dir,
     )
+    # Only the run's own evidence root is searched: with an Attempt, a file left
+    # at the task level by an earlier run is not this Attempt's evidence.
     coverage = RunnerEvidenceCollector(
         source="approved_task_runner",
-        artifact_roots=(evidence_root, effective_task.artifact_dir),
+        artifact_roots=(evidence_root,),
     )
     validation_summary = ValidationSummaryRecorder(
         task_key=effective_task.task_key,
@@ -604,7 +606,9 @@ def run_approved_task(
             task_key=effective_task.task_key,
             project=effective_task.project,
             worktree_path=workspace_result.worktree_path,
-            artifact_dir=effective_task.artifact_dir,
+            # The claimed Attempt's root whenever one exists, whether or not
+            # the resolved validator is wrapped by the Attempt proxy.
+            artifact_dir=evidence_root,
             attempt_id=progress.attempt_id,
         )
         progress.validator_running(validator_name)

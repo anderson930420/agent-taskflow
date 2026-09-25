@@ -79,10 +79,13 @@ framework assumption:
   `not_applicable` for integration validation, which launches no executor, and
   `not_run` when the executor used a path that publishes no managed launch
   spec.
-* `preflight-pr-check.json` is `unknown` unless a seam records an actual
-  preflight operation. Nothing in the current pipeline performs one, so nothing
-  is written for it. A seam may state applicability explicitly through
-  `RunnerEvidenceCollector.note_operation`.
+* `preflight-pr-check.json` is `not_applicable`, with the reason in
+  `PREFLIGHT_NOT_APPLICABLE_REASON`, unless a seam records an actual preflight
+  operation or one is found in the artifact root. No validation run performs a
+  PR preflight check and nothing writes the file: execution validation never
+  opens a PR, and V1 integration gates its PR with the integration validators.
+  A seam that gains a real check states it through
+  `RunnerEvidenceCollector.note_operation`; nothing fabricates the file.
 * `dual-write-consistency.json` is required only during a migration window.
   The runner seams observe no migration state, so the entry is `unknown` unless
   an observation exists in the artifact root or a seam supplies one.
@@ -165,6 +168,68 @@ identity cannot own an Attempt, so that is a mismatch too. Only a missing
 Attempt row — a database without the Attempt tables, or a producer older than
 them — leaves the check `unavailable`, and the recorded handoff then stands on
 its own with that fact written down.
+
+## Where the evidence lives
+
+Roadmap §2.4 files every artifact under the Attempt that produced it. For a
+Ticket, the execution Attempt's root is `<artifacts_root>/<TASK_KEY>/<attempt_id>/`,
+allocated by `attempt_resources.allocate`, and every run writes there with the
+same relative layout the task level used before:
+
+| Artifact | Before | Now |
+| --- | --- | --- |
+| execution `validation-summary.json`, `evidence-coverage.json`, `validator-NNN.log` | `<attempt root>/validation-runs/<uuid>/` | unchanged |
+| `changed-files-audit.json`, `policy-validate.log`, other validator artifacts | `<attempt root>/`: the context was task level; the validator proxy moved the writes to the Attempt root | `<attempt root>/`, already in the context the runner builds, with or without the proxy |
+| integration `validation-summary.json`, `evidence-coverage.json`, `validator-NNN-evidence.json` | `<tasks.artifact_dir>/validation-runs/<uuid>/` | `<producer attempt root>/validation-runs/<uuid>/` |
+| integration report `validators-<run>.json` | `<tasks.artifact_dir>/integration/` | `<producer attempt root>/integration/` |
+| integration run `integration-<run>.json` | `<tasks.artifact_dir>/integration/` | `<producer attempt root>/integration/` |
+
+`tasks.artifact_dir` is rewritten to the newest Attempt's root when that
+Attempt is allocated, so before this change integration evidence followed
+whichever Attempt was newest, not the one that produced the tree.
+`agent_taskflow/integration_evidence_root.py` now reads the producer's root
+from its own `attempts.artifact_root` row, through the producer binding above.
+The integration run records the decision as `evidence_root` in its run JSON,
+on `IntegrationResult`, and on the `integration_started` event.
+
+Every coverage index also carries `artifact_root_binding`, whose `reason_code`
+says whether its root is the run's own Attempt root (`attempt_artifact_root`),
+a run bound to an Attempt without a usable root of its own
+(`attempt_bound_outside_attempt_root`), a run bound to no Attempt
+(`no_attempt_bound`), or no root at all (`no_artifact_root`).
+
+Coverage discovery searches only the run's own evidence root. A file left at
+the task level by an earlier run is not this Attempt's evidence, so it is no
+longer discovered. In particular, a stale task-level `preflight-pr-check.json`
+used to make that entry `applicable`/`missing` with an inadmissible
+`discovered` reference; the entry is now `not_applicable` with
+`PREFLIGHT_NOT_APPLICABLE_REASON`. The old file itself is untouched and still
+indexed.
+
+The task level remains in these cases, each with its `reason_code`:
+
+* `no_producer_attempt`: a manual, watcher or legacy run, or a superseded or
+  refused producer. When `tasks.artifact_dir` is some Attempt's root, the run
+  writes to that Attempt's recorded `artifact_base_root` instead, so unbound
+  evidence is never filed under an Attempt that did not produce it. The
+  result's `task_level_reason_code` records how that directory was decided:
+  `task_artifact_dir_is_no_attempt_root`, `task_artifact_dir_is_attempt_root`,
+  or `task_level_directory_unresolved` when the read-only lookup failed and
+  `tasks.artifact_dir` was used as recorded.
+* `producer_attempt_has_no_artifact_root`, `producer_attempt_unreadable`,
+  `producer_attempt_artifact_root_unsafe`, `producer_attempt_artifact_root_unavailable`:
+  the producer's root cannot be used. A missing root is reported, not
+  recreated.
+* `no_attempt_bound` (in the coverage index's `artifact_root_binding`): a
+  runner run with no runtime claim (a store without the claim API) has no
+  Attempt, so `artifact_root_for_claim` keeps the task's directory.
+* `integration_cleanup.py` still writes `cleanup-<id>.json` under
+  `tasks.artifact_dir/integration/`. Cleanup evidence is not in the §2.2 set,
+  and that module belongs to V1-F10.
+
+Nothing already written is moved or rewritten. Every new file is still indexed
+with `record_task_artifact`, so the API artifact listing, the evidence
+readback and Mission Control find old and new paths alike.
 
 ## What this does not change
 

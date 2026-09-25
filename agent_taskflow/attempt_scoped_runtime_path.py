@@ -8,6 +8,7 @@ from functools import wraps
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
+import weakref
 
 import agent_taskflow.canonical_runtime_path as canonical_path
 from agent_taskflow.attempt_resources import (
@@ -93,7 +94,7 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
         self._attempt_resources = AttemptResourceManager(self.db_path)
         self._attempt_resource_states: dict[str, _AttemptResourceState] = {}
         self._attempt_resource_configs: dict[str, _AttemptResourceConfig] = {}
-        self._task_objects: dict[str, Any] = {}
+        self._task_objects: dict[str, list[weakref.ref[Any]]] = {}
         self._worktree_objects: dict[str, Any] = {}
 
     def init_db(self) -> None:
@@ -102,12 +103,22 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
     def get_task(self, task_key: str):
         task = super().get_task(task_key)
         if task is not None:
-            self._task_objects[task.task_key] = task
+            self._remember_task_object(task)
         return task
 
     def upsert_task(self, record: Any, *, preserve_existing_status: bool = True) -> None:
         super().upsert_task(record, preserve_existing_status=preserve_existing_status)
-        self._task_objects[record.task_key] = record
+        self._remember_task_object(record)
+
+    def _remember_task_object(self, task: Any) -> None:
+        # Every task value this store handed out for the key, not only the
+        # latest: a runner builds its validator context from the value it read
+        # first, and that value must see the Attempt root too (L2-M2-B2).
+        # Weak references, so a long-lived store does not keep every value alive.
+        known = [ref for ref in self._task_objects.get(task.task_key, ()) if ref() is not None]
+        if not any(ref() is task for ref in known):
+            known.append(weakref.ref(task))
+        self._task_objects[task.task_key] = known
 
     def get_task_worktree(self, task_key: str):
         worktree = super().get_task_worktree(task_key)
@@ -161,9 +172,10 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
         return self._attempt_resources.get(claim.attempt_id) if claim is not None else None
 
     def _bind_task_artifact_root(self, record: AttemptResourceRecord) -> None:
-        cached = self._task_objects.get(record.task_key)
-        if cached is not None:
-            object.__setattr__(cached, "artifact_dir", record.artifact_root)
+        for ref in self._task_objects.get(record.task_key, ()):
+            cached = ref()
+            if cached is not None:
+                object.__setattr__(cached, "artifact_dir", record.artifact_root)
 
     def _bind_workspace_result(self, result: Any) -> None:
         cached = self._worktree_objects.get(result.task_key)
@@ -381,6 +393,8 @@ class AttemptScopedRuntimeTaskStore(canonical_path.CanonicalRuntimeTaskStore):
                 expected_current_status=expected_current_status,
             )
             self._attempt_resource_states.pop(normalized, None)
+            # Values read after this point belong to whichever run comes next.
+            self._task_objects.pop(normalized, None)
             self._attempt_resources.release(handle, reason=f"task_status:{status}")
             return
 
