@@ -51,6 +51,8 @@ _PRIVATE_STATE_FIELDS = (
     "merge_verified_at",
     "closed_unmerged_at",
     "cleanup_confirmed_at",
+    "pr_poll_consecutive_failures",
+    "pr_poll_failure_fingerprint",
 )
 
 _BOOL_PR_FIELDS = ("pr_merged", "reintegration_required")
@@ -122,11 +124,42 @@ class IntegrationStore:
         with closing(connect(self.db_path)) as conn, conn:
             self._require_task(conn, key)
             self._ensure_pr_row(conn, key)
+            self._reset_poll_failures_on_new_pr(conn, key, stored)
             conn.execute(
                 f"UPDATE task_pr_state SET {assignments} WHERE task_key = ?",
                 (*stored.values(), key),
             )
         return self.get_pr_state(key)
+
+    @staticmethod
+    def _reset_poll_failures_on_new_pr(
+        conn: Any, key: str, stored: Mapping[str, Any]
+    ) -> None:
+        """Clear the PR-poll failure count when ``pr_number`` changes (review N2).
+
+        The count belongs to the PR it counted; a different PR starts from
+        zero. Runs inside the caller's transaction, before the new number is
+        written, so every writer of ``pr_number`` gets the same reset.
+        """
+        if "pr_number" not in stored:
+            return
+        previous = conn.execute(
+            "SELECT pr_number FROM task_pr_state WHERE task_key = ?", (key,)
+        ).fetchone()["pr_number"]
+        if previous == stored["pr_number"]:
+            return
+        conn.execute(
+            """
+            UPDATE task_integration_state
+            SET pr_poll_consecutive_failures = NULL,
+                pr_poll_failure_fingerprint = NULL,
+                updated_at = ?
+            WHERE task_key = ?
+              AND (pr_poll_consecutive_failures IS NOT NULL
+                   OR pr_poll_failure_fingerprint IS NOT NULL)
+            """,
+            (utc_now_iso(), key),
+        )
 
     def record_integration_completed(
         self,
@@ -157,6 +190,7 @@ class IntegrationStore:
         with closing(connect(self.db_path)) as conn, conn:
             self._require_task(conn, key)
             self._ensure_pr_row(conn, key)
+            self._reset_poll_failures_on_new_pr(conn, key, stored)
             if stored:
                 assignments = ", ".join(f"{name} = ?" for name in stored)
                 conn.execute(

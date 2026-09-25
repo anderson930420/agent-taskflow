@@ -86,8 +86,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="Let verified-merge cleanup remove the worktree and local branch")
     parser.add_argument("--confirm-freshness", action="store_true",
                         help="Let the target-freshness poll re-queue stale needs_review Tickets")
-    parser.add_argument("--lock-path", type=Path, default=None,
-                        help="Absolute non-overlap lock file (default: derived from --db-path and --repo)")
     parser.add_argument("--jsonl", action="store_true",
                         help="Print the result as one compact JSON line, for append-only logs")
     args = parser.parse_args(argv)
@@ -108,8 +106,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Never leave a lock file beside a database that does not exist.
         if not request.db_path.is_file():
             raise ValueError(f"db_path must name an existing initialized database: {request.db_path}")
+        # RULINGS 70 (F10-FU4): the lock is always the derived path; there is
+        # no --lock-path override.
         lock = TickLock(
-            args.lock_path or integration_tick_lock_path(request.db_path, request.repo),
+            integration_tick_lock_path(request.db_path, request.repo),
             holder={"kind": KIND, "repo": request.repo, "db_path": str(request.db_path)},
             db_path=request.db_path,
         )
@@ -122,15 +122,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit(skipped_overlap_result(KIND, lock, repo=request.repo, db_path=str(request.db_path)),
               jsonl=args.jsonl)
         return EXIT_SKIPPED_OVERLAP
+    # A corrupt holder record that the lock reclaimed is reported on this run's line.
+    reclaim = {"lock_reclaimed": lock.reclaimed} if lock.reclaimed else {}
     try:
         result = run_integration_tick(request)
     except Exception as exc:
         print(json.dumps({"kind": KIND, "ok": False, "status": "error",
-                          "reason": f"{type(exc).__name__}: {exc}"}, sort_keys=True))
+                          "reason": f"{type(exc).__name__}: {exc}", **reclaim}, sort_keys=True))
         return 2
     finally:
         lock.release()
-    _emit(result, jsonl=args.jsonl)
+    _emit({**result, **reclaim}, jsonl=args.jsonl)
     if result.get("tick_status") == "error":
         return 2
     return 0 if result["ok"] else 1

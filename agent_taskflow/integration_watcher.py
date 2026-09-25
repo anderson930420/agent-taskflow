@@ -25,6 +25,7 @@ Deliberate non-behaviours:
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -52,6 +53,10 @@ __all__ = [
 
 
 SOURCE = "integration_watcher"
+
+# RULINGS 70 (amending ruling 29e): this many consecutive failed polls of one
+# Ticket's PR escalate it to needs_decision; fewer leave its status alone.
+POLL_FAILURE_ESCALATION_THRESHOLD = 6
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,8 @@ class PrOutcome:
     deferred: bool = False
     # Set when the poll itself failed: "<ExceptionType>: <message>".
     poll_error: str | None = None
+    # The consecutive failed polls this one makes (a preview counts it too).
+    consecutive_poll_failures: int | None = None
 
 
 def poll_target_freshness(
@@ -317,6 +324,7 @@ def poll_pr_outcomes(
         except Exception as exc:  # noqa: BLE001 - every failure is audited
             # Review round 4, Ruling 29e: a failed poll is never skipped
             # silently. A skipped poll is a watcher that has gone blind.
+            # RULINGS 70 amends what happens next: see _poll_failed.
             outcomes.append(
                 _poll_failed(
                     task_store,
@@ -334,24 +342,30 @@ def poll_pr_outcomes(
             outcomes.append(_outcome(task.task_key, snapshot, transition, None, task.status))
             continue
 
-        _record_pr_state(integration, task.task_key, snapshot)
-        task_store.record_task_event(
-            task.task_key,
-            "pr_state_polled",
-            SOURCE,
-            message=f"PR #{snapshot.number} polled",
-            payload={
-                "pr_number": snapshot.number,
-                "pr_state": snapshot.state,
-                "merged": snapshot.merged,
-                "review_decision": snapshot.review_decision,
-                "task_status": task.status,
-                # Recorded for observability only; §30 forbids it from
-                # influencing any lifecycle transition.
-                "ci_status": snapshot.ci_status,
-                "ci_is_not_a_lifecycle_authority": True,
-            },
-        )
+        changed = _record_pr_state(integration, task.task_key, snapshot, pr_state)
+        _record_poll_recovery(task_store, integration, task, snapshot.number)
+        # RULINGS 70 (F10-FU1): the domain event is written only when a §32.1
+        # field changed. pr_last_polled_at, written on every successful poll,
+        # is the heartbeat, so an unchanged PR adds no event per tick.
+        if changed:
+            task_store.record_task_event(
+                task.task_key,
+                "pr_state_polled",
+                SOURCE,
+                message=f"PR #{snapshot.number} polled; changed: {', '.join(sorted(changed))}",
+                payload={
+                    "pr_number": snapshot.number,
+                    "pr_state": snapshot.state,
+                    "merged": snapshot.merged,
+                    "review_decision": snapshot.review_decision,
+                    "task_status": task.status,
+                    # Recorded for observability only; §30 forbids it from
+                    # influencing any lifecycle transition.
+                    "ci_status": snapshot.ci_status,
+                    "ci_is_not_a_lifecycle_authority": True,
+                    "changed_fields": changed,
+                },
+            )
 
         # GitHub does not always return headRefOid; the §32.1 field we already
         # recorded at integration time is then the authoritative reviewed head.
@@ -370,6 +384,11 @@ def poll_pr_outcomes(
     return outcomes
 
 
+def _poll_failure_fingerprint(exc: BaseException) -> str:
+    """sha256 of the exception type and message (RULINGS 70, OR-9)."""
+    return hashlib.sha256(f"{type(exc).__name__}\n{exc}".encode("utf-8")).hexdigest()
+
+
 def _poll_failed(
     task_store: TaskMirrorStore,
     integration: IntegrationStore,
@@ -379,47 +398,95 @@ def _poll_failed(
     *,
     confirm: bool,
 ) -> PrOutcome:
-    """Audit a failed PR poll and stop the Ticket for a decision (§27.2.1).
+    """Audit a failed PR poll; escalate only a persistent failure (§27.2.1).
 
-    The event names the original exception type and message. A Ticket in
-    ``needs_review`` moves to ``needs_decision``. A Ticket the transition table
-    does not let integration move there — ``ready_for_integration``, ``paused``
-    or one already in ``needs_decision`` — keeps its status and gets the event;
-    a queued Ticket's own integration run reaches ``needs_decision`` when its
-    ``gh`` call fails. Nothing in §32.1 is recorded from a poll that failed.
+    RULINGS 70 amends ruling 29e. A failed poll is counted in the Ticket's
+    ``pr_poll_consecutive_failures`` and never changes its status by itself.
+    ``pr_poll_failed`` is written only when the failure fingerprint (exception
+    type and message) differs from the stored one, so a persistent failure
+    adds one event, not one per tick.
+
+    Once the count is at or past :data:`POLL_FAILURE_ESCALATION_THRESHOLD`,
+    a failed poll of a Ticket the transition table lets integration move to
+    ``needs_decision`` escalates it there, with one ``pr_poll_escalated``
+    event. The escalation itself leaves the escalatable state, so this fires
+    at most once per return to one: at the threshold, and again only if a
+    human puts the Ticket back (for example to ``needs_review``) while the
+    failures continue (review N1). A Ticket that cannot move there
+    (``ready_for_integration``, ``paused``, or already ``needs_decision``)
+    keeps its status; it gets the event, with ``transition`` null, only on
+    the poll that reaches the threshold, and escalates on its first failed
+    poll after it becomes escalatable. A successful poll resets the count
+    (:func:`_record_poll_recovery`). Nothing in §32.1 is recorded from a poll
+    that failed.
     """
     pr_number = int(pr_state["pr_number"])
     error = f"{type(exc).__name__}: {exc}"
+    state = integration.get_integration_state(task.task_key)
+    previous_fingerprint = state["pr_poll_failure_fingerprint"]
+    failures = (state["pr_poll_consecutive_failures"] or 0) + 1
+    fingerprint = _poll_failure_fingerprint(exc)
+    over_threshold = failures >= POLL_FAILURE_ESCALATION_THRESHOLD
     target = (
         schema.NEEDS_DECISION
-        if schema.can_transition(task.status, schema.NEEDS_DECISION)
+        if over_threshold and schema.can_transition(task.status, schema.NEEDS_DECISION)
         else None
     )
+    escalate = target is not None or failures == POLL_FAILURE_ESCALATION_THRESHOLD
     applied: str | None = None
     if confirm:
         message = f"Polling PR #{pr_number} failed: {error}"
-        task_store.record_task_event(
-            task.task_key,
-            "pr_poll_failed",
-            SOURCE,
-            message=message,
-            payload={
-                "pr_number": pr_number,
-                "task_status": task.status,
-                "exception_type": type(exc).__name__,
-                "exception_message": str(exc),
-                "transition": target,
-            },
-        )
-        if target is not None:
-            task_store.update_task_status(
+        payload = {
+            "pr_number": pr_number,
+            "task_status": task.status,
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+            "fingerprint": fingerprint,
+            "consecutive_failures": failures,
+            "escalation_threshold": POLL_FAILURE_ESCALATION_THRESHOLD,
+        }
+        if fingerprint != previous_fingerprint:
+            task_store.record_task_event(
                 task.task_key,
-                target,
-                source=SOURCE,
+                "pr_poll_failed",
+                SOURCE,
                 message=message,
-                expected_current_status=task.status,
+                payload={**payload, "previous_fingerprint": previous_fingerprint},
             )
-            applied = target
+        if escalate:
+            task_store.record_task_event(
+                task.task_key,
+                "pr_poll_escalated",
+                SOURCE,
+                message=(
+                    f"Polling PR #{pr_number} failed {failures} consecutive times: {error}"
+                ),
+                payload={
+                    **payload,
+                    "transition": target,
+                    "reason": (
+                        "threshold_reached"
+                        if failures == POLL_FAILURE_ESCALATION_THRESHOLD
+                        else "escalatable_again_while_failing"
+                    ),
+                },
+            )
+            if target is not None:
+                task_store.update_task_status(
+                    task.task_key,
+                    target,
+                    source=SOURCE,
+                    message=message,
+                    expected_current_status=task.status,
+                )
+                applied = target
+        # Written last: a crash before this point repeats the poll's events on
+        # the next tick instead of losing the escalation.
+        integration.update_integration_state(
+            task.task_key,
+            pr_poll_consecutive_failures=failures,
+            pr_poll_failure_fingerprint=fingerprint,
+        )
     return PrOutcome(
         task_key=task.task_key,
         pr_number=pr_number,
@@ -431,6 +498,43 @@ def _poll_failed(
         applied_transition=applied,
         task_status=task.status,
         poll_error=error,
+        consecutive_poll_failures=failures,
+    )
+
+
+def _record_poll_recovery(
+    task_store: TaskMirrorStore,
+    integration: IntegrationStore,
+    task: Any,
+    pr_number: int,
+) -> None:
+    """Reset the failure count after a confirmed successful poll (RULINGS 70).
+
+    Writes one ``pr_poll_recovered`` event when there was a count to reset.
+    It never changes the Ticket's status: an escalated Ticket stays with the
+    human who is deciding it.
+    """
+    state = integration.get_integration_state(task.task_key)
+    failures = state["pr_poll_consecutive_failures"]
+    if not failures and state["pr_poll_failure_fingerprint"] is None:
+        return
+    task_store.record_task_event(
+        task.task_key,
+        "pr_poll_recovered",
+        SOURCE,
+        message=f"Polling PR #{pr_number} recovered after {failures or 0} failed poll(s)",
+        payload={
+            "pr_number": pr_number,
+            "task_status": task.status,
+            "consecutive_failures": failures or 0,
+            "previous_fingerprint": state["pr_poll_failure_fingerprint"],
+            "escalated": (failures or 0) >= POLL_FAILURE_ESCALATION_THRESHOLD,
+        },
+    )
+    integration.update_integration_state(
+        task.task_key,
+        pr_poll_consecutive_failures=None,
+        pr_poll_failure_fingerprint=None,
     )
 
 
@@ -450,15 +554,29 @@ def _proposed_transition(snapshot: PrSnapshot, task_status: str) -> str | None:
 
 
 def _record_pr_state(
-    integration: IntegrationStore, task_key: str, snapshot: PrSnapshot
-) -> None:
+    integration: IntegrationStore,
+    task_key: str,
+    snapshot: PrSnapshot,
+    previous: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Write the polled §32.1 fields and the heartbeat; return what changed.
+
+    The result maps each written field whose value differs from ``previous``
+    to ``{"old": ..., "new": ...}``. ``pr_last_polled_at`` is not a change.
+    """
     fields = {
         key: value
         for key, value in snapshot.to_pr_state_fields().items()
         if value is not None or key in {"pr_merged"}
     }
+    changed = {
+        key: {"old": previous.get(key), "new": value}
+        for key, value in fields.items()
+        if previous.get(key) != value
+    }
     fields["pr_last_polled_at"] = utc_now_iso()
     integration.update_pr_state(task_key, **fields)
+    return changed
 
 
 def _apply_transition(

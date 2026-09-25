@@ -151,6 +151,7 @@ SCHEMA_MIGRATIONS = (
     "task_worktrees_base_sha",
     "v1_step2_integration_tables",
     "v1_step2_conflict_verification",
+    "v1_step2_pr_poll_failures",
 )
 
 
@@ -327,12 +328,28 @@ def _migrate_v1_step2_conflict_verification(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v1_step2_pr_poll_failures(conn: sqlite3.Connection) -> None:
+    """Count consecutive failed PR polls per Ticket (RULINGS 70, OR-9).
+
+    Additive and Step-2-private: two nullable columns on the per-Ticket
+    integration state, not §32.1 fields and not a repo-level heartbeat. The
+    watcher escalates at 6 consecutive failures and resets both on a success.
+    """
+    _add_column_if_missing(
+        conn, "task_integration_state", "pr_poll_consecutive_failures", "INTEGER"
+    )
+    _add_column_if_missing(
+        conn, "task_integration_state", "pr_poll_failure_fingerprint", "TEXT"
+    )
+
+
 _MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (
     ("tasks_blocked_reason", _migrate_tasks_blocked_reason),
     ("tasks_executor_selection", _migrate_tasks_executor_selection),
     ("task_worktrees_base_sha", _migrate_task_worktrees_base_sha),
     ("v1_step2_integration_tables", _migrate_v1_step2_integration_tables),
     ("v1_step2_conflict_verification", _migrate_v1_step2_conflict_verification),
+    ("v1_step2_pr_poll_failures", _migrate_v1_step2_pr_poll_failures),
 )
 
 

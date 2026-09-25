@@ -7,6 +7,7 @@ test can reach real GitHub even if a phase unexpectedly polled a PR.
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import hashlib
 import importlib.util
 import io
 import json
@@ -188,27 +189,90 @@ class ConsumerScriptTests(ScriptFixture):
         self.assertFalse(missing.exists())
         self.assertFalse(integration_tick_lock_path(missing, "owner/repo").exists())
 
-    def test_a_lock_path_naming_the_database_or_other_data_is_refused(self):
-        """Review N2 through the script: nothing is truncated and no work is done."""
+    def assert_error_line(self, completed, error):
+        self.assertEqual(completed.returncode, 2, completed.stderr + completed.stdout)
+        self.assertEqual(len(completed.stdout.splitlines()), 1)
+        payload = json.loads(completed.stdout)
+        self.assertEqual((payload["kind"], payload["status"]), ("integration_tick", "error"))
+        self.assertIn(error, payload["reason"])
+
+    def test_there_is_no_lock_path_override(self):
+        """RULINGS 70 (F10-FU4): production ticks cannot name another lock file."""
+        queued = self.ticket()
+        watched = database_files(self.db_path)
+        before = file_states(watched)
+        for value in (str(self.root / "custom.lock"), str(self.db_path), "relative.lock"):
+            with self.subTest(value=value):
+                completed = self.run_script("--confirm-integration", "--lock-path", value, "--jsonl")
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn("unrecognized arguments: --lock-path", completed.stderr)
+                self.assertEqual(completed.stdout, "")
+        self.assertEqual(file_states(watched), before)
+        self.assertFalse((self.root / "custom.lock").exists())
+        self.assertFalse(self.lock_path.exists())
+        self.assertEqual(self.status(queued), schema.READY_FOR_INTEGRATION)
+
+    def test_an_unusable_derived_lock_file_is_refused_and_nothing_runs(self):
+        """Review N2 / R2-N1 through the script: nothing is truncated, no work is done."""
         queued = self.ticket()
         notes = self.root / "notes.txt"
         notes.write_text("operator notes\n", encoding="utf-8")
         watched = [*database_files(self.db_path), notes]
-        before = file_states(watched)
-        for lock_path, error in (*((path, "TickLockPathError") for path in watched),
-                                 (self.root / "no-such-directory" / "tick.lock", "FileNotFoundError")):
-            with self.subTest(lock_path=str(lock_path)):
-                completed = self.run_script("--confirm-integration", "--lock-path", str(lock_path),
-                                            "--jsonl")
-                self.assertEqual(completed.returncode, 2, completed.stderr + completed.stdout)
-                self.assertEqual(len(completed.stdout.splitlines()), 1)
-                payload = json.loads(completed.stdout)
-                self.assertEqual((payload["kind"], payload["status"]), ("integration_tick", "error"))
-                self.assertIn(error, payload["reason"])
-        self.assertEqual(file_states(watched), before)
-        self.assertFalse((self.root / "no-such-directory").exists())
+        for name, make, error in (
+            ("hard link to the database", lambda: os.link(self.db_path, self.lock_path),
+             "TickLockPathError"),
+            ("symlink", lambda: self.lock_path.symlink_to(notes), "TickLockPathError"),
+            ("hard link to a notes file", lambda: os.link(notes, self.lock_path),
+             "TickLockPathError"),
+            ("padded file", lambda: self.lock_path.write_bytes(b" " * 5000 + b"data\n"),
+             "TickLockPathError"),
+            ("sqlite content",
+             lambda: self.lock_path.write_bytes(b"SQLite format 3\x00" + b"\x00" * 84),
+             "TickLockPathError"),
+        ):
+            with self.subTest(name=name):
+                make()
+                before = (file_states(watched), os.lstat(self.lock_path).st_ino,
+                          None if self.lock_path.is_symlink() else self.lock_path.read_bytes())
+                self.assert_error_line(self.run_script("--confirm-integration", "--jsonl"), error)
+                self.assertEqual((file_states(watched), os.lstat(self.lock_path).st_ino,
+                                  None if self.lock_path.is_symlink() else self.lock_path.read_bytes()),
+                                 before)
+                self.lock_path.unlink()
         self.assertEqual(self.status(queued), schema.READY_FOR_INTEGRATION)
         self.assertTrue(self.integration.is_queued(queued.task_key))
+
+    def test_a_corrupt_holder_record_is_reclaimed_and_reported(self):
+        """RULINGS 70: a torn record no longer makes every tick exit 2."""
+        torn = b"\x00" * 40
+        self.lock_path.write_bytes(torn)
+        completed = self.run_script("--jsonl")
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        [line] = completed.stdout.splitlines()
+        payload = json.loads(line)
+        self.assertEqual(payload["tick_status"], "ok")
+        self.assertEqual(payload["lock_reclaimed"]["lock_path"], str(self.lock_path))
+        self.assertEqual(payload["lock_reclaimed"]["previous_size"], len(torn))
+        self.assertEqual(payload["lock_reclaimed"]["previous_sha256"],
+                         hashlib.sha256(torn).hexdigest())
+        self.assertNotIn("previous_content", payload["lock_reclaimed"])
+        self.assertNotIn("\\u0000", line)
+        self.assertEqual(self.lock_path.read_bytes(), b"")
+        after = self.run_script("--jsonl")
+        self.assertEqual(after.returncode, 0, after.stderr + after.stdout)
+        self.assertNotIn("lock_reclaimed", json.loads(after.stdout))
+
+    def test_a_reclaim_is_reported_even_when_the_tick_errors(self):
+        self.lock_path.write_bytes(b"{")
+        with patch.object(cli, "run_integration_tick", side_effect=RuntimeError("boom")), \
+                redirect_stdout(io.StringIO()) as output:
+            code = cli.main(self.arguments())
+        self.assertEqual(code, 2)
+        payload = json.loads(output.getvalue())
+        self.assertEqual((payload["status"], payload["reason"]), ("error", "RuntimeError: boom"))
+        self.assertEqual(payload["lock_reclaimed"]["previous_size"], 1)
+        self.assertNotIn("previous_content", payload["lock_reclaimed"])
+        self.assertEqual(self.lock_path.read_bytes(), b"")
 
 
 class IntegrationTickOverlapTests(ScriptFixture):
