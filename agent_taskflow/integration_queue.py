@@ -6,9 +6,13 @@ Two rules shape this module:
   (§22.1), so ``priority`` is recorded for observability and deliberately not
   used as a sort key.
 * **Loose lock.** The lock covers only the window that actually mutates the
-  integration branch state. It is released once ``integrated_base_sha`` is
-  recorded and never spans human review (§23.1), which is what lets several
-  same-repo PRs sit in ``needs_review`` at once.
+  integration branch state and never spans human review (§23.1), which is
+  what lets several same-repo PRs sit in ``needs_review`` at once.
+
+Since RULINGS 69 (D3) the lock's exclusion authority is the OS flock in
+:mod:`agent_taskflow.integration_repo_lock`, which ``integrate_task`` takes.
+:class:`IntegrationLock` writes only the ``integration_locks`` journal row and
+excludes nothing that the flock does not.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ __all__ = [
 
 
 class IntegrationLockUnavailable(RuntimeError):
-    """Raised when another runtime already holds a repo's integration lock."""
+    """Raised when a repo's ``integration_locks`` journal row is already written."""
 
 
 @dataclass(frozen=True)
@@ -101,11 +105,12 @@ def remove_from_queue(store: IntegrationStore, task_key: str) -> None:
 
 
 class IntegrationLock:
-    """Context manager for the per-repo integration lock.
+    """Context manager for the per-repo ``integration_locks`` journal row.
 
-    Raises :class:`IntegrationLockUnavailable` on entry when another owner
-    holds the lock, and always releases on exit, including when the body
-    raises — a crashed integration must never wedge a repo.
+    Since RULINGS 69 this row is a journal, not the exclusion authority; the
+    OS flock is (:mod:`agent_taskflow.integration_repo_lock`). It raises
+    :class:`IntegrationLockUnavailable` on entry when a row is already there,
+    and always clears its own row on exit, including when the body raises.
     """
 
     def __init__(self, store: IntegrationStore, repo: str, *, owner: str) -> None:

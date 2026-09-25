@@ -7,7 +7,7 @@ Two storage tiers, kept deliberately separate:
   tolerate ``None``.
 * Step-2-private tables — integration state that §32.1 does not list
   (``previous_integrated_base_sha``, ``new_target_sha``), the per-repo queue
-  and lock, and validator / review / conflict evidence.
+  and the lock journal, and validator / review / conflict evidence.
 
 This module never mutates task status, never touches git or GitHub, and never
 removes anything.
@@ -126,6 +126,70 @@ class IntegrationStore:
                 f"UPDATE task_pr_state SET {assignments} WHERE task_key = ?",
                 (*stored.values(), key),
             )
+        return self.get_pr_state(key)
+
+    def record_integration_completed(
+        self,
+        task_key: str,
+        *,
+        pr_fields: Mapping[str, Any],
+        increment_reintegration: bool,
+        state_fields: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Record a finished integration and dequeue it in one transaction.
+
+        The §32.1 fields (``integrated_base_sha`` among them), the
+        ``reintegration_count`` increment, the private state (with
+        ``last_integration_status="integrated"``) and the dequeue land together
+        or not at all, so a crash leaves either none of them or all of them
+        (RULINGS 69, crash cases D and E).
+        """
+        key = normalize_task_key(task_key)
+        validated = validate_pr_state(dict(pr_fields))
+        unknown = sorted(set(state_fields) - set(_PRIVATE_STATE_FIELDS))
+        if unknown:
+            raise ValueError(f"Unknown integration state field(s): {', '.join(unknown)}")
+        stored = {
+            name: (int(value) if name in _BOOL_PR_FIELDS and value is not None else value)
+            for name, value in validated.items()
+        }
+        now = utc_now_iso()
+        with closing(connect(self.db_path)) as conn, conn:
+            self._require_task(conn, key)
+            self._ensure_pr_row(conn, key)
+            if stored:
+                assignments = ", ".join(f"{name} = ?" for name in stored)
+                conn.execute(
+                    f"UPDATE task_pr_state SET {assignments} WHERE task_key = ?",
+                    (*stored.values(), key),
+                )
+            if increment_reintegration:
+                conn.execute(
+                    """
+                    UPDATE task_pr_state
+                    SET reintegration_count = COALESCE(reintegration_count, 0) + 1
+                    WHERE task_key = ?
+                    """,
+                    (key,),
+                )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO task_integration_state (task_key, updated_at)
+                VALUES (?, ?)
+                """,
+                (key, now),
+            )
+            if state_fields:
+                assignments = ", ".join(f"{name} = ?" for name in state_fields)
+                conn.execute(
+                    f"""
+                    UPDATE task_integration_state
+                    SET {assignments}, updated_at = ?
+                    WHERE task_key = ?
+                    """,
+                    (*state_fields.values(), now, key),
+                )
+            conn.execute("DELETE FROM integration_queue WHERE task_key = ?", (key,))
         return self.get_pr_state(key)
 
     def increment_reintegration_count(self, task_key: str) -> int:
@@ -337,6 +401,12 @@ class IntegrationStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_queue_repos(self) -> dict[str, str]:
+        """Return every queued task key with the repository key it is queued under."""
+        with closing(connect(self.db_path)) as conn:
+            rows = conn.execute("SELECT task_key, repo FROM integration_queue").fetchall()
+        return {row["task_key"]: row["repo"] for row in rows}
+
     def dequeue(self, task_key: str) -> None:
         key = normalize_task_key(task_key)
         with closing(connect(self.db_path)) as conn, conn:
@@ -350,33 +420,77 @@ class IntegrationStore:
             ).fetchone()
         return row is not None
 
-    # -- per-repo lock ----------------------------------------------------
+    # -- per-repo lock journal ---------------------------------------------
+    #
+    # RULINGS 69: since D3 these rows are a journal, not the exclusion
+    # authority. The OS flock in integration_repo_lock is. integrate_task
+    # writes a row when it takes the flock and clears it on a clean release,
+    # so a row found by the next flock holder records a holder that died.
+    # Rows are keyed by the normalized ``owner/name``; a row an older
+    # version wrote under the key as given is still found.
+
+    @staticmethod
+    def _lock_keys(repo: str) -> tuple[str, ...]:
+        raw = (repo or "").strip()
+        try:
+            normalized = normalize_repo(raw)
+        except ValueError:
+            return (raw,)
+        return (normalized,) if normalized == raw else (normalized, raw)
+
     def acquire_integration_lock(self, repo: str, *, owner: str) -> bool:
-        """Take the per-repo integration lock. Returns False if already held."""
+        """Write the journal row. Returns False if a row is already there."""
+        keys = self._lock_keys(repo)
+        placeholders = ", ".join("?" for _ in keys)
         with closing(connect(self.db_path)) as conn, conn:
+            existing = conn.execute(
+                f"SELECT 1 FROM integration_locks WHERE repo IN ({placeholders})", keys
+            ).fetchone()
+            if existing is not None:
+                return False
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO integration_locks (repo, owner, acquired_at)
                 VALUES (?, ?, ?)
                 """,
-                (repo, owner, utc_now_iso()),
+                (keys[0], owner, utc_now_iso()),
             )
             return cursor.rowcount == 1
 
     def release_integration_lock(self, repo: str, *, owner: str) -> bool:
-        """Release the lock only if ``owner`` still holds it."""
+        """Clear the journal row only if ``owner`` wrote it."""
+        keys = self._lock_keys(repo)
+        placeholders = ", ".join("?" for _ in keys)
         with closing(connect(self.db_path)) as conn, conn:
             cursor = conn.execute(
-                "DELETE FROM integration_locks WHERE repo = ? AND owner = ?",
-                (repo, owner),
+                f"DELETE FROM integration_locks WHERE repo IN ({placeholders}) AND owner = ?",
+                (*keys, owner),
             )
-            return cursor.rowcount == 1
+            return cursor.rowcount >= 1
+
+    def clear_integration_lock(self, repo: str) -> dict[str, Any] | None:
+        """Remove a dead holder's journal row, whoever wrote it; return it.
+
+        Only the flock holder may call this: the flock proves the row's
+        writer is gone (RULINGS 69).
+        """
+        row = self.get_integration_lock(repo)
+        if row is None:
+            return None
+        keys = self._lock_keys(repo)
+        placeholders = ", ".join("?" for _ in keys)
+        with closing(connect(self.db_path)) as conn, conn:
+            conn.execute(f"DELETE FROM integration_locks WHERE repo IN ({placeholders})", keys)
+        return row
 
     def get_integration_lock(self, repo: str) -> dict[str, Any] | None:
+        keys = self._lock_keys(repo)
+        placeholders = ", ".join("?" for _ in keys)
         with closing(connect(self.db_path)) as conn:
             row = conn.execute(
-                "SELECT repo, owner, acquired_at FROM integration_locks WHERE repo = ?",
-                (repo,),
+                "SELECT repo, owner, acquired_at FROM integration_locks "
+                f"WHERE repo IN ({placeholders}) ORDER BY repo LIMIT 1",
+                keys,
             ).fetchone()
         return dict(row) if row is not None else None
 

@@ -26,6 +26,11 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
+from agent_taskflow.integration_repo_lock import (
+    active_integration_lock,
+    run_integration_child,
+)
+
 
 __all__ = [
     "GitRunResult",
@@ -49,6 +54,7 @@ __all__ = [
     "fetch",
     "head_sha",
     "in_progress_operation",
+    "git_common_dir",
     "git_dir",
     "verify_conflict_resolution",
     "ResolutionCheck",
@@ -57,6 +63,7 @@ __all__ = [
     "merge_target_into_branch",
     "push_branch",
     "rebase_onto_target",
+    "remote_branch_sha",
     "resolve_target_sha",
     "rev_list",
     "run_git",
@@ -68,6 +75,13 @@ PROTECTED_BRANCHES = frozenset({"main", "master", "trunk"})
 
 # The only remote a Step 2 push may target (review Ruling 3).
 ALLOWED_PUSH_REMOTE = "origin"
+
+# Prepended to every git call made under the integration lock (RULINGS 69).
+GIT_NO_BACKGROUND_WORK = (
+    "-c", "gc.autoDetach=false",
+    "-c", "gc.auto=0",
+    "-c", "maintenance.auto=false",
+)
 
 # Force-style flags refused on every non-push command, as defence in depth.
 # Pushes are governed by the stricter allowlist in `assert_push_allowed`.
@@ -296,7 +310,12 @@ def _default_runner(argv: Sequence[str], cwd: Path) -> CompletedProcessLike:
     # on the editor and silently leaves the rebase in progress, which review
     # blocker B2's check (a) caught. `true` accepts the prepared message as-is.
     env["GIT_EDITOR"] = "true"
-    return subprocess.run(
+    if active_integration_lock() is not None:
+        # RULINGS 69: under the integration lock, git runs as a managed child
+        # holding the lock's descriptor, so it must not leave a background GC
+        # or maintenance descendant behind that keeps holding it.
+        argv = [argv[0], *GIT_NO_BACKGROUND_WORK, *argv[1:]]
+    return run_integration_child(
         list(argv),
         cwd=cwd,
         shell=False,
@@ -448,6 +467,22 @@ def git_dir(cwd: Path) -> Path:
             target = Path(pointer[len(prefix) :].strip())
             return target if target.is_absolute() else (Path(cwd) / target).resolve()
     return path
+
+
+def remote_branch_sha(cwd: Path, remote: str, branch: str, **kwargs) -> str | None:
+    """Return the fetched ``<remote>/<branch>`` SHA, or None if there is none."""
+    result = run_git(
+        cwd, ["rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"], **kwargs
+    )
+    return (result.stdout.strip() or None) if result.ok else None
+
+
+def git_common_dir(cwd: Path, **kwargs) -> Path:
+    """Return the canonical git-common-dir shared by ``cwd`` and its clone."""
+    result = run_git(
+        cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], check=True, **kwargs
+    )
+    return Path(result.stdout.strip()).resolve()
 
 
 def in_progress_operation(cwd: Path) -> str | None:

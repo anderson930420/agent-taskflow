@@ -21,13 +21,18 @@ from agent_taskflow.integration_controller import (
     IntegrationRequest,
     integrate_task,
 )
-from agent_taskflow.integration_queue import IntegrationLock, enqueue_for_integration
+from agent_taskflow.integration_queue import enqueue_for_integration
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.integration_validators import IntegrationValidatorSpec
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.github_pr_adapter import GitHubPrAdapter
-from v1_step2_fixtures import FakeGhRunner, GitFixture  # noqa: E402
+from v1_step2_fixtures import (  # noqa: E402
+    FakeGhRunner,
+    GitFixture,
+    hold_integration_lock,
+    isolate_integration_lock_dir,
+)
 
 
 GREEN = (IntegrationValidatorSpec(name="unit", command=("true",)),)
@@ -65,6 +70,7 @@ class TakeBothSidesResolver:
 
 class ControllerTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        self.lock_dir = isolate_integration_lock_dir(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.fixture = GitFixture(self.root)
@@ -284,8 +290,10 @@ class LockAndQueueTests(ControllerTestCase):
         worktree = self.make_task("AT-101")
         self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
         enqueue_for_integration(self.integration, "AT-101", repo="owner/repo")
-        with IntegrationLock(self.integration, "owner/repo", owner="other-runtime"):
-            result = self.integrate("AT-101")
+        # RULINGS 69: another writer holds the repository's flock.
+        lock = hold_integration_lock(self, "owner/repo", self.fixture.repo)
+        result = self.integrate("AT-101")
+        lock.release()
         self.assertEqual(result.status, "lock_unavailable")
         self.assertEqual(self.status_of("AT-101"), schema.READY_FOR_INTEGRATION)
         self.assertEqual(self.gh_runner.calls, [])
@@ -293,8 +301,9 @@ class LockAndQueueTests(ControllerTestCase):
     def test_a_different_repo_lock_does_not_block(self) -> None:
         worktree = self.make_task("AT-101")
         self.fixture.commit_in(worktree, "feature.txt", "f\n", "feature")
-        with IntegrationLock(self.integration, "owner/other", owner="other-runtime"):
-            result = self.integrate("AT-101")
+        lock = hold_integration_lock(self, "owner/other", self.fixture.repo)
+        result = self.integrate("AT-101")
+        lock.release()
         self.assertTrue(result.ok, result.summary)
         self.assertEqual(self.status_of("AT-101"), schema.NEEDS_REVIEW)
 
@@ -1036,7 +1045,16 @@ class PrIdentityTests(ControllerTestCase):
                 raise RuntimeError("simulated failure after gh pr create")
             return real_update(task_key, **fields)
 
-        with mock.patch.object(self.integration, "update_pr_state", side_effect=failing_update):
+        # integrated_base_sha is recorded by the atomic completion record
+        # (RULINGS 69), so the failure is injected there.
+        def failing_completion(task_key, *, pr_fields, **_):
+            return failing_update(task_key, **pr_fields)
+
+        with mock.patch.object(
+            self.integration, "update_pr_state", side_effect=failing_update
+        ), mock.patch.object(
+            self.integration, "record_integration_completed", side_effect=failing_completion
+        ):
             result = self.integrate("AT-101")
 
         self.assertEqual(result.status, "needs_decision", result.summary)

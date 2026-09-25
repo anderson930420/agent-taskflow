@@ -42,7 +42,12 @@ from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.ticket_fields_schema import migrate_ticket_fields
 from agent_taskflow.ticket_models import AI_TITLE_NOT_ATTEMPTED, METADATA_SOURCE_FALLBACK
-from v1_step2_fixtures import FakeGhRunner, GitFixture, git as raw_git  # noqa: E402
+from v1_step2_fixtures import (  # noqa: E402
+    FakeGhRunner,
+    GitFixture,
+    git as raw_git,
+    isolate_integration_lock_dir,
+)
 
 
 GREEN = (IntegrationValidatorSpec(name="unit", command=("true",)),)
@@ -67,6 +72,7 @@ STEP2_MODULES = (
 
 class AcceptanceTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        self.lock_dir = isolate_integration_lock_dir(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.fixture = GitFixture(self.root)

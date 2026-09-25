@@ -509,7 +509,10 @@ class CleanupPhaseTests(ConsumerFixture):
 
 
 class LockReportTests(ConsumerFixture):
-    def test_a_held_integration_lock_row_is_reported_and_left_untouched(self):
+    def test_a_leftover_lock_row_is_reported_then_cleared_by_the_next_flock_holder(self):
+        """RULINGS 69: the row is a journal. The tick still reports it read-only,
+        but it no longer wedges the repository: the next flock holder treats it
+        as a dead holder's row, reconciles, clears it and integrates."""
         queued = self.ticket()
         self.assertTrue(self.integration.acquire_integration_lock("owner/repo", owner="killed-runtime"))
         row = self.integration.get_integration_lock("owner/repo")
@@ -517,14 +520,17 @@ class LockReportTests(ConsumerFixture):
         report = result["integration_lock_at_start"]
         self.assertTrue(report["held"])
         self.assertEqual((report["owner"], report["acquired_at"]), ("killed-runtime", row["acquired_at"]))
-        self.assertEqual(result["stopped_reason"], "lock_unavailable")
-        self.assertEqual(result["remaining_task_keys"], [queued.task_key])
-        self.assertFalse(result["ok"])
-        self.assertEqual(self.integration.get_integration_lock("owner/repo"), row)
-        self.integration.release_integration_lock("owner/repo", owner="killed-runtime")
+        self.assertIsNone(result["stopped_reason"])
+        self.assertEqual(result["remaining_task_keys"], [])
+        self.assertTrue(result["ok"], result)
+        outcome, = result["outcomes"]
+        lock = outcome["integration"]["integration_lock"]
+        self.assertEqual(lock["leftover_journal_row"], row)
+        self.assertEqual(lock["crash_reconciliation"], [])
+        self.assertIsNone(self.integration.get_integration_lock("owner/repo"))
+        self.assertEqual(self.status(queued), schema.NEEDS_REVIEW)
         clear = self.tick()
         self.assertEqual(clear["integration_lock_at_start"], {"held": False})
-        self.assertEqual(self.status(queued), schema.NEEDS_REVIEW)
 
 
 class IdempotenceTests(ConsumerFixture):

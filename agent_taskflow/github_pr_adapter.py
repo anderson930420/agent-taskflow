@@ -23,6 +23,8 @@ import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Protocol, Sequence
 
+from agent_taskflow.integration_repo_lock import run_integration_child
+
 
 __all__ = [
     "GitHubPrAdapter",
@@ -344,7 +346,8 @@ class GitHubPrAdapter:
         if not normalized:
             raise GitHubPrError("repo must not be empty")
         self.repo = normalized
-        self._runner = runner or subprocess.run
+        # Managed under the integration lock, plain subprocess.run otherwise.
+        self._runner = runner or run_integration_child
         self._gh_bin = gh_bin
 
     # -- command execution -------------------------------------------------

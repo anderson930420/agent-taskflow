@@ -89,6 +89,9 @@ TASK_EVENT_TYPES = {
     "integration_started",
     "integration_completed",
     "integration_blocked",
+    # RULINGS 69: the next flock holder handled a Ticket a dead holder left
+    # in `integrating` (crash cases A-F).
+    "integration_crash_reconciled",
     "reintegration_required",
     "pr_state_polled",
     "pr_poll_failed",
@@ -131,6 +134,8 @@ TASK_ARTIFACT_TYPES = {
     "integration_result",
     "integration_validator_evidence",
     "integration_cleanup",
+    # RULINGS 69: what crash reconciliation found and did, per Ticket.
+    "integration_crash_reconciliation",
     "other",
 }
 
