@@ -101,6 +101,7 @@ from agent_taskflow.ticket_prompt import (
     write_ticket_implementation_prompt,
 )
 from agent_taskflow.ticket_success_gate import (
+    control_plane_commit_refusal,
     executor_result_refusal,
     managed_invocation_refusal,
     required_evidence_refusal,
@@ -134,6 +135,9 @@ TICKET_REQUIRED_EVIDENCE = (
     CLAUDE_CODE_PROMPT_FILENAME,
     CLAUDE_CODE_EXECUTION_ARTIFACT_FILENAME,
 )
+
+#: The control-plane commit's record in the Attempt root (OR-10 Q2).
+CONTROL_PLANE_COMMIT_FILENAME = "control_plane_commit.json"
 
 RUNNABLE_STATUSES = {
     # Persisted spelling of the §12 display status `ready` (status_vocab);
@@ -685,6 +689,15 @@ class Dispatcher:
 
         if policy is not None:
             evidence_refusal = required_evidence_refusal(evidence_root, TICKET_REQUIRED_EVIDENCE)
+            if evidence_refusal is None:
+                # OR-10 Q2: the control plane, not the executor, commits the
+                # validated output, so integration has a commit to rebase.
+                worktree_path, base_sha, repo_path, branch = self._ticket_workspace(task, worktree)
+                evidence_refusal = control_plane_commit_refusal(
+                    worktree_path, base_sha, f"{task.task_key}: {task.title or task.task_key}",
+                    Path(evidence_root) / CONTROL_PLANE_COMMIT_FILENAME,
+                    repo_path=repo_path, branch=branch,
+                )
             if evidence_refusal is not None:
                 validation_summary.finish(state="stopped", reason=evidence_refusal)
                 return self._fail(
@@ -889,13 +902,18 @@ class Dispatcher:
         if refusal is None:
             refusal = managed_invocation_refusal(self.store.db_path, attempt_id, policy)
         if refusal is None:
-            resource_lookup = getattr(self.store, "attempt_resource", None)
-            resource = resource_lookup(task.task_key) if resource_lookup is not None else None
-            if resource is not None:
-                refusal = worktree_diff_refusal(resource.worktree_path, resource.base_sha)
-            else:
-                refusal = worktree_diff_refusal(worktree.worktree_path, worktree.base_sha)
+            refusal = worktree_diff_refusal(*self._ticket_workspace(task, worktree)[:2])
         return refusal
+
+    def _ticket_workspace(
+        self, task: TaskRecord, worktree: TaskWorktreeRecord,
+    ) -> tuple[str | Path, str | None, str | Path, str]:
+        """The Attempt's worktree, base commit, repository and branch, else the task worktree's."""
+        resource_lookup = getattr(self.store, "attempt_resource", None)
+        resource = resource_lookup(task.task_key) if resource_lookup is not None else None
+        if resource is not None:
+            return resource.worktree_path, resource.base_sha, resource.repo_path, resource.branch_name
+        return worktree.worktree_path, worktree.base_sha, worktree.repo_path, worktree.branch
 
     def _get_executor(
         self,

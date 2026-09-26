@@ -8,8 +8,10 @@ or merely "not in the failure list" — is a failure.
 
 The dispatcher calls these checks. Each returns ``None`` when its condition
 holds, or the reason it does not. They read the database and the worktree and
-write nothing. They rely on facts the dispatcher can observe itself, not on
-what an executor object says about itself: the managed-launch row that
+write nothing, except :func:`control_plane_commit_refusal`, which commits the
+executor's output once everything else has passed (OR-10 Q2). They rely on
+facts the dispatcher can observe itself, not on what an executor object says
+about itself: the managed-launch row that
 :func:`agent_taskflow.executor_launch.run_managed_process` records for the
 claimed Attempt, its launch spec file, and ``git`` in the worktree.
 """
@@ -24,6 +26,7 @@ import sqlite3
 import subprocess
 from typing import Iterable
 
+from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.execution_policy import ExecutionPolicy
 
 #: Git configuration for the diff check. It must not run repository hooks or a
@@ -119,8 +122,8 @@ def worktree_diff_refusal(worktree_path: str | Path, base_sha: str | None) -> st
 
     Tracked changes are compared against the base commit, so commits the
     executor made count as well as uncommitted edits; new untracked files that
-    are not ignored count too. Nothing is committed here (D2 moves commits to the
-    control plane).
+    are not ignored count too. Nothing is committed here; the control plane
+    commits later, in :func:`control_plane_commit_refusal`.
     """
     if not base_sha:
         return "The Attempt has no base commit; a diff against the base cannot be shown"
@@ -141,6 +144,91 @@ def worktree_diff_refusal(worktree_path: str | Path, base_sha: str | None) -> st
     if untracked.stdout.strip("\0"):
         return None
     return f"The executor produced no change: the worktree does not differ from base {base_sha}"
+
+
+def _repository_binding_refusal(worktree: Path, repo_path: Path) -> str | None:
+    """Require the worktree's git dir to be the one ``repo_path`` registered for it.
+
+    The expected git dir comes from the managed repository (its linked-worktree
+    entry whose ``gitdir`` file names this worktree), never from the worktree's
+    own ``.git`` file, which the executor can rewrite.
+    """
+    common = _git(repo_path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common.returncode != 0:
+        return f"The managed repository {repo_path} is unreadable: {common.stderr.strip()[:500]}"
+    common_dir = Path(common.stdout.strip()).resolve()
+    registered = [
+        entry.resolve() for entry in (common_dir / "worktrees").glob("*")
+        if (entry / "gitdir").is_file()
+        and Path((entry / "gitdir").read_text(encoding="utf-8").strip()).parent.resolve()
+        == worktree.resolve()
+    ]
+    actual = _git(worktree, "rev-parse", "--path-format=absolute", "--absolute-git-dir", "--git-common-dir")
+    dirs = [Path(line).resolve() for line in actual.stdout.splitlines()]
+    if len(registered) != 1 or actual.returncode != 0 or dirs != [registered[0], common_dir]:
+        return (
+            f"The worktree {worktree} is not bound to the managed repository {repo_path}: "
+            f"git dirs {[str(d) for d in dirs]}, expected {[str(d) for d in registered[:1]]} "
+            f"and {common_dir}"
+        )
+    return None
+
+
+def control_plane_commit_refusal(
+    worktree_path: str | Path, base_sha: str | None, message: str, record_path: Path,
+    *, repo_path: str | Path, branch: str,
+) -> str | None:
+    """Commit what the executor left in the worktree, as the control plane (OR-10 Q2).
+
+    The worktree must first be bound to ``repo_path`` (its git dir is the one the
+    managed repository registered for it). Everything not ignored is then staged
+    and committed with hooks and signing disabled, ``--no-verify``, and
+    ``user.useConfigOnly`` so that a missing git identity fails instead of being
+    guessed. A clean tree means the executor committed its own change, and
+    nothing more is committed. Either way HEAD must then differ from
+    ``base_sha``, the tree must be clean, and ``refs/heads/<branch>`` in
+    ``repo_path`` must be that HEAD. The resulting HEAD is written to
+    ``record_path`` in the Attempt's evidence.
+    """
+    if not base_sha:
+        return "The Attempt has no base commit; its change cannot be committed"
+    worktree, repo = Path(worktree_path), Path(repo_path)
+    commit = (
+        "-c", "user.useConfigOnly=true", "-c", "commit.gpgSign=false",
+        "commit", "--no-verify", "-q", "-m", message,
+    )
+    try:
+        binding = _repository_binding_refusal(worktree, repo)
+        if binding is not None:
+            return binding
+        status = _git(worktree, "status", "--porcelain", "-z")
+        if status.returncode != 0:
+            return f"git status failed: {status.stderr.strip()[:500]}"
+        for name, args in (("add", ("add", "-A")), ("commit", commit)) if status.stdout else ():
+            step = _git(worktree, *args)
+            if step.returncode != 0:
+                return f"Control-plane git {name} failed: {step.stderr.strip()[:500]}"
+        head = _git(worktree, "rev-parse", "--verify", "HEAD^{commit}")
+        after = _git(worktree, "status", "--porcelain", "-z")
+        head_sha = head.stdout.strip()
+        if head.returncode != 0 or after.returncode != 0 or after.stdout:
+            return "The worktree is not clean at a readable HEAD after the control-plane commit"
+        if head_sha == base_sha:
+            return f"HEAD is still the base {base_sha}; there is no commit to integrate"
+        branch_head = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}")
+        if branch_head.returncode != 0 or branch_head.stdout.strip() != head_sha:
+            return (
+                f"refs/heads/{branch} in {repo} is at {branch_head.stdout.strip() or 'nothing'}, "
+                f"not the worktree HEAD {head_sha}"
+            )
+        atomic_write_json(record_path, {
+            "base_sha": base_sha, "head_sha": head_sha,
+            "committed_by_control_plane": bool(status.stdout),
+            "message": message if status.stdout else None,
+        }, sort_keys=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"The control-plane commit could not be made: {exc}"
+    return None
 
 
 def validator_status_refusal(name: str, status: object) -> str | None:
@@ -165,6 +253,7 @@ def required_evidence_refusal(root: str | Path | None, names: Iterable[str]) -> 
 
 __all__ = [
     "argv_sha256",
+    "control_plane_commit_refusal",
     "executor_result_refusal",
     "managed_invocation_refusal",
     "required_evidence_refusal",
