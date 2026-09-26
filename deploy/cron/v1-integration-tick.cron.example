@@ -48,8 +48,8 @@
 # {"status": "skipped_overlap", ...} line to the JSONL log and exits 75
 # without doing any work. Do NOT also wrap this line in flock(1) on that same
 # file: the tick would contend with its own wrapper and skip every run. Do not
-# add timeout(1) either: killing a tick mid-integration leaves the per-repo
-# integration lock row held (a known, owner-reserved liveness gap).
+# add timeout(1) either: killing a tick mid-integration interrupts its git/gh work;
+# the next tick's crash reconciliation (RULINGS 69) settles it or asks a human.
 #
 # Exit codes: 0 ok, 1 not ok (some phase or drain outcome needs attention,
 # including a verified merge whose cleanup is incomplete: it is listed in
