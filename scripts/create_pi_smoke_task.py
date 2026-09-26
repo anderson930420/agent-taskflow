@@ -31,6 +31,7 @@ from agent_taskflow.atomic_write import atomic_write_text
 from agent_taskflow.models import TaskRecord, TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 
 DEFAULT_PROVIDER = "minimax"
 DEFAULT_MODEL = "MiniMax-M2.7"
@@ -129,6 +130,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Normalize task key
     task_key = normalize_task_key(args.task_key)
+
+    # RULINGS 74/80/81: never overwrite a V1 Ticket's row or worktree record.
+    # Refused before any directory, prompt or DB write.
+    try:
+        require_supported_in_v0(db_path, task_key, entrypoint="scripts/create_pi_smoke_task.py")
+    except UnsupportedInV0 as exc:
+        print(json.dumps({
+            "ok": False, "task_key": task_key, "status": "blocked", "summary": str(exc),
+        }, indent=2, sort_keys=True))
+        return 2
 
     # Derived paths
     worktree_path = repo_path / ".worktrees" / task_key

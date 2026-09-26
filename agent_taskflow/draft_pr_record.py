@@ -63,6 +63,7 @@ from agent_taskflow.pr_handoff_package import (
 )
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 from agent_taskflow.worktree import ensure_absolute_path
 
 
@@ -215,6 +216,14 @@ def record_existing_draft_pr(
         )
 
     current_store = store or TaskMirrorStore(db_path)
+    # RULINGS 74/80/81: Step 2 is the only writer of a V1 Ticket's PR evidence.
+    # Refused before the handoff preview and any gh call, in dry-run too.
+    try:
+        require_supported_in_v0(
+            current_store.db_path, request.task_key, entrypoint="record_existing_draft_pr",
+        )
+    except UnsupportedInV0 as exc:
+        return _error_result(request=request, status="blocked", error=str(exc))
     handoff_request = PrHandoffPackageRequest(
         task_key=request.task_key,
         repo_path=request.repo_path,

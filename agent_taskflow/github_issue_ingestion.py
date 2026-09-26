@@ -12,6 +12,7 @@ from agent_taskflow.atomic_write import atomic_write_text
 from agent_taskflow.models import TaskRecord, require_absolute_path, utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 
 
 ISSUE_SPEC_FILENAME = "issue_spec.md"
@@ -190,6 +191,18 @@ def ingest_github_issue(
     fetcher: IssueFetcher = fetch_issue_with_gh,
 ) -> GitHubIssueIngestionResult:
     """Mirror one GitHub Issue into the local store without dispatching."""
+
+    # RULINGS 74/80/81: ingestion never rewrites a V1 Ticket's row (an explicit
+    # --task-key may name one). Refused before the gh fetch and any write, in
+    # dry-run too.
+    try:
+        require_supported_in_v0(
+            store.db_path,
+            request.task_key or f"AT-GH-{request.issue_number}",
+            entrypoint="ingest_github_issue",
+        )
+    except UnsupportedInV0 as exc:
+        raise GitHubIssueIngestionError(str(exc)) from exc
 
     try:
         issue = fetcher(request.repo, request.issue_number)

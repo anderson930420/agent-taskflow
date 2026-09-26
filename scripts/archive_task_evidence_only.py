@@ -47,6 +47,7 @@ from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import TaskRecord, utc_now_iso, validate_task_status
 from agent_taskflow.store import TaskMirrorStore, default_db_path
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 
 
 ARTIFACT_TYPE = "task_evidence_archive"
@@ -174,6 +175,13 @@ def archive_task_evidence_only(
         )
 
     current_store = store or TaskMirrorStore(db_path)
+    # RULINGS 74/80/81: a V1 Ticket is never archived here, in any mode
+    # (docs/v0-supported-surface.md). Raises UnsupportedInV0; main() exits 2.
+    require_supported_in_v0(
+        current_store.db_path,
+        request.task_key,
+        entrypoint="scripts/archive_task_evidence_only.py",
+    )
     task = current_store.get_task(request.task_key)
     if task is None:
         return _not_found_result(
@@ -741,6 +749,12 @@ def main(argv: list[str] | None = None, *, store: TaskMirrorStore | None = None)
             confirm_evidence_archive=args.confirm_evidence_archive,
         )
         result = archive_task_evidence_only(request, store=store)
+    except UnsupportedInV0 as exc:
+        _emit_json(
+            _error_payload(args.task_key, args.reason_code, str(exc)),
+            compact=args.json and not args.pretty,
+        )
+        return 2
     except (ValueError, OSError, EvidenceArchiveError) as exc:
         _emit_json(
             _error_payload(args.task_key, args.reason_code, str(exc)),

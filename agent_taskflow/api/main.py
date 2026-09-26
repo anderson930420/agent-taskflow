@@ -90,6 +90,7 @@ from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.ticket_ai_metadata import TicketAIMetadataAdapter
 from agent_taskflow.ticket_lifecycle import is_ticket
 from agent_taskflow.ticket_store import TicketStore
+from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 from agent_taskflow.workspace_manager import (
     WorkspacePreparationRequest,
     prepare_task_workspace,
@@ -207,6 +208,19 @@ def create_app(
             ),
         )
 
+    def v0_refusal(action: str, task: TaskRecord, current_store: TaskMirrorStore) -> JSONResponse | None:
+        # RULINGS 74/80/81: these legacy action routes refuse a V1 Ticket before
+        # any write or subprocess (docs/v0-supported-surface.md).
+        try:
+            require_supported_in_v0(
+                current_store.db_path,
+                task.task_key,
+                entrypoint=f"POST /api/tasks/{{task_key}}/{action}",
+            )
+        except UnsupportedInV0 as exc:
+            return conflict(action, task, str(exc))
+        return None
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "service": SERVICE_NAME}
@@ -320,6 +334,11 @@ def create_app(
         current_store: TaskMirrorStore = Depends(get_store),
     ) -> dict[str, object] | JSONResponse:
         task = task_or_404(task_key, current_store)
+        # A Ticket runs only through the execution tick, never in the API
+        # process (RULINGS 80, 81; docs/v0-supported-surface.md).
+        refused = v0_refusal("start", task, current_store)
+        if refused is not None:
+            return refused
 
         if task.status in {
             "waiting_approval",
@@ -425,8 +444,11 @@ def create_app(
         task_key: str,
         request: PrepareWorkspaceRequest | None = None,
         current_store: TaskMirrorStore = Depends(get_store),
-    ) -> dict[str, object]:
+    ) -> dict[str, object] | JSONResponse:
         task = task_or_404(task_key, current_store)
+        refused = v0_refusal("prepare-workspace", task, current_store)
+        if refused is not None:
+            return refused
         request = request or PrepareWorkspaceRequest()
 
         try:
@@ -457,6 +479,9 @@ def create_app(
         current_store: TaskMirrorStore = Depends(get_store),
     ) -> dict[str, object] | JSONResponse:
         task = task_or_404(task_key, current_store)
+        refused = v0_refusal("approve", task, current_store)
+        if refused is not None:
+            return refused
         require_operator_attested_decided_by(request.decided_by, action="Approval")
 
         if task.status != "waiting_approval":
@@ -500,6 +525,9 @@ def create_app(
         current_store: TaskMirrorStore = Depends(get_store),
     ) -> dict[str, object] | JSONResponse:
         task = task_or_404(task_key, current_store)
+        refused = v0_refusal("reject", task, current_store)
+        if refused is not None:
+            return refused
         require_operator_attested_decided_by(request.decided_by, action="Rejection")
 
         if task.status not in {"waiting_approval", "blocked"}:
@@ -541,8 +569,12 @@ def create_app(
         task_key: str,
         request: BlockTaskRequest,
         current_store: TaskMirrorStore = Depends(get_store),
-    ) -> dict[str, object]:
+    ) -> dict[str, object] | JSONResponse:
         task = task_or_404(task_key, current_store)
+        # A Ticket is paused or killed through scripts/runtime_control.py.
+        refused = v0_refusal("block", task, current_store)
+        if refused is not None:
+            return refused
         reason = request.blocked_reason.strip()
         if not reason:
             raise HTTPException(status_code=422, detail="blocked_reason must not be empty")

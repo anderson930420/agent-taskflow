@@ -18,6 +18,7 @@ from agent_taskflow.atomic_write import atomic_write_json
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 from agent_taskflow.worktree import ensure_absolute_path
 
 
@@ -139,6 +140,14 @@ def push_task_branch(
     """Preview or push the prepared task branch recorded in the local store."""
 
     current_store = store or TaskMirrorStore(request.db_path)
+    # RULINGS 74/80/81: only integration_git pushes a V1 Ticket branch. Refused
+    # before init_db and any git call, in dry-run too.
+    try:
+        require_supported_in_v0(
+            current_store.db_path, request.task_key, entrypoint="push_task_branch",
+        )
+    except UnsupportedInV0 as exc:
+        raise BranchPushError(str(exc)) from exc
     current_store.init_db()
     run = runner or subprocess.run
 

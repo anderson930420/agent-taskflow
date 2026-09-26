@@ -26,6 +26,7 @@ from agent_taskflow.post_merge_cleanup_recommendation import (
 )
 from agent_taskflow.store import TaskMirrorStore, default_db_path
 from agent_taskflow.tasks import normalize_task_key
+from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 from agent_taskflow.worktree import ensure_absolute_path
 
 
@@ -161,6 +162,23 @@ def confirm_local_cleanup(
     task = current_store.get_task(request.task_key)
     if task is None:
         return _not_found_result(request=request, error=f"Task not found: {request.task_key}")
+
+    # RULINGS 74/80/81: a V1 Ticket is cleaned up only by integration_cleanup
+    # after merge verification. Refused before any git call, in dry-run too.
+    try:
+        require_supported_in_v0(
+            current_store.db_path, request.task_key, entrypoint="confirm_local_cleanup",
+        )
+    except UnsupportedInV0 as exc:
+        return _blocked_result(
+            request=request,
+            task=task,
+            cleanup_recommendation=_empty_cleanup_recommendation(),
+            worktree=_empty_worktree(),
+            local_branch=_empty_local_branch(),
+            warnings=[str(exc)],
+            error=str(exc),
+        )
 
     worktree = current_store.get_task_worktree(request.task_key)
     if worktree is None:
