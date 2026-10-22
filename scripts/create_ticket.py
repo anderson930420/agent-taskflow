@@ -5,7 +5,8 @@ An operator CLI that replaces curl. It only calls the API: it never touches
 the database, never starts an executor, and changes no lifecycle state itself.
 
 Exit codes: 0 on success, 1 on an HTTP error status, 2 if the API cannot be
-reached. Argument errors exit 2 through argparse.
+reached or does not answer within ``--timeout`` seconds. Argument errors exit
+2 through argparse.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 from typing import Any
 import urllib.error
@@ -21,6 +23,18 @@ import urllib.request
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8100"
 API_BASE_URL_ENV = "AGENT_TASKFLOW_API_BASE_URL"
+DEFAULT_TIMEOUT_SECONDS = 30.0
+_TIMEOUT_ERRORS = (TimeoutError, socket.timeout)
+
+
+def _positive_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}") from None
+    if not seconds > 0:
+        raise argparse.ArgumentTypeError(f"must be greater than 0: {value!r}")
+    return seconds
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -31,6 +45,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--api-base-url",
         default=None,
         help=f"API base URL (default: ${API_BASE_URL_ENV} or {DEFAULT_API_BASE_URL})",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help=f"request timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS:g})",
     )
     parser.add_argument("--json", action="store_true", help="print the full JSON response")
     source = parser.add_mutually_exclusive_group(required=True)
@@ -71,6 +92,11 @@ def _error_detail(body: bytes) -> str:
     return text
 
 
+def _report_timeout(base_url: str, timeout: float) -> int:
+    print(f"the API at {base_url} did not answer within {timeout:g} seconds", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     base_url = _api_base_url(args.api_base_url)
@@ -81,12 +107,16 @@ def main(argv: list[str] | None = None) -> int:
     }
     request = _build_request(base_url, payload)
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=args.timeout) as response:
             body: Any = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         print(f"HTTP {exc.code}: {_error_detail(exc.read() or b'')}", file=sys.stderr)
         return 1
+    except _TIMEOUT_ERRORS:
+        return _report_timeout(base_url, args.timeout)
     except urllib.error.URLError as exc:
+        if isinstance(exc.reason, _TIMEOUT_ERRORS):
+            return _report_timeout(base_url, args.timeout)
         print(f"cannot reach the API at {base_url}: {exc.reason}", file=sys.stderr)
         return 2
     if args.json:
