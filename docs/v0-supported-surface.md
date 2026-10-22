@@ -120,7 +120,6 @@ Routes are the `APIRoute`s of `create_app()`. FastAPI's generated `/openapi.json
 | `scripts/kanban_workflow_regression.py` | script | LEGACY | n/a | Disposable fixtures. |
 | `scripts/run_local_validation.py` | script | LEGACY | n/a | Local checks; no Ticket state. |
 | `scripts/run_issue_to_prepared_workspace_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_mission_control_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_pi_executor_golden_path_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_prepared_workspace_golden_path_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_workflow_policy_artifact_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
