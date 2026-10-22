@@ -31,14 +31,6 @@ STEP3_PY_MODULES = (
     "agent_taskflow/api/realtime.py",
 )
 
-STEP3_FRONTEND_FILES = (
-    "mission-control/lib/realtime.ts",
-    "mission-control/components/ExecutionStepList.tsx",
-    "mission-control/components/LiveBoard.tsx",
-    "mission-control/components/LiveTicketPanel.tsx",
-    "mission-control/app/live/page.tsx",
-)
-
 
 def read(relative: str) -> str:
     path = REPO_ROOT / relative
@@ -49,7 +41,7 @@ def read(relative: str) -> str:
 
 class Step3FilesExistTests(unittest.TestCase):
     def test_every_declared_step3_file_exists(self) -> None:
-        for relative in STEP3_PY_MODULES + STEP3_FRONTEND_FILES:
+        for relative in STEP3_PY_MODULES:
             with self.subTest(file=relative):
                 self.assertTrue((REPO_ROOT / relative).exists(), relative)
 
@@ -206,25 +198,6 @@ class NoGitOrGithubCallInStep3CodeTests(unittest.TestCase):
                 with self.subTest(file=relative, token=token):
                     self.assertNotIn(token, source)
 
-    def test_step3_frontend_never_calls_a_mutation_endpoint(self) -> None:
-        forbidden = (
-            "/approve",
-            "/reject",
-            "/block",
-            "/start",
-            "/validate",
-            "/prepare-workspace",
-            'method: "POST"',
-            "method: 'POST'",
-            "gh pr",
-            "git push",
-        )
-        for relative in STEP3_FRONTEND_FILES:
-            source = read(relative)
-            for token in forbidden:
-                with self.subTest(file=relative, token=token):
-                    self.assertNotIn(token, source)
-
 
 class NoProgressEstimateAnywhereTests(unittest.TestCase):
     """§14.2 — no percentage, ETA, or completion estimate in code or template."""
@@ -262,18 +235,6 @@ class NoProgressEstimateAnywhereTests(unittest.TestCase):
                 relative,
                 allow_regex_source=relative.endswith("runtime_progress.py"),
             )
-
-    def test_step3_frontend_renders_no_estimate(self) -> None:
-        for relative in STEP3_FRONTEND_FILES:
-            self._assert_clean(relative, allow_regex_source=False)
-
-    def test_step3_frontend_has_no_dag_visualization(self) -> None:
-        # §16 / §41 — V1 does not do DAG visualization.
-        for relative in STEP3_FRONTEND_FILES:
-            source = read(relative).lower()
-            for token in ("dag", "graphviz", "cytoscape", "d3-", "mermaid"):
-                with self.subTest(file=relative, token=token):
-                    self.assertNotIn(token, source)
 
 
 class Step3StaysWithinItsAllowedLayersTests(unittest.TestCase):

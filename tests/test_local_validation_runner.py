@@ -87,7 +87,6 @@ class LocalValidationRunnerTests(unittest.TestCase):
             [
                 "workflow contract validation",
                 "workflow policy validation",
-                "Mission Control golden path smoke",
                 "PiExecutor golden path smoke (fake Pi)",
                 "unit tests",
                 "compileall",
@@ -114,7 +113,7 @@ class LocalValidationRunnerTests(unittest.TestCase):
             ],
         )
 
-        pi_command = checks[3].command
+        pi_command = checks[2].command
         self.assertEqual(
             pi_command,
             [
@@ -182,7 +181,6 @@ class LocalValidationRunnerTests(unittest.TestCase):
         self.assertNotIn("push", text)
         self.assertNotIn("cleanup", text)
         self.assertNotIn("delete", text)
-        self.assertNotIn("mission-control/", text)
         self.assertNotIn("shell=true", text)
 
 

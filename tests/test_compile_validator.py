@@ -86,7 +86,7 @@ class CompileValidatorCommandTests(CompileValidatorTestCase):
         for excluded in (
             "./.git/hooks/x.py",
             "./node_modules/pkg/x.py",
-            "./mission-control/node_modules/pkg/x.py",
+            "./web/node_modules/pkg/x.py",
             "./.venv/lib/python3.12/site-packages/x.py",
             "./.worktrees/task-1/x.py",
         ):

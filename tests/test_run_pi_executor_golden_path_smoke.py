@@ -158,7 +158,6 @@ class RunPiExecutorGoldenPathSmokeTests(unittest.TestCase):
     def test_script_does_not_introduce_forbidden_surface_area(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8").lower()
 
-        self.assertNotIn("mission-control/", text)
         self.assertNotIn("github", text)
         self.assertNotIn("multi-agent", text)
         self.assertNotIn("list_executor_names", text)

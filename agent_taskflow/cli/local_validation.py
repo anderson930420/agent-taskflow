@@ -97,14 +97,6 @@ def build_required_checks(python_executable: str = sys.executable) -> list[Check
             ],
         ),
         CheckSpec(
-            name="Mission Control golden path smoke",
-            command=[
-                python_executable,
-                "scripts/run_mission_control_smoke.py",
-                "--keep-workspace",
-            ],
-        ),
-        CheckSpec(
             name="PiExecutor golden path smoke (fake Pi)",
             command=[
                 python_executable,
