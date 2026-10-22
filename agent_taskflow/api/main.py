@@ -99,7 +99,8 @@ from agent_taskflow.workspace_manager import (
 
 SERVICE_NAME = "agent-taskflow-api"
 
-# Allowed CORS origins for the Mission Control frontend.
+# Default browser origins allowed by CORS, kept for local development tools.
+# The operator UI calls this API server-side, so it does not need them.
 # Credentials=False — no cookies or auth headers sent cross-origin.
 DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:3001",
