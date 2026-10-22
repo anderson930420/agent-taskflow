@@ -1,12 +1,12 @@
 """Deterministic implementation prompt generation for prompt-driven executors.
 
-Some executors (currently ``opencode``) cannot start without an
-``implementation_prompt.md`` describing the work. That prompt is normally
-produced ahead of time by the explicit task execution package step
-(:mod:`agent_taskflow.task_execution_package`). When it has not been produced,
-the approved task runner generates one deterministically from the mirrored
-``issue_spec.md`` so a confirmed execution can proceed instead of blocking only
-because the prompt file is absent.
+An executor listed in ``EXECUTORS_REQUIRING_PROMPT`` cannot start without an
+``implementation_prompt.md`` describing the work; no built-in executor is
+listed today. That prompt is normally produced ahead of time by the explicit
+task execution package step (:mod:`agent_taskflow.task_execution_package`).
+When it has not been produced, the approved task runner generates one
+deterministically from the mirrored ``issue_spec.md`` so a confirmed execution
+can proceed instead of blocking only because the prompt file is absent.
 
 This module owns the deterministic prompt template and the set of executors
 that require a prompt. It performs no I/O, runs no executor, and makes no
@@ -18,8 +18,9 @@ review gate.
 from __future__ import annotations
 
 
-# Executors that cannot start without an implementation_prompt.md.
-EXECUTORS_REQUIRING_PROMPT = frozenset({"opencode"})
+# Executors that cannot start without an implementation_prompt.md. None of the
+# built-in executors does.
+EXECUTORS_REQUIRING_PROMPT: frozenset[str] = frozenset()
 
 IMPLEMENTATION_PROMPT_FILENAME = "implementation_prompt.md"
 

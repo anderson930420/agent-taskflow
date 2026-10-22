@@ -71,9 +71,10 @@ RUN_STATUS_BLOCKED = "blocked"
 PHASE_CODEX_ADVISORY_EVIDENCE = "codex_advisory_evidence"
 DEFAULT_BASE_BRANCH = "main"
 SUPPORTED_EXECUTORS = tuple(list_executor_names())
-BUILTIN_VALIDATORS = {"pytest", "openspec", "policy", "changed-files", "typecheck", "lint", "compile"}
-# Executors that cannot run without an explicit model in their profile.
-EXECUTORS_REQUIRING_MODEL = frozenset({"opencode"})
+BUILTIN_VALIDATORS = {"pytest", "compile"}
+# Executors that cannot run without an explicit model in their profile. No
+# built-in executor requires one.
+EXECUTORS_REQUIRING_MODEL: frozenset[str] = frozenset()
 
 
 class ApprovedTaskRunnerError(RuntimeError):
@@ -115,7 +116,7 @@ class ApprovedTaskRunRequest:
     command: tuple[str, ...] | None = None
     # Executor profile overrides. When provided these take precedence over the
     # TaskRecord profile fields; otherwise the recorded TaskRecord profile is
-    # used. Real executors such as opencode/pi may require this configuration.
+    # used.
     model: str | None = None
     provider: str | None = None
     tools: tuple[str, ...] | None = None
@@ -976,8 +977,6 @@ def _run_preflight(request: ApprovedTaskRunRequest, *, preflight_runner) -> Pref
         validators=request.validators,
         executor=request.executor,
         require_pytest="pytest" in request.validators,
-        require_pi=request.executor == "pi",
-        require_opencode=request.executor == "opencode",
         repo_root=request.repo_path,
     )
 
@@ -1008,13 +1007,7 @@ def _resolve_executor(
                 else None
             ),
         )
-    return get_executor(
-        request.executor,
-        model=task.model,
-        provider=task.provider,
-        tools=task.tools if task.tools else None,
-        pi_bin=task.pi_bin if task.pi_bin else "pi",
-    )
+    return get_executor(request.executor)
 
 
 def _model_requirement_error(request: ApprovedTaskRunRequest, task: TaskRecord) -> str | None:
@@ -1398,7 +1391,7 @@ def _ensure_implementation_prompt(
     if not issue_spec_path.exists():
         return None, (
             "issue_spec.md is required to generate implementation_prompt.md for "
-            f"{task.executor or 'opencode'} executor: {issue_spec_path}"
+            f"{task.executor} executor: {issue_spec_path}"
         ), None
     issue_spec_text = issue_spec_path.read_text(encoding="utf-8")
     atomic_write_text(

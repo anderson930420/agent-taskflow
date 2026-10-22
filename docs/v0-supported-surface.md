@@ -108,7 +108,6 @@ Routes are the `APIRoute`s of `create_app()`. FastAPI's generated `/openapi.json
 | `scripts/archive_task_evidence_only.py` | script | LEGACY | unsupported_in_v0 | G6: could write `cleaned`/`canceled`/`archived`/`rejected` on a Ticket. |
 | `scripts/prepare_task_workspace.py` | script | LEGACY | unsupported_in_v0 | G11: only `ensure_ticket_worktree` owns a Ticket worktree. |
 | `scripts/ingest_github_issue.py` | script | LEGACY | unsupported_in_v0 | G12 (`github_issue_ingestion.ingest_github_issue`): an explicit `--task-key` could rewrite a Ticket row. |
-| `scripts/create_pi_smoke_task.py` | script | LEGACY | unsupported_in_v0 | G13: an explicit `--task-key` could overwrite a Ticket row and worktree record. |
 | `scripts/kanban_accept_cleanup.py` | script | LEGACY | owner_decision | FROZEN for V0 (RULINGS 81): a label only, with no code guard. It reads no Taskflow DB, so it cannot tell a Ticket; `--confirm` removes `<worktrees_dir>/<task-key>`, the same path as a Ticket worktree. Never run it on a Ticket key. |
 | `scripts/kanban_create.py` | script | LEGACY | n/a | No Taskflow DB; `git worktree add` fails on an existing Ticket worktree path. |
 | `scripts/create_scheduler_proposal.py` | script | LEGACY | n/a | Artifacts and events, no status. |
@@ -120,7 +119,6 @@ Routes are the `APIRoute`s of `create_app()`. FastAPI's generated `/openapi.json
 | `scripts/kanban_workflow_regression.py` | script | LEGACY | n/a | Disposable fixtures. |
 | `scripts/run_local_validation.py` | script | LEGACY | n/a | Local checks; no Ticket state. |
 | `scripts/run_issue_to_prepared_workspace_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_pi_executor_golden_path_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_prepared_workspace_golden_path_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_workflow_policy_artifact_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_workflow_policy_pow_package_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |

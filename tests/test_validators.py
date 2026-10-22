@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_taskflow.validators import (
-    OpenSpecValidator,
+    CompileValidator,
     PytestValidator,
     ValidatorContext,
     ValidatorResult,
@@ -334,160 +334,21 @@ class PytestValidatorTests(ValidatorTestCase):
         self.assertEqual(validator.python_bin, "custom-python")
 
 
-class OpenSpecValidatorTests(ValidatorTestCase):
-    def test_openspec_validator_skips_when_openspec_directory_is_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self.make_context(Path(tmp))
-
-            result = OpenSpecValidator().run(context)
-
-            self.assertEqual(result.status, "skipped")
-            self.assertIsNone(result.log_path)
-            self.assertEqual(result.artifacts, {})
-            self.assertEqual(result.summary, "openspec directory not found")
-
-    def test_openspec_validator_uses_expected_command_and_worktree_cwd(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self.make_context(Path(tmp))
-            (context.worktree_path / "openspec").mkdir()
-
-            def side_effect(command, **kwargs):
-                stdout = kwargs.get("stdout")
-                if stdout is not None:
-                    stdout.write("openspec mock output\n")
-                return subprocess.CompletedProcess(args=command, returncode=0)
-
-            with patch(
-                "agent_taskflow.validators.openspec.subprocess.run",
-                side_effect=side_effect,
-            ) as run_mock:
-                result = OpenSpecValidator().run(context)
-
-            self.assertEqual(result.status, "passed")
-            self.assertEqual(
-                run_mock.call_args.args[0],
-                ["openspec", "validate", "--all", "--no-interactive"],
-            )
-            self.assertEqual(run_mock.call_args.kwargs["cwd"], context.worktree_path)
-            self.assertEqual(run_mock.call_args.kwargs["shell"], False)
-
-    def test_openspec_validator_writes_stdout_stderr_to_log(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self.make_context(Path(tmp))
-            (context.worktree_path / "openspec").mkdir()
-
-            def side_effect(command, **kwargs):
-                stdout = kwargs.get("stdout")
-                if stdout is not None:
-                    stdout.write("mock openspec output\n")
-                return subprocess.CompletedProcess(args=command, returncode=0)
-
-            with patch(
-                "agent_taskflow.validators.openspec.subprocess.run",
-                side_effect=side_effect,
-            ):
-                result = OpenSpecValidator().run(context)
-
-            self.assertEqual(result.status, "passed")
-            self.assertIsNotNone(result.log_path)
-            assert result.log_path is not None
-            self.assertEqual(
-                result.log_path,
-                context.artifact_dir / "openspec-validate.log",
-            )
-            self.assertTrue(result.log_path.exists())
-            log_text = result.log_path.read_text(encoding="utf-8")
-            self.assertIn(
-                "Command: ['openspec', 'validate', '--all', '--no-interactive']",
-                log_text,
-            )
-            self.assertIn("Environment: not logged", log_text)
-            self.assertIn("mock openspec output", log_text)
-
-    def test_openspec_validator_exit_code_zero_returns_passed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self.make_context(Path(tmp))
-            (context.worktree_path / "openspec").mkdir()
-
-            with patch(
-                "agent_taskflow.validators.openspec.subprocess.run",
-                return_value=subprocess.CompletedProcess(
-                    args=["openspec", "validate", "--all", "--no-interactive"],
-                    returncode=0,
-                ),
-            ):
-                result = OpenSpecValidator().run(context)
-
-            self.assertEqual(result.status, "passed")
-            self.assertEqual(result.exit_code, 0)
-            self.assertEqual(result.artifacts["log"], result.log_path)
-
-    def test_openspec_validator_nonzero_exit_code_returns_failed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self.make_context(Path(tmp))
-            (context.worktree_path / "openspec").mkdir()
-
-            with patch(
-                "agent_taskflow.validators.openspec.subprocess.run",
-                return_value=subprocess.CompletedProcess(
-                    args=["openspec", "validate", "--all", "--no-interactive"],
-                    returncode=9,
-                ),
-            ):
-                result = OpenSpecValidator().run(context)
-
-            self.assertEqual(result.status, "failed")
-            self.assertEqual(result.exit_code, 9)
-            self.assertIn("exit code 9", result.summary or "")
-
-    def test_openspec_validator_timeout_returns_failed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self.make_context(Path(tmp), timeout_seconds=1)
-            (context.worktree_path / "openspec").mkdir()
-
-            with patch(
-                "agent_taskflow.validators.openspec.subprocess.run",
-                side_effect=subprocess.TimeoutExpired(
-                    cmd=["openspec", "validate", "--all", "--no-interactive"],
-                    timeout=1,
-                ),
-            ):
-                result = OpenSpecValidator().run(context)
-
-            self.assertEqual(result.status, "failed")
-            self.assertIsNone(result.exit_code)
-            self.assertIsNotNone(result.log_path)
-            assert result.log_path is not None
-            self.assertIn("timed out", result.log_path.read_text(encoding="utf-8"))
-
-    def test_openspec_validator_command_missing_returns_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self.make_context(Path(tmp))
-            (context.worktree_path / "openspec").mkdir()
-
-            with patch(
-                "agent_taskflow.validators.openspec.subprocess.run",
-                side_effect=FileNotFoundError("openspec missing"),
-            ):
-                result = OpenSpecValidator().run(context)
-
-            self.assertEqual(result.status, "blocked")
-            self.assertIsNone(result.exit_code)
-            self.assertIn("failed to start", result.summary or "")
-
-
 class ValidatorRegistryTests(unittest.TestCase):
-    def test_registry_lists_pytest_and_openspec(self) -> None:
-        names = list_validator_names()
-
-        self.assertIn("pytest", names)
-        self.assertIn("openspec", names)
+    def test_registry_lists_pytest_and_compile(self) -> None:
+        self.assertEqual(list_validator_names(), ["pytest", "compile"])
 
     def test_registry_returns_pytest_validator(self) -> None:
         self.assertIsInstance(get_validator("pytest"), PytestValidator)
 
-    def test_registry_returns_openspec_validator(self) -> None:
-        self.assertIsInstance(get_validator("openspec"), OpenSpecValidator)
+    def test_registry_returns_compile_validator(self) -> None:
+        self.assertIsInstance(get_validator("compile"), CompileValidator)
+
+    def test_registry_rejects_retired_validators(self) -> None:
+        for name in ("openspec", "policy", "changed-files", "typecheck", "lint"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "Unknown validator"):
+                    get_validator(name)
 
     def test_registry_rejects_unknown_validator(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown validator"):

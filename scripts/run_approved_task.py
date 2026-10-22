@@ -81,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--executor",
         required=True,
-        help="Explicit executor name to run, for example noop, shell, pi, or opencode.",
+        help="Explicit executor name to run, for example noop, shell, or claude-code.",
     )
     parser.add_argument(
         "--confirm-approved-task",

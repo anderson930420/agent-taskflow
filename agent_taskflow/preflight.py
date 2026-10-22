@@ -11,12 +11,11 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 
-DEFAULT_VALIDATORS = ("pytest", "openspec")
+DEFAULT_VALIDATORS = ("pytest",)
 RECOMMENDED_COMMANDS = (
     "python3 scripts/run_local_validation.py",
     "python -m unittest discover -s tests -v",
 )
-KNOWN_PI_PATHS = (Path("/home/ubuntu/tools/pi-agent/bin/pi"),)
 
 
 @dataclass(frozen=True)
@@ -258,17 +257,12 @@ def run_preflight(
     validators: str | Sequence[str] | None = None,
     executor: str = "manual",
     strict: bool = False,
-    require_openspec: bool = False,
     require_pytest: bool | None = None,
     require_fastapi: bool = False,
     require_uvicorn: bool = False,
-    require_pi: bool = False,
-    require_opencode: bool = False,
     repo_root: Path | None = None,
     environ: Mapping[str, str] | None = None,
     find_spec: Callable[[str], object | None] | None = None,
-    which: Callable[[str], str | None] | None = None,
-    pi_paths: Sequence[Path] = KNOWN_PI_PATHS,
 ) -> PreflightResult:
     normalized_validators = normalize_validators(validators)
     normalized_executor = executor.strip().lower() if executor.strip() else "manual"
@@ -278,10 +272,7 @@ def run_preflight(
     )
 
     pytest_selected = "pytest" in normalized_validators
-    openspec_selected = "openspec" in normalized_validators
     pytest_required = pytest_selected if require_pytest is None else require_pytest
-    pi_selected = normalized_executor == "pi" or require_pi
-    opencode_selected = normalized_executor == "opencode" or require_opencode
 
     checks = (
         check_python_environment(python_environment, strict=strict),
@@ -302,25 +293,6 @@ def run_preflight(
             required=require_uvicorn,
             selected=True,
             find_spec=find_spec,
-        ),
-        check_cli_tool(
-            "openspec",
-            required=require_openspec,
-            selected=openspec_selected,
-            which=which,
-        ),
-        check_cli_tool(
-            "pi",
-            required=require_pi,
-            selected=pi_selected,
-            which=which,
-            extra_paths=pi_paths,
-        ),
-        check_cli_tool(
-            "opencode",
-            required=require_opencode,
-            selected=opencode_selected,
-            which=which,
         ),
     )
     ok, status, missing_required, missing_optional = summarize_checks(checks)

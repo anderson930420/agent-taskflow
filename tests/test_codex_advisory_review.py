@@ -161,10 +161,7 @@ class CodexAdvisoryReviewTests(unittest.TestCase):
     def test_prompt_includes_deterministic_validator_boundary(self) -> None:
         prompt = build_review_prompt(self._request(), detect_evidence(self.artifact_dir))
         lowered = prompt.lower()
-        self.assertIn("pytest", lowered)
-        self.assertIn("compileall", lowered)
-        self.assertIn("policy", lowered)
-        self.assertIn("changed-files", lowered)
+        self.assertIn("deterministic validators remain pytest / compileall.", lowered)
 
     def test_prompt_includes_human_approval_required(self) -> None:
         prompt = build_review_prompt(self._request(), detect_evidence(self.artifact_dir))
@@ -216,7 +213,7 @@ class CodexAdvisoryReviewTests(unittest.TestCase):
     def test_evidence_detection_is_executor_neutral(self) -> None:
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         (self.artifact_dir / "task_execution_package.json").write_text("{}", encoding="utf-8")
-        # Generic, executor-neutral log discovery (not pi/opencode/shell specific).
+        # Generic, executor-neutral log discovery (no executor name is hard-coded).
         (self.artifact_dir / "claude-code-executor.log").write_text("ok", encoding="utf-8")
         (self.artifact_dir / "pi-executor.log").write_text("ok", encoding="utf-8")
 

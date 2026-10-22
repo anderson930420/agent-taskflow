@@ -47,7 +47,7 @@ from agent_taskflow.executors.manual import NoopExecutor
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.preflight import PreflightCheck, PreflightResult
 from agent_taskflow.store import TaskMirrorStore
-from agent_taskflow.validators.policy import PolicyCheckValidator
+from agent_taskflow.validators.compile import CompileValidator
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +69,7 @@ def _preflight_result() -> PreflightResult:
         status="passed",
         strict=False,
         executor="noop",
-        validators=("policy",),
+        validators=("compile",),
         python={"executable": "python3"},
         checks=(check,),
         missing_required=(),
@@ -362,7 +362,7 @@ class CodexAdvisoryEvidenceBoundaryTests(unittest.TestCase):
             artifact_root=self.artifact_root,
             worktree_root=self.repo / ".worktrees",
             base_branch="main",
-            validators=("policy",),
+            validators=("compile",),
             confirm_approved_task=True,
             preflight=True,
             require_codex_advisory_evidence=require_codex_advisory_evidence,
@@ -373,7 +373,7 @@ class CodexAdvisoryEvidenceBoundaryTests(unittest.TestCase):
             self._request(task_key, **kwargs),
             store=self.store,
             executor_registry={"noop": NoopExecutor()},
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kw: _preflight_result(),
         )
 
@@ -568,11 +568,11 @@ class CodexAdvisoryEvidenceBoundaryTests(unittest.TestCase):
         )
 
         class FailingValidator(Validator):
-            name = "policy"
+            name = "compile"
 
             def run(self, context: ValidatorContext) -> ValidatorResult:
                 return ValidatorResult(
-                    validator="policy",
+                    validator="compile",
                     status="failed",
                     exit_code=1,
                     summary="validator failed",
@@ -582,7 +582,7 @@ class CodexAdvisoryEvidenceBoundaryTests(unittest.TestCase):
             self._request("AT-GH-510"),
             store=self.store,
             executor_registry={"noop": NoopExecutor()},
-            validator_registry={"policy": FailingValidator()},
+            validator_registry={"compile": FailingValidator()},
             preflight_runner=lambda **kw: _preflight_result(),
         )
 

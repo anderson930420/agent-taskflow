@@ -16,7 +16,6 @@ from agent_taskflow.executor_launch import (
     inspect_process_group,
 )
 from agent_taskflow.lifecycle_control import RuntimeControlStore
-from agent_taskflow.mission_contract import build_mission_contract, write_mission_contract
 from agent_taskflow.models import TaskRecord
 from agent_taskflow.store import TaskMirrorStore, connect
 from agent_taskflow.validator_process_runtime_path import ValidatorProcessRuntimeTaskStore
@@ -24,10 +23,46 @@ from agent_taskflow.validator_process_schema import (
     VALIDATOR_PROCESS_MIGRATION,
     migrate_validator_process_lifecycle,
 )
-from agent_taskflow.validators.base import ValidatorContext
-from agent_taskflow.validators.changed_files import ChangedFilesValidator
+from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
+from agent_taskflow.validators.command import run_command
 from agent_taskflow.validators.compile import CompileValidator
-from agent_taskflow.validators.lint import LintValidator
+
+
+class CommandValidator(Validator):
+    """Test double: runs an explicit argv through the shared validator command path."""
+
+    name = "command"
+
+    def __init__(self, command: list[str]) -> None:
+        self._command = list(command)
+
+    def run(self, context: ValidatorContext) -> ValidatorResult:
+        completed, log_path, error_summary, error_status, process_artifacts = run_command(
+            validator_name=self.name,
+            command=self._command,
+            worktree_path=context.worktree_path,
+            artifact_dir=context.artifact_dir,
+            timeout_seconds=context.timeout_seconds,
+            run_env=None,
+            launch_binding=context.launch_binding,
+        )
+        if completed is None:
+            return ValidatorResult(
+                validator=self.name,
+                status=error_status,
+                exit_code=None,
+                log_path=log_path,
+                summary=error_summary,
+                artifacts={"log": log_path, **process_artifacts},
+            )
+        return ValidatorResult(
+            validator=self.name,
+            status="passed" if completed.returncode == 0 else "failed",
+            exit_code=completed.returncode,
+            log_path=log_path,
+            summary=f"exit code {completed.returncode}",
+            artifacts={"log": log_path, **process_artifacts},
+        )
 
 
 class ValidatorProcessLifecycleTests(unittest.TestCase):
@@ -129,8 +164,8 @@ class ValidatorProcessLifecycleTests(unittest.TestCase):
         self.assertEqual(migration_count, 1)
         self.assertIn("process_role", columns)
 
-    def test_bound_lint_validator_records_verified_validator_process(self) -> None:
-        result = LintValidator(
+    def test_bound_command_validator_records_verified_validator_process(self) -> None:
+        result = CommandValidator(
             [sys.executable, "-c", "print('validator-managed-ok')"]
         ).run(self.context)
 
@@ -182,7 +217,7 @@ class ValidatorProcessLifecycleTests(unittest.TestCase):
             launch_binding=self.context.launch_binding,
         )
 
-        result = LintValidator([sys.executable, "-c", script]).run(context)
+        result = CommandValidator([sys.executable, "-c", script]).run(context)
 
         self.assertEqual(result.status, "failed")
         self.assertIn("timed out", result.summary)
@@ -200,7 +235,7 @@ class ValidatorProcessLifecycleTests(unittest.TestCase):
         holder: dict[str, object] = {}
 
         def run() -> None:
-            holder["result"] = LintValidator(
+            holder["result"] = CommandValidator(
                 [sys.executable, "-c", "import time; time.sleep(60)"]
             ).run(self.context)
 
@@ -238,7 +273,7 @@ class ValidatorProcessLifecycleTests(unittest.TestCase):
         holder: dict[str, object] = {}
 
         def run() -> None:
-            holder["result"] = LintValidator(
+            holder["result"] = CommandValidator(
                 [sys.executable, "-c", "import time; time.sleep(60)"]
             ).run(self.context)
 
@@ -280,37 +315,9 @@ class ValidatorProcessLifecycleTests(unittest.TestCase):
         thread.join(timeout=8)
         self.assertFalse(thread.is_alive())
 
-    def test_changed_files_git_status_uses_managed_validator_process(self) -> None:
-        contract = build_mission_contract(
-            task_key="AT-PR9-1",
-            goal="Managed changed-files validation.",
-            repo_path=self.resource.repo_path,
-            worktree_path=self.resource.worktree_path,
-            artifact_dir=self.resource.artifact_root,
-            executor="noop",
-            required_validators=("changed-files",),
-            allowed_paths=("src",),
-        )
-        write_mission_contract(contract, artifact_dir=self.resource.artifact_root)
-        (self.resource.worktree_path / "src").mkdir()
-        (self.resource.worktree_path / "src" / "managed.py").write_text(
-            "print('managed')\n",
-            encoding="utf-8",
-        )
-
-        result = ChangedFilesValidator().run(self.context)
-
-        self.assertEqual(result.status, "passed")
-        self.assertIn("launch_spec", result.artifacts)
-        self.assertIn("pid_manifest", result.artifacts)
-        row = self._last_process_row()
-        self.assertEqual(row["process_role"], "validator")
-        self.assertEqual(row["executor_name"], "changed-files-git-status")
-        self.assertEqual(row["verified_exit"], 1)
-
     def test_unbound_local_validator_preserves_legacy_subprocess_path(self) -> None:
         before = len(ExecutorProcessStore(self.db_path).list_active())
-        result = LintValidator([sys.executable, "-c", "print('legacy-local')"]).run(
+        result = CommandValidator([sys.executable, "-c", "print('legacy-local')"]).run(
             self.raw_context
         )
         with closing(connect(self.db_path)) as conn:

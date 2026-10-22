@@ -149,16 +149,10 @@ class WorkflowPolicyReviewEvidenceContractTests(unittest.TestCase):
         self.assertEqual(kind, "mission_contract")
 
     def test_validator_log_still_maps_to_validator_log(self) -> None:
-        for name in ("pytest.log", "openspec-validate.log", "lint.log"):
+        for name in ("pytest.log", "compile.log"):
             with self.subTest(name=name):
                 kind = _file_kind(name)
                 self.assertEqual(kind, "validator_log")
-
-    def test_executor_log_still_maps_to_executor_log(self) -> None:
-        for name in ("pi-executor.log", "opencode-executor.log", "pi-run.log"):
-            with self.subTest(name=name):
-                kind = _file_kind(name)
-                self.assertEqual(kind, "executor_log")
 
     def test_unrelated_files_map_to_other(self) -> None:
         for name in (
@@ -178,7 +172,6 @@ class WorkflowPolicyReviewEvidenceContractTests(unittest.TestCase):
                 '{"schema_version":"1","task_key":"TEST"}', encoding="utf-8"
             )
             (artifact_dir / "pytest.log").write_text("passed", encoding="utf-8")
-            (artifact_dir / "pi-executor.log").write_text("done", encoding="utf-8")
 
             results = build_artifact_file_summaries(artifact_dir)
             by_name = {r["name"]: r for r in results}
@@ -187,7 +180,6 @@ class WorkflowPolicyReviewEvidenceContractTests(unittest.TestCase):
                 by_name["mission_contract.json"]["kind"], "mission_contract"
             )
             self.assertEqual(by_name["pytest.log"]["kind"], "validator_log")
-            self.assertEqual(by_name["pi-executor.log"]["kind"], "executor_log")
 
     # ------------------------------------------------------------------
     # Constants are used (not duplicated hardcoded values)

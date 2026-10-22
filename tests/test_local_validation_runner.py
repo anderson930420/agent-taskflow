@@ -77,7 +77,7 @@ class LocalValidationRunnerTests(unittest.TestCase):
         with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/openspec"):
             self.assertEqual(runner.find_openspec(), "/usr/bin/openspec")
 
-    def test_command_list_construction_uses_python_executable_and_fake_pi(self) -> None:
+    def test_command_list_construction_uses_python_executable(self) -> None:
         runner = _load_runner_module()
 
         checks = runner.build_required_checks("/tmp/project/.venv/bin/python")
@@ -87,7 +87,6 @@ class LocalValidationRunnerTests(unittest.TestCase):
             [
                 "workflow contract validation",
                 "workflow policy validation",
-                "PiExecutor golden path smoke (fake Pi)",
                 "unit tests",
                 "compileall",
             ],
@@ -112,18 +111,6 @@ class LocalValidationRunnerTests(unittest.TestCase):
                 "scripts/validate_workflow_policy.py",
             ],
         )
-
-        pi_command = checks[2].command
-        self.assertEqual(
-            pi_command,
-            [
-                "/tmp/project/.venv/bin/python",
-                "scripts/run_pi_executor_golden_path_smoke.py",
-                "--keep-workspace",
-            ],
-        )
-        self.assertNotIn("--real-pi", pi_command)
-        self.assertNotIn("--confirm-real-pi", pi_command)
 
     def test_openspec_check_is_skipped_when_unavailable(self) -> None:
         runner = _load_runner_module()
