@@ -42,6 +42,7 @@ FIRST_TASK_KEY_SEQUENCE = 1
 _TASK_KEY_PATTERN = re.compile(rf"^{TASK_KEY_PREFIX}-(?P<sequence>\d+)$")
 _UNSAFE_BRANCH_CHARS = re.compile(r"[^a-z0-9]+")
 _SAFE_BRANCH_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+_EXCESS_BLANK_LINES = re.compile(r"\n{3,}")
 
 
 def normalize_prompt(prompt: str) -> str:
@@ -49,12 +50,32 @@ def normalize_prompt(prompt: str) -> str:
 
     Whitespace runs (including newlines and tabs) become single spaces, and
     control / non-printable characters are removed. This is the shared
-    normalization behind both the stored prompt and the §10.1 title fallback.
+    normalization behind the §10.1 title fallback and branch slugs; the stored
+    prompt keeps its lines (see `normalize_prompt_text`).
     """
     displayable = "".join(
         char for char in prompt if char.isspace() or char.isprintable()
     )
     return " ".join(displayable.split())
+
+
+def normalize_prompt_text(prompt: str) -> str:
+    """Normalize a prompt for storage while keeping its line structure.
+
+    Line endings become `\\n`. In each line, tabs become single spaces,
+    characters that are neither printable nor a space are dropped, and
+    trailing spaces are stripped; leading indentation and inner spacing stay
+    as written. Three or more consecutive newlines collapse to two, so
+    paragraphs keep at most one blank line between them, and the result is
+    stripped of leading and trailing whitespace.
+    """
+    text = prompt.replace("\r\n", "\n").replace("\r", "\n")
+    lines = []
+    for line in text.split("\n"):
+        line = line.replace("\t", " ")
+        line = "".join(char for char in line if char == " " or char.isprintable())
+        lines.append(line.rstrip(" "))
+    return _EXCESS_BLANK_LINES.sub("\n\n", "\n".join(lines)).strip()
 
 
 def shorten_title(text: str, max_chars: int = TITLE_FALLBACK_MAX_CHARS) -> str:
@@ -186,6 +207,7 @@ __all__ = [
     "fallback_title_from_prompt",
     "format_task_key",
     "normalize_prompt",
+    "normalize_prompt_text",
     "parse_task_key_sequence",
     "shorten_title",
     "slugify_branch_component",

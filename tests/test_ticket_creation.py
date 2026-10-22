@@ -495,10 +495,31 @@ class NegativeScopeTests(TicketCreationTestCase):
 
 class RequestNormalizationTests(TicketCreationTestCase):
     def test_prompt_whitespace_is_normalized_before_storage(self) -> None:
-        request = self.request(prompt="  Fix\tthe\n\nlogin  flow  ")
+        request = self.request(prompt=" Fix\tthe\n\nlogin flow ")
         ticket = self.create(request=request).ticket
-        self.assertEqual(ticket.prompt, "Fix the login flow")
+        self.assertEqual(ticket.prompt, "Fix the\n\nlogin flow")
         self.assertEqual(ticket.title, "Fix the login flow")
+
+    def test_numbered_list_keeps_one_item_per_line(self) -> None:
+        prompt = "Steps:\n1. Read the file\n2. Fix the bug\n3. Add a test"
+        ticket = self.create(request=self.request(prompt=prompt)).ticket
+        self.assertEqual(ticket.prompt, prompt)
+
+    def test_crlf_line_endings_become_newlines(self) -> None:
+        request = self.request(prompt="First line\r\nSecond line")
+        self.assertEqual(request.prompt, "First line\nSecond line")
+
+    def test_extra_blank_lines_collapse_to_one(self) -> None:
+        request = self.request(prompt="First paragraph\n\n\n\n\nSecond paragraph")
+        self.assertEqual(request.prompt, "First paragraph\n\nSecond paragraph")
+
+    def test_control_characters_are_removed(self) -> None:
+        request = self.request(prompt="Fix the\x07 bug\nnow")
+        self.assertEqual(request.prompt, "Fix the bug\nnow")
+
+    def test_whitespace_only_prompt_is_refused(self) -> None:
+        with self.assertRaises(TicketCreationError):
+            self.request(prompt=" \n\t\r\n ")
 
     def test_blank_blocked_by_is_treated_as_absent(self) -> None:
         ticket = self.create(request=self.request(blocked_by="   ")).ticket
