@@ -80,7 +80,7 @@ class RunApprovedTaskScriptTests(unittest.TestCase):
                 "--worktree-root",
                 str(self.repo / ".worktrees"),
                 "--validator",
-                "policy",
+                "compile",
                 *extra_args,
             ],
             cwd=REPO_ROOT,

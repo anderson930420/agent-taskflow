@@ -16,8 +16,8 @@ The contract is NOT:
 - A validator (it does not block on its own).
 - An orchestrator (it does not drive loops or sub-agents).
 - A replacement for the governance layer (agent-taskflow remains the control plane).
-- A replacement for deterministic validators (pytest, openspec, typecheck, lint,
-  policy checks remain required regardless of what the executor produces).
+- A replacement for deterministic validators (pytest and compile checks remain
+  required regardless of what the executor produces).
 """
 
 from __future__ import annotations
@@ -143,7 +143,7 @@ class MissionContract:
     worktree_path: Path
     artifact_dir: Path
     executor: str
-    required_validators: tuple[str, ...] = field(default_factory=lambda: ("pytest", "openspec"))
+    required_validators: tuple[str, ...] = field(default_factory=lambda: ("pytest",))
     forbidden_actions: tuple[str, ...] = field(default_factory=lambda: _GOVERNANCE_FORBIDDEN_ACTIONS)
     expected_artifacts: tuple[str, ...] = field(default_factory=lambda: _GOVERNANCE_EXPECTED_ARTIFACTS)
     allowed_paths: tuple[str, ...] = field(default_factory=tuple)
@@ -210,7 +210,7 @@ class MissionContract:
         """Human-readable list of governance constraints embedded in the contract."""
         return [
             "agent-taskflow is the governance/control plane.",
-            "Pi, OpenCode, and Shell are executor backends only.",
+            "Executors are implementation backends only.",
             "Worker cannot approve tasks.",
             "Worker cannot push to remote branches.",
             "Worker cannot merge PRs.",
@@ -283,7 +283,7 @@ def build_mission_contract(
         executor=_require_non_empty(executor, "executor"),
         model=model,
         provider=provider,
-        required_validators=required_validators or ("pytest", "openspec"),
+        required_validators=required_validators or ("pytest",),
         allowed_paths=allowed_paths or (),
         forbidden_paths=forbidden_paths or (),
         implementation_prompt_path=resolved_prompt_path,

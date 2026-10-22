@@ -52,7 +52,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECTS_REGISTRY_PATH = PACKAGE_ROOT / "config" / "projects.yaml"
 
 #: Executors a V1 policy may name. ``manual``, ``noop`` and ``shell`` never run a
-#: real implementation, and the other adapters are not yet admitted (RULINGS 67).
+#: real implementation (RULINGS 67).
 EXECUTOR_ALLOWLIST = frozenset({"claude-code"})
 
 POLICY_REGISTRY_UNAVAILABLE = "execution_policy_registry_unavailable"

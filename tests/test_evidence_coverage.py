@@ -51,7 +51,6 @@ from agent_taskflow.validators.base import (  # noqa: E402
     ValidatorContext,
     ValidatorResult,
 )
-from agent_taskflow.validators.policy import PolicyCheckValidator  # noqa: E402
 from agent_taskflow.validators.pytest import PytestValidator  # noqa: E402
 
 
@@ -468,8 +467,8 @@ class ValidatorIdentityTests(unittest.TestCase):
 
     def test_an_in_process_validator_states_that_it_has_no_command(self) -> None:
         identity = validator_config_identity(
-            PolicyCheckValidator(),
-            name="policy",
+            ArtifactValidator("in-process", artifacts={}),
+            name="in-process",
             index=1,
             config_source="ApprovedTaskRunRequest.validators",
             resolution="agent_taskflow.validators.registry.get_validator",

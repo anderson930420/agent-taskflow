@@ -5,13 +5,8 @@ from __future__ import annotations
 from typing import Sequence
 
 from agent_taskflow.validators.base import Validator
-from agent_taskflow.validators.changed_files import ChangedFilesValidator
 from agent_taskflow.validators.compile import CompileValidator
-from agent_taskflow.validators.lint import LintValidator
-from agent_taskflow.validators.openspec import OpenSpecValidator
-from agent_taskflow.validators.policy import PolicyCheckValidator
 from agent_taskflow.validators.pytest import PytestValidator
-from agent_taskflow.validators.typecheck import TypecheckValidator
 
 
 def _normalize_name(name: str) -> str:
@@ -26,10 +21,6 @@ def get_validator(
     *,
     python_bin: str | None = None,
     pytest_extra_args: Sequence[str] | None = None,
-    openspec_bin: str = "openspec",
-    openspec_args: Sequence[str] | None = None,
-    scan_artifacts: bool = True,
-    allow_no_changes: bool = False,
 ) -> Validator:
     """Return a built-in validator by name without checking external binaries."""
 
@@ -41,26 +32,6 @@ def get_validator(
             extra_args=pytest_extra_args,
         )
 
-    if normalized == "openspec":
-        return OpenSpecValidator(
-            openspec_bin=openspec_bin,
-            args=openspec_args,
-        )
-
-    if normalized == "policy":
-        return PolicyCheckValidator(
-            scan_artifacts=scan_artifacts,
-        )
-
-    if normalized == "changed-files":
-        return ChangedFilesValidator(allow_no_changes=allow_no_changes)
-
-    if normalized == "typecheck":
-        return TypecheckValidator()
-
-    if normalized == "lint":
-        return LintValidator()
-
     if normalized == "compile":
         return CompileValidator(python_bin=python_bin)
 
@@ -70,7 +41,7 @@ def get_validator(
 def list_validator_names() -> list[str]:
     """Return supported validator names."""
 
-    return ["pytest", "openspec", "policy", "changed-files", "typecheck", "lint", "compile"]
+    return ["pytest", "compile"]
 
 
 __all__ = [

@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--executor",
         dest="executor_name",
-        help="Executor name override, for example manual, noop, or opencode.",
+        help="Executor name override, for example manual or noop.",
     )
     parser.add_argument(
         "--model",
@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--validators",
         type=_parse_validators,
         default=DEFAULT_VALIDATORS,
-        help="Comma-separated validator names. Default: pytest,openspec.",
+        help="Comma-separated validator names. Default: pytest.",
     )
     parser.add_argument(
         "--dry-run",

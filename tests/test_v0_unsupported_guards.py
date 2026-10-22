@@ -269,7 +269,7 @@ class ApiGuardTests(GuardTestCase):
 
 
 class ScriptGuardTests(GuardTestCase):
-    """G6, G11, G13: scripts print one JSON result and exit 2."""
+    """G6, G11: scripts print one JSON result and exit 2."""
 
     def test_g6_archive_task_evidence_only(self) -> None:
         script = load_script("archive_task_evidence_only")
@@ -304,24 +304,6 @@ class ScriptGuardTests(GuardTestCase):
         )
         self.assertEqual(code, 0, payload)
         self.assertTrue((self.fx.repo / ".worktrees" / LEGACY_KEY).is_dir())
-
-    def test_g13_create_pi_smoke_task(self) -> None:
-        script = load_script("create_pi_smoke_task")
-        base = [
-            "--db-path", str(self.db_path),
-            "--repo-path", str(self.fx.repo),
-            "--artifact-root", str(self.fx.artifacts),
-        ]
-        with self.assert_untouched():
-            code, payload = run_main(script, ["--task-key", self.ticket, *base])
-        self.assertEqual(code, 2)
-        self.assertFalse(payload["ok"])
-        self.assert_refusal_text(payload["summary"])
-        output = io.StringIO()
-        with redirect_stdout(output):
-            code = script.main(["--task-key", LEGACY_KEY, *base])
-        self.assertEqual(code, 0, output.getvalue())
-        self.assertEqual(self.fx.task_row(LEGACY_KEY)["executor"], "pi")
 
 
 class ModuleGuardTests(GuardTestCase):

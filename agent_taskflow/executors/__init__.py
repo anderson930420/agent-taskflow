@@ -18,12 +18,8 @@ from agent_taskflow.executors.claude_code import (
     render_claude_code_implementer_prompt,
 )
 from agent_taskflow.executors.manual import ManualExecutor, NoopExecutor
-from agent_taskflow.executors.opencode import OpenCodeExecutor
-from agent_taskflow.executors.pi import PiExecutor
 from agent_taskflow.executors.registry import (
     build_claude_code_executor,
-    build_opencode_executor,
-    build_pi_executor,
     build_shell_executor,
     get_executor,
     list_executor_names,
@@ -43,12 +39,8 @@ __all__ = [
     "ExecutorResult",
     "ManualExecutor",
     "NoopExecutor",
-    "OpenCodeExecutor",
-    "PiExecutor",
     "ShellExecutor",
     "build_claude_code_executor",
-    "build_opencode_executor",
-    "build_pi_executor",
     "build_shell_executor",
     "check_claude_code_preflight",
     "get_executor",

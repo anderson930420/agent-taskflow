@@ -18,7 +18,7 @@ two hard invariants ``validation_authority = false`` and
 ``human_review_required = true`` are always enforced by agent-taskflow and can
 never be overridden by Codex output.
 
-Deterministic validators remain pytest / compileall / policy / changed-files.
+Deterministic validators remain pytest / compileall.
 Human final approval is always required.
 """
 
@@ -183,8 +183,7 @@ REVIEW_DIMENSIONS = (
 )
 
 # Executor-neutral evidence detection. These names are common across executor
-# backends (manual, shell, opencode, pi) and are expected to work naturally for
-# a future Claude Code executor too. Detection is generic file-presence only.
+# backends (manual, shell, claude-code). Detection is generic file-presence only.
 KNOWN_EVIDENCE_FILES = (
     "task_execution_package.json",
     "implementation_prompt.md",
@@ -194,7 +193,7 @@ KNOWN_EVIDENCE_FILES = (
     "policy-validate.log",
     "changed-files-audit.json",
 )
-# Generic, executor-neutral log discovery. Do not hard-code opencode/pi/shell.
+# Generic, executor-neutral log discovery. Do not hard-code executor names.
 EXECUTOR_LOG_GLOB = "*.log"
 
 # Governance prohibitions surfaced in every generated artifact.
@@ -440,8 +439,7 @@ Review each of the following dimensions:
 
 The following common evidence files may exist in the artifact directory. Read
 whatever is present. Evidence detection is generic and executor-neutral; it must
-work for any executor backend (manual, shell, opencode, pi, and a future Claude
-Code executor):
+work for any executor backend (manual, shell, claude-code):
 
 - task_execution_package.json
 - implementation_prompt.md
@@ -468,7 +466,7 @@ Detected executor logs:
 - Codex must not delete branches or delete worktrees.
 - Codex must not change lifecycle.
 - Human final approval is required.
-- Deterministic validators remain pytest / compileall / policy / changed-files.
+- Deterministic validators remain pytest / compileall.
 
 Codex advisory review output is never treated as deterministic validation. It
 never approves, blocks, merges, pushes, cleans up, deletes branches, deletes
@@ -609,8 +607,6 @@ def build_review_payload(
             "deterministic_validators": [
                 "pytest",
                 "compileall",
-                "policy",
-                "changed-files",
             ],
             "prohibitions": list(GOVERNANCE_PROHIBITIONS),
             "codex_cli_invoked": False,
@@ -820,8 +816,7 @@ def build_review_markdown(payload: dict[str, Any]) -> str:
             "- Codex must not approve, block, merge, push, cleanup, delete "
             "branches, delete worktrees, or change lifecycle.",
             "- Human final approval is required.",
-            "- Deterministic validators remain pytest / compileall / policy / "
-            "changed-files.",
+            "- Deterministic validators remain pytest / compileall.",
             "",
         ]
     )
