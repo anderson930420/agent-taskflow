@@ -71,7 +71,7 @@ RUN_STATUS_BLOCKED = "blocked"
 PHASE_CODEX_ADVISORY_EVIDENCE = "codex_advisory_evidence"
 DEFAULT_BASE_BRANCH = "main"
 SUPPORTED_EXECUTORS = tuple(list_executor_names())
-BUILTIN_VALIDATORS = {"pytest", "openspec", "policy", "changed-files", "typecheck", "lint"}
+BUILTIN_VALIDATORS = {"pytest", "openspec", "policy", "changed-files", "typecheck", "lint", "compile"}
 # Executors that cannot run without an explicit model in their profile.
 EXECUTORS_REQUIRING_MODEL = frozenset({"opencode"})
 

@@ -73,6 +73,7 @@ _VALIDATOR_LOG_NAMES = frozenset({
     "policy-validate.log",
     "typecheck.log",
     "lint.log",
+    "compile.log",
 })
 
 _VALIDATOR_STATUS_ORDER = {
