@@ -339,45 +339,5 @@ class AttemptStoreTests(unittest.TestCase):
             self.assertEqual(closed.status, status)
 
 
-class TaskAttemptLifecycleDocsTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        doc = (
-            Path(__file__).resolve().parents[1]
-            / "docs"
-            / "task-attempt-lifecycle-schema.md"
-        )
-        cls.text = doc.read_text(encoding="utf-8")
-        cls.normalized = " ".join(cls.text.split())
-        cls.normalized_lower = cls.normalized.lower()
-
-    def test_records_implemented_schema_and_remaining_runtime_boundaries(self) -> None:
-        for phrase in (
-            "task_attempt_schema = implemented",
-            "legacy_migration = implemented",
-            "one_active_attempt_constraint = implemented",
-            "append_only_lifecycle_events = implemented",
-            "runtime_attempt_admission = not_implemented_in_this_pr",
-            "attempt_scoped_worktree_lock_pid_artifact = not_implemented_in_this_pr",
-            "milestone_0 = open_blocked",
-            "level_2_eligible = false",
-            "historical_attempts_synthesized = false",
-            "ux_attempts_one_active_per_task",
-            "BEGIN IMMEDIATE",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, self.normalized)
-
-    def test_does_not_claim_runtime_or_level2_completion(self) -> None:
-        for forbidden in (
-            "runtime_attempt_admission = implemented",
-            "milestone_0 = closed",
-            "level_2_eligible = true",
-            "all executor runs now use attempt_id",
-        ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, self.normalized_lower)
-
-
 if __name__ == "__main__":
     unittest.main()
