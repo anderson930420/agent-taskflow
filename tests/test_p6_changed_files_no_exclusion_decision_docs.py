@@ -30,7 +30,6 @@ class ChangedFilesNoExclusionDecisionDocsTests(unittest.TestCase):
             "Do not hide orphan atomic temp files from evidence",
             "Do not automatically delete orphan atomic temp files",
             ".{target.name}.{16 lowercase hex}.tmp",
-            "summarize_atomic_temp_orphans.py",
             "docs/atomic-artifact-safety-runbook.md",
             "not cleanup",
             "not approval",

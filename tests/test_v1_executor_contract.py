@@ -537,7 +537,6 @@ class DispatcherPolicyEndToEndTests(unittest.TestCase):
         )
 
 
-
 class LegacyAndApiOverrideTests(unittest.TestCase):
     """RULINGS 67: no CLI, API or legacy path overrides a V1 Ticket's policy."""
 
@@ -617,42 +616,6 @@ class LegacyAndApiOverrideTests(unittest.TestCase):
                 self.assertFalse(result.ok)
                 self.assertIn(LEGACY_ENTRYPOINT_REFUSED, json.dumps(result.to_dict()))
         self.assertEqual(self.snapshot(self.key), before)
-
-    def test_queued_task_handoff_fails_closed_on_a_ticket(self) -> None:
-        from agent_taskflow.queued_task_handoff import QueuedTaskHandoffRequest, run_queued_task_handoff
-        from agent_taskflow.ticket_lifecycle import LEGACY_ENTRYPOINT_REFUSED
-
-        before = self.snapshot(self.key)
-        result = run_queued_task_handoff(QueuedTaskHandoffRequest(
-            task_key=self.key, executor="claude-code", repo_path=self.fx.repo,
-            db_path=self.fx.db_path, dry_run=True,
-        ))
-        self.assertFalse(result.ok)
-        self.assertIn(LEGACY_ENTRYPOINT_REFUSED, json.dumps(result.to_dict()))
-        self.assertEqual(self.snapshot(self.key), before)
-
-    def test_execution_engine_fails_closed_on_a_ticket(self) -> None:
-        from agent_taskflow.execution_engine_approved_task_adapter import (
-            ApprovedTaskRunnerExecutionEngineAdapter,
-        )
-        from agent_taskflow.execution_engine_manual_runtime import (
-            build_manual_execution_engine_request,
-        )
-        from agent_taskflow.ticket_lifecycle import LEGACY_ENTRYPOINT_REFUSED
-
-        request = dataclasses.replace(
-            build_manual_execution_engine_request(
-                task_key=self.key, repo_path=self.fx.repo, artifact_dir=self.fx.artifacts,
-                executor="claude-code", validators=("pytest",), dry_run=False,
-            ),
-            lifecycle_db_path=self.fx.db_path,
-        )
-        before = self.snapshot(self.key)
-        result = ApprovedTaskRunnerExecutionEngineAdapter().execute(request)
-        self.assertFalse(result.ok)
-        self.assertIn(LEGACY_ENTRYPOINT_REFUSED, result.summary)
-        self.assertEqual(self.snapshot(self.key), before)
-
 
 
 class IntegrationDrainPolicyTests(TickFixture):

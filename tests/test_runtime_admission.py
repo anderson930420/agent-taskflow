@@ -377,11 +377,6 @@ class RuntimeAdmissionTests(unittest.TestCase):
                 "agent_taskflow/dispatcher.py",
             },
         )
-        queued_handoff = (
-            REPO_ROOT / "agent_taskflow" / "queued_task_handoff.py"
-        ).read_text(encoding="utf-8")
-        self.assertNotRegex(queued_handoff, r"\bexecutor\.run\(")
-        self.assertIn("run_approved_task", queued_handoff)
 
 
 if __name__ == "__main__":

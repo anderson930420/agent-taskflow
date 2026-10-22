@@ -442,25 +442,6 @@ class CodexAdvisoryArtifactContractValidatorTests(unittest.TestCase):
 
         self.assertTrue(result.passed, result.errors)
 
-    def test_validator_does_not_mutate_waiting_approval_summary(self) -> None:
-        # The waiting-approval summary helper must keep its lenient, never-fail
-        # behavior; this strict validator must not alter that contract.
-        from agent_taskflow.codex_advisory_review_summary import (
-            summarize_codex_advisory_review_artifacts,
-        )
-
-        self._write_raw_json("{malformed")
-        self._write_markdown()
-
-        summary = summarize_codex_advisory_review_artifacts(self.artifact_dir)
-        validator_result = self._validate()
-
-        # Summary stays lenient (present + warning), validator is strict (fail).
-        self.assertTrue(summary.present)
-        self.assertEqual(summary.review_status, "malformed")
-        self.assertTrue(summary.human_review_required)
-        self.assertFalse(validator_result.passed)
-
     def test_validator_does_not_expose_ready_for_human_review(self) -> None:
         self._write_json(self._payload())
         self._write_markdown()

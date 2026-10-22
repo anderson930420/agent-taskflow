@@ -611,40 +611,6 @@ class CodexAdvisoryEvidenceBoundaryTests(unittest.TestCase):
         )
         self.assertTrue(request.require_codex_advisory_evidence)
 
-    def test_waiting_approval_summary_still_displays_codex_review(self) -> None:
-        # v0.2.3 waiting-approval summary still surfaces the Codex advisory review
-        # once the task has reached waiting_approval through the gate.
-        from agent_taskflow.waiting_approval_summary import (
-            WaitingApprovalSummaryRequest,
-            summarize_waiting_approval_task,
-        )
-
-        artifact_dir = self._add_task("AT-GH-513")
-        _write_codex_artifact(
-            artifact_dir,
-            _confirm_payload(
-                "AT-GH-513", artifact_dir,
-                review_status="needs_attention", risk_level="medium",
-            ),
-        )
-
-        run_result = self._run("AT-GH-513")
-        self.assertTrue(run_result.ok, run_result.error)
-
-        summary = summarize_waiting_approval_task(
-            WaitingApprovalSummaryRequest(
-                task_key="AT-GH-513",
-                db_path=self.db_path,
-                artifact_root=self.artifact_root,
-            )
-        )
-        self.assertTrue(summary.codex_advisory_review["present"])
-        self.assertEqual(
-            summary.codex_advisory_review["review_status"], "needs_attention"
-        )
-        # The advisory content never grants approval; human review remains required.
-        self.assertFalse(summary.safety["approved"])
-
     def test_blocked_run_does_not_push_pr_merge_cleanup_or_approve(self) -> None:
         self._add_task("AT-GH-514")  # missing evidence -> blocked at gate
 

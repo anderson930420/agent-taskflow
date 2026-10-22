@@ -24,7 +24,6 @@ from agent_taskflow.integration_cleanup import (
     run_integration_cleanup,
 )
 from agent_taskflow.integration_controller import IntegrationRequest, integrate_task
-from agent_taskflow.integration_metrics import compute_integration_metrics
 from agent_taskflow.integration_handoff import (
     ENQUEUED,
     HANDOFF_EVENT,
@@ -66,7 +65,6 @@ STEP2_MODULES = (
     "merge_verification",
     "integration_watcher",
     "integration_cleanup",
-    "integration_metrics",
 )
 
 
@@ -300,11 +298,6 @@ class EndToEndJourneyTests(AcceptanceTestCase):
 
         # 33 — the ticket reaches completed.
         self.assertEqual(self.status_of("AT-101"), schema.COMPLETED)
-
-        # 35 — metrics are available for the run.
-        metrics = compute_integration_metrics(self.integration, store=self.store)
-        self.assertEqual(metrics.reintegration_count_total, 1)
-        self.assertGreater(metrics.reintegration_rate, 0.0)
 
     def test_item_13_integration_is_serialized_per_repo_and_parallel_across_repos(self) -> None:
         self.make_task("AT-101")

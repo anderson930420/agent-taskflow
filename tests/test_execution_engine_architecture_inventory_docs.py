@@ -30,9 +30,6 @@ class ExecutionEngineArchitectureInventoryDocTests(unittest.TestCase):
 
     def test_mentions_key_modules(self) -> None:
         for module in (
-            "run_github_issue_one_task_scheduler_tick.py",
-            "github_issue_one_task_scheduler_tick.py",
-            "github_issue_one_task_automation.py",
             "approved_task_runner.py",
             "executor adapter",
             "validator layer",

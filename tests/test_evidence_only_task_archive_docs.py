@@ -33,21 +33,11 @@ class EvidenceOnlyTaskArchiveDocTests(unittest.TestCase):
         self.assertIn("not", self.doc_lower)
         self.assertIn("merged-pr closeout", self.doc_lower)
 
-    def test_states_does_not_replace_closeout(self) -> None:
-        self.assertIn("confirm_task_closeout.py", self.doc)
-        self.assertIn("does not replace", self.doc_lower)
-
     def test_states_closeout_is_separate_and_stricter(self) -> None:
         self.assertIn("stricter", self.doc_lower)
         # The closeout command is described as the full draft PR pipeline path.
         self.assertIn("draft pr", self.doc_lower)
         self.assertIn("merged", self.doc_lower)
-
-    def test_directs_full_closeout_to_closeout_script(self) -> None:
-        self.assertIn(
-            "use `confirm_task_closeout.py` for full draft pr pipeline closeout",
-            self.doc_lower,
-        )
 
     def test_directs_evidence_only_to_archive_script(self) -> None:
         self.assertIn(

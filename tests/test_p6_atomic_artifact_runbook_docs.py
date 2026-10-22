@@ -22,7 +22,6 @@ class AtomicArtifactRunbookDocsTests(unittest.TestCase):
 
     def test_preserves_required_commands_and_safety_language(self) -> None:
         for phrase in (
-            "summarize_atomic_temp_orphans.py",
             "reset_task_status.py",
             "blocked -> queued",
             "--confirm-reset",

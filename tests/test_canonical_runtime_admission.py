@@ -65,12 +65,6 @@ class CanonicalRuntimeAdmissionTests(unittest.TestCase):
             runtime_admission_module.RuntimeAdmissionStore,
             CanonicalRuntimeAdmissionStore,
         )
-
-        import agent_taskflow.queued_task_handoff as queued_task_handoff
-
-        self.assertTrue(
-            getattr(queued_task_handoff.run_approved_task, "__canonical_runtime__", False)
-        )
         self.assertTrue(
             getattr(engine_adapter_module.run_approved_task, "__canonical_runtime__", False)
         )

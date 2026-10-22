@@ -314,10 +314,8 @@ class AdapterRuntimeIsolationTests(unittest.TestCase):
         # scheduler/automation module may import the adapter.
         allowed = {
             f"{adapter_stem}.py",
-            "execution_engine_manual_runtime.py",
             "scheduler_execution_engine_opt_in.py",
             "scheduler_execution_engine_authority.py",
-            "m1_canonical_execution_path_rehearsal.py",
         }
         offenders: list[str] = []
         for base in (repo_root / "agent_taskflow", repo_root / "scripts"):

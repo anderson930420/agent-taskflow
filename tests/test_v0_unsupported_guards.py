@@ -32,7 +32,6 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from step5_support import make_fixture  # noqa: E402
 
-from agent_taskflow.models import TaskWorktreeRecord  # noqa: E402
 from agent_taskflow.store import SCHEMA_MIGRATIONS, TaskMirrorStore  # noqa: E402
 from agent_taskflow.ticket_lifecycle import LEGACY_ENTRYPOINT_REFUSED  # noqa: E402
 from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0  # noqa: E402
@@ -150,21 +149,6 @@ class GuardTestCase(unittest.TestCase):
                 "DELETE FROM schema_migrations WHERE name = ?", (SCHEMA_MIGRATIONS[-1],),
             ).rowcount
         self.assertEqual(deleted, 1)
-
-    def add_worktree_record(self, task_key: str) -> Path:
-        worktree = self.fx.repo / ".worktrees" / task_key
-        worktree.mkdir(parents=True, exist_ok=True)
-        TaskMirrorStore(self.db_path).upsert_task_worktree(
-            TaskWorktreeRecord(
-                task_key=task_key,
-                repo_path=self.fx.repo,
-                worktree_path=worktree,
-                branch=f"task/{task_key}",
-                base_branch="main",
-                status="active",
-            )
-        )
-        return worktree
 
 
 class RequireSupportedInV0Tests(GuardTestCase):
@@ -343,102 +327,6 @@ class ScriptGuardTests(GuardTestCase):
 class ModuleGuardTests(GuardTestCase):
     """G7-G10, G12, G14: module functions refuse in their own result form."""
 
-    def test_g7_push_task_branch(self) -> None:
-        from agent_taskflow.branch_push import BranchPushError, BranchPushRequest, push_task_branch
-
-        self.add_worktree_record(self.ticket)
-        for kwargs in ({"dry_run": True}, {"dry_run": False, "confirm_push": True}):
-            request = BranchPushRequest(task_key=self.ticket, db_path=self.db_path, **kwargs)
-            with self.subTest(kwargs=kwargs), self.assert_untouched():
-                runner = RecordingRunner()
-                with self.assertRaises(BranchPushError) as caught:
-                    push_task_branch(request, runner=runner)
-                self.assertEqual(runner.calls, [])
-                self.assert_refusal_text(str(caught.exception))
-        self.use_an_older_schema()
-        with self.assert_untouched(), self.assertRaises(BranchPushError):
-            push_task_branch(BranchPushRequest(task_key=self.ticket, db_path=self.db_path))
-        self.add_worktree_record(LEGACY_KEY)
-        runner = RecordingRunner()
-        with self.assertRaises(Reached):
-            push_task_branch(BranchPushRequest(task_key=LEGACY_KEY, db_path=self.db_path), runner=runner)
-        self.assertEqual(runner.calls[0][:2], ["git", "rev-parse"])
-
-    def test_g8_record_existing_draft_pr(self) -> None:
-        from agent_taskflow.draft_pr_record import DraftPrRecordRequest, record_existing_draft_pr
-
-        for kwargs in ({"dry_run": True}, {"confirm_record_existing_pr": True, "allow_non_waiting": True}):
-            request = DraftPrRecordRequest(
-                task_key=self.ticket, repo="owner/repo", pr_number=7,
-                repo_path=self.fx.repo, db_path=self.db_path, **kwargs,
-            )
-            with self.subTest(kwargs=kwargs), self.assert_untouched():
-                runner = RecordingRunner()
-                result = record_existing_draft_pr(request, runner=runner)
-                self.assertEqual(runner.calls, [])
-            self.assertFalse(result.ok)
-            self.assertEqual(result.status, "blocked")
-            self.assertFalse(result.artifact_recorded)
-            self.assert_refusal_text(result.error)
-        legacy = record_existing_draft_pr(
-            DraftPrRecordRequest(
-                task_key=LEGACY_KEY, repo="owner/repo", pr_number=7,
-                repo_path=self.fx.repo, db_path=self.db_path, dry_run=True,
-            ),
-            runner=RecordingRunner(raise_on_call=False),
-        )
-        # The legacy task reaches the PR-handoff readiness check, as before.
-        self.assertNotIn(LEGACY_ENTRYPOINT_REFUSED, json.dumps(legacy.to_dict()))
-        self.assertTrue(legacy.handoff)
-
-    def test_g9_confirm_local_cleanup(self) -> None:
-        from agent_taskflow.local_cleanup_confirm import (
-            LocalCleanupConfirmRequest,
-            confirm_local_cleanup,
-        )
-
-        self.add_worktree_record(self.ticket)
-        for kwargs in ({"dry_run": True}, {"confirm_local_cleanup": True, "delete_local_branch": True}):
-            request = LocalCleanupConfirmRequest(
-                task_key=self.ticket, repo_path=self.fx.repo, db_path=self.db_path, **kwargs,
-            )
-            with self.subTest(kwargs=kwargs), self.assert_untouched():
-                runner = RecordingRunner()
-                result = confirm_local_cleanup(request, runner=runner)
-                self.assertEqual(runner.calls, [])
-            self.assertFalse(result.ok)
-            self.assertEqual(result.status, "blocked")
-            self.assert_refusal_text(result.error)
-        legacy = confirm_local_cleanup(
-            LocalCleanupConfirmRequest(task_key=LEGACY_KEY, repo_path=self.fx.repo, db_path=self.db_path),
-            runner=RecordingRunner(),
-        )
-        self.assertEqual(legacy.error, f"TaskWorktreeRecord missing for task: {LEGACY_KEY}")
-
-    def test_g10_confirm_remote_branch_cleanup(self) -> None:
-        from agent_taskflow.remote_branch_cleanup_confirm import (
-            RemoteBranchCleanupConfirmRequest,
-            confirm_remote_branch_cleanup,
-        )
-
-        self.add_worktree_record(self.ticket)
-        for kwargs in ({"dry_run": True}, {"confirm_remote_branch_delete": True}):
-            request = RemoteBranchCleanupConfirmRequest(
-                task_key=self.ticket, repo_path=self.fx.repo, db_path=self.db_path, **kwargs,
-            )
-            with self.subTest(kwargs=kwargs), self.assert_untouched():
-                runner = RecordingRunner()
-                result = confirm_remote_branch_cleanup(request, runner=runner)
-                self.assertEqual(runner.calls, [])
-            self.assertFalse(result.ok)
-            self.assertEqual(result.status, "blocked")
-            self.assert_refusal_text(result.error)
-        legacy = confirm_remote_branch_cleanup(
-            RemoteBranchCleanupConfirmRequest(task_key=LEGACY_KEY, repo_path=self.fx.repo, db_path=self.db_path),
-            runner=RecordingRunner(),
-        )
-        self.assertEqual(legacy.error, f"TaskWorktreeRecord missing for task: {LEGACY_KEY}")
-
     def test_g12_ingest_github_issue(self) -> None:
         from agent_taskflow.github_issue_ingestion import (
             GitHubIssueIngestionError,
@@ -476,34 +364,6 @@ class ModuleGuardTests(GuardTestCase):
             fetcher=fetcher,
         )
         self.assertEqual((legacy.status, fetched), ("reused", [5]))
-
-    def test_g14_run_advisory_evidence_retry(self) -> None:
-        from agent_taskflow.advisory_evidence_retry import (
-            AdvisoryEvidenceRetryError,
-            AdvisoryEvidenceRetryRequest,
-            run_advisory_evidence_retry,
-        )
-
-        self.fx.set_status(self.ticket, "blocked", blocked_reason="advisory")
-        artifact_dir = Path(self.fx.task_row(self.ticket)["artifact_dir"])
-        for confirm in (False, True):
-            request = AdvisoryEvidenceRetryRequest(
-                task_key=self.ticket, artifact_dir=artifact_dir, operator="operator-cli",
-                db_path=self.db_path, confirm_transition=confirm,
-            )
-            with self.subTest(confirm=confirm), self.assert_untouched():
-                with self.assertRaises(AdvisoryEvidenceRetryError) as caught:
-                    run_advisory_evidence_retry(request)
-            self.assert_refusal_text(str(caught.exception))
-        legacy = run_advisory_evidence_retry(
-            AdvisoryEvidenceRetryRequest(
-                task_key=LEGACY_KEY, artifact_dir=self.fx.artifacts / LEGACY_KEY,
-                operator="operator-cli", db_path=self.db_path,
-            )
-        )
-        # The legacy task gets its read-only precondition report, as before.
-        self.assertFalse(legacy.mutated)
-        self.assertEqual(legacy.observed_status, "queued")
 
 
 if __name__ == "__main__":

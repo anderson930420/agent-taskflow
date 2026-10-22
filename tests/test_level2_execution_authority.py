@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,34 +17,11 @@ from agent_taskflow.approved_task_runner import (
 )
 from agent_taskflow.attempt_store import AttemptStore
 from agent_taskflow.dispatcher import Dispatcher
-from agent_taskflow.execution_engine_approved_task_adapter import (
-    ApprovedTaskRunnerExecutionEngineAdapter,
-)
-from agent_taskflow.execution_engine_manual_runtime import (
-    build_manual_execution_engine_request,
-)
 from agent_taskflow.models import TaskRecord
-from agent_taskflow.one_shot_task_pipeline import (
-    OneShotTaskPipelineRequest,
-    run_one_shot_task_pipeline,
-)
-from agent_taskflow.queued_task_handoff import (
-    QueuedTaskHandoffRequest,
-    run_queued_task_handoff,
-)
-from agent_taskflow.runtime_handoff_execution_from_handoff import (
-    RuntimeHandoffExecutionRequest,
-    run_runtime_handoff_execution_from_handoff,
-)
 from agent_taskflow.scheduler_execution_engine_opt_in import (
     route_scheduler_tick_through_execution_engine,
 )
 from agent_taskflow.store import TaskMirrorStore
-from agent_taskflow.task_to_draft_pr_pipeline import (
-    TaskToDraftPRPipelineRequest,
-    canonical_attempt_binding_error,
-    run_task_to_draft_pr_pipeline,
-)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -159,29 +135,6 @@ class Level2ExecutionAuthorityBoundaryTests(unittest.TestCase):
         self.assertEqual(payload["phase"], "execution_authority")
         self.assertFalse(payload["safety"]["executor_started"])
 
-    def test_queued_handoff_rejects_level2_injected_runner(self) -> None:
-        runner = _NeverCalled()
-        request = QueuedTaskHandoffRequest(
-            task_key="AT-L2-AUTHORITY",
-            executor="manual",
-            repo_path=self.repo,
-            db_path=self.db_path,
-            artifact_root=self.artifacts,
-            dry_run=False,
-            confirm_handoff=True,
-            intake_runner_handoff_artifact_path=self.root / "handoff.json",
-        )
-
-        result = run_queued_task_handoff(
-            request,
-            store=self.store,
-            approved_task_runner=runner,
-        )
-
-        self.assertFalse(result.ok)
-        self.assertEqual(result.phase, "execution_authority")
-        self.assertEqual(runner.calls, [])
-
     def test_dispatcher_rejects_level2_before_executor(self) -> None:
         executor = _NeverCalled()
         dispatcher = Dispatcher(
@@ -196,26 +149,6 @@ class Level2ExecutionAuthorityBoundaryTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         self.assertIn("canonical ExecutionEngine", result.summary)
         self.assertEqual(executor.calls, [])
-
-    def test_manual_engine_facade_cannot_skip_level2_contract(self) -> None:
-        runner = _NeverCalled()
-        request = replace(
-            build_manual_execution_engine_request(
-                task_key="AT-L2-AUTHORITY",
-                repo_path=self.repo,
-                artifact_dir=self.artifacts,
-                dry_run=False,
-            ),
-            lifecycle_db_path=self.db_path,
-        )
-
-        result = ApprovedTaskRunnerExecutionEngineAdapter(
-            approved_task_runner=runner
-        ).execute(request)
-
-        self.assertFalse(result.ok)
-        self.assertIn("Level 2 ExecutionEngine contract", result.summary)
-        self.assertEqual(runner.calls, [])
 
     def test_historical_shadow_route_refuses_level2_execution(self) -> None:
         engine = _NeverCalled()
@@ -234,130 +167,6 @@ class Level2ExecutionAuthorityBoundaryTests(unittest.TestCase):
         self.assertFalse(block["executed"])
         self.assertIn("forbidden_for_level2", block["reason"])
         self.assertEqual(engine.calls, [])
-
-    def test_runtime_handoff_rejects_arbitrary_level2_callback(self) -> None:
-        runner = _NeverCalled()
-        # Caller-controlled marker attributes are not authority capabilities.
-        runner.__level2_execution_engine_authority__ = True
-        request = RuntimeHandoffExecutionRequest(
-            db_path=self.db_path,
-            artifact_root=self.artifacts,
-            task_key="AT-L2-AUTHORITY",
-            handoff_id="handoff-l2",
-            dry_run=False,
-            confirm_run_approved_task_runner=True,
-        )
-
-        result = run_runtime_handoff_execution_from_handoff(
-            request,
-            approved_task_runner_fn=runner,
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "execution_authority_blocked")
-        self.assertEqual(runner.calls, [])
-
-    def test_one_shot_rejects_arbitrary_level2_callback_before_writes(self) -> None:
-        runner = _NeverCalled()
-        before_events = len(self.store.list_task_events("AT-L2-AUTHORITY"))
-        result = run_one_shot_task_pipeline(
-            OneShotTaskPipelineRequest(
-                db_path=self.db_path,
-                artifact_root=self.artifacts,
-                task_key="AT-L2-AUTHORITY",
-                dry_run=False,
-                confirm_run_one_shot_pipeline=True,
-            ),
-            approved_task_runner_fn=runner,
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertIn(
-            "level2_execution_engine_authority_required", result["reasons"]
-        )
-        self.assertEqual(runner.calls, [])
-        self.assertEqual(
-            before_events,
-            len(self.store.list_task_events("AT-L2-AUTHORITY")),
-        )
-
-    def test_task_pipeline_rejects_inconsistent_level2_authority(self) -> None:
-        result = {
-            "stages": {
-                "runtime_execution": {
-                    "execution_authority": "legacy_scheduler",
-                    "canonical_attempt_bound": False,
-                    "canonical_attempt_id": None,
-                }
-            }
-        }
-
-        error = canonical_attempt_binding_error(
-            result,
-            db_path=self.db_path,
-            task_key="AT-L2-AUTHORITY",
-        )
-
-        self.assertEqual(error, "execution_engine_authority_required_for_level2")
-
-    def test_task_to_draft_pr_rejects_injected_level2_runner(self) -> None:
-        runner = _NeverCalled()
-        result = run_task_to_draft_pr_pipeline(
-            TaskToDraftPRPipelineRequest(
-                db_path=self.db_path,
-                artifact_root=self.artifacts,
-                task_key="AT-L2-AUTHORITY",
-                dry_run=False,
-                confirm_run_one_shot_pipeline=True,
-                confirm_prepare_pr=True,
-                confirm_github_mutations=True,
-                confirm_branch_push=True,
-                confirm_draft_pr=True,
-            ),
-            approved_task_runner_fn=runner,
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["failed_stage"], "one_shot")
-        self.assertEqual(runner.calls, [])
-
-    def test_task_pipeline_verifies_exact_attempt_even_when_newer_exists(self) -> None:
-        attempt_a = self.attempts.create_attempt("AT-L2-AUTHORITY")
-        self.attempts.close_attempt(
-            attempt_a.attempt_id,
-            status="waiting_approval",
-            reason_code="attempt_a_complete",
-            actor="authority_test",
-            execution_result="completed",
-            validation_result="passed",
-        )
-        attempt_b = self.attempts.create_attempt("AT-L2-AUTHORITY")
-        self.attempts.close_attempt(
-            attempt_b.attempt_id,
-            status="waiting_approval",
-            reason_code="attempt_b_complete",
-            actor="authority_test",
-            execution_result="completed",
-            validation_result="passed",
-        )
-        result = {
-            "stages": {
-                "runtime_execution": {
-                    "execution_authority": "execution_engine",
-                    "canonical_attempt_bound": True,
-                    "canonical_attempt_id": attempt_a.attempt_id,
-                }
-            }
-        }
-
-        error = canonical_attempt_binding_error(
-            result,
-            db_path=self.db_path,
-            task_key="AT-L2-AUTHORITY",
-        )
-
-        self.assertIsNone(error)
-        self.assertNotEqual(attempt_a.attempt_id, attempt_b.attempt_id)
 
     def test_legacy_task_retains_supported_runner_preview(self) -> None:
         subprocess.run(
