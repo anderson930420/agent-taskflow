@@ -62,6 +62,7 @@ These are the ACTIVE_V0 operator commands, besides the three happy-path entrypoi
 - `scripts/runtime_control.py`: `set-capacity 1`; pause or kill at task, project or global scope. This is how a legacy, frozen or old Ticket is kept out of the execution tick (Part 2 §6). A pause stops future claims but not a Ticket that is already running; a kill request stops it. It replaces the `/block` action for Tickets.
 - `scripts/reset_task_status.py`: retries a stopped Ticket without a DB edit (§7.12).
 - `scripts/reap_stale_runtime.py`: the standalone lease reaper. The execution tick also reaps.
+- `scripts/create_ticket.py`: creates a Ticket through the running API's `POST /api/tickets`, so an operator no longer needs curl.
 - `scripts/terminate_executor_process.py`: operator kill of a registered executor or validator process group.
 - The explicit `scripts/migrate_*.py` migrations listed below, run through the owner-approved runbook (FOLLOWUPS F3).
 - `scripts/run_integration_tick.py --confirm-cleanup`: the explicit, human-confirmed cleanup after merge verification.
@@ -80,6 +81,7 @@ Routes are the `APIRoute`s of `create_app()`. FastAPI's generated `/openapi.json
 | `scripts/runtime_control.py` | script | ACTIVE_V0 | n/a | `set-capacity 1`; task/project/global pause and kill. |
 | `scripts/reset_task_status.py` | script | ACTIVE_V0 | n/a | Retries a stopped Ticket without a DB edit. |
 | `scripts/reap_stale_runtime.py` | script | ACTIVE_V0 | n/a | Standalone lease reaper. |
+| `scripts/create_ticket.py` | script | ACTIVE_V0 | n/a | Operator CLI for `POST /api/tickets`; replaces curl. |
 | `scripts/terminate_executor_process.py` | script | ACTIVE_V0 | n/a | Operator kill of a registered process group. |
 | `scripts/migrate_ticket_fields.py` | script | ACTIVE_V0 | n/a | Explicit migration; the execution tick fails closed without it. |
 | `scripts/migrate_ticket_worktree_resources.py` | script | ACTIVE_V0 | n/a | Explicit migration; the execution tick fails closed without it. |
