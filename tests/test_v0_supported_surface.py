@@ -33,6 +33,7 @@ ACTIVE_V0_OPERATOR = {
     "scripts/runtime_control.py",
     "scripts/reset_task_status.py",
     "scripts/reap_stale_runtime.py",
+    "scripts/create_ticket.py",
     "scripts/terminate_executor_process.py",
     "scripts/migrate_ticket_fields.py",
     "scripts/migrate_ticket_worktree_resources.py",
