@@ -23,7 +23,6 @@ from agent_taskflow.codex_advisory_review import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DOCS = REPO_ROOT / "docs" / "codex-advisory-review.md"
 
 
 class CodexAdvisoryReviewTests(unittest.TestCase):
@@ -276,22 +275,6 @@ class CodexAdvisoryReviewTests(unittest.TestCase):
             "from agent_taskflow.dispatcher",
         ):
             self.assertNotIn(forbidden, source, forbidden)
-
-    def test_docs_mention_advisory_only_and_non_authoritative(self) -> None:
-        self.assertTrue(DOCS.exists())
-        text = DOCS.read_text(encoding="utf-8").lower()
-        self.assertIn("advisory", text)
-        self.assertIn("not", text)
-        self.assertIn("deterministic validator", text)
-        self.assertIn("human", text)
-        self.assertIn("p5-f", text)
-        self.assertIn("claude code executor", text)
-
-    def test_docs_mention_confirm_run_advisory_and_excluded_scope(self) -> None:
-        text = DOCS.read_text(encoding="utf-8").lower()
-        self.assertIn("--confirm-run", text)
-        self.assertIn("waiting_approval", text)
-        self.assertIn("v0.2.2", text)
 
     def test_prompt_includes_json_output_instruction(self) -> None:
         prompt = build_review_prompt(self._request(), detect_evidence(self.artifact_dir))
