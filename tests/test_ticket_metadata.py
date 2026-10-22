@@ -18,6 +18,7 @@ from agent_taskflow.ticket_metadata import (
     format_task_key,
     normalize_prompt,
     parse_task_key_sequence,
+    shorten_title,
     slugify_branch_component,
 )
 from agent_taskflow.ticket_repositories import TicketRepository
@@ -50,7 +51,7 @@ class NormalizePromptTests(unittest.TestCase):
 
 
 class FallbackTitleTests(unittest.TestCase):
-    """SPEC §10.1: normalized whitespace, first 60 displayable characters."""
+    """First non-empty line, normalized, at most 60 characters at a word boundary."""
 
     def test_short_prompt_is_used_verbatim(self) -> None:
         self.assertEqual(
@@ -58,22 +59,78 @@ class FallbackTitleTests(unittest.TestCase):
             "Separate ending-page image",
         )
 
-    def test_long_prompt_is_truncated_to_sixty_characters(self) -> None:
-        prompt = "x" * 200
+    def test_long_single_word_is_cut_mid_word_with_ellipsis(self) -> None:
+        prompt = "x" * 80
         title = fallback_title_from_prompt(prompt)
         self.assertEqual(len(title), TITLE_FALLBACK_MAX_CHARS)
-        self.assertEqual(title, "x" * TITLE_FALLBACK_MAX_CHARS)
+        self.assertEqual(title, "x" * (TITLE_FALLBACK_MAX_CHARS - 1) + "…")
 
     def test_truncation_counts_after_whitespace_normalization(self) -> None:
         prompt = "word   " * 40
         self.assertEqual(
             fallback_title_from_prompt(prompt),
-            ("word " * 40).strip()[:TITLE_FALLBACK_MAX_CHARS],
+            ("word " * 12).strip() + "…",
+        )
+
+    def test_long_prompt_is_cut_at_a_word_boundary(self) -> None:
+        prompt = "Rework the scheduler so that every worker reports its heartbeat"
+        title = fallback_title_from_prompt(prompt)
+        self.assertLessEqual(len(title), TITLE_FALLBACK_MAX_CHARS)
+        self.assertEqual(
+            title,
+            "Rework the scheduler so that every worker reports its…",
+        )
+
+    def test_trailing_punctuation_is_removed_before_ellipsis(self) -> None:
+        self.assertEqual(
+            fallback_title_from_prompt(
+                "Rework the scheduler so that every worker reports, heartbeats"
+            ),
+            "Rework the scheduler so that every worker reports…",
+        )
+        self.assertEqual(
+            fallback_title_from_prompt(
+                "Rework the scheduler so that every worker reports these:"
+                " heartbeat"
+            ),
+            "Rework the scheduler so that every worker reports these…",
+        )
+
+    def test_only_the_first_non_empty_line_is_used(self) -> None:
+        prompt = "\n   \nFix the login redirect\n\nDetails follow on later lines."
+        self.assertEqual(
+            fallback_title_from_prompt(prompt),
+            "Fix the login redirect",
+        )
+
+    def test_create_ticket_prompt_title(self) -> None:
+        prompt = (
+            "Add a small command-line tool `scripts/create_ticket.py` that"
+            " creates a Ticket through the running API, so an operator no"
+            " longer needs curl."
+        )
+        self.assertEqual(
+            fallback_title_from_prompt(prompt),
+            "Add a small command-line tool `scripts/create_ticket.py`…",
         )
 
     def test_blank_prompt_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             fallback_title_from_prompt("   \n  ")
+
+
+class ShortenTitleTests(unittest.TestCase):
+    def test_short_text_is_unchanged(self) -> None:
+        self.assertEqual(shorten_title("Fix  the\tbug"), "Fix the bug")
+
+    def test_result_never_exceeds_max_chars(self) -> None:
+        title = shorten_title("alpha beta gamma delta", max_chars=12)
+        self.assertEqual(title, "alpha beta…")
+        self.assertLessEqual(len(title), 12)
+
+    def test_blank_text_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            shorten_title(" \x00 ")
 
 
 class BranchSlugTests(unittest.TestCase):

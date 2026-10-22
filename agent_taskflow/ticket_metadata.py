@@ -21,8 +21,8 @@ from agent_taskflow.ticket_repositories import TicketRepository
 from agent_taskflow.worktree import worktree_path_from_base
 
 
-# SPEC §10.1 title fallback: first 60 displayable characters of the
-# whitespace-normalized prompt.
+# Title budget: at most 60 displayable characters, cut at a word boundary
+# (see `shorten_title`).
 TITLE_FALLBACK_MAX_CHARS = 60
 
 # Branch slugs stay short so that `<prefix><TASK_KEY>-<slug>` remains a
@@ -55,12 +55,35 @@ def normalize_prompt(prompt: str) -> str:
     return " ".join(displayable.split())
 
 
-def fallback_title_from_prompt(prompt: str) -> str:
-    """Return the SPEC §10.1 deterministic title fallback."""
-    normalized = normalize_prompt(prompt)
+def shorten_title(text: str, max_chars: int = TITLE_FALLBACK_MAX_CHARS) -> str:
+    """Return `text` normalized and shortened to at most `max_chars` characters.
+
+    Titles become commit subjects and PR titles, so a long title is cut at
+    the last word boundary that fits, trailing `,;:-` are dropped, and `…`
+    marks the cut. A single word longer than the budget is cut mid-word.
+    """
+    normalized = normalize_prompt(text)
     if not normalized:
         raise ValueError("prompt must contain at least one displayable character")
-    return normalized[:TITLE_FALLBACK_MAX_CHARS]
+    if len(normalized) <= max_chars:
+        return normalized
+    space = normalized.rfind(" ", 0, max_chars)
+    cut = normalized[:space].rstrip(" ,;:-") if space > 0 else ""
+    if not cut:
+        cut = normalized[: max_chars - 1]
+    return f"{cut}…"
+
+
+def fallback_title_from_prompt(prompt: str) -> str:
+    """Return the SPEC §10.1 deterministic title fallback.
+
+    Only the first line of the prompt with a displayable character is used,
+    shortened at a word boundary by `shorten_title`.
+    """
+    for line in prompt.splitlines():
+        if normalize_prompt(line):
+            return shorten_title(line)
+    raise ValueError("prompt must contain at least one displayable character")
 
 
 def slugify_branch_component(value: str) -> str:
@@ -169,5 +192,6 @@ __all__ = [
     "format_task_key",
     "normalize_prompt",
     "parse_task_key_sequence",
+    "shorten_title",
     "slugify_branch_component",
 ]
