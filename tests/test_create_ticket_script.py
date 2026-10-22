@@ -149,6 +149,48 @@ class CreateTicketScriptTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8100", err)
         self.assertEqual(len(err.strip().splitlines()), 1)
 
+    def test_timeout_defaults_to_30_seconds(self) -> None:
+        urlopen = mock.MagicMock(return_value=_fake_response(RESPONSE))
+        self.run_main(["--repository", "agent-taskflow", "x"], urlopen)
+        urlopen.assert_called_once()
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 30.0)
+
+    def test_explicit_timeout_is_passed_to_urlopen(self) -> None:
+        urlopen = mock.MagicMock(return_value=_fake_response(RESPONSE))
+        self.run_main(["--repository", "agent-taskflow", "--timeout", "5", "x"], urlopen)
+        urlopen.assert_called_once()
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 5.0)
+
+    def test_timeout_error_returns_2_and_names_the_timeout(self) -> None:
+        urlopen = mock.MagicMock(side_effect=TimeoutError("timed out"))
+        code, out, err = self.run_main(
+            ["--repository", "agent-taskflow", "--timeout", "5", "x"], urlopen
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("http://127.0.0.1:8100", err)
+        self.assertIn("5 seconds", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+
+    def test_url_error_wrapping_a_timeout_returns_2_and_names_the_timeout(self) -> None:
+        urlopen = mock.MagicMock(side_effect=urllib.error.URLError(TimeoutError("timed out")))
+        code, _, err = self.run_main(["--repository", "agent-taskflow", "x"], urlopen)
+        self.assertEqual(code, 2)
+        self.assertIn("http://127.0.0.1:8100", err)
+        self.assertIn("30 seconds", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+
+    def test_non_positive_timeout_is_an_argparse_error(self) -> None:
+        for value in ("0", "-1"):
+            with self.subTest(timeout=value):
+                urlopen = mock.MagicMock()
+                with self.assertRaises(SystemExit) as ctx:
+                    self.run_main(
+                        ["--repository", "agent-taskflow", "--timeout", value, "x"], urlopen
+                    )
+                self.assertEqual(ctx.exception.code, 2)
+                urlopen.assert_not_called()
+
     def test_both_prompt_sources_is_an_argparse_error(self) -> None:
         urlopen = mock.MagicMock()
         with TemporaryDirectory() as tmp:
