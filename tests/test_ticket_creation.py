@@ -47,7 +47,6 @@ from agent_taskflow.ticket_creation import (
     ticket_to_dict,
 )
 from agent_taskflow.ticket_metadata import (
-    TITLE_FALLBACK_MAX_CHARS,
     derive_branch_name,
     fallback_title_from_prompt,
     slugify_branch_component,
@@ -247,7 +246,7 @@ class AiTitleFallbackTests(TicketCreationTestCase):
         result = self.create(ai_adapter=adapter, **kwargs)
         ticket = result.ticket
 
-        self.assertEqual(ticket.title, PROMPT[:TITLE_FALLBACK_MAX_CHARS])
+        self.assertEqual(ticket.title, fallback_title_from_prompt(PROMPT))
         self.assertEqual(ticket.ai_title_status, AI_TITLE_FALLBACK)
         self.assertEqual(ticket.branch_slug_source, METADATA_SOURCE_FALLBACK)
         self.assertFalse(result.used_ai_title)
@@ -332,7 +331,7 @@ class AiTitleFallbackTests(TicketCreationTestCase):
         self.assertFalse(result.metadata.ai_attempted)
         self.assertIsNone(result.metadata.ai_error)
         self.assertEqual(result.ticket.ai_title_status, AI_TITLE_NOT_ATTEMPTED)
-        self.assertEqual(result.ticket.title, PROMPT[:TITLE_FALLBACK_MAX_CHARS])
+        self.assertEqual(result.ticket.title, fallback_title_from_prompt(PROMPT))
 
 
 class OneTicketOneWorktreeTests(TicketCreationTestCase):

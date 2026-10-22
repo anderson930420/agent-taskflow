@@ -251,7 +251,7 @@ class FailingAiAdapterRouteTests(TicketApiTestCase):
         response = self.create()
         self.assertEqual(response.status_code, 200)
         item = response.json()["item"]
-        self.assertEqual(item["title"], PROMPT[:60])
+        self.assertEqual(item["title"], fallback_title_from_prompt(PROMPT))
         self.assertEqual(item["ai_title_status"], "fallback")
 
 

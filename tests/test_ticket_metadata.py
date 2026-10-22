@@ -18,6 +18,7 @@ from agent_taskflow.ticket_metadata import (
     format_task_key,
     normalize_prompt,
     parse_task_key_sequence,
+    shorten_title,
     slugify_branch_component,
 )
 from agent_taskflow.ticket_repositories import TicketRepository
@@ -50,7 +51,7 @@ class NormalizePromptTests(unittest.TestCase):
 
 
 class FallbackTitleTests(unittest.TestCase):
-    """SPEC §10.1: normalized whitespace, first 60 displayable characters."""
+    """SPEC §10.1: normalized whitespace, shortened at a word boundary."""
 
     def test_short_prompt_is_used_verbatim(self) -> None:
         self.assertEqual(
@@ -58,22 +59,66 @@ class FallbackTitleTests(unittest.TestCase):
             "Separate ending-page image",
         )
 
-    def test_long_prompt_is_truncated_to_sixty_characters(self) -> None:
-        prompt = "x" * 200
+    def test_long_prompt_is_cut_at_a_word_boundary(self) -> None:
+        prompt = "Separate the ending page image from the shared hero component please"
         title = fallback_title_from_prompt(prompt)
-        self.assertEqual(len(title), TITLE_FALLBACK_MAX_CHARS)
-        self.assertEqual(title, "x" * TITLE_FALLBACK_MAX_CHARS)
+        self.assertEqual(title, "Separate the ending page image from the shared hero…")
+        self.assertTrue(title.endswith("…"))
+        self.assertLessEqual(len(title), TITLE_FALLBACK_MAX_CHARS)
 
     def test_truncation_counts_after_whitespace_normalization(self) -> None:
         prompt = "word   " * 40
+        title = fallback_title_from_prompt(prompt)
+        self.assertEqual(title, ("word " * 12).strip() + "…")
+        self.assertLessEqual(len(title), TITLE_FALLBACK_MAX_CHARS)
+
+    def test_trailing_punctuation_before_the_cut_is_removed(self) -> None:
+        for mark in (",", ":"):
+            with self.subTest(mark=mark):
+                prompt = "x" * 50 + mark + " " + "y" * 20
+                self.assertEqual(
+                    fallback_title_from_prompt(prompt),
+                    "x" * 50 + "…",
+                )
+
+    def test_single_overlong_word_is_cut_mid_word(self) -> None:
+        title = fallback_title_from_prompt("x" * 80)
+        self.assertEqual(title, "x" * 59 + "…")
+        self.assertEqual(len(title), TITLE_FALLBACK_MAX_CHARS)
+
+    def test_create_ticket_prompt_keeps_whole_words(self) -> None:
+        prompt = (
+            "Add a small command-line tool `scripts/create_ticket.py` that "
+            "creates a Ticket through the running API, so an operator no "
+            "longer needs curl."
+        )
         self.assertEqual(
             fallback_title_from_prompt(prompt),
-            ("word " * 40).strip()[:TITLE_FALLBACK_MAX_CHARS],
+            "Add a small command-line tool `scripts/create_ticket.py`…",
         )
 
     def test_blank_prompt_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             fallback_title_from_prompt("   \n  ")
+
+
+class ShortenTitleTests(unittest.TestCase):
+    def test_short_text_is_unchanged(self) -> None:
+        self.assertEqual(shorten_title("Fix the login flow"), "Fix the login flow")
+
+    def test_text_of_exactly_max_chars_is_unchanged(self) -> None:
+        text = "x" * TITLE_FALLBACK_MAX_CHARS
+        self.assertEqual(shorten_title(text), text)
+
+    def test_long_text_never_exceeds_max_chars(self) -> None:
+        for length in range(55, 75):
+            with self.subTest(length=length):
+                text = ("ab " * 40)[:length]
+                self.assertLessEqual(len(shorten_title(text)), TITLE_FALLBACK_MAX_CHARS)
+
+    def test_whitespace_only_text_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            shorten_title(" \t\n ")
 
 
 class BranchSlugTests(unittest.TestCase):

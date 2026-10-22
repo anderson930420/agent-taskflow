@@ -21,9 +21,11 @@ from agent_taskflow.ticket_repositories import TicketRepository
 from agent_taskflow.worktree import worktree_path_from_base
 
 
-# SPEC §10.1 title fallback: first 60 displayable characters of the
-# whitespace-normalized prompt.
+# SPEC §10.1 title fallback: the whitespace-normalized prompt, shortened at a
+# word boundary to at most 60 displayable characters (ellipsis included).
 TITLE_FALLBACK_MAX_CHARS = 60
+_TITLE_ELLIPSIS = "…"
+_TITLE_CUT_TRAILING_CHARS = " ,;:-"
 
 # Branch slugs stay short so that `<prefix><TASK_KEY>-<slug>` remains a
 # comfortable ref name.
@@ -55,12 +57,28 @@ def normalize_prompt(prompt: str) -> str:
     return " ".join(displayable.split())
 
 
-def fallback_title_from_prompt(prompt: str) -> str:
-    """Return the SPEC §10.1 deterministic title fallback."""
-    normalized = normalize_prompt(prompt)
+def shorten_title(text: str, max_chars: int = TITLE_FALLBACK_MAX_CHARS) -> str:
+    """Return `text` normalized and shortened to at most `max_chars` characters.
+
+    Text that already fits is returned unchanged. Longer text is cut at the
+    last space before `max_chars`, trailing spaces and `,;:-` are stripped,
+    and `…` is appended. A single overlong word is cut at `max_chars - 1`.
+    """
+    normalized = normalize_prompt(text)
     if not normalized:
         raise ValueError("prompt must contain at least one displayable character")
-    return normalized[:TITLE_FALLBACK_MAX_CHARS]
+    if len(normalized) <= max_chars:
+        return normalized
+    cut = normalized.rfind(" ", 0, max_chars)
+    head = normalized[:cut].rstrip(_TITLE_CUT_TRAILING_CHARS) if cut > 0 else ""
+    if not head:
+        head = normalized[: max_chars - 1]
+    return head + _TITLE_ELLIPSIS
+
+
+def fallback_title_from_prompt(prompt: str) -> str:
+    """Return the SPEC §10.1 deterministic title fallback (see `shorten_title`)."""
+    return shorten_title(prompt)
 
 
 def slugify_branch_component(value: str) -> str:
@@ -169,5 +187,6 @@ __all__ = [
     "format_task_key",
     "normalize_prompt",
     "parse_task_key_sequence",
+    "shorten_title",
     "slugify_branch_component",
 ]

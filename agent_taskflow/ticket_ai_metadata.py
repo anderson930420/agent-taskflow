@@ -16,9 +16,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from agent_taskflow.ticket_metadata import (
-    TITLE_FALLBACK_MAX_CHARS,
     fallback_title_from_prompt,
     normalize_prompt,
+    shorten_title,
     slugify_branch_component,
 )
 from agent_taskflow.ticket_models import (
@@ -186,11 +186,7 @@ def resolve_ticket_metadata(
             commit_message = None
 
     # An AI title shares the same display budget as the §10.1 fallback.
-    title = (
-        suggested_title[:TITLE_FALLBACK_MAX_CHARS].strip()
-        if suggested_title
-        else None
-    )
+    title = shorten_title(suggested_title) if suggested_title else None
     return ResolvedTicketMetadata(
         title=title or fallback_title,
         ai_title_status=AI_TITLE_GENERATED if title else AI_TITLE_FALLBACK,
