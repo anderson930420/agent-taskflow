@@ -21,14 +21,6 @@ from agent_taskflow.github_issue_ingestion import (
     GitHubIssueSnapshot,
     ingest_github_issue,
 )
-from agent_taskflow.github_issue_intake import (
-    GitHubIssueIntakeRequest as SelectedIssueIntakeRequest,
-    intake_selected_github_issues as intake_selected_issues,
-)
-from agent_taskflow.github_issue_intake_gate import (
-    GitHubIssueIntakeRequest as IntakeGateRequest,
-    intake_selected_github_issues as intake_through_gate,
-)
 from agent_taskflow.level2_execution_authority import (
     Level2ExecutionAuthorityError,
     ensure_level2_task_identity,
@@ -84,38 +76,9 @@ class _AdmissionPathCase(unittest.TestCase):
             fetcher=lambda repo, number: issue_snapshot(),
         )
 
-    def intake_selected(self) -> Any:
-        return intake_selected_issues(
-            SelectedIssueIntakeRequest(
-                repo="anderson930420/agent-taskflow",
-                issue_numbers=(ISSUE_NUMBER,),
-                db_path=self.db_path,
-                local_repo_path=self.repo,
-                artifact_root=self.artifact_root,
-            ),
-            store=self.store,
-            fetcher=lambda repo, number: issue_snapshot(),
-        )
-
-    def intake_gate(self) -> Any:
-        return intake_through_gate(
-            IntakeGateRequest(
-                repo="anderson930420/agent-taskflow",
-                issue_numbers=(ISSUE_NUMBER,),
-                repo_path=self.repo,
-                artifact_root=self.artifact_root,
-                db_path=self.db_path,
-                dry_run=False,
-            ),
-            store=self.store,
-            fetcher=lambda repo, number: issue_snapshot(),
-        )
-
     def admission_paths(self) -> dict[str, Any]:
         return {
             "github_issue_ingestion": self.ingest,
-            "github_issue_intake": self.intake_selected,
-            "github_issue_intake_gate": self.intake_gate,
         }
 
     def task_keys(self) -> list[str]:

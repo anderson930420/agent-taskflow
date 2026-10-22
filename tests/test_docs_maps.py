@@ -44,9 +44,6 @@ class DocumentationMapTests(unittest.TestCase):
         for module in (
             "task_recommendations.py",
             "scheduler_proposals.py",
-            "scheduler_proposal_review.py",
-            "scheduler_confirmations.py",
-            "scheduler_confirmation_verifier.py",
         ):
             self.assertIn(module, text)
 

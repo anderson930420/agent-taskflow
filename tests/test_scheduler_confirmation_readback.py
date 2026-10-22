@@ -3,27 +3,17 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any
 
 from agent_taskflow.models import TaskRecord
-from agent_taskflow.scheduler_candidate_proposals import (
-    SchedulerCandidateProposalRequest,
-    create_scheduler_proposal_from_candidate,
-)
 from agent_taskflow.scheduler_confirmation_from_proposal import (
     CONFIRMATION_ARTIFACT_TYPE,
     CONFIRMATION_EVENT_TYPE,
-    SchedulerConfirmationFromProposalRequest,
-    create_scheduler_confirmation_from_proposal,
 )
 from agent_taskflow.scheduler_confirmation_readback import (
-    CONFIRMATION_READBACK_NOTE,
     CONFIRMATION_READBACK_SAFETY_FLAGS,
-    CONFIRMATION_READBACK_SCHEMA_VERSION,
     SchedulerConfirmationReadbackError,
     list_scheduler_confirmation_readbacks,
     list_task_scheduler_confirmation_readbacks,
@@ -67,117 +57,8 @@ class _Base(unittest.TestCase):
             )
         )
 
-    def _create_proposal(self, task_key: str) -> dict[str, Any]:
-        self._seed_task(task_key)
-        payload = create_scheduler_proposal_from_candidate(
-            SchedulerCandidateProposalRequest(
-                task_key=task_key,
-                db_path=self.db_path,
-                artifact_root=self.artifact_root,
-                dry_run=False,
-                confirm_create_proposal=True,
-            )
-        )
-        self.assertTrue(payload["ok"], payload)
-        self.assertEqual(payload["status"], "created")
-        return payload["proposal"]
-
-    def _create_confirmation(self, task_key: str) -> dict[str, Any]:
-        proposal = self._create_proposal(task_key)
-        result = create_scheduler_confirmation_from_proposal(
-            SchedulerConfirmationFromProposalRequest(
-                db_path=self.db_path,
-                artifact_root=self.artifact_root,
-                task_key=task_key,
-                proposal_item_id=proposal["proposal_item_id"],
-                proposal_hash=proposal["proposal_hash"],
-                proposal_id=proposal["proposal_id"],
-                item_hash=proposal["item_hash"],
-                recommended_command_kind=proposal["recommended_command_kind"],
-                proposal_artifact_path=Path(proposal["proposal_artifact_path"]),
-                dry_run=False,
-                confirm_create_confirmation=True,
-                operator="test-operator",
-                operator_note="K3 readback unit test",
-            )
-        )
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["status"], "created")
-        return result["confirmation"]
-
-    def _db_counts(self) -> dict[str, int]:
-        with sqlite3.connect(self.db_path) as conn:
-            return {
-                "tasks": conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0],
-                "events": conn.execute(
-                    "SELECT COUNT(*) FROM task_events"
-                ).fetchone()[0],
-                "artifacts": conn.execute(
-                    "SELECT COUNT(*) FROM task_artifacts"
-                ).fetchone()[0],
-                "worktrees": conn.execute(
-                    "SELECT COUNT(*) FROM task_worktrees"
-                ).fetchone()[0],
-            }
-
 
 class HelperReadbackTests(_Base):
-    def test_lists_confirmation_created_by_k2(self) -> None:
-        task_key = "AT-K3-001"
-        confirmation = self._create_confirmation(task_key)
-
-        result = list_task_scheduler_confirmation_readbacks(self.store, task_key)
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["schema_version"], CONFIRMATION_READBACK_SCHEMA_VERSION)
-        self.assertEqual(result["mode"], "read_only")
-        self.assertEqual(result["readback_note"], CONFIRMATION_READBACK_NOTE)
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["safety"], dict(CONFIRMATION_READBACK_SAFETY_FLAGS))
-
-        item = result["items"][0]
-        self.assertEqual(item["task_key"], task_key)
-        self.assertEqual(item["confirmation_id"], confirmation["confirmation_id"])
-        self.assertEqual(item["proposal_id"], confirmation["proposal_id"])
-        self.assertEqual(item["proposal_hash"], confirmation["proposal_hash"])
-        self.assertEqual(item["proposal_item_id"], confirmation["proposal_item_id"])
-        self.assertEqual(item["item_hash"], confirmation["item_hash"])
-        self.assertEqual(
-            item["recommended_command_kind"],
-            confirmation["recommended_command_kind"],
-        )
-        self.assertEqual(item["artifact_path"], confirmation["artifact_path"])
-        self.assertEqual(item["confirmation_status"], "recorded")
-        self.assertTrue(item["not_execution_permission"])
-        self.assertTrue(item["not_verifier_report"])
-        self.assertTrue(item["not_handoff"])
-        self.assertTrue(item["not_runtime"])
-        self.assertTrue(item["requires_next_gate"])
-        self.assertTrue(item["safety"]["read_only"])
-        self.assertFalse(item["safety"]["confirmation_created"])
-
-    def test_global_readback_supports_task_filter(self) -> None:
-        self._create_confirmation("AT-K3-002")
-        self._create_confirmation("AT-K3-003")
-
-        result = list_scheduler_confirmation_readbacks(
-            self.store,
-            task_key="AT-K3-003",
-        )
-
-        self.assertEqual(result["filters"]["task_key"], "AT-K3-003")
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["items"][0]["task_key"], "AT-K3-003")
-
-    def test_global_readback_returns_all_tasks_when_unfiltered(self) -> None:
-        self._create_confirmation("AT-K3-004")
-        self._create_confirmation("AT-K3-005")
-
-        result = list_scheduler_confirmation_readbacks(self.store)
-
-        self.assertEqual(result["count"], 2)
-        task_keys = {item["task_key"] for item in result["items"]}
-        self.assertEqual(task_keys, {"AT-K3-004", "AT-K3-005"})
 
     def test_empty_readback_returns_count_zero(self) -> None:
         result = list_scheduler_confirmation_readbacks(self.store)
@@ -186,18 +67,6 @@ class HelperReadbackTests(_Base):
         self.assertEqual(result["items"], [])
         self.assertEqual(result["count"], 0)
         self.assertEqual(result["safety"], dict(CONFIRMATION_READBACK_SAFETY_FLAGS))
-
-
-class ReadOnlyTests(_Base):
-    def test_readback_is_read_only_and_does_not_mutate_db(self) -> None:
-        self._create_confirmation("AT-K3-RO-001")
-        before = self._db_counts()
-
-        list_scheduler_confirmation_readbacks(self.store)
-        list_task_scheduler_confirmation_readbacks(self.store, "AT-K3-RO-001")
-        list_scheduler_confirmation_readbacks(self.store, task_key="AT-K3-RO-001")
-
-        self.assertEqual(self._db_counts(), before)
 
 
 class LimitTests(_Base):
@@ -209,50 +78,8 @@ class LimitTests(_Base):
                 self.store, "AT-K3-LIM-001", limit=-2
             )
 
-    def test_limit_zero_returns_count_zero(self) -> None:
-        self._create_confirmation("AT-K3-LIM-002")
-        self._create_confirmation("AT-K3-LIM-003")
-
-        result = list_scheduler_confirmation_readbacks(self.store, limit=0)
-
-        self.assertEqual(result["items"], [])
-        self.assertEqual(result["count"], 0)
-        self.assertEqual(result["filters"]["limit"], 0)
-
-    def test_limit_one_returns_a_single_item(self) -> None:
-        self._create_confirmation("AT-K3-LIM-004")
-        self._create_confirmation("AT-K3-LIM-005")
-
-        result = list_scheduler_confirmation_readbacks(self.store, limit=1)
-
-        self.assertEqual(result["count"], 1)
-
 
 class DegradedEvidenceTests(_Base):
-    def test_missing_artifact_file_returns_warning_not_crash(self) -> None:
-        task_key = "AT-K3-DEG-001"
-        confirmation = self._create_confirmation(task_key)
-        artifact_path = Path(confirmation["artifact_path"])
-        artifact_path.unlink()
-
-        result = list_task_scheduler_confirmation_readbacks(self.store, task_key)
-
-        self.assertEqual(result["count"], 1)
-        item = result["items"][0]
-        self.assertIn("artifact_file_missing", item["readback_warnings"])
-        # Event-side fields still flow through so evidence remains auditable.
-        self.assertEqual(item["confirmation_id"], confirmation["confirmation_id"])
-
-    def test_malformed_artifact_json_returns_warning_not_crash(self) -> None:
-        task_key = "AT-K3-DEG-002"
-        confirmation = self._create_confirmation(task_key)
-        artifact_path = Path(confirmation["artifact_path"])
-        artifact_path.write_text("{not-json", encoding="utf-8")
-
-        result = list_task_scheduler_confirmation_readbacks(self.store, task_key)
-
-        item = result["items"][0]
-        self.assertIn("artifact_json_malformed", item["readback_warnings"])
 
     def test_event_without_artifact_row_or_file_returns_warning(self) -> None:
         task_key = "AT-K3-DEG-003"

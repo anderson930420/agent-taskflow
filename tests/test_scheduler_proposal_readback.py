@@ -1,17 +1,12 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
 from agent_taskflow.models import TaskRecord
-from agent_taskflow.scheduler_candidate_proposals import (
-    SchedulerCandidateProposalRequest,
-    create_scheduler_proposal_from_candidate,
-)
 from agent_taskflow.scheduler_proposal_readback import (
     READBACK_NOTE,
     READBACK_SAFETY_FLAGS,
@@ -59,36 +54,6 @@ class SchedulerProposalReadbackTests(unittest.TestCase):
             )
         )
 
-    def _create_confirmed_proposal(self, task_key: str) -> dict[str, Any]:
-        self._seed_task(task_key)
-        payload = create_scheduler_proposal_from_candidate(
-            SchedulerCandidateProposalRequest(
-                task_key=task_key,
-                db_path=self.db_path,
-                artifact_root=self.artifact_root,
-                dry_run=False,
-                confirm_create_proposal=True,
-            )
-        )
-        self.assertTrue(payload["ok"], payload)
-        self.assertEqual(payload["status"], "created")
-        return payload
-
-    def _db_counts(self) -> dict[str, int]:
-        with sqlite3.connect(self.db_path) as conn:
-            return {
-                "tasks": conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0],
-                "events": conn.execute(
-                    "SELECT COUNT(*) FROM task_events"
-                ).fetchone()[0],
-                "artifacts": conn.execute(
-                    "SELECT COUNT(*) FROM task_artifacts"
-                ).fetchone()[0],
-                "worktrees": conn.execute(
-                    "SELECT COUNT(*) FROM task_worktrees"
-                ).fetchone()[0],
-            }
-
     def _readback_item(self, task_key: str) -> dict[str, Any]:
         result = list_task_scheduler_proposal_readbacks(self.store, task_key)
         self.assertEqual(result["count"], 1)
@@ -117,151 +82,10 @@ class SchedulerProposalReadbackTests(unittest.TestCase):
         self.assertEqual(result["count"], 0)
         self.assert_top_level_safety(result)
 
-    def test_confirmed_j1_proposal_appears_in_readback(self) -> None:
-        self._create_confirmed_proposal("AT-J2-001")
-
-        result = list_scheduler_proposal_readbacks(self.store)
-
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["items"][0]["task_key"], "AT-J2-001")
-
-    def test_item_includes_proposal_id(self) -> None:
-        created = self._create_confirmed_proposal("AT-J2-002")
-
-        item = self._readback_item("AT-J2-002")
-
-        self.assertEqual(item["proposal_id"], created["proposal"]["proposal_id"])
-
-    def test_item_includes_proposal_hash(self) -> None:
-        created = self._create_confirmed_proposal("AT-J2-003")
-
-        item = self._readback_item("AT-J2-003")
-
-        self.assertEqual(item["proposal_hash"], created["proposal"]["proposal_hash"])
-
-    def test_item_includes_proposal_item_id(self) -> None:
-        created = self._create_confirmed_proposal("AT-J2-004")
-
-        item = self._readback_item("AT-J2-004")
-
-        self.assertEqual(
-            item["proposal_item_id"],
-            created["proposal"]["proposal_item_id"],
-        )
-
-    def test_item_includes_item_hash(self) -> None:
-        created = self._create_confirmed_proposal("AT-J2-005")
-
-        item = self._readback_item("AT-J2-005")
-
-        self.assertEqual(item["item_hash"], created["proposal"]["item_hash"])
-
-    def test_item_includes_recommended_command_kind(self) -> None:
-        created = self._create_confirmed_proposal("AT-J2-006")
-
-        item = self._readback_item("AT-J2-006")
-
-        self.assertEqual(
-            item["recommended_command_kind"],
-            created["proposal"]["recommended_command_kind"],
-        )
-
-    def test_item_includes_artifact_path(self) -> None:
-        created = self._create_confirmed_proposal("AT-J2-007")
-
-        item = self._readback_item("AT-J2-007")
-
-        self.assertEqual(
-            item["artifact_path"],
-            created["proposal"]["proposal_artifact_path"],
-        )
-
-    def test_item_says_not_execution_permission(self) -> None:
-        self._create_confirmed_proposal("AT-J2-008")
-
-        item = self._readback_item("AT-J2-008")
-
-        self.assertTrue(item["not_execution_permission"])
-        self.assertTrue(item["safety"]["not_execution_permission"])
-
-    def test_item_says_not_confirmation(self) -> None:
-        self._create_confirmed_proposal("AT-J2-009")
-
-        item = self._readback_item("AT-J2-009")
-
-        self.assertTrue(item["not_confirmation"])
-        self.assertTrue(item["safety"]["not_confirmation"])
-
-    def test_item_says_requires_human_confirmation(self) -> None:
-        self._create_confirmed_proposal("AT-J2-010")
-
-        item = self._readback_item("AT-J2-010")
-
-        self.assertTrue(item["requires_human_confirmation"])
-
     def test_top_level_safety_says_read_only(self) -> None:
         result = list_scheduler_proposal_readbacks(self.store)
 
         self.assertTrue(result["safety"]["read_only"])
-
-    def test_top_level_safety_says_proposal_created_false(self) -> None:
-        self._create_confirmed_proposal("AT-J2-011")
-
-        result = list_scheduler_proposal_readbacks(self.store)
-
-        self.assertFalse(result["safety"]["proposal_created"])
-
-    def test_top_level_safety_says_no_confirmation_handoff_runtime_or_runner(self) -> None:
-        self._create_confirmed_proposal("AT-J2-012")
-
-        result = list_scheduler_proposal_readbacks(self.store)
-
-        self.assert_top_level_safety(result)
-
-    def test_task_key_filter_works(self) -> None:
-        self._create_confirmed_proposal("AT-J2-013")
-        self._create_confirmed_proposal("AT-J2-014")
-
-        result = list_scheduler_proposal_readbacks(
-            self.store,
-            task_key="AT-J2-014",
-        )
-
-        self.assertEqual(result["filters"]["task_key"], "AT-J2-014")
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["items"][0]["task_key"], "AT-J2-014")
-
-    def test_limit_works(self) -> None:
-        self._create_confirmed_proposal("AT-J2-015")
-        self._create_confirmed_proposal("AT-J2-016")
-
-        zero = list_scheduler_proposal_readbacks(self.store, limit=0)
-        one = list_scheduler_proposal_readbacks(self.store, limit=1)
-
-        self.assertEqual(zero["items"], [])
-        self.assertEqual(zero["count"], 0)
-        self.assertEqual(one["count"], 1)
-
-    def test_malformed_or_missing_artifact_json_does_not_crash(self) -> None:
-        created = self._create_confirmed_proposal("AT-J2-017")
-        artifact_path = Path(created["proposal"]["proposal_artifact_path"])
-
-        artifact_path.write_text("{not-json", encoding="utf-8")
-        malformed = self._readback_item("AT-J2-017")
-        self.assertIn("artifact_json_malformed", malformed["readback_warnings"])
-
-        artifact_path.unlink()
-        missing = self._readback_item("AT-J2-017")
-        self.assertIn("artifact_file_missing", missing["readback_warnings"])
-
-    def test_repeated_readback_does_not_mutate_db(self) -> None:
-        self._create_confirmed_proposal("AT-J2-018")
-        before = self._db_counts()
-
-        list_scheduler_proposal_readbacks(self.store)
-        list_task_scheduler_proposal_readbacks(self.store, "AT-J2-018")
-
-        self.assertEqual(self._db_counts(), before)
 
     def test_event_without_artifact_row_still_returns_item(self) -> None:
         self._seed_task("AT-J2-019")
@@ -338,11 +162,6 @@ class SchedulerProposalReadbackTests(unittest.TestCase):
         source = module_path.read_text(encoding="utf-8")
 
         for forbidden in (
-            "from agent_taskflow.scheduler_confirmations",
-            "import agent_taskflow.scheduler_confirmations",
-            "from agent_taskflow.scheduler_confirmation_verifier",
-            "from agent_taskflow.intake_runner_handoff",
-            "from agent_taskflow.queued_task_handoff",
             "from agent_taskflow.approved_task_runner",
             "from agent_taskflow.executors",
             "from agent_taskflow.validators",

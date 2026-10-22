@@ -87,14 +87,9 @@ UNSUPPORTED_IN_V0 = {
     "POST /api/tasks/{task_key}/approve",
     "POST /api/tasks/{task_key}/start",
     "scripts/archive_task_evidence_only.py",
-    "scripts/push_task_branch.py",
-    "scripts/record_existing_draft_pr.py",
-    "scripts/confirm_local_cleanup.py",
-    "scripts/confirm_remote_branch_cleanup.py",
     "scripts/prepare_task_workspace.py",
     "scripts/ingest_github_issue.py",
     "scripts/create_pi_smoke_task.py",
-    "scripts/retry_advisory_evidence_transition.py",
 }
 
 _ROW = re.compile(r"^\|\s*`(?P<surface>[^`]+)`\s*\|(?P<rest>.*)\|\s*$")

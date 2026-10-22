@@ -28,10 +28,6 @@ class TestV021ReleaseNotes(unittest.TestCase):
         self.assertIn("codex-advisory-review.json", self.content)
         self.assertIn("codex-advisory-review.md", self.content)
 
-    def test_packaged_entrypoint_and_script(self) -> None:
-        self.assertIn("agent-taskflow-codex-advisory-review", self.content)
-        self.assertIn("scripts/run_codex_advisory_review.py", self.content)
-
     def test_advisory_only_authority_boundary(self) -> None:
         self.assertIn("advisory-only", self.lower)
         self.assertIn("non-authoritative", self.lower)

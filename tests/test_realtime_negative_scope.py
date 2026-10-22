@@ -160,14 +160,10 @@ class NoGitOrGithubCallInStep3CodeTests(unittest.TestCase):
             "urllib.request",
             "http.client",
             "socket",
-            "agent_taskflow.branch_push",
-            "agent_taskflow.draft_pr",
             "agent_taskflow.dispatcher",
             "agent_taskflow.worktree",
             "agent_taskflow.workspace_manager",
-            "agent_taskflow.github_issue_intake",
             "agent_taskflow.github_issue_ingestion",
-            "agent_taskflow.github_issue_discovery",
             "agent_taskflow.executor_launch",
         }
     )

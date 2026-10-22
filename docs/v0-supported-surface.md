@@ -95,14 +95,7 @@ Routes are the `APIRoute`s of `create_app()`. FastAPI's generated `/openapi.json
 | `scripts/migrate_validator_process_lifecycle.py` | script | ACTIVE_V0 | n/a | Explicit migration (F3 runbook). |
 | `scripts/ticket_dependency.py` | script | FROZEN | n/a | Ticket-native `blocked_by` in the tick's own domain, audited. Not guarded: it is the formal way to undo an accidental `blocked_by`. |
 | `scripts/run_concurrency_rehearsal.py` | script | FROZEN | n/a | Disposable fixtures; the >1 capacity gate is suspended at capacity 1. |
-| `scripts/audit_m1_exit_gate.py` | script | FROZEN | n/a | Level 2 M1; read-only / DB copies. |
-| `scripts/run_m1_canonical_execution_path_rehearsal.py` | script | FROZEN | n/a | Level 2 M1 rehearsal on disposable state. |
-| `scripts/run_m1_db_copy_rehearsal.py` | script | FROZEN | n/a | Level 2 M1 rehearsal on a DB copy. |
-| `scripts/run_m1_dual_write_observation.py` | script | FROZEN | n/a | Level 2 M1; not a V0 gate. |
-| `scripts/run_m1_project_class_control_rehearsal.py` | script | FROZEN | n/a | Level 2 M1 rehearsal on disposable state. |
 | `scripts/run_real_executor_preflight.py` | script | FROZEN | n/a | Read-only report. |
-| `scripts/summarize_atomic_temp_orphans.py` | script | FROZEN | n/a | Read-only report. |
-| `scripts/summarize_local_workspace_inventory.py` | script | FROZEN | n/a | Read-only report. |
 | `scripts/summarize_workflow_policy.py` | script | FROZEN | n/a | Read-only report. |
 | `scripts/validate_workflow_contract.py` | script | FROZEN | n/a | Read-only validator of `WORKFLOW.md`. |
 | `scripts/validate_workflow_policy.py` | script | FROZEN | n/a | Read-only validator of the workflow policy. |
@@ -110,75 +103,24 @@ Routes are the `APIRoute`s of `create_app()`. FastAPI's generated `/openapi.json
 | `scripts/report_workflow_policy_review_evidence.py` | script | FROZEN | n/a | Read-only report. |
 | `scripts/run_dispatcher.py` | script | LEGACY | d1_refusal | Refuses a Ticket (exit 2). |
 | `scripts/run_approved_task.py` | script | LEGACY | d1_refusal | `run_approved_task` refuses a Ticket. |
-| `scripts/run_queued_task_handoff.py` | script | LEGACY | d1_refusal | `run_queued_task_handoff` refuses a Ticket. |
-| `scripts/run_execution_engine_approved_task.py` | script | LEGACY | d1_refusal | The ExecutionEngine adapter refuses a Ticket. |
-| `scripts/run_runtime_handoff_execution_from_handoff.py` | script | LEGACY | d1_refusal | Refused transitively by `run_approved_task`. |
-| `scripts/run_one_shot_task_pipeline.py` | script | LEGACY | d1_refusal | Refused transitively by `run_approved_task`. |
-| `scripts/run_github_issue_one_task_automation.py` | script | LEGACY | d1_refusal | Refused transitively; its ingestion step is also G12. |
-| `scripts/run_github_issue_one_task_scheduler_tick.py` | script | LEGACY | d1_refusal | The ExecutionEngine adapter refuses a Ticket. |
-| `scripts/run_scheduler_watcher_one_task.py` | script | LEGACY | status_gated | Acts from `waiting_approval` only. |
-| `scripts/run_task_to_draft_pr_pipeline.py` | script | LEGACY | status_gated | Acts from `waiting_approval` only. |
-| `scripts/run_pr_preparation_pipeline.py` | script | LEGACY | status_gated | Acts from `waiting_approval` only. |
-| `scripts/confirm_branch_push.py` | script | LEGACY | status_gated | Acts from `waiting_approval` only. |
-| `scripts/confirm_draft_pr.py` | script | LEGACY | status_gated | Acts from `waiting_approval` only. |
-| `scripts/create_draft_pr.py` | script | LEGACY | status_gated | Acts from `waiting_approval` only. |
-| `scripts/create_pr_handoff.py` | script | LEGACY | status_gated | Acts from `waiting_approval` only. |
-| `scripts/confirm_task_closeout.py` | script | LEGACY | status_gated | Mutates only from `waiting_approval`. |
-| `scripts/create_task_execution_package.py` | script | LEGACY | status_gated | Acts from legacy `queued`; writes an artifact and an event, never a status. |
 | `scripts/archive_task_evidence_only.py` | script | LEGACY | unsupported_in_v0 | G6: could write `cleaned`/`canceled`/`archived`/`rejected` on a Ticket. |
-| `scripts/push_task_branch.py` | script | LEGACY | unsupported_in_v0 | G7 (`branch_push.push_task_branch`): only `integration_git` pushes a Ticket branch. |
-| `scripts/record_existing_draft_pr.py` | script | LEGACY | unsupported_in_v0 | G8 (`draft_pr_record.record_existing_draft_pr`): Step 2 is the only PR-evidence writer. |
-| `scripts/confirm_local_cleanup.py` | script | LEGACY | unsupported_in_v0 | G9 (`local_cleanup_confirm.confirm_local_cleanup`): would bypass merge verification. |
-| `scripts/confirm_remote_branch_cleanup.py` | script | LEGACY | unsupported_in_v0 | G10 (`remote_branch_cleanup_confirm.confirm_remote_branch_cleanup`): V1 never deletes a remote branch. |
 | `scripts/prepare_task_workspace.py` | script | LEGACY | unsupported_in_v0 | G11: only `ensure_ticket_worktree` owns a Ticket worktree. |
 | `scripts/ingest_github_issue.py` | script | LEGACY | unsupported_in_v0 | G12 (`github_issue_ingestion.ingest_github_issue`): an explicit `--task-key` could rewrite a Ticket row. |
 | `scripts/create_pi_smoke_task.py` | script | LEGACY | unsupported_in_v0 | G13: an explicit `--task-key` could overwrite a Ticket row and worktree record. |
-| `scripts/retry_advisory_evidence_transition.py` | script | LEGACY | unsupported_in_v0 | G14 (`advisory_evidence_retry.run_advisory_evidence_retry`): would write legacy `waiting_approval`. |
-| `scripts/ingest_selected_github_issues.py` | script | LEGACY | n/a | `github_issue_intake`: writes only derived `AT-GH-<n>` keys and refuses an existing key; not reached by G12. |
-| `scripts/intake_github_issues.py` | script | LEGACY | n/a | `github_issue_intake_gate`: writes only derived `GH-<n>` keys; not reached by G12. |
 | `scripts/kanban_accept_cleanup.py` | script | LEGACY | owner_decision | FROZEN for V0 (RULINGS 81): a label only, with no code guard. It reads no Taskflow DB, so it cannot tell a Ticket; `--confirm` removes `<worktrees_dir>/<task-key>`, the same path as a Ticket worktree. Never run it on a Ticket key. |
 | `scripts/kanban_create.py` | script | LEGACY | n/a | No Taskflow DB; `git worktree add` fails on an existing Ticket worktree path. |
-| `scripts/create_pr_handoff_package.py` | script | LEGACY | n/a | Artifact only; push only as a dry-run preview. |
 | `scripts/create_scheduler_proposal.py` | script | LEGACY | n/a | Artifacts and events, no status. |
-| `scripts/create_scheduler_proposal_from_candidate.py` | script | LEGACY | n/a | Artifacts and events, no status. |
-| `scripts/create_scheduler_confirmation.py` | script | LEGACY | n/a | Artifacts and events, no status. |
 | `scripts/create_scheduler_confirmation_from_proposal.py` | script | LEGACY | n/a | Artifacts and events, no status. |
-| `scripts/create_scheduler_confirmation_verifier_report.py` | script | LEGACY | n/a | Artifacts and events, no status. |
-| `scripts/verify_scheduler_confirmation.py` | script | LEGACY | n/a | Artifacts and events, no status. |
-| `scripts/review_scheduler_proposal.py` | script | LEGACY | n/a | Artifacts and events, no status. |
-| `scripts/create_intake_runner_handoff.py` | script | LEGACY | n/a | Artifacts and events, no status. |
-| `scripts/create_intake_runner_handoff_from_verifier_report.py` | script | LEGACY | n/a | Artifacts and events, no status. |
-| `scripts/run_codex_advisory_review.py` | script | LEGACY | n/a | Advisory artifacts only. |
-| `scripts/run_scheduler_watcher_preview.py` | script | LEGACY | n/a | Read-only dry-run preview. |
-| `scripts/discover_github_issues.py` | script | LEGACY | n/a | Read-only. |
 | `scripts/discover_scheduler_candidates.py` | script | LEGACY | n/a | Read-only. |
 | `scripts/list_task_recommendations.py` | script | LEGACY | n/a | Read-only. |
 | `scripts/recommend_next_tasks.py` | script | LEGACY | n/a | Read-only. |
-| `scripts/recommend_post_merge_cleanup.py` | script | LEGACY | n/a | Read-only. |
-| `scripts/summarize_waiting_approval.py` | script | LEGACY | n/a | Read-only. |
-| `scripts/summarize_real_scheduled_execution.py` | script | LEGACY | n/a | Read-only. |
 | `scripts/summarize_execution_observability_payload.py` | script | LEGACY | n/a | Read-only. |
 | `scripts/kanban_workflow_regression.py` | script | LEGACY | n/a | Disposable fixtures. |
 | `scripts/run_local_validation.py` | script | LEGACY | n/a | Local checks; no Ticket state. |
-| `scripts/run_draft_pr_fake_gh_golden_path_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_intake_runner_handoff_hardening_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_issue_to_prepared_workspace_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_issue_to_waiting_approval_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_minimal_runtime_handoff_execution_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_mission_control_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_one_shot_task_pipeline_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_pi_executor_golden_path_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_pr_handoff_golden_path_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_pr_preparation_pipeline_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_prepared_workspace_golden_path_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_real_approved_task_runner_integration_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_runtime_chain_dogfood_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_scheduler_confirmation_preparation_hardening_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_scheduler_confirmation_verifier_report_hardening_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_scheduler_proposal_creation_hardening_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_scheduler_watcher_one_task_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_scheduler_watcher_preview_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
-| `scripts/run_task_to_draft_pr_pipeline_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_workflow_policy_artifact_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_workflow_policy_pow_package_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_workflow_policy_review_evidence_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
@@ -217,9 +159,6 @@ Routes are the `APIRoute`s of `create_app()`. FastAPI's generated `/openapi.json
 | `POST /api/tasks/{task_key}/approve` | api | LEGACY | unsupported_in_v0 | G4: legacy approval on a Ticket. |
 | `POST /api/tasks/{task_key}/prepare-workspace` | api | LEGACY | unsupported_in_v0 | G3: only `ensure_ticket_worktree` owns a Ticket worktree. |
 | `agent-taskflow-local-validation` | cli | FROZEN | n/a | Local checks; no Ticket state. |
-| `agent-taskflow-github-issue-one-task-automation` | cli | LEGACY | d1_refusal | Refused through `run_approved_task`; its ingestion step is also G12. |
-| `agent-taskflow-github-issue-one-task-scheduler-tick` | cli | LEGACY | d1_refusal | The ExecutionEngine adapter refuses a Ticket. |
-| `agent-taskflow-codex-advisory-review` | cli | LEGACY | n/a | Advisory artifacts only. |
 | `install_canonical_runtime_path` | installer | ACTIVE_V0 | n/a | The atomic claim and lease owner. Its `run_approved_task` half is LEGACY and dormant. |
 | `install_attempt_scoped_runtime_path` | installer | ACTIVE_V0 | n/a | Attempt/evidence binding and Ticket failure mapping. Its runner half is LEGACY and dormant. |
 | `install_attempt_scoped_runtime_compat` | installer | LEGACY | n/a | PR-4 public symbol and a non-git fallback that V0 does not reach (F2, a later §6.4 item). Load-bearing for 4 tests; not changed. |

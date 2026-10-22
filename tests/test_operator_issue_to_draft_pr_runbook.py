@@ -70,7 +70,6 @@ class OperatorIssueToDraftPrRunbookTests(unittest.TestCase):
     def test_branch_push_foundation_is_documented_as_explicit(self) -> None:
         self.assertIn("explicit branch push foundation is implemented", self.doc_lower)
         self.assertIn("does not push branches automatically", self.doc_lower)
-        self.assertIn("scripts/push_task_branch.py", self.doc)
         self.assertIn("--confirm-push", self.doc)
 
     def test_real_draft_pr_creation_requires_dry_run_and_confirm(self) -> None:
@@ -84,10 +83,6 @@ class OperatorIssueToDraftPrRunbookTests(unittest.TestCase):
             "scripts/ingest_github_issue.py",
             "scripts/prepare_task_workspace.py",
             "scripts/run_dispatcher.py",
-            "scripts/create_pr_handoff.py",
-            "scripts/push_task_branch.py",
-            "scripts/create_draft_pr.py",
-            "scripts/run_draft_pr_fake_gh_golden_path_smoke.py",
         ]
         for script in scripts:
             self.assertTrue((REPO_ROOT / script).is_file(), f"missing referenced script {script}")
@@ -130,7 +125,6 @@ class OperatorIssueToDraftPrRunbookTests(unittest.TestCase):
             self.assertNotIn(command, executable_text)
 
     def test_static_safety_no_raw_git_push_command_is_executable(self) -> None:
-        self.assertIn("scripts/push_task_branch.py", self.doc)
         executable_text = "\n".join(_executable_code_blocks(self.doc)).lower()
         self.assertNotIn("git push", executable_text)
 

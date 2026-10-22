@@ -23,11 +23,6 @@ class ManualRuntimePathDocTests(unittest.TestCase):
     def test_doc_exists(self) -> None:
         self.assertTrue(DOC.is_file())
 
-    def test_mentions_cli_script(self) -> None:
-        self.assertIn(
-            "scripts/run_execution_engine_approved_task.py", self.doc
-        )
-
     def test_says_manual_runtime_path(self) -> None:
         self.assertIn("manual runtime path", self.doc_lower)
 

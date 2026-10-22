@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import importlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -195,16 +194,6 @@ class TaskRecommendationTests(unittest.TestCase):
 
         payload = self.recommend()
         json.dumps(payload, sort_keys=True)
-
-    def test_legacy_singular_module_reexports_canonical_api(self) -> None:
-        legacy = importlib.import_module("agent_taskflow.task_recommendation")
-        canonical = importlib.import_module("agent_taskflow.task_recommendations")
-
-        self.assertIs(
-            legacy.TaskRecommendationRequest, canonical.TaskRecommendationRequest
-        )
-        self.assertIs(legacy.TaskRecommendationError, canonical.TaskRecommendationError)
-        self.assertIs(legacy.recommend_next_tasks, canonical.recommend_next_tasks)
 
 
 if __name__ == "__main__":

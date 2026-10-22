@@ -63,13 +63,6 @@ class OperatorCleanupAndBacklogTriageDocTests(unittest.TestCase):
         ):
             self.assertIn(artifact, self.doc, f"doc missing artifact {artifact!r}")
 
-    def test_references_summarize_script(self) -> None:
-        script = "scripts/summarize_real_scheduled_execution.py"
-        self.assertTrue((REPO_ROOT / script).is_file())
-        self.assertIn(script, self.doc)
-        self.assertIn("TaskMirrorStore", self.doc)
-        self.assertIn("artifact_dir", self.doc)
-
     def test_smoke_issue_handling_documented(self) -> None:
         self.assertIn("smoke", self.doc_lower)
         self.assertIn("supersed", self.doc_lower)

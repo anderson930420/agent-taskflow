@@ -274,11 +274,7 @@ class SchedulerCandidateDiscoveryTests(_DiscoveryTestBase):
         ).read_text(encoding="utf-8")
         forbidden_imports = (
             "from agent_taskflow.approved_task_runner",
-            "from agent_taskflow.queued_task_handoff",
-            "from agent_taskflow.intake_runner_handoff",
             "from agent_taskflow.scheduler_proposals",
-            "from agent_taskflow.scheduler_confirmations",
-            "from agent_taskflow.scheduler_confirmation_verifier",
             "from agent_taskflow.executors",
             "from agent_taskflow.dispatcher",
         )

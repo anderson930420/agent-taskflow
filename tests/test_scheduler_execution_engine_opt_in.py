@@ -409,26 +409,6 @@ class FallbackHardeningTests(unittest.TestCase):
         self.assertEqual(block["effective_authority"], "legacy_scheduler")
         self.assertIs(block["engine_authority"], False)
 
-    def test_fallback_assessment_absent_when_opt_in_off(self) -> None:
-        # The tick attaches engine evidence (and with it the fallback
-        # assessment) only behind the use_execution_engine gate.
-        from agent_taskflow.github_issue_one_task_scheduler_tick import (
-            _maybe_attach_execution_engine,
-        )
-
-        engine = RecordingEngine()
-        legacy_response = tick_payload()
-        result = _maybe_attach_execution_engine(
-            SimpleNamespace(use_execution_engine=False),
-            legacy_response,
-            execution_engine=engine,
-        )
-
-        self.assertIs(result, legacy_response)
-        self.assertEqual(len(engine.calls), 0)
-        self.assertNotIn("execution_engine", result)
-        self.assertNotIn("fallback_assessment", json.dumps(result))
-
     def test_hardened_block_adds_no_publication_or_cleanup_side_effects(
         self,
     ) -> None:
