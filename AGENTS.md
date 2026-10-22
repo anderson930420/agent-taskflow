@@ -59,7 +59,7 @@ The agent-taskflow execution policy runs the `claude-code` executor and the `com
 - `scripts/`: explicit operator commands. The Ticket path uses `run_api.py`, `run_parallel_scheduler_tick.py` and `run_integration_tick.py`; operators also use `runtime_control.py` (capacity, pause, kill), `reset_task_status.py`, `reap_stale_runtime.py`, `terminate_executor_process.py`, `ticket_dependency.py` and the `migrate_*.py` migrations.
 - `tests/`: one flat suite, mostly `test_<module>.py`.
 - `deploy/cron/v1-*.cron.example`: the two tick lines. `ops/`: the read-only Discord notifier.
-- `docs/`: mostly dated phase records; treat them as history. `docs/v1/` holds the handoff and end-to-end record of each V1 step.
+- `docs/`: `docs/v0-supported-surface.md` (the entrypoint labels) and `docs/v1/` (the handoff and end-to-end record of each V1 step). The few other files there are historical records kept only because code docstrings or `WORKFLOW.md` cite them. Older documents are in git history.
 - The operator UI is the Taskflow module of the owner's Personal AI Workspace, a separate app that calls this API server-side.
 
 ## Deployment (VPS)
