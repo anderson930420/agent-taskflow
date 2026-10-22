@@ -30,7 +30,11 @@ from agent_taskflow.ticket_ai_metadata import (
     TicketAIMetadataAdapter,
     resolve_ticket_metadata,
 )
-from agent_taskflow.ticket_metadata import derive_ticket_metadata, normalize_prompt
+from agent_taskflow.ticket_metadata import (
+    derive_ticket_metadata,
+    normalize_prompt,
+    normalize_prompt_text,
+)
 from agent_taskflow.ticket_models import (
     AI_TITLE_GENERATED,
     DEFAULT_TICKET_PRIORITY,
@@ -122,12 +126,11 @@ class TicketCreationRequest:
         except ValueError as exc:
             raise TicketCreationError(str(exc)) from exc
 
-        normalized_prompt = normalize_prompt(self.prompt)
-        if not normalized_prompt:
+        if not normalize_prompt(self.prompt):
             raise TicketCreationError(
                 "prompt must contain at least one displayable character"
             )
-        object.__setattr__(self, "prompt", normalized_prompt)
+        object.__setattr__(self, "prompt", normalize_prompt_text(self.prompt))
 
         if self.blocked_by is not None:
             blocked_by = self.blocked_by.strip()

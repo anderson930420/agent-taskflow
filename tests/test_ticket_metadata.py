@@ -17,6 +17,7 @@ from agent_taskflow.ticket_metadata import (
     fallback_title_from_prompt,
     format_task_key,
     normalize_prompt,
+    normalize_prompt_text,
     parse_task_key_sequence,
     shorten_title,
     slugify_branch_component,
@@ -48,6 +49,50 @@ class NormalizePromptTests(unittest.TestCase):
 
     def test_empty_prompt_normalizes_to_empty(self) -> None:
         self.assertEqual(normalize_prompt("   \n\t  "), "")
+
+
+class NormalizePromptTextTests(unittest.TestCase):
+    def test_keeps_lines_and_inner_spacing(self) -> None:
+        self.assertEqual(
+            normalize_prompt_text("Steps:\n1. Read  it\n   - indented item"),
+            "Steps:\n1. Read  it\n   - indented item",
+        )
+
+    def test_converts_line_endings(self) -> None:
+        self.assertEqual(normalize_prompt_text("a\r\nb\rc"), "a\nb\nc")
+
+    def test_tabs_become_single_spaces(self) -> None:
+        self.assertEqual(normalize_prompt_text("Fix\tthe\t\tbug"), "Fix the  bug")
+
+    def test_drops_non_displayable_characters(self) -> None:
+        self.assertEqual(
+            normalize_prompt_text("Fix\x00 the\x07 bug\nnow\x1b"),
+            "Fix the bug\nnow",
+        )
+
+    def test_strips_trailing_spaces_per_line(self) -> None:
+        self.assertEqual(normalize_prompt_text("one   \ntwo \t"), "one\ntwo")
+
+    def test_collapses_excess_blank_lines(self) -> None:
+        self.assertEqual(
+            normalize_prompt_text("first\n\n\n\n\nsecond\n\nthird"),
+            "first\n\nsecond\n\nthird",
+        )
+
+    def test_whitespace_only_blank_lines_also_collapse(self) -> None:
+        self.assertEqual(
+            normalize_prompt_text("first\n  \n\t\n \nsecond"),
+            "first\n\nsecond",
+        )
+
+    def test_strips_surrounding_whitespace(self) -> None:
+        self.assertEqual(
+            normalize_prompt_text("\n\n  Fix\tthe\n\nlogin flow  \n\n"),
+            "Fix the\n\nlogin flow",
+        )
+
+    def test_empty_prompt_normalizes_to_empty(self) -> None:
+        self.assertEqual(normalize_prompt_text("   \r\n\t  "), "")
 
 
 class FallbackTitleTests(unittest.TestCase):
