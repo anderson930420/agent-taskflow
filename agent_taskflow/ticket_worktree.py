@@ -2,8 +2,9 @@
 
 Step 1 derives a Ticket's branch and worktree path as strings only. This module
 turns them into the real thing, before any claim: a git worktree at
-``tasks.worktree_path`` on ``tasks.branch``, created from ``tasks.base_branch``,
-plus the Ticket's single ``task_worktrees`` row.
+``tasks.worktree_path`` on ``tasks.branch``, created from
+``origin/<tasks.base_branch>`` when that remote-tracking ref exists (else the
+local ``tasks.base_branch``), plus the Ticket's single ``task_worktrees`` row.
 
 * Idempotent. A worktree that is already registered in the Ticket's repository
   on the Ticket's branch is left exactly as it is, clean or dirty. Nothing is
@@ -374,6 +375,10 @@ def ensure_ticket_worktree(
 ) -> TicketWorktreeResult:
     """Create or confirm the Ticket's one worktree and its row. Idempotent.
 
+    A new worktree is cut from ``origin/<base_branch>`` when that
+    remote-tracking ref exists, else from the local ``base_branch``. It never
+    fetches, and the new Ticket branch does not track the base branch.
+
     Raises :class:`~agent_taskflow.ticket_worktree_schema.TicketWorktreeMigrationRequired`
     before touching anything when the Step 5 migration is missing, and
     ``ValueError`` for a row that is not a Ticket. Every other problem is a
@@ -414,7 +419,15 @@ def ensure_ticket_worktree(
             f"{ticket.worktree_path}; refusing to reattach or recreate it",
             source=source,
         )
-    base = _git(["rev-parse", "--verify", ticket.base_branch], ticket.repo_path)
+    # The integration tick fetches origin every minute; the local base branch
+    # is never advanced after a merge, so prefer the remote-tracking ref.
+    remote_ref = f"refs/remotes/origin/{ticket.base_branch}"
+    remote = _git(
+        ["rev-parse", "--verify", "--quiet", f"{remote_ref}^{{commit}}"],
+        ticket.repo_path,
+    )
+    start_point = remote_ref if remote.returncode == 0 else ticket.base_branch
+    base = _git(["rev-parse", "--verify", start_point], ticket.repo_path)
     if base.returncode != 0:
         return _refuse(
             store,
@@ -429,9 +442,10 @@ def ensure_ticket_worktree(
             "worktree",
             "add",
             str(ticket.worktree_path),
+            "--no-track",
             "-b",
             ticket.branch,
-            ticket.base_branch,
+            start_point,
         ],
         ticket.repo_path,
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 
@@ -128,6 +129,73 @@ class OneWorktreePerTicketTests(Step5WorktreeTestCase):
         self.assertEqual(self.fx.events(ticket.task_key), events_after_first)
         self.assertEqual(self.fx.event_kinds(ticket.task_key).count(TICKET_WORKTREE_CREATED), 1)
         self.assertEqual(len(git_worktrees(self.fx.repo)), 1)
+
+
+class WorktreeStartPointTests(Step5WorktreeTestCase):
+    """A new Ticket worktree starts from origin/<base_branch> when it exists."""
+
+    def advance_origin(self) -> str:
+        """Give the managed repo an origin whose main is one commit ahead."""
+        origin = self.fx.root / "origin.git"
+        git(self.fx.root, "clone", "--bare", str(self.fx.repo), str(origin))
+        pusher = self.fx.root / "pusher"
+        git(self.fx.root, "clone", str(origin), str(pusher))
+        git(pusher, "config", "user.email", "step5@example.invalid")
+        git(pusher, "config", "user.name", "Step 5")
+        (pusher / "MERGED.md").write_text("merged on origin\n", encoding="utf-8")
+        git(pusher, "add", "MERGED.md")
+        git(pusher, "commit", "-m", "merged PR")
+        git(pusher, "push", "origin", "main")
+        git(self.fx.repo, "remote", "add", "origin", str(origin))
+        git(self.fx.repo, "fetch", "origin", "--prune")
+        return git(pusher, "rev-parse", "HEAD").strip()
+
+    def test_worktree_is_cut_from_origin_base_when_it_is_ahead(self) -> None:
+        local_main = git(self.fx.repo, "rev-parse", "main").strip()
+        origin_main = self.advance_origin()
+        self.assertNotEqual(local_main, origin_main)
+        ticket = self.fx.create_ticket("Start from the merged code")
+
+        result = ensure_ticket_worktree(self.fx.db_path, ticket.task_key)
+
+        self.assertEqual(result.action, ACTION_CREATED, result.reason)
+        self.assertEqual(result.base_branch, "main")
+        self.assertEqual(result.base_sha, origin_main)
+        self.assertEqual(git(ticket.worktree_path, "rev-parse", "HEAD").strip(), origin_main)
+        self.assertTrue((ticket.worktree_path / "MERGED.md").is_file())
+        rows = self.fx.task_worktree_rows(ticket.task_key)
+        self.assertEqual([row["base_sha"] for row in rows], [origin_main])
+        self.assertEqual([row["base_branch"] for row in rows], ["main"])
+        self.assertEqual(git(self.fx.repo, "rev-parse", "main").strip(), local_main)
+
+    def test_worktree_without_origin_is_cut_from_local_base(self) -> None:
+        self.assertEqual(git(self.fx.repo, "remote").strip(), "")
+        local_main = git(self.fx.repo, "rev-parse", "main").strip()
+        ticket = self.fx.create_ticket("No origin remote")
+
+        result = ensure_ticket_worktree(self.fx.db_path, ticket.task_key)
+
+        self.assertEqual(result.action, ACTION_CREATED, result.reason)
+        self.assertEqual(result.base_sha, local_main)
+        self.assertEqual(git(ticket.worktree_path, "rev-parse", "HEAD").strip(), local_main)
+        rows = self.fx.task_worktree_rows(ticket.task_key)
+        self.assertEqual([row["base_sha"] for row in rows], [local_main])
+
+    def test_ticket_branch_has_no_upstream(self) -> None:
+        self.advance_origin()
+        ticket = self.fx.create_ticket("No upstream")
+
+        result = ensure_ticket_worktree(self.fx.db_path, ticket.task_key)
+
+        self.assertEqual(result.action, ACTION_CREATED, result.reason)
+        merge = subprocess.run(
+            ["git", "config", f"branch.{ticket.branch}.merge"],
+            cwd=self.fx.repo,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(merge.returncode, 1, merge.stdout)
+        self.assertEqual(merge.stdout, "")
 
 
 class FailClosedWorktreeTests(Step5WorktreeTestCase):
