@@ -124,7 +124,7 @@ from agent_taskflow.validators.registry import get_validator
 from agent_taskflow.validation_summary import ValidationSummaryRecorder, artifact_root_for_claim, recording_error_sink
 
 
-DEFAULT_VALIDATORS = ("pytest", "openspec")
+DEFAULT_VALIDATORS = ("pytest",)
 
 # RULINGS 67: what a V1 Ticket's Attempt root must hold before success. The
 # executor's own launch evidence is checked separately, against the database.
@@ -359,23 +359,6 @@ class Dispatcher:
             executor_timeout_seconds = self.executor_timeout_seconds
         prompt_path = self._prompt_path(task.artifact_dir)
 
-        if selected_executor == "opencode" and not prompt_path.is_file():
-            reason = f"implementation_prompt.md is required for opencode executor: {prompt_path}"
-            if dry_run:
-                return DispatcherResult(
-                    task_key=task.task_key,
-                    status="blocked",
-                    summary=reason,
-                    blocked_reason=reason,
-                )
-            return self._fail(
-                task.task_key,
-                reason,
-                FAILURE_GOVERNANCE,
-                ticket=ticket,
-                expected_status=task.status,
-            )
-
         if dry_run:
             return DispatcherResult(
                 task_key=task.task_key,
@@ -433,9 +416,6 @@ class Dispatcher:
             executor = self._get_executor(
                 selected_executor,
                 selected_model,
-                provider=task.provider,
-                tools=task.tools,
-                pi_bin=task.pi_bin,
                 policy=policy,
             )
         except Exception as exc:
@@ -920,9 +900,6 @@ class Dispatcher:
         executor_name: str,
         model: str | None,
         *,
-        provider: str | None = None,
-        tools: list[str] | None = None,
-        pi_bin: str | None = None,
         policy: ExecutionPolicy | None = None,
     ) -> Executor:
         if executor_name in self.executor_registry:
@@ -936,14 +913,7 @@ class Dispatcher:
                 claude_enable_invocation=True,
                 claude_model=policy.model,
             )
-        # Phase 13: pass pi-specific options from task record
-        return get_executor(
-            executor_name,
-            model=model,
-            provider=provider,
-            tools=tools if tools else None,
-            pi_bin=pi_bin if pi_bin else "pi",
-        )
+        return get_executor(executor_name)
 
     def _get_validator(self, validator_name: str) -> Validator:
         if validator_name in self.validator_registry:

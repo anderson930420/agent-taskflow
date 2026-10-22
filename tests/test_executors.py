@@ -297,13 +297,14 @@ class ShellExecutorTests(ExecutorTestCase):
 
 
 class ExecutorRegistryTests(unittest.TestCase):
-    def test_registry_lists_manual_noop_shell_and_opencode(self) -> None:
-        names = list_executor_names()
+    def test_registry_lists_manual_noop_shell_and_claude_code(self) -> None:
+        self.assertEqual(list_executor_names(), ["manual", "noop", "shell", "claude-code"])
 
-        self.assertIn("manual", names)
-        self.assertIn("noop", names)
-        self.assertIn("shell", names)
-        self.assertIn("opencode", names)
+    def test_registry_rejects_retired_executors(self) -> None:
+        for name in ("pi", "opencode"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "Unknown executor"):
+                    get_executor(name)
 
     def test_registry_returns_manual_and_noop(self) -> None:
         self.assertIsInstance(get_executor("manual"), ManualExecutor)

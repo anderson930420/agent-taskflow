@@ -90,7 +90,6 @@ UNSUPPORTED_IN_V0 = {
     "scripts/archive_task_evidence_only.py",
     "scripts/prepare_task_workspace.py",
     "scripts/ingest_github_issue.py",
-    "scripts/create_pi_smoke_task.py",
 }
 
 _ROW = re.compile(r"^\|\s*`(?P<surface>[^`]+)`\s*\|(?P<rest>.*)\|\s*$")

@@ -7,14 +7,10 @@ import json
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import patch
 
 from agent_taskflow.executors.base import ExecutorContext
-from agent_taskflow.executors.pi import PiExecutor
-from agent_taskflow.executors.opencode import OpenCodeExecutor
 from agent_taskflow.executors.claude_code import ClaudeCodeExecutor
 from agent_taskflow.launch_provenance import ExecutorLaunchProvenance, LaunchContentReference
-from agent_taskflow.mission_contract import build_from_task_fields, write_mission_contract
 from agent_taskflow.store import connect
 import tests.test_executor_launch_evidence as fixtures
 import tests.test_approved_task_runner as runner_fixtures
@@ -63,49 +59,6 @@ class ExecutorLaunchProvenanceTests(unittest.TestCase):
         self.assertNotIn(text, json.dumps(evidence))
         self.assertNotIn("prompt_reference", evidence["missing_fields"])
         self.assertIsNone(evidence["observed_model"])
-
-    def test_pi_hashes_rendered_mission_and_constructor_model_not_input_or_context(self):
-        context = self.context()
-        contract = build_from_task_fields(
-            task_key=context.task_key, goal="fixture", repo_path=self.repo,
-            worktree_path=context.worktree_path, artifact_dir=context.artifact_dir,
-            executor="pi", model="contract-model",
-        )
-        write_mission_contract(contract, artifact_dir=context.artifact_dir)
-        result = PiExecutor(pi_bin=str(self.fake_cli()), model="selected-pi-model", tools=["read"]).run(context)
-        evidence = self.adapter_evidence(result)
-        rendered = result.artifacts["pi_mission_prompt"]
-        self.assertNotEqual(rendered.read_text(), context.prompt_path.read_text())
-        self.assert_selected_prompt(result, evidence, rendered, rendered.read_text())
-        self.assertEqual(evidence["prompt_reference"]["source"], "pi_mission_rendered")
-        self.assertEqual(evidence["requested_launch"]["model"], "selected-pi-model")
-        self.assertEqual(evidence["requested_launch"]["tools"], ["read"])
-        self.assertIsNone(evidence["allowed_tools"])
-        self.assertEqual(evidence["configured_attempt"]["model"], "configured-model")
-
-    def test_pi_does_not_claim_unused_context_model_was_requested(self):
-        context = self.context()
-        result = PiExecutor(pi_bin=str(self.fake_cli())).run(context)
-        evidence = self.adapter_evidence(result)
-        self.assert_selected_prompt(result, evidence, context.prompt_path, context.prompt_path.read_text())
-        self.assertIsNone(evidence["requested_launch"]["model"])
-
-    def test_opencode_captures_selected_text_without_rereading_changed_path(self):
-        from agent_taskflow.executor_launch import run_managed_process
-        context = self.context()
-        selected = context.prompt_path.read_text()
-
-        def replace_input_then_launch(*args, **kwargs):
-            context.prompt_path.write_text("changed after selection")
-            return run_managed_process(*args, **kwargs)
-
-        with patch("agent_taskflow.executors.opencode.run_managed_process", side_effect=replace_input_then_launch):
-            result = OpenCodeExecutor(opencode_bin=str(self.fake_cli()), model="constructor-model").run(context)
-        evidence = self.adapter_evidence(result)
-        self.assert_selected_prompt(result, evidence, context.prompt_path, selected)
-        self.assertEqual(evidence["requested_launch"]["model"], "constructor-model")
-        self.assertNotEqual(evidence["prompt_reference"]["sha256"],
-                            hashlib.sha256(context.prompt_path.read_bytes()).hexdigest())
 
     def test_claude_hashes_rendered_stdin_and_does_not_infer_opaque_command_model(self):
         context = self.context()
@@ -157,11 +110,13 @@ class ExecutorLaunchProvenanceTests(unittest.TestCase):
 
     def test_malformed_optional_context_does_not_prevent_real_adapter_launch(self):
         context = replace(self.context(), launch_provenance={"canonical_execution_path": "invented"})
-        result = PiExecutor(pi_bin=str(self.fake_cli()), model="selected-model").run(context)
+        result = ClaudeCodeExecutor(command=[str(self.fake_cli(stdin=True))], enable_invocation=True,
+                                    worktree_root=self.repo / ".worktrees", model="selected-model").run(context)
         evidence = self.adapter_evidence(result)
         self.assertIsNone(evidence["canonical_execution_path"])
         self.assertEqual(evidence["requested_launch"]["model"], "selected-model")
-        self.assert_selected_prompt(result, evidence, context.prompt_path, context.prompt_path.read_text())
+        rendered = result.artifacts["claude_code_prompt"]
+        self.assert_selected_prompt(result, evidence, rendered, rendered.read_text())
 
     def test_bound_base_is_actual_claimed_resource_and_path_stays_unobserved(self):
         context = self.context()
@@ -208,21 +163,20 @@ class RunnerLaunchProvenanceTests(unittest.TestCase):
         (artifact / "issue_spec.md").write_text(spec_text, encoding="utf-8")
         if existing_prompt:
             (artifact / "implementation_prompt.md").write_text("Previously rendered prompt\n")
-        cli = self.root / "fake-pi"
+        cli = self.root / "fake-executor"
         cli.write_text(f"#!{sys.executable}\nprint('fixture executor completed')\n")
         cli.chmod(0o755)
         validator = runner_fixtures.FakeValidator(name="fixture")
 
         def invoke(request, **kwargs):
             return run_approved_task(replace(request, require_codex_advisory_evidence=False),
-                                     validator_registry={"fixture": validator},
-                                     executor_registry={"opencode": OpenCodeExecutor(opencode_bin=str(cli))}, **kwargs)
+                                     validator_registry={"fixture": validator}, **kwargs)
 
         if engine:
             request = ExecutionEngineRequest(
                 task_key="AT-PROVENANCE", dry_run=False, preflight=False,
                 lifecycle_db_path=self.db_path, metadata={"confirmed": True},
-                executor_profile=ExecutionEngineExecutorProfile(executor="opencode", model="override-model", pi_bin=str(cli)),
+                executor_profile=ExecutionEngineExecutorProfile(executor="shell", model="override-model", command=(str(cli),)),
                 validator_profile=ExecutionEngineValidatorProfile(validators=("fixture",)),
                 workspace=ExecutionEngineWorkspaceProfile(repo_path=self.repo, artifact_dir=self.artifact_root,
                                                           worktree_root=self.worktree_root),
@@ -230,10 +184,10 @@ class RunnerLaunchProvenanceTests(unittest.TestCase):
             result = ApprovedTaskRunnerExecutionEngineAdapter(approved_task_runner=invoke).execute(request)
         else:
             request = ApprovedTaskRunRequest(
-                task_key="AT-PROVENANCE", executor="opencode", repo_path=self.repo,
+                task_key="AT-PROVENANCE", executor="shell", repo_path=self.repo,
                 db_path=self.db_path, worktree_root=self.worktree_root, artifact_root=self.artifact_root,
                 validators=("fixture",), preflight=False, confirm_approved_task=True,
-                model="override-model", pi_bin=str(cli),
+                model="override-model", command=(str(cli),),
             )
             result = invoke(request)
         self.assertTrue(result.ok, result)
@@ -241,15 +195,13 @@ class RunnerLaunchProvenanceTests(unittest.TestCase):
         self.assertEqual(len(artifacts), 1)
         return json.loads(artifacts[0].read_text()), spec_text
 
-    def test_approved_runner_captures_config_spec_and_base_from_actual_selection(self):
-        evidence, spec_text = self.run_runner()
+    def test_approved_runner_captures_config_and_base_from_actual_selection(self):
+        evidence, _ = self.run_runner()
         self.assertEqual(evidence["canonical_execution_path"], "approved_task_runner")
-        self.assertEqual(evidence["requested_launch"]["model"], "override-model")
-        self.assertEqual(evidence["spec_reference"]["sha256"], hashlib.sha256(spec_text.encode()).hexdigest())
-        self.assertEqual(evidence["spec_reference"]["length_bytes"], len(spec_text.encode()))
-        self.assertTrue(evidence["spec_reference"]["reference"].endswith("/issue_spec.md"))
+        # The shell command's model is opaque, so none is claimed as requested.
+        self.assertIsNone(evidence["requested_launch"]["model"])
         self.assertEqual(evidence["config_snapshot_reference"]["reference"], "approved_task_runner.resolved_configuration")
-        expected_config = dict(executor="opencode", model="override-model", provider=None, tools=None,
+        expected_config = dict(executor="shell", model="override-model", provider=None, tools=None,
                                base_branch="main", validators=["fixture"], timeout_seconds=None)
         expected = json.dumps(expected_config, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
         self.assertEqual(evidence["config_snapshot_reference"]["sha256"], hashlib.sha256(expected).hexdigest())

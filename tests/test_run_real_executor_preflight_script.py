@@ -25,7 +25,7 @@ def make_result(*, ok: bool = True) -> PreflightResult:
         status=status,
         strict=False,
         executor="pi",
-        validators=("pytest", "openspec"),
+        validators=("pytest",),
         python={
             "executable": "/tmp/repo/.venv/bin/python",
             "version": "3.x",
@@ -67,7 +67,7 @@ class RunRealExecutorPreflightScriptTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         data = json.loads(stdout.getvalue())
         self.assertTrue(data["ok"])
-        self.assertEqual(data["validators"], ["pytest", "openspec"])
+        self.assertEqual(data["validators"], ["pytest"])
 
     def test_missing_pytest_exits_nonzero(self) -> None:
         with mock.patch.object(script, "run_preflight", return_value=make_result(ok=False)):
@@ -87,22 +87,6 @@ class RunRealExecutorPreflightScriptTests(unittest.TestCase):
 
         self.assertEqual(run.call_args.kwargs["validators"], "pytest")
         self.assertIsNone(run.call_args.kwargs["require_pytest"])
-
-    def test_validators_openspec_does_not_require_openspec_by_default(self) -> None:
-        with mock.patch.object(script, "run_preflight", return_value=make_result(ok=True)) as run:
-            with contextlib.redirect_stdout(io.StringIO()):
-                script.main(["--validators", "openspec"])
-
-        self.assertEqual(run.call_args.kwargs["validators"], "openspec")
-        self.assertFalse(run.call_args.kwargs["require_openspec"])
-
-    def test_require_openspec_is_forwarded(self) -> None:
-        with mock.patch.object(script, "run_preflight", return_value=make_result(ok=False)) as run:
-            with contextlib.redirect_stdout(io.StringIO()):
-                exit_code = script.main(["--validators", "openspec", "--require-openspec"])
-
-        self.assertEqual(exit_code, 1)
-        self.assertTrue(run.call_args.kwargs["require_openspec"])
 
     def test_static_safety_constraints(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8").lower()

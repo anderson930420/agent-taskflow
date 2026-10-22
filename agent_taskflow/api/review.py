@@ -38,7 +38,6 @@ _MAX_PREVIEW_SIZE = 20 * 1024  # 20 KB
 _MAX_LIST_SIZE = 1024 * 1024
 
 # Patterns that indicate a high-confidence secret assignment.
-# These are the same patterns used by PolicyCheckValidator.
 _SECRET_PATTERNS = (
     re.compile(
         r'[A-Z_][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)\s*[:=]',
@@ -69,10 +68,6 @@ _BINARY_EXTENSIONS = frozenset({
 # Kinds we recognise.
 _VALIDATOR_LOG_NAMES = frozenset({
     "pytest.log",
-    "openspec-validate.log",
-    "policy-validate.log",
-    "typecheck.log",
-    "lint.log",
     "compile.log",
 })
 
@@ -130,8 +125,6 @@ def _file_kind(name: str) -> str:
         return "validator_log"
     if name in WORKFLOW_POLICY_ARTIFACT_FILENAMES:
         return WORKFLOW_POLICY_REVIEW_KIND
-    if name.startswith("pi-") or name.startswith("opencode-"):
-        return "executor_log"
     return "other"
 
 

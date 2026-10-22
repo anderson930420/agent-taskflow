@@ -105,7 +105,7 @@ class ApiActionTests(unittest.TestCase):
             "repo_path": repo_path or str(self.repo_path),
             "worktree_path": worktree_path or str(self.worktree_path),
             "artifact_dir": artifact_dir or str(self.artifact_dir),
-            "executor": "opencode",
+            "executor": "claude-code",
             "model": "fake-model",
             "validator": "pytest",
         }

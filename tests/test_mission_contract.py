@@ -85,7 +85,7 @@ class MissionContractConstructionTests(unittest.TestCase):
             artifact_dir="/tmp",
             executor="manual",
         )
-        self.assertEqual(contract.required_validators, ("pytest", "openspec"))
+        self.assertEqual(contract.required_validators, ("pytest",))
         self.assertIsNone(contract.model)
         self.assertIsNone(contract.provider)
         self.assertIsNone(contract.title)
@@ -342,7 +342,7 @@ class BuildFromTaskFieldsTests(unittest.TestCase):
         self.assertEqual(contract.task_key, "AT-001")
         self.assertEqual(contract.goal, "Implement feature X.")
         self.assertEqual(contract.executor, "manual")
-        self.assertEqual(contract.required_validators, ("pytest", "openspec"))
+        self.assertEqual(contract.required_validators, ("pytest",))
 
     def test_with_model_and_provider(self) -> None:
         contract = build_from_task_fields(
@@ -366,9 +366,9 @@ class BuildFromTaskFieldsTests(unittest.TestCase):
             worktree_path="/tmp",
             artifact_dir="/tmp",
             executor="manual",
-            required_validators=("openspec",),
+            required_validators=("compile",),
         )
-        self.assertEqual(contract.required_validators, ("openspec",))
+        self.assertEqual(contract.required_validators, ("compile",))
 
 
 # ----------------------------------------------------------------------
@@ -807,7 +807,7 @@ class GovernanceRulesTests(unittest.TestCase):
         )
         self.assertTrue(contract.human_approval_required)
 
-    def test_required_validators_default_is_pytest_and_openspec(self) -> None:
+    def test_required_validators_default_is_pytest(self) -> None:
         contract = build_from_task_fields(
             task_key="AT-1",
             goal="x",
@@ -816,7 +816,7 @@ class GovernanceRulesTests(unittest.TestCase):
             artifact_dir="/tmp",
             executor="manual",
         )
-        self.assertEqual(contract.required_validators, ("pytest", "openspec"))
+        self.assertEqual(contract.required_validators, ("pytest",))
 
     def test_governance_rules_list_is_present(self) -> None:
         contract = MissionContract(

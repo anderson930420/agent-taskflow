@@ -190,22 +190,18 @@ class ReviewEvidenceApiTests(unittest.TestCase):
     def test_review_evidence_includes_artifacts_with_metadata(self) -> None:
         artifact_dir = self._get_artifact_dir("AT-0100")
         (artifact_dir / "pytest.log").write_text("test output", encoding="utf-8")
-        (artifact_dir / "pi-executor.log").write_text("executor output", encoding="utf-8")
+        (artifact_dir / "claude-code-stdout.log").write_text("executor output", encoding="utf-8")
 
         response = self.client.get("/api/tasks/AT-0100/review-evidence")
         self.assertEqual(response.status_code, 200)
         payload = response.json()["item"]
         names = {a["name"] for a in payload["artifacts"]}
         self.assertIn("pytest.log", names)
-        self.assertIn("pi-executor.log", names)
+        self.assertIn("claude-code-stdout.log", names)
 
         pytest_artifact = next(a for a in payload["artifacts"] if a["name"] == "pytest.log")
         self.assertEqual(pytest_artifact["kind"], "validator_log")
         self.assertTrue(pytest_artifact["is_validator_log"])
-
-        executor_artifact = next(a for a in payload["artifacts"] if a["name"] == "pi-executor.log")
-        self.assertEqual(executor_artifact["kind"], "executor_log")
-        self.assertTrue(executor_artifact["is_executor_log"])
 
     def test_review_evidence_task_without_artifact_dir_returns_422(self) -> None:
         task = TaskRecord(
@@ -609,8 +605,8 @@ class ReviewEvidenceApiTests(unittest.TestCase):
         (artifact_dir / "mission_contract.json").write_text(
             '{"schema_version":"1","task_key":"AT-0100"}', encoding="utf-8"
         )
-        (artifact_dir / "policy-validate.log").write_text("PASSED", encoding="utf-8")
-        (artifact_dir / "pi-executor.log").write_text("done", encoding="utf-8")
+        (artifact_dir / "compile.log").write_text("PASSED", encoding="utf-8")
+        (artifact_dir / "claude-code-stdout.log").write_text("done", encoding="utf-8")
         (artifact_dir / "handoff_summary.md").write_text("summary", encoding="utf-8")
 
         response = self.client.get("/api/tasks/AT-0100/artifacts")
@@ -619,8 +615,8 @@ class ReviewEvidenceApiTests(unittest.TestCase):
         self.assertEqual(payload["count"], 4)
         names = {item["name"] for item in payload["items"]}
         self.assertIn("mission_contract.json", names)
-        self.assertIn("policy-validate.log", names)
-        self.assertIn("pi-executor.log", names)
+        self.assertIn("compile.log", names)
+        self.assertIn("claude-code-stdout.log", names)
         self.assertIn("handoff_summary.md", names)
 
         # Verify kind classification.
@@ -628,13 +624,9 @@ class ReviewEvidenceApiTests(unittest.TestCase):
         self.assertEqual(contract_item["kind"], "mission_contract")
         self.assertTrue(contract_item["is_mission_contract"])
 
-        policy_item = next(i for i in payload["items"] if i["name"] == "policy-validate.log")
-        self.assertEqual(policy_item["kind"], "validator_log")
-        self.assertTrue(policy_item["is_validator_log"])
-
-        executor_item = next(i for i in payload["items"] if i["name"] == "pi-executor.log")
-        self.assertEqual(executor_item["kind"], "executor_log")
-        self.assertTrue(executor_item["is_executor_log"])
+        compile_item = next(i for i in payload["items"] if i["name"] == "compile.log")
+        self.assertEqual(compile_item["kind"], "validator_log")
+        self.assertTrue(compile_item["is_validator_log"])
 
     def test_artifact_list_returns_empty_for_missing_artifact_dir(self) -> None:
         # Task with no artifact dir.
@@ -893,12 +885,12 @@ class ReviewEvidenceHelpersTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             artifact_dir = Path(tmp)
             (artifact_dir / "pytest.log").write_text("passed", encoding="utf-8")
-            (artifact_dir / "pi-executor.log").write_text("done", encoding="utf-8")
+            (artifact_dir / "claude-code-stdout.log").write_text("done", encoding="utf-8")
 
             results = build_artifact_file_summaries(artifact_dir)
             names = {r["name"] for r in results}
             self.assertIn("pytest.log", names)
-            self.assertIn("pi-executor.log", names)
+            self.assertIn("claude-code-stdout.log", names)
 
             pytest_result = next(r for r in results if r["name"] == "pytest.log")
             self.assertEqual(pytest_result["kind"], "validator_log")

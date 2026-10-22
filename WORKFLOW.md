@@ -13,7 +13,7 @@ agent-taskflow is deterministic Python orchestration code. It manages task
 lifecycle, workspace selection, executor invocation, validation,
 proof-of-work collection, and human review gates.
 
-AI coding agents such as Pi, OpenCode, Codex, Claude Code, or future tools are
+AI coding agents such as Claude Code, Codex, or future tools are
 bounded implementation workers invoked through executor adapters. They do not
 own scheduling, task selection, lifecycle state transitions, validation
 decisions, approval decisions, merge behavior, push behavior, or cleanup
@@ -21,8 +21,8 @@ behavior.
 
 Workflow policy may be included in prompts for context, but AI workers are not
 trusted to enforce workflow policy by prompt adherence alone. Enforcement
-belongs to deterministic code, validators, changed-files checks, workspace
-checks, git checks, and human review.
+belongs to deterministic code, validators, workspace checks, git checks, and
+human review.
 
 ## Component Ownership
 
@@ -116,9 +116,8 @@ Mission Control behavior.
 The Real Executor Preflight Dependency Check
 (`scripts/run_real_executor_preflight.py`) verifies selected validator and
 executor prerequisites before real dogfood execution. It checks and reports the
-active Python runtime, selected Python imports such as `pytest`, optional tools
-such as `openspec`, and selected executor command availability without running
-the executor. It is check/report only: it does not install packages, modify
+active Python runtime and selected Python imports such as `pytest` without
+running the executor. It is check/report only: it does not install packages, modify
 `.venv`, run executors, dispatch tasks, prepare workspaces, push, create PRs,
 merge, approve, clean up, or mutate GitHub.
 
@@ -247,11 +246,11 @@ behavior.
 Allowed executor adapters currently include:
 
 - `manual`
+- `noop`
 - `shell`
-- `opencode`
-- `pi`
+- `claude-code`
 
-Future adapters, such as `codex` or `claude-code`, may be added later.
+Future adapters, such as `codex`, may be added later.
 
 Executor adapters are deterministic wrappers. They are responsible for command
 construction, workspace selection, environment setup, log capture, artifact
@@ -266,11 +265,7 @@ worker claims alone are insufficient.
 Current or intended validator categories include:
 
 - `pytest`
-- `openspec`, optional if available
-- `policy`
-- `changed-files`
-- `typecheck`
-- `lint`
+- `compile`
 - smoke tests
 - future contract/workflow validators
 
@@ -278,7 +273,7 @@ Validation results should be recorded as reviewable proof-of-work artifacts.
 
 ## Changed-Files / Path Policy
 
-The changed-files validator follows the Phase 79 path policy semantics:
+Path policy follows the Phase 79 semantics:
 
 - `forbidden_paths` wins.
 - `allowed_paths` constrains changed files when non-empty.
@@ -286,7 +281,8 @@ The changed-files validator follows the Phase 79 path policy semantics:
 - Artifact outputs outside the repo should be treated separately from repo diff
   audit.
 
-The changed-files validator is a deterministic scope guard for executor output.
+No built-in validator enforces this policy today: the changed-files validator
+was retired because the Ticket path does not run it.
 
 ## Proof-of-Work Artifacts
 

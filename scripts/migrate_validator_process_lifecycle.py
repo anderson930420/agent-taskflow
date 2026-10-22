@@ -81,11 +81,7 @@ def main() -> int:
                 "runtime_process_role_state_counts": role_state_counts,
                 "managed_validator_commands": [
                     "pytest",
-                    "openspec",
-                    "lint",
-                    "typecheck",
                     "compile",
-                    "changed-files:git-status",
                 ],
                 "launch_isolation": {
                     "shell": False,

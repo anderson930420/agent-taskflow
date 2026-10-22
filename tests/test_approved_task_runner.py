@@ -21,7 +21,7 @@ from agent_taskflow.models import TaskRecord
 from agent_taskflow.preflight import PreflightCheck, PreflightResult
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.validators.base import Validator, ValidatorContext, ValidatorResult
-from agent_taskflow.validators.policy import PolicyCheckValidator
+from agent_taskflow.validators.compile import CompileValidator
 from agent_taskflow.workspace_manager import WorkspacePreparationResult
 
 
@@ -95,7 +95,7 @@ def _preflight_result(*, ok: bool = True, status: str = "passed", summary: str =
         status=status,
         strict=False,
         executor="noop",
-        validators=("policy",),
+        validators=("compile",),
         python={"executable": "python3"},
         checks=(check,),
         missing_required=(),
@@ -193,7 +193,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         task_key: str = "AT-GH-401",
         executor: str = "noop",
         confirm_approved_task: bool = True,
-        validators: tuple[str, ...] = ("policy",),
+        validators: tuple[str, ...] = ("compile",),
         dry_run: bool = False,
         preflight: bool = True,
         command: tuple[str, ...] | None = None,
@@ -512,7 +512,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             self._request(task_key="AT-GH-405"),
             store=self.store,
             executor_registry={"noop": failing_executor},
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -534,13 +534,13 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
 
     def test_validator_failure_records_evidence_and_ends_blocked(self) -> None:
         self._add_task("AT-GH-406")
-        failing_validator = FakeValidator(name="policy", status="failed", summary="validator failed")
+        failing_validator = FakeValidator(name="compile", status="failed", summary="validator failed")
 
         result = run_approved_task(
             self._request(task_key="AT-GH-406"),
             store=self.store,
             executor_registry={"noop": NoopExecutor()},
-            validator_registry={"policy": failing_validator},
+            validator_registry={"compile": failing_validator},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -550,7 +550,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertEqual(self.store.get_task("AT-GH-406").status, RUN_STATUS_BLOCKED)
         self.assertEqual(len(self.store.list_validation_results("AT-GH-406")), 1)
         self.assertTrue(result.executor_run["ok"])
-        self.assertEqual(result.validators[0]["name"], "policy")
+        self.assertEqual(result.validators[0]["name"], "compile")
         self.assertFalse(result.validators[0]["ok"])
         self.assertIn("validator failed", result.error or "")
 
@@ -559,10 +559,10 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self._write_codex_advisory_evidence("AT-GH-407")
 
         result = run_approved_task(
-            self._request(task_key="AT-GH-407", validators=("policy",)),
+            self._request(task_key="AT-GH-407", validators=("compile",)),
             store=self.store,
             executor_registry={"noop": NoopExecutor()},
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -595,14 +595,14 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         result = run_approved_task(
             self._request(
                 task_key="AT-GH-412",
-                validators=("policy",),
+                validators=("compile",),
                 auto_generate_codex_advisory_evidence=True,
                 codex_advisory_command=f"{sys.executable} {codex_script}",
                 codex_advisory_timeout_seconds=60,
             ),
             store=self.store,
             executor_registry={"noop": NoopExecutor()},
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -636,14 +636,14 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         result = run_approved_task(
             self._request(
                 task_key="AT-GH-413",
-                validators=("policy",),
+                validators=("compile",),
                 auto_generate_codex_advisory_evidence=True,
                 codex_advisory_command=f"{sys.executable} {codex_script}",
                 codex_advisory_timeout_seconds=60,
             ),
             store=self.store,
             executor_registry={"noop": NoopExecutor()},
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -675,13 +675,13 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         result = run_approved_task(
             self._request(
                 task_key="AT-GH-414",
-                validators=("policy",),
+                validators=("compile",),
                 auto_generate_codex_advisory_evidence=True,
                 codex_advisory_command=f"{sys.executable} {codex_script}",
             ),
             store=self.store,
             executor_registry={"noop": NoopExecutor()},
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -717,9 +717,9 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self._write_codex_advisory_evidence("AT-GH-727")
 
         result = run_approved_task(
-            self._request(task_key="AT-GH-727", executor="claude-code", validators=("policy",)),
+            self._request(task_key="AT-GH-727", executor="claude-code", validators=("compile",)),
             store=self.store,
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -729,7 +729,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertTrue(result.executor_run["ok"])
         # Deterministic validators ran after the executor.
         self.assertTrue(result.safety["validators_started"])
-        self.assertEqual(result.validators[0]["name"], "policy")
+        self.assertEqual(result.validators[0]["name"], "compile")
         self.assertTrue(result.validators[0]["ok"])
         # No branch/PR/merge/cleanup/approval side effects from the executor.
         self.assertFalse(result.safety["branch_pushed"])
@@ -754,9 +754,9 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self._add_task("AT-GH-728")
 
         result = run_approved_task(
-            self._request(task_key="AT-GH-728", executor="claude-code", validators=("policy",)),
+            self._request(task_key="AT-GH-728", executor="claude-code", validators=("compile",)),
             store=self.store,
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -778,13 +778,13 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             self._request(
                 task_key="AT-GH-820",
                 executor="claude-code",
-                validators=("policy",),
+                validators=("compile",),
                 claude_code_enable_invocation=True,
                 claude_code_command=(sys.executable, str(script)),
                 claude_code_timeout_seconds=60,
             ),
             store=self.store,
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -792,7 +792,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         self.assertEqual(result.status, APPROVED_TASK_STATUS)
         self.assertTrue(result.executor_run["ok"])
         # Deterministic validators still ran after the executor.
-        self.assertEqual(result.validators[0]["name"], "policy")
+        self.assertEqual(result.validators[0]["name"], "compile")
         self.assertTrue(result.validators[0]["ok"])
 
         artifact_dir = self.store.get_task("AT-GH-820").artifact_dir
@@ -840,12 +840,12 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             self._request(
                 task_key="AT-GH-821",
                 executor="claude-code",
-                validators=("policy",),
+                validators=("compile",),
                 claude_code_enable_invocation=True,
                 claude_code_command=(sys.executable, str(script)),
             ),
             store=self.store,
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -918,13 +918,13 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             self._request(
                 task_key="AT-GH-901",
                 executor="claude-code",
-                validators=("policy",),
+                validators=("compile",),
                 claude_code_enable_invocation=True,
                 claude_code_command=command,
                 claude_code_timeout_seconds=60,
             ),
             store=self.store,
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -936,7 +936,7 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
 
         # Deterministic validators still ran after the executor.
         self.assertTrue(result.safety["validators_started"])
-        self.assertEqual(result.validators[0]["name"], "policy")
+        self.assertEqual(result.validators[0]["name"], "compile")
         self.assertTrue(result.validators[0]["ok"])
 
         # Execution artifact records the full bounded-implementer contract.
@@ -992,13 +992,13 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             self._request(
                 task_key="AT-GH-902",
                 executor="claude-code",
-                validators=("policy",),
+                validators=("compile",),
                 claude_code_enable_invocation=True,
                 claude_code_command=command,
                 claude_code_timeout_seconds=60,
             ),
             store=self.store,
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
         self.assertFalse(blocked.ok)
@@ -1018,22 +1018,6 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         )
         self.assertEqual(blocked_execution["status"], "completed")
         self.assertIs(blocked_execution["human_review_required"], True)
-
-    def test_opencode_without_model_is_explicitly_blocked(self) -> None:
-        self._add_task("AT-GH-409")
-
-        result = run_approved_task(
-            self._request(task_key="AT-GH-409", executor="opencode"),
-            store=self.store,
-            preflight_runner=lambda **kwargs: _preflight_result(),
-        )
-
-        self.assertFalse(result.ok)
-        self.assertEqual(result.phase, "executor")
-        self.assertEqual(result.status, RUN_STATUS_BLOCKED)
-        self.assertIn("requires a model", result.error or "")
-        self.assertEqual(self.store.get_task("AT-GH-409").status, RUN_STATUS_BLOCKED)
-        self.assertFalse(result.safety["executor_started"])
 
     def _write_issue_spec(self, artifact_dir: Path, *, title: str, body: str) -> Path:
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -1055,116 +1039,16 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         )
         return issue_spec_path
 
-    def test_opencode_generates_implementation_prompt_from_issue_spec(self) -> None:
-        artifact_dir = self._add_task("AT-GH-67", title="Add the widget")
-        self._write_issue_spec(artifact_dir, title="Add the widget", body="Please add a widget.")
-        self._write_codex_advisory_evidence("AT-GH-67", artifact_dir)
-        opencode = FakeExecutor(name="opencode", status="completed")
-
-        result = run_approved_task(
-            self._request(
-                task_key="AT-GH-67",
-                executor="opencode",
-                validators=("policy",),
-                model="minimax-coding-plan/MiniMax-M2.7",
-            ),
-            store=self.store,
-            executor_registry={"opencode": opencode},
-            validator_registry={"policy": PolicyCheckValidator()},
-            preflight_runner=lambda **kwargs: _preflight_result(),
-        )
-
-        self.assertTrue(result.ok, msg=result.error)
-        self.assertEqual(result.status, APPROVED_TASK_STATUS)
-
-        attempt_artifact_dir = self.store.get_task("AT-GH-67").artifact_dir
-        assert attempt_artifact_dir is not None
-        prompt_path = attempt_artifact_dir / "implementation_prompt.md"
-        self.assertTrue(prompt_path.exists())
-        prompt_text = prompt_path.read_text(encoding="utf-8")
-        self.assertIn("AT-GH-67", prompt_text)
-        self.assertIn("Add the widget", prompt_text)
-        self.assertIn("Please add a widget.", prompt_text)
-
-        # The generated prompt is recorded as an implementation_prompt artifact.
-        artifact_types = {
-            record.artifact_type for record in self.store.list_task_artifacts("AT-GH-67")
-        }
-        self.assertIn("implementation_prompt", artifact_types)
-
-        # opencode no longer blocks before executor start; it ran with the prompt.
-        self.assertEqual(len(opencode.calls), 1)
-        self.assertEqual(opencode.calls[0].prompt_path, prompt_path)
-        self.assertTrue(result.executor_run["started"])
-        self.assertTrue(result.safety["executor_started"])
-
-    def test_opencode_blocks_when_issue_spec_missing(self) -> None:
-        artifact_dir = self._add_task("AT-GH-68", title="No spec task")
-        opencode = FakeExecutor(name="opencode", status="completed")
-
-        result = run_approved_task(
-            self._request(
-                task_key="AT-GH-68",
-                executor="opencode",
-                validators=("policy",),
-                model="minimax-coding-plan/MiniMax-M2.7",
-            ),
-            store=self.store,
-            executor_registry={"opencode": opencode},
-            validator_registry={"policy": PolicyCheckValidator()},
-            preflight_runner=lambda **kwargs: _preflight_result(),
-        )
-
-        self.assertFalse(result.ok)
-        self.assertEqual(result.phase, "executor")
-        self.assertEqual(result.status, RUN_STATUS_BLOCKED)
-        self.assertIn("issue_spec.md", result.error or "")
-        self.assertEqual(len(opencode.calls), 0)
-        self.assertFalse(result.safety["executor_started"])
-        self.assertFalse((artifact_dir / "implementation_prompt.md").exists())
-        self.assertEqual(self.store.get_task("AT-GH-68").status, RUN_STATUS_BLOCKED)
-
-    def test_opencode_reuses_existing_implementation_prompt(self) -> None:
-        artifact_dir = self._add_task("AT-GH-69", title="Existing prompt task")
-        self._write_issue_spec(artifact_dir, title="ignored", body="ignored body")
-        prompt_path = artifact_dir / "implementation_prompt.md"
-        prompt_path.write_text("# Pre-supplied prompt\n", encoding="utf-8")
-        self._write_codex_advisory_evidence("AT-GH-69", artifact_dir)
-        opencode = FakeExecutor(name="opencode", status="completed")
-
-        result = run_approved_task(
-            self._request(
-                task_key="AT-GH-69",
-                executor="opencode",
-                validators=("policy",),
-                model="minimax-coding-plan/MiniMax-M2.7",
-            ),
-            store=self.store,
-            executor_registry={"opencode": opencode},
-            validator_registry={"policy": PolicyCheckValidator()},
-            preflight_runner=lambda **kwargs: _preflight_result(),
-        )
-
-        self.assertTrue(result.ok, msg=result.error)
-        # A pre-supplied prompt is snapshotted into the Attempt artifact root and
-        # the task-level input remains untouched.
-        attempt_artifact_dir = self.store.get_task("AT-GH-69").artifact_dir
-        assert attempt_artifact_dir is not None
-        attempt_prompt_path = attempt_artifact_dir / "implementation_prompt.md"
-        self.assertEqual(prompt_path.read_text(encoding="utf-8"), "# Pre-supplied prompt\n")
-        self.assertEqual(attempt_prompt_path.read_text(encoding="utf-8"), "# Pre-supplied prompt\n")
-        self.assertEqual(opencode.calls[0].prompt_path, attempt_prompt_path)
-
     def test_noop_does_not_generate_implementation_prompt(self) -> None:
         artifact_dir = self._add_task("AT-GH-70", title="Noop task")
         self._write_issue_spec(artifact_dir, title="Noop task", body="should be ignored by noop")
         self._write_codex_advisory_evidence("AT-GH-70", artifact_dir)
 
         result = run_approved_task(
-            self._request(task_key="AT-GH-70", executor="noop", validators=("policy",)),
+            self._request(task_key="AT-GH-70", executor="noop", validators=("compile",)),
             store=self.store,
             executor_registry={"noop": NoopExecutor()},
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -1185,11 +1069,11 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             self._request(
                 task_key="AT-GH-71",
                 executor="shell",
-                validators=("policy",),
+                validators=("compile",),
                 command=("git", "status", "--short"),
             ),
             store=self.store,
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 
@@ -1201,15 +1085,14 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
         }
         self.assertNotIn("implementation_prompt", artifact_types)
 
-    def test_request_executor_profile_flows_to_real_executor(self) -> None:
+    def test_request_executor_profile_is_recorded_on_the_task(self) -> None:
         self._add_task("AT-GH-410")
         self._write_codex_advisory_evidence("AT-GH-410")
         captured: dict[str, object] = {}
-        fake_executor = FakeExecutor(name="pi", status="completed")
+        fake_executor = FakeExecutor(name="noop", status="completed")
 
         def fake_get_executor(name, **kwargs):
             captured["name"] = name
-            captured["kwargs"] = kwargs
             return fake_executor
 
         with mock.patch(
@@ -1219,25 +1102,21 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             result = run_approved_task(
                 self._request(
                     task_key="AT-GH-410",
-                    executor="pi",
-                    validators=("policy",),
+                    executor="noop",
+                    validators=("compile",),
                     model="claude-sonnet-4-6",
                     provider="anthropic",
                     tools=("read", "write"),
                     pi_bin="/custom/pi",
                 ),
                 store=self.store,
-                validator_registry={"policy": PolicyCheckValidator()},
+                validator_registry={"compile": CompileValidator()},
                 preflight_runner=lambda **kwargs: _preflight_result(),
             )
 
         self.assertTrue(result.ok, msg=result.error)
         self.assertEqual(result.status, APPROVED_TASK_STATUS)
-        self.assertEqual(captured["name"], "pi")
-        self.assertEqual(captured["kwargs"]["model"], "claude-sonnet-4-6")
-        self.assertEqual(captured["kwargs"]["provider"], "anthropic")
-        self.assertEqual(captured["kwargs"]["tools"], ["read", "write"])
-        self.assertEqual(captured["kwargs"]["pi_bin"], "/custom/pi")
+        self.assertEqual(captured["name"], "noop")
         task = self.store.get_task("AT-GH-410")
         self.assertEqual(task.model, "claude-sonnet-4-6")
         self.assertEqual(task.provider, "anthropic")
@@ -1252,13 +1131,13 @@ class ApprovedTaskRunnerTests(unittest.TestCase):
             self._request(
                 task_key="AT-GH-411",
                 executor="noop",
-                validators=("policy",),
+                validators=("compile",),
                 model="claude-sonnet-4-6",
                 provider="anthropic",
             ),
             store=self.store,
             executor_registry={"noop": NoopExecutor()},
-            validator_registry={"policy": PolicyCheckValidator()},
+            validator_registry={"compile": CompileValidator()},
             preflight_runner=lambda **kwargs: _preflight_result(),
         )
 

@@ -3,7 +3,7 @@
 Level 2 M2 Exit Gate row 3 ("all required evidence is attempt-scoped"; Roadmap
 §2.2 and §2.4). The end-to-end test drives the real path: a Ticket is created
 through the Ticket service, dispatched through the real Dispatcher with the
-real ``changed-files`` and ``policy`` validators, handed off through the real
+real ``compile`` validator, handed off through the real
 integration handoff, and integrated by a real ``integrate_task`` run against a
 local bare ``origin``. Only GitHub is faked (``FakeGhRunner``). Nothing here
 writes evidence by hand.
@@ -40,9 +40,7 @@ from agent_taskflow.attempt_store import AttemptStore  # noqa: E402
 from agent_taskflow.dispatcher import Dispatcher  # noqa: E402
 from agent_taskflow.evidence_coverage import (  # noqa: E402
     COVERAGE_ARTIFACT_NAME,
-    EVIDENCE_CHANGED_FILES_AUDIT,
     EVIDENCE_COMPILEALL_LOG,
-    EVIDENCE_POLICY_VALIDATE_LOG,
     EVIDENCE_PREFLIGHT_PR_CHECK,
     PREFLIGHT_NOT_APPLICABLE_REASON,
     ROOT_ATTEMPT,
@@ -81,8 +79,7 @@ from agent_taskflow.integration_store import IntegrationStore  # noqa: E402
 from agent_taskflow.integration_validators import IntegrationValidatorSpec  # noqa: E402
 from agent_taskflow.store import TaskMirrorStore  # noqa: E402
 from agent_taskflow.validation_summary import ValidationSummaryRecorder  # noqa: E402
-from agent_taskflow.validators.changed_files import ChangedFilesValidator  # noqa: E402
-from agent_taskflow.validators.policy import PolicyCheckValidator  # noqa: E402
+from agent_taskflow.validators.compile import CompileValidator  # noqa: E402
 
 
 REPO = "owner/alpha"
@@ -118,18 +115,15 @@ class _Pipeline:
         self.integration.init_db()
         self.github = GitHubPrAdapter(REPO, runner=FakeGhRunner(repo=REPO))
         # RULINGS 67: a Ticket's validators come from its execution policy.
-        self.fx.set_policy_validators(("changed-files", "policy"))
+        self.fx.set_policy_validators(("compile",))
 
     def dispatch(self, prompt: str) -> str:
         key = self.fx.create_ticket(prompt).task_key
         dispatcher = Dispatcher(
             db_path=self.fx.db_path,
             executor_registry={"claude-code": RecordingExecutor(write_file="feature.txt")},
-            validator_registry={
-                "changed-files": ChangedFilesValidator(),
-                "policy": PolicyCheckValidator(),
-            },
-            validators=("changed-files", "policy"),
+            validator_registry={"compile": CompileValidator()},
+            validators=("compile",),
             default_executor="fake",
         )
         self.last_store = dispatcher.store
@@ -155,11 +149,8 @@ class _Pipeline:
         dispatcher = Dispatcher(
             db_path=self.fx.db_path,
             executor_registry={"claude-code": RecordingExecutor(status="failed")},
-            validator_registry={
-                "changed-files": ChangedFilesValidator(),
-                "policy": PolicyCheckValidator(),
-            },
-            validators=("changed-files", "policy"),
+            validator_registry={"compile": CompileValidator()},
+            validators=("compile",),
             default_executor="fake",
         )
         try:
@@ -257,9 +248,7 @@ class DispatchedAndIntegratedTicketTests(unittest.TestCase):
             # §2.2 evidence pipeline, execution validation.
             summaries["implementation_validation"]["path"],
             summaries["implementation_validation"]["path"].parent / COVERAGE_ARTIFACT_NAME,
-            self.root / EVIDENCE_CHANGED_FILES_AUDIT,
-            self.root / EVIDENCE_POLICY_VALIDATE_LOG,
-            self.root / "changed-files-validate.log",
+            self.root / "compile.log",
             # §2.2 evidence pipeline, integration validation.
             summaries["integration_validation"]["path"],
             summaries["integration_validation"]["path"].parent / COVERAGE_ARTIFACT_NAME,
@@ -275,8 +264,8 @@ class DispatchedAndIntegratedTicketTests(unittest.TestCase):
         for path in required:
             self.assertTrue(path.is_file(), path)
             self.assertTrue(_is_under(path, self.root), path)
-        self.assertEqual(self.result.integration_json_path, required[8])
-        self.assertEqual(self.result.validation_report.evidence_path, required[7])
+        self.assertEqual(self.result.integration_json_path, required[6])
+        self.assertEqual(self.result.validation_report.evidence_path, required[5])
 
         # Every summary and index names this Attempt and only this root.
         for phase, entry in summaries.items():
@@ -332,15 +321,23 @@ class DispatchedAndIntegratedTicketTests(unittest.TestCase):
         ]
         self.assertEqual(started[0]["evidence_root"], evidence_root)
 
-    def test_preflight_and_compileall_are_not_applicable_with_their_reasons(self) -> None:
+    def test_preflight_and_compileall_applicability_with_their_reasons(self) -> None:
         for phase in ("implementation_validation", "integration_validation"):
             coverage = self.coverage(phase)
             preflight = self.item(coverage, EVIDENCE_PREFLIGHT_PR_CHECK)
             self.assertEqual(preflight["applicability"], "not_applicable", phase)
             self.assertEqual(preflight["reason"], PREFLIGHT_NOT_APPLICABLE_REASON)
-            compileall = self.item(coverage, EVIDENCE_COMPILEALL_LOG)
-            self.assertEqual(compileall["applicability"], "not_applicable", phase)
-            self.assertIn("No validator configured for this run", compileall["reason"])
+        # The compile validator runs compileall, so the item applies to the
+        # implementation run and points at that validator's own log.
+        compileall = self.item(self.coverage("implementation_validation"), EVIDENCE_COMPILEALL_LOG)
+        self.assertEqual(compileall["applicability"], "applicable")
+        self.assertIn("Validator compile runs compileall", compileall["reason"])
+        for reference in compileall["references"]:
+            self.assertTrue(_is_under(Path(reference["path"]), self.root), reference)
+        # The integration run's validator does not.
+        compileall = self.item(self.coverage("integration_validation"), EVIDENCE_COMPILEALL_LOG)
+        self.assertEqual(compileall["applicability"], "not_applicable")
+        self.assertIn("No validator configured for this run", compileall["reason"])
         self.assertEqual(list(self.p.task_dir(self.key).rglob("preflight-pr-check.json")), [])
         self.assertEqual(list(self.p.task_dir(self.key).rglob("compileall.log")), [])
 
@@ -454,13 +451,12 @@ class ValidatorContextBindingTests(unittest.TestCase):
         ):
             key = p.dispatch("Proxy disabled")
         root = Path(p.attempt(key)["artifact_root"])
-        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(seen), 1)
         for context in seen:
             self.assertEqual(context.artifact_dir, root)
             self.assertEqual(context.attempt_id, p.attempt(key)["attempt_id"])
-        self.assertTrue((root / EVIDENCE_CHANGED_FILES_AUDIT).is_file())
-        self.assertTrue((root / EVIDENCE_POLICY_VALIDATE_LOG).is_file())
-        self.assertFalse((p.task_dir(key) / EVIDENCE_CHANGED_FILES_AUDIT).exists())
+        self.assertTrue((root / "compile.log").is_file())
+        self.assertFalse((p.task_dir(key) / "compile.log").exists())
 
     def test_the_bound_task_values_are_released_with_the_attempt(self) -> None:
         p = _Pipeline(self)

@@ -7,8 +7,6 @@ from typing import Sequence
 from agent_taskflow.executors.base import Executor
 from agent_taskflow.executors.claude_code import ClaudeCodeExecutor
 from agent_taskflow.executors.manual import ManualExecutor, NoopExecutor
-from agent_taskflow.executors.opencode import OpenCodeExecutor
-from agent_taskflow.executors.pi import PiExecutor
 from agent_taskflow.executors.shell import ShellExecutor
 
 
@@ -23,12 +21,6 @@ def get_executor(
     name: str,
     *,
     command: Sequence[str] | None = None,
-    model: str | None = None,
-    opencode_bin: str = "opencode",
-    extra_args: Sequence[str] | None = None,
-    provider: str | None = None,
-    tools: Sequence[str] | None = None,
-    pi_bin: str = "pi",
     claude_command: Sequence[str] | None = None,
     claude_enable_invocation: bool = False,
     worktree_root: str | None = None,
@@ -46,19 +38,6 @@ def get_executor(
         if command is None:
             raise ValueError("shell executor requires command")
         return ShellExecutor(command)
-    if normalized == "opencode":
-        return OpenCodeExecutor(
-            model=model,
-            opencode_bin=opencode_bin,
-            extra_args=extra_args,
-        )
-    if normalized == "pi":
-        return PiExecutor(
-            provider=provider,
-            model=model,
-            tools=list(tools) if tools is not None else None,
-            pi_bin=pi_bin,
-        )
     if normalized == "claude-code":
         return ClaudeCodeExecutor(
             command=claude_command,
@@ -74,21 +53,6 @@ def build_shell_executor(command: Sequence[str], *, name: str = "shell") -> Shel
     """Build a shell executor with an explicit command."""
 
     return ShellExecutor(command, name=name)
-
-
-def build_opencode_executor(
-    *,
-    model: str | None = None,
-    opencode_bin: str = "opencode",
-    extra_args: Sequence[str] | None = None,
-) -> OpenCodeExecutor:
-    """Build an OpenCode executor without checking external availability."""
-
-    return OpenCodeExecutor(
-        model=model,
-        opencode_bin=opencode_bin,
-        extra_args=extra_args,
-    )
 
 
 def build_claude_code_executor(
@@ -110,35 +74,14 @@ def build_claude_code_executor(
     )
 
 
-def build_pi_executor(
-    *,
-    provider: str | None = None,
-    model: str | None = None,
-    tools: Sequence[str] | None = None,
-    env: dict[str, str] | None = None,
-    pi_bin: str = "pi",
-) -> PiExecutor:
-    """Build a Pi executor without checking external availability."""
-
-    return PiExecutor(
-        provider=provider,
-        model=model,
-        tools=list(tools) if tools is not None else None,
-        env=env,
-        pi_bin=pi_bin,
-    )
-
-
 def list_executor_names() -> list[str]:
     """Return supported executor names."""
 
-    return ["manual", "noop", "shell", "opencode", "pi", "claude-code"]
+    return ["manual", "noop", "shell", "claude-code"]
 
 
 __all__ = [
     "build_claude_code_executor",
-    "build_opencode_executor",
-    "build_pi_executor",
     "build_shell_executor",
     "get_executor",
     "list_executor_names",

@@ -23,12 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--validators",
         default=",".join(DEFAULT_VALIDATORS),
-        help="Comma-separated validators to preflight. Default: pytest,openspec.",
+        help="Comma-separated validators to preflight. Default: pytest.",
     )
     parser.add_argument(
         "--executor",
         default="manual",
-        help="Executor context to preflight, for example pi, opencode, manual, shell, or noop.",
+        help="Executor context to preflight, for example claude-code, manual, shell, or noop.",
     )
     parser.add_argument(
         "--json",
@@ -39,11 +39,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict",
         action="store_true",
         help="Fail when the active Python environment is not the repo .venv.",
-    )
-    parser.add_argument(
-        "--require-openspec",
-        action="store_true",
-        help="Treat missing openspec as a failed required check.",
     )
     parser.add_argument(
         "--require-pytest",
@@ -61,16 +56,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Treat missing uvicorn as a failed required check.",
     )
-    parser.add_argument(
-        "--require-pi",
-        action="store_true",
-        help="Treat missing pi executable discovery as a failed required check.",
-    )
-    parser.add_argument(
-        "--require-opencode",
-        action="store_true",
-        help="Treat missing opencode executable discovery as a failed required check.",
-    )
     return parser
 
 
@@ -81,12 +66,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         validators=args.validators,
         executor=args.executor,
         strict=args.strict,
-        require_openspec=args.require_openspec,
         require_pytest=args.require_pytest,
         require_fastapi=args.require_fastapi,
         require_uvicorn=args.require_uvicorn,
-        require_pi=args.require_pi,
-        require_opencode=args.require_opencode,
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     return 0 if result.ok else 1

@@ -6,7 +6,7 @@ API, verifying:
 1. Create Task form creates a TaskRecord and TaskWorktreeRecord in the mirror DB.
 2. Start/Dispatch calls the dispatcher and advances the task through
    preparing → implementing → validating → waiting_approval.
-3. Deterministic validators (pytest, openspec, policy) run against the output.
+3. Deterministic validators (pytest, compile) run against the output.
 4. Task reaches waiting_approval and the StartDispatchPanel is disabled.
 5. Human approval (approve) via the UI action API accepts the task.
 6. No forbidden actions are triggered: no push, merge, cleanup, worktree deletion.
@@ -98,24 +98,6 @@ class FakePytestValidator:
         )
 
 
-class FakeOpenspecValidator:
-    """Fake openspec validator for dogfood testing."""
-
-    name = "openspec"
-
-    def run(self, ctx: ValidatorContext) -> ValidatorResult:
-        log_path = ctx.artifact_dir / "openspec-validate.log"
-        log_path.write_text("openspec ran in dogfood test\n", encoding="utf-8")
-        return ValidatorResult(
-            validator=self.name,
-            status="skipped",
-            exit_code=0,
-            summary="openspec skipped",
-            log_path=log_path,
-            artifacts={"log": log_path},
-        )
-
-
 class UiCreateDispatchDogfoodTests(unittest.TestCase):
     """Dogfood tests for the Create Task and Dispatch UI flow."""
 
@@ -133,7 +115,7 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         self.artifact_root.mkdir(parents=True)
         self.artifact_dir.mkdir(parents=True)
 
-        # Write an implementation prompt so opencode executor doesn't block
+        # Write an implementation prompt for the executor context
         (self.artifact_dir / "implementation_prompt.md").write_text(
             "Create a file called result.txt with content: dogfood-ok",
             encoding="utf-8",
@@ -147,7 +129,7 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
 
         def dispatcher_factory(store: object, validators: tuple[str, ...]) -> object:
             from agent_taskflow.dispatcher import Dispatcher
-            from agent_taskflow.validators.policy import PolicyCheckValidator
+            from agent_taskflow.validators.compile import CompileValidator
 
             return Dispatcher(
                 store,
@@ -157,8 +139,7 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
                 },
                 validator_registry={
                     "pytest": FakePytestValidator(),
-                    "openspec": FakeOpenspecValidator(),
-                    "policy": PolicyCheckValidator(scan_artifacts=True),
+                    "compile": CompileValidator(),
                 },
                 validators=validators,
                 default_executor="fake-dogfood",
@@ -285,7 +266,7 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         response = self.client.post(
             "/api/tasks/AT-UI-DOGFOOD-59/start",
             json={
-                "validators": ["pytest", "policy"],
+                "validators": ["pytest", "compile"],
                 "executor": "fake-dogfood",
             },
         )
@@ -306,15 +287,15 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         self.assertEqual(task.status, "waiting_approval")
 
         # Validators ran and produced logs
-        policy_log = self.artifact_dir / "policy-validate.log"
-        self.assertTrue(policy_log.exists(), "policy validator should produce a log")
+        compile_log = self.artifact_dir / "compile.log"
+        self.assertTrue(compile_log.exists(), "compile validator should produce a log")
 
         # Handoff artifact written by fake executor
         handoff = self.artifact_dir / "handoff_summary.md"
         self.assertTrue(handoff.exists(), "fake executor should write handoff artifact")
 
     def test_start_dispatch_with_default_validators(self) -> None:
-        """Dispatch with default validators (pytest, openspec) works."""
+        """Dispatch with default validators (pytest) works."""
         self.client.post(
             "/api/tasks",
             json={
@@ -337,11 +318,9 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["status"], "waiting_approval")
 
-        # Both pytest and openspec logs produced
+        # The pytest log is produced
         pytest_log = self.artifact_dir / "pytest.log"
-        openspec_log = self.artifact_dir / "openspec-validate.log"
         self.assertTrue(pytest_log.exists())
-        self.assertTrue(openspec_log.exists())
 
     def test_start_on_terminal_task_returns_conflict(self) -> None:
         """Start on accepted/rejected/cleaned task returns 409 conflict."""
@@ -399,37 +378,6 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         assert task is not None
         self.assertEqual(task.status, "blocked")
         self.assertIsNotNone(task.blocked_reason)
-
-    def test_policy_validator_checks_artifact_dir(self) -> None:
-        """Policy validator runs against the task artifact directory."""
-        self.client.post(
-            "/api/tasks",
-            json={
-                "task_key": "AT-UI-DOGFOOD-59",
-                "project": "agent-taskflow",
-                "repo_path": str(self.repo_path),
-                "worktree_path": str(self.worktree_path),
-                "artifact_dir": str(self.artifact_dir),
-                "executor": "fake-dogfood",
-            },
-        )
-
-        response = self.client.post(
-            "/api/tasks/AT-UI-DOGFOOD-59/start",
-            json={"validators": ["policy"]},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["status"], "waiting_approval")
-
-        # Policy log exists and shows pass
-        policy_log = self.artifact_dir / "policy-validate.log"
-        self.assertTrue(policy_log.exists())
-        content = policy_log.read_text(encoding="utf-8")
-        self.assertIn("PASSED", content)
-        self.assertIn("Policy check PASSED", content)
 
     def test_approve_requires_operator_attestation_identity(self) -> None:
         """Approve endpoint rejects worker/system decided_by values."""
@@ -581,7 +529,7 @@ class UiCreateDispatchDogfoodTests(unittest.TestCase):
         start_response = self.client.post(
             "/api/tasks/AT-UI-DOGFOOD-59/start",
             json={
-                "validators": ["pytest", "openspec", "policy"],
+                "validators": ["pytest", "compile"],
                 "executor": "fake-dogfood",
             },
         )
