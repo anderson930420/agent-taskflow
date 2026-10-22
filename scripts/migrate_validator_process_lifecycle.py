@@ -84,6 +84,7 @@ def main() -> int:
                     "openspec",
                     "lint",
                     "typecheck",
+                    "compile",
                     "changed-files:git-status",
                 ],
                 "launch_isolation": {

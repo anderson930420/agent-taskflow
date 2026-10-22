@@ -25,8 +25,12 @@
 # OR-10 Q3): the executor runs as the current OS user with that user's own
 # logged-in claude CLI; argv[0] is a version-pinned, root-owned copy of the
 # binary, not the self-updating ~/.local/bin/claude symlink. This is not an
-# isolation boundary: the Ticket's output runs under the pytest validator as
-# the same user (hardened mode is D2). bullet_journal is not runnable.
+# isolation boundary: the executor writes the Ticket's output as the same user
+# (hardened mode is D2). Both validator phases run only the fast `compile`
+# syntax gate (python -I -m compileall -f, which never imports or runs the code
+# it checks). The full test suite is not a per-Ticket gate: it stays in tests/
+# and runs on demand; the human review of the PR is the merge gate.
+# bullet_journal is not runnable.
 # Commented example, with placeholder values:
 #
 #   execution:
@@ -67,7 +71,7 @@ projects:
         - --permission-prompts
         - none                       # ... and anything that would prompt is denied
         - --tools
-        - Read,Edit,Write,Glob,Grep  # no Bash tool in the session; its output still runs under the validators as this user
+        - Read,Edit,Write,Glob,Grep  # no Bash tool in the session; the validators byte-compile its output, never run it
         - --setting-sources
         - project                    # no user settings or hooks; the repo's own apply
         - --strict-mcp-config
@@ -76,13 +80,13 @@ projects:
       effort: medium
       timeout_seconds: 3600
       permission_profile: local-dev-accept-edits-no-bash
-      policy_version: "v0-2"
+      policy_version: "v0-3"
       implementation_validators:
-        - {name: pytest, timeout_seconds: 3600}
+        - {name: compile, timeout_seconds: 300}
       integration_validators:
-        - name: pytest
-          command: [/home/ubuntu/agent-taskflow-runtime/current/.venv/bin/python, -m, pytest, -q]
-          timeout_seconds: 3600
+        - name: compile
+          command: [/home/ubuntu/agent-taskflow-runtime/current/.venv/bin/python, -I, -m, compileall, -q, -f, agent_taskflow, scripts, tests]
+          timeout_seconds: 300
 
   bullet_journal:
     project_slug: bullet_journal

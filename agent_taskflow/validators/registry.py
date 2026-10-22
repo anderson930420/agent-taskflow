@@ -6,6 +6,7 @@ from typing import Sequence
 
 from agent_taskflow.validators.base import Validator
 from agent_taskflow.validators.changed_files import ChangedFilesValidator
+from agent_taskflow.validators.compile import CompileValidator
 from agent_taskflow.validators.lint import LintValidator
 from agent_taskflow.validators.openspec import OpenSpecValidator
 from agent_taskflow.validators.policy import PolicyCheckValidator
@@ -60,13 +61,16 @@ def get_validator(
     if normalized == "lint":
         return LintValidator()
 
+    if normalized == "compile":
+        return CompileValidator(python_bin=python_bin)
+
     raise ValueError(f"Unknown validator: {name!r}")
 
 
 def list_validator_names() -> list[str]:
     """Return supported validator names."""
 
-    return ["pytest", "openspec", "policy", "changed-files", "typecheck", "lint"]
+    return ["pytest", "openspec", "policy", "changed-files", "typecheck", "lint", "compile"]
 
 
 __all__ = [

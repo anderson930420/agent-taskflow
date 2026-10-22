@@ -29,6 +29,8 @@ from agent_taskflow.integration_tick import IntegrationTickRequest, run_integrat
 from agent_taskflow.models import TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.ticket_success_gate import control_plane_commit_refusal
+from agent_taskflow.validators.compile import CompileValidator
+from agent_taskflow.validators.registry import get_validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from execution_policy_support import policy_block, project_entry, write_registry  # noqa: E402
@@ -381,10 +383,25 @@ class CommittedPolicyTests(unittest.TestCase):
         self.assertNotIn("Bash", value("--tools").split(","))
         self.assertEqual(value("--setting-sources"), "project")
         self.assertNotIn("--dangerously-skip-permissions", argv)
-        self.assertEqual(policy.implementation_validator_names, ("pytest",))
+        self.assertEqual(policy.policy_version, "v0-3")
+
+    def test_the_committed_policy_gates_both_phases_with_compile_only(self) -> None:
+        # Owner decision: the full test suite is too slow for a per-Ticket gate,
+        # so both phases run the compile syntax gate; the suite runs on demand.
+        path = REPO_ROOT / "config" / "projects.yaml"
+        policy = execution_policy.resolve_execution_policy("agent-taskflow", config_path=path)
+        self.assertEqual(policy.implementation_validator_names, ("compile",))
+        self.assertEqual(policy.implementation_validator_timeout("compile"), 300)
+        self.assertIsInstance(get_validator("compile"), CompileValidator)
         (spec,) = policy.integration_validator_specs()
+        self.assertEqual((spec.name, spec.timeout_seconds), ("compile", 300))
         self.assertTrue(Path(spec.command[0]).is_absolute())
-        self.assertEqual(spec.command[1:], ("-m", "pytest", "-q"))
+        # -I keeps the worktree off sys.path, so a Ticket file cannot shadow
+        # compileall; -f ignores any existing __pycache__ entry.
+        self.assertEqual(
+            spec.command[1:],
+            ("-I", "-m", "compileall", "-q", "-f", "agent_taskflow", "scripts", "tests"),
+        )
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ from agent_taskflow.validator_process_schema import (
 )
 from agent_taskflow.validators.base import ValidatorContext
 from agent_taskflow.validators.changed_files import ChangedFilesValidator
+from agent_taskflow.validators.compile import CompileValidator
 from agent_taskflow.validators.lint import LintValidator
 
 
@@ -146,6 +147,23 @@ class ValidatorProcessLifecycleTests(unittest.TestCase):
             "validator-managed-ok",
             result.log_path.read_text(encoding="utf-8"),
         )
+
+    def test_bound_compile_validator_records_verified_validator_process(self) -> None:
+        (self.context.worktree_path / "module.py").write_text("x = 1\n", encoding="utf-8")
+
+        result = CompileValidator().run(self.context)
+
+        self.assertEqual(result.status, "passed", result.summary)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.log_path.name, "compile.log")
+        self.assertIn("launch_spec", result.artifacts)
+        self.assertIn("pid_manifest", result.artifacts)
+        row = self._last_process_row()
+        self.assertEqual(row["process_role"], "validator")
+        self.assertEqual(row["executor_name"], "compile")
+        self.assertEqual(row["state"], "exited")
+        self.assertEqual(row["verified_exit"], 1)
+        self.assertEqual(row["exit_code"], 0)
 
     def test_validator_timeout_kills_sigterm_ignoring_descendant(self) -> None:
         script = (
