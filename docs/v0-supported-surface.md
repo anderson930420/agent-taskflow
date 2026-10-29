@@ -75,6 +75,7 @@ Routes are the `APIRoute`s of `create_app()`. FastAPI's generated `/openapi.json
 
 | surface | kind | label | ticket_guard | note |
 |---|---|---|---|---|
+| `scripts/run_affected_tests.py` | script | ACTIVE_V0 | n/a | Runs affected tests in the integration worktree. |
 | `scripts/run_api.py` | script | ACTIVE_V0 | n/a | Serves `POST /api/tickets` and the routes below. |
 | `scripts/run_parallel_scheduler_tick.py` | script | ACTIVE_V0 | n/a | The execution tick: the only V0 execution path. |
 | `scripts/run_integration_tick.py` | script | ACTIVE_V0 | n/a | The integration tick; `--confirm-cleanup` is the explicit human-confirmed cleanup. |

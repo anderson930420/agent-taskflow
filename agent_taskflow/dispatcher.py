@@ -570,6 +570,8 @@ class Dispatcher:
             artifact_dir=task.artifact_dir,
             timeout_seconds=self.validator_timeout_seconds,
             attempt_id=progress.attempt_id,
+            base_commit=worktree.base_sha,
+            base_branch=worktree.base_branch,
         )
 
         progress.validators_running(validators)

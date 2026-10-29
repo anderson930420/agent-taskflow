@@ -52,6 +52,8 @@ class ValidatorContext:
     env: dict[str, str] | None = None
     launch_binding: ExecutorLaunchBinding | None = None
     attempt_id: str | None = None
+    base_commit: str | None = None
+    base_branch: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_key", normalize_task_key(self.task_key))

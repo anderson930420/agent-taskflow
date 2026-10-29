@@ -71,7 +71,7 @@ RUN_STATUS_BLOCKED = "blocked"
 PHASE_CODEX_ADVISORY_EVIDENCE = "codex_advisory_evidence"
 DEFAULT_BASE_BRANCH = "main"
 SUPPORTED_EXECUTORS = tuple(list_executor_names())
-BUILTIN_VALIDATORS = {"pytest", "compile"}
+BUILTIN_VALIDATORS = {"pytest", "compile", "affected-tests"}
 # Executors that cannot run without an explicit model in their profile. No
 # built-in executor requires one.
 EXECUTORS_REQUIRING_MODEL: frozenset[str] = frozenset()

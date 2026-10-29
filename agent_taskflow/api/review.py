@@ -69,6 +69,7 @@ _BINARY_EXTENSIONS = frozenset({
 _VALIDATOR_LOG_NAMES = frozenset({
     "pytest.log",
     "compile.log",
+    "affected-tests.log",
 })
 
 _VALIDATOR_STATUS_ORDER = {
