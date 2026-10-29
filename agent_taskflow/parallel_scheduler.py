@@ -47,6 +47,7 @@ from agent_taskflow.ticket_dependencies import (
     DependencyMaintenanceResult,
     maintain_dependencies,
 )
+from agent_taskflow.ticket_auto_retry import maintain_auto_retries
 from agent_taskflow.ticket_lifecycle import FAILURE_WORKTREE, ticket_failure_status
 from agent_taskflow.ticket_worktree import ensure_ticket_worktree
 
@@ -83,6 +84,7 @@ class SchedulerTickResult:
     worker_results: tuple[dict[str, Any], ...] = ()
     # RULINGS 67: Tickets never picked because their project is not runnable.
     policy_refused: tuple[dict[str, Any], ...] = ()
+    auto_retry: dict[str, Any] = field(default_factory=dict)
     workers: list[subprocess.Popen] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -90,6 +92,7 @@ class SchedulerTickResult:
             "db_path": self.db_path,
             "reap": self.reap,
             "dependencies": self.dependencies,
+            "auto_retry": self.auto_retry,
             "max_concurrent_tasks": self.max_concurrent_tasks,
             "active_leases_at_start": self.active_leases_at_start,
             "candidates": list(self.candidates),
@@ -252,6 +255,7 @@ def run_scheduler_tick(
 
     reap = reap_stale_runtime(path)
     dependencies = maintain_dependencies(path, actor=actor)
+    auto_retry = maintain_auto_retries(path)
     capacity = read_runtime_capacity(path).max_concurrent_tasks
     active_at_start = _active_leases(path)
     candidates, refused = ready_queue_selection(path)
@@ -318,6 +322,7 @@ def run_scheduler_tick(
         db_path=str(path),
         reap=reap.to_dict(),
         dependencies=dependencies.to_dict(),
+        auto_retry=auto_retry,
         max_concurrent_tasks=capacity,
         active_leases_at_start=active_at_start,
         candidates=tuple(c.task_key for c in candidates),

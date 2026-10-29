@@ -54,6 +54,8 @@ TASK_STATUSES = {
 }
 
 TASK_EVENT_TYPES = {
+    "auto_retry",
+    "auto_retry_exhausted",
     "created",
     "mirrored",
     "status_changed",
