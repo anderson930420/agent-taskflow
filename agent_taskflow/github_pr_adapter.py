@@ -448,6 +448,13 @@ class GitHubPrAdapter:
         self._run_checked(argv, cwd=cwd, action="gh api PATCH pulls")
         return self.poll_pr(pr_number=pr_number, cwd=cwd)
 
+    def close_pr(self, *, pr_number: int, cwd: Path, comment: str) -> None:
+        """Close a superseded PR without deleting its branch."""
+        self._run_checked(
+            [self._gh_bin, "pr", "close", str(int(pr_number)), "--repo", self.repo,
+             "--comment", comment], cwd=cwd, action="gh pr close"
+        )
+
     def poll_pr(self, *, pr_number: int, cwd: Path) -> PrSnapshot:
         """Read a PR's current state. Read-only and safe to repeat (§32)."""
         argv = [

@@ -285,6 +285,16 @@ class PrOutcomeTests(WatcherTestCase):
         self.outcomes()
         self.assertEqual(self.status_of("AT-201"), schema.CANCELLED)
 
+    def test_closed_pr_on_already_cancelled_ticket_has_no_second_transition(self) -> None:
+        self.make_reviewing_task("AT-201")
+        self.store.update_task_status("AT-201", schema.CANCELLED, source="test")
+        before = [e for e in self.store.list_task_events("AT-201") if e.event_type == "status_changed"]
+        self.gh_runner.set_pr(42, state="CLOSED")
+        self.outcomes()
+        after = [e for e in self.store.list_task_events("AT-201") if e.event_type == "status_changed"]
+        self.assertEqual(len(after), len(before))
+        self.assertEqual(self.status_of("AT-201"), schema.CANCELLED)
+
     def test_pr_closed_unmerged_retains_the_workspace_and_evidence(self) -> None:
         worktree = self.make_reviewing_task("AT-201")
         self.gh_runner.set_pr(42, state="CLOSED")

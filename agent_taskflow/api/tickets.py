@@ -32,6 +32,13 @@ from agent_taskflow.ticket_repositories import (
     list_ticket_repositories,
 )
 from agent_taskflow.ticket_store import TicketStore
+from agent_taskflow.store import TaskMirrorStore
+from agent_taskflow.ticket_retry import retry_ticket, TicketRetryError, TICKET_RETRY_FROM_STATUSES
+from agent_taskflow.task_status_reset import TaskStatusResetRequest
+from agent_taskflow.ticket_feedback import validate_note
+from agent_taskflow.ticket_rework import rework_ticket
+from agent_taskflow.github_pr_adapter import GitHubPrAdapter, GitHubPrError
+from agent_taskflow.status_vocab import to_display_status
 
 
 class CreateTicketRequest(BaseModel):
@@ -41,6 +48,10 @@ class CreateTicketRequest(BaseModel):
     prompt: str
     priority: str = DEFAULT_TICKET_PRIORITY
     blocked_by: str | None = None
+
+
+class TicketActionRequest(BaseModel):
+    note: str | None = None
 
 
 class TicketResponse(BaseModel):
@@ -70,6 +81,7 @@ def build_ticket_router(
     *,
     projects_config_path: str | Path | None = None,
     ai_adapter: TicketAIMetadataAdapter | None = None,
+    github_adapter_factory=GitHubPrAdapter,
 ) -> APIRouter:
     """Return the Ticket router bound to one store and repository registry."""
     router = APIRouter()
@@ -182,6 +194,44 @@ def build_ticket_router(
             "item": ticket_to_dict(ticket),
             "events": [ticket_event_to_dict(event) for event in events],
         }
+
+    @router.post("/api/tickets/{task_key}/retry")
+    def retry_route(task_key: str, request: TicketActionRequest, store: TicketStore = Depends(get_ticket_store)) -> dict[str, object]:
+        ticket = ticket_or_404(task_key, store)
+        if request.note is not None:
+            try:
+                validate_note(request.note)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if ticket.status not in TICKET_RETRY_FROM_STATUSES:
+            raise HTTPException(status_code=409, detail=f"Ticket status is {to_display_status(ticket.status)}")
+        try:
+            retry_ticket(TaskStatusResetRequest(task_key=ticket.task_key, from_status=ticket.status,
+                         reason="Owner requested retry", confirm_reset=True, actor="mission_control"),
+                         store=TaskMirrorStore(store.db_path), note=request.note)
+        except TicketRetryError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "task_key": ticket.task_key, "status": "created", "display_status": "ready"}
+
+    @router.post("/api/tickets/{task_key}/rework")
+    def rework_route(task_key: str, request: TicketActionRequest, store: TicketStore = Depends(get_ticket_store)) -> dict[str, object]:
+        ticket = ticket_or_404(task_key, store)
+        if request.note is not None:
+            try:
+                validate_note(request.note)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            new_key = rework_ticket(ticket.task_key, store=store, note=request.note,
+                                    projects_config_path=projects_config_path, ai_adapter=ai_adapter,
+                                    github_adapter_factory=github_adapter_factory)
+        except GitHubPrError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        current = store.get_ticket(ticket.task_key)
+        return {"ok": True, "task_key": ticket.task_key, "status": current.status,
+                "display_status": to_display_status(current.status), "new_task_key": new_key}
 
     return router
 

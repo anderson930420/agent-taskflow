@@ -170,6 +170,8 @@ def create_ticket(
     ai_timeout_seconds: float | None = DEFAULT_AI_METADATA_TIMEOUT_SECONDS,
     actor: str = DEFAULT_TICKET_ACTOR,
     branch_lookup: BranchLookup = find_existing_branch_refs,
+    before_insert: Callable | None = None,
+    after_insert: Callable | None = None,
 ) -> TicketCreationResult:
     """Create one Ticket from repository / prompt / priority."""
     if repository is None:
@@ -246,6 +248,8 @@ def create_ticket(
             ),
             blocked_by=request.blocked_by,
             branch_guard=reject_repository_branch,
+            before_insert=before_insert,
+            after_insert=after_insert,
         )
     except TicketBranchExistsError as exc:
         raise TicketBranchCollisionError(exc.branch, exc.source, exc.existing) from exc
