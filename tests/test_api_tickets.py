@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -31,27 +32,44 @@ from agent_taskflow.ticket_ai_metadata import (
     TicketAIMetadataSuggestion,
 )
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from execution_policy_support import policy_block, project_entry, write_registry  # noqa: E402
+
 
 PROMPT = "Separate the ending page image from the shared hero component"
 
-PROJECTS_YAML = """\
-projects:
-  forms:
-    project_slug: forms
-    task_key_prefix: FM
-    repo_path: {repo_path}
-    github_repo: example/forms
-    artifacts_root: {artifacts_root}
-    worktrees_dir: {worktrees_dir}
-    default_branch: main
-    branch_prefix: task/
-  bullet_journal:
-    project_slug: bullet_journal
-    task_key_prefix: BJ
-    repo_path: {other_repo_path}
-    default_branch: trunk
-    branch_prefix: worktree/
-"""
+def write_projects(
+    config_path: Path,
+    *,
+    repo_path: Path,
+    other_repo_path: Path,
+    artifacts_root: Path,
+    worktrees_dir: Path,
+    bullet_journal_execution: dict | None = None,
+) -> None:
+    """forms carries an execution policy; bullet_journal has none by default."""
+    write_registry(
+        config_path,
+        {
+            "forms": {
+                **project_entry(
+                    repo_path, execution=policy_block(), github_repo="example/forms"
+                ),
+                "project_slug": "forms",
+                "task_key_prefix": "FM",
+                "artifacts_root": str(artifacts_root),
+                "worktrees_dir": str(worktrees_dir),
+                "branch_prefix": "task/",
+            },
+            "bullet_journal": {
+                **project_entry(other_repo_path, execution=bullet_journal_execution),
+                "project_slug": "bullet_journal",
+                "task_key_prefix": "BJ",
+                "default_branch": "trunk",
+                "branch_prefix": "worktree/",
+            },
+        },
+    )
 
 
 class TicketApiTestCase(unittest.TestCase):
@@ -69,15 +87,7 @@ class TicketApiTestCase(unittest.TestCase):
         self.other_repo_path.mkdir(parents=True)
 
         self.config_path = self.root / "projects.yaml"
-        self.config_path.write_text(
-            PROJECTS_YAML.format(
-                repo_path=self.repo_path,
-                artifacts_root=self.artifacts_root,
-                worktrees_dir=self.worktrees_dir,
-                other_repo_path=self.other_repo_path,
-            ),
-            encoding="utf-8",
-        )
+        self.write_projects()
 
         db_dir = self.root / "db"
         db_dir.mkdir()
@@ -97,6 +107,16 @@ class TicketApiTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.client.__exit__(None, None, None)
         self.tmp.cleanup()
+
+    def write_projects(self, *, bullet_journal_execution: dict | None = None) -> None:
+        write_projects(
+            self.config_path,
+            repo_path=self.repo_path,
+            other_repo_path=self.other_repo_path,
+            artifacts_root=self.artifacts_root,
+            worktrees_dir=self.worktrees_dir,
+            bullet_journal_execution=bullet_journal_execution,
+        )
 
     def create(self, **overrides: object):
         payload: dict[str, object] = {
@@ -127,6 +147,24 @@ class RepositoryRegistryRouteTests(TicketApiTestCase):
         self.assertEqual(forms["github_repo"], "example/forms")
         # Task keys come from one global counter, not a per-repo prefix.
         self.assertNotIn("ticket_prefix", forms)
+
+    def test_repository_with_an_execution_policy_is_runnable(self) -> None:
+        items = {
+            item["repository"]: item
+            for item in self.client.get("/api/repositories").json()["items"]
+        }
+        self.assertIs(items["forms"]["runnable"], True)
+        self.assertIsNone(items["forms"]["not_runnable_reason"])
+
+    def test_repository_without_an_execution_policy_is_not_runnable(self) -> None:
+        items = {
+            item["repository"]: item
+            for item in self.client.get("/api/repositories").json()["items"]
+        }
+        self.assertIs(items["bullet_journal"]["runnable"], False)
+        self.assertEqual(
+            items["bullet_journal"]["not_runnable_reason"], "execution_policy_missing"
+        )
 
 
 class CreateTicketRouteTests(TicketApiTestCase):
@@ -165,6 +203,19 @@ class CreateTicketRouteTests(TicketApiTestCase):
         response = self.create(repository="nope")
         self.assertEqual(response.status_code, 422)
         self.assertIn("nope", response.json()["detail"])
+
+    def test_repository_that_is_not_runnable_is_rejected(self) -> None:
+        response = self.create(repository="bullet_journal")
+        self.assertEqual(response.status_code, 422)
+        detail = response.json()["detail"]
+        self.assertIn("bullet_journal", detail)
+        self.assertIn("execution_policy_missing", detail)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0], 0
+            )
+        self.assertEqual(self.client.get("/api/tickets").json()["count"], 0)
 
     def test_unknown_priority_is_rejected(self) -> None:
         self.assertEqual(self.create(priority="urgent").status_code, 422)
@@ -210,6 +261,7 @@ class TicketReadbackRouteTests(TicketApiTestCase):
         self.assertEqual(self.client.get("/api/tickets/..%2Fetc").status_code, 404)
 
     def test_list_filters_by_repository_priority_and_display_status(self) -> None:
+        self.write_projects(bullet_journal_execution=policy_block())
         self.create(priority="high")
         self.create(repository="bullet_journal", priority="low")
 
