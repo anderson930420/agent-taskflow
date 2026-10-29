@@ -128,6 +128,8 @@ Routes are the `APIRoute`s of `create_app()`. FastAPI's generated `/openapi.json
 | `POST /api/tickets/{task_key}/rework` | api | ACTIVE_V0 | n/a | Create a replacement Ticket. |
 | `GET /api/tickets` | api | ACTIVE_V0 | n/a | Read. |
 | `GET /api/tickets/{task_key}` | api | ACTIVE_V0 | n/a | Read. |
+| `GET /api/tickets/{task_key}/usage` | api | ACTIVE_V0 | n/a | Attempt usage for a Ticket. |
+| `GET /api/usage` | api | ACTIVE_V0 | n/a | Usage totals for the board. |
 | `GET /api/repositories` | api | ACTIVE_V0 | n/a | Read: the registry for Ticket creation. |
 | `GET /health` | api | ACTIVE_V0 | n/a | Read. |
 | `GET /api/realtime/board` | api | ACTIVE_V0 | n/a | SSE progress (SPEC §14), read. |

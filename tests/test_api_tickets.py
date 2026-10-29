@@ -430,3 +430,17 @@ class TicketActionTests(TicketApiTestCase):
         new_key = rework_ticket(key, store=TicketStore(self.db_path), projects_config_path=self.config_path,
                                 github_adapter_factory=lambda repo: adapter)
         self.assertEqual(adapter.close_pr.call_args.kwargs["comment"], f"Superseded by {new_key} (rework).")
+
+
+class TicketUsageRouteTests(TicketApiTestCase):
+    def test_usage_routes_and_repository_filter(self):
+        key = self.create().json()['task_key']
+        response = self.client.get(f'/api/tickets/{key}/usage')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['attempts_total'], 0)
+        self.assertIsNone(response.json()['total_cost_usd'])
+        self.assertEqual(self.client.get('/api/tickets/AT-9999/usage').status_code, 404)
+        board = self.client.get('/api/usage', params={'repository': 'forms'}).json()
+        self.assertEqual([item['task_key'] for item in board['items']], [key])
+        self.assertEqual(board['totals']['attempts_unknown'], 0)
+        self.assertEqual(self.client.get('/api/usage', params={'repository': 'bullet_journal'}).json()['items'], [])

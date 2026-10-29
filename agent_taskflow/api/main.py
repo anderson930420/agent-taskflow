@@ -89,6 +89,7 @@ from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.tasks import normalize_task_key
 from agent_taskflow.ticket_ai_metadata import TicketAIMetadataAdapter
 from agent_taskflow.ticket_lifecycle import is_ticket
+from agent_taskflow.ticket_usage import USAGE_FIELDS, summarize_ticket_usage
 from agent_taskflow.ticket_store import TicketStore
 from agent_taskflow.v0_surface import UnsupportedInV0, require_supported_in_v0
 from agent_taskflow.workspace_manager import (
@@ -988,6 +989,30 @@ def create_app(
             else []
         )
         return list_response(items)
+
+    @app.get("/api/tickets/{task_key}/usage")
+    def ticket_usage(task_key: str) -> dict:
+        try:
+            ticket = ticket_store.get_ticket(task_key)
+        except ValueError:
+            ticket = None
+        if ticket is None:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+        return summarize_ticket_usage(store.db_path, ticket.task_key)
+
+    @app.get("/api/usage")
+    def board_usage(repository: str | None = Query(default=None)) -> dict:
+        items = []
+        for ticket in ticket_store.list_tickets(repository=repository):
+            summary = summarize_ticket_usage(store.db_path, ticket.task_key)
+            items.append({"task_key": ticket.task_key, **summary})
+        totals = {name: sum(item[name] for item in items) for name in (
+            "attempts_total", "attempts_with_usage", "attempts_unknown"
+        )}
+        for name in USAGE_FIELDS:
+            values = [item[name] for item in items if item[name] is not None]
+            totals[name] = sum(values) if values else None
+        return {"items": items, "totals": totals}
 
     app.include_router(
         build_ticket_router(

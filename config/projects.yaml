@@ -62,6 +62,8 @@ projects:
       argv:
         - /opt/claude-code/2.1.281/claude
         - --print
+        - --output-format
+        - json
         - --model
         - "{model}"
         - --effort
@@ -80,7 +82,7 @@ projects:
       effort: medium
       timeout_seconds: 3600
       permission_profile: local-dev-accept-edits-no-bash
-      policy_version: "v0-3"
+      policy_version: "v0-4"
       implementation_validators:
         - {name: compile, timeout_seconds: 300}
       integration_validators:

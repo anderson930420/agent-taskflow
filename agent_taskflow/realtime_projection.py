@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_taskflow.ticket_usage import summarize_ticket_usage
 from agent_taskflow.execution_observability import (
     ExecutionObservedStep,
     to_observability_dict,
@@ -422,6 +423,7 @@ class TicketProjection:
     ticket: BoardTicket
     attempts: tuple[TicketAttemptRef, ...] = field(default_factory=tuple)
     selected_attempt_id: str | None = None
+    usage: Mapping[str, Any] = field(default_factory=dict)
     artifacts: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
     validators: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
     reviewer_hints: tuple[str, ...] = field(default_factory=tuple)
@@ -434,6 +436,7 @@ class TicketProjection:
             "ticket": self.ticket.to_dict(),
             "attempts": [item.to_dict() for item in self.attempts],
             "selected_attempt_id": self.selected_attempt_id,
+            "usage": dict(self.usage),
             "artifacts": [dict(item) for item in self.artifacts],
             "validators": [dict(item) for item in self.validators],
             "reviewer_hints": list(self.reviewer_hints),
@@ -746,6 +749,7 @@ def build_ticket_projection(
             for item in history
         ),
         selected_attempt_id=selected.attempt_id if selected is not None else None,
+        usage=summarize_ticket_usage(db_path, normalized),
         artifacts=artifacts,
         validators=validators,
         reviewer_hints=_reviewer_hints(ticket.pr),
