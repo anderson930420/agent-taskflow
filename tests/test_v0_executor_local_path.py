@@ -12,6 +12,7 @@ from contextlib import closing
 import dataclasses
 import json
 import os
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -28,7 +29,7 @@ from agent_taskflow.github_pr_adapter import GitHubPrAdapter
 from agent_taskflow.integration_tick import IntegrationTickRequest, run_integration_tick
 from agent_taskflow.models import TaskWorktreeRecord
 from agent_taskflow.store import TaskMirrorStore
-from agent_taskflow.ticket_success_gate import control_plane_commit_refusal
+from agent_taskflow.ticket_success_gate import control_plane_commit_refusal, argv_sha256, managed_invocation_refusal
 from agent_taskflow.validators.compile import CompileValidator
 from agent_taskflow.validators.registry import get_validator
 
@@ -373,7 +374,7 @@ class CommittedPolicyTests(unittest.TestCase):
         # A version-pinned, root-owned binary, not the self-updating ~/.local/bin/claude.
         self.assertTrue(Path(argv[0]).is_absolute())
         self.assertRegex(argv[0], r"^/opt/claude-code/\d+\.\d+\.\d+/claude$")
-        self.assertEqual(argv[1:6], ("--print", "--model", "claude-opus-5-5", "--effort", "medium"))
+        self.assertEqual(argv[1:8], ("--print", "--output-format", "json", "--model", "claude-opus-5-5", "--effort", "medium"))
 
         def value(flag: str) -> str:
             return argv[argv.index(flag) + 1]
@@ -383,7 +384,19 @@ class CommittedPolicyTests(unittest.TestCase):
         self.assertNotIn("Bash", value("--tools").split(","))
         self.assertEqual(value("--setting-sources"), "project")
         self.assertNotIn("--dangerously-skip-permissions", argv)
-        self.assertEqual(policy.policy_version, "v0-3")
+        self.assertEqual(policy.policy_version, "v0-4")
+
+    def test_committed_argv_passes_managed_launch_gate(self) -> None:
+        policy = execution_policy.resolve_execution_policy("agent-taskflow", config_path=REPO_ROOT / "config" / "projects.yaml")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spec = root / "launch.json"
+            spec.write_text(json.dumps({"attempt_id": "attempt-1", "argv_sha256": argv_sha256(policy.resolved_argv())}))
+            db = root / "db.sqlite"
+            with sqlite3.connect(db) as conn:
+                conn.execute("CREATE TABLE executor_processes (attempt_id TEXT, process_role TEXT, executor_name TEXT, state TEXT, exit_code INTEGER, verified_exit INTEGER, launch_spec_path TEXT)")
+                conn.execute("INSERT INTO executor_processes VALUES (?, ?, ?, ?, ?, ?, ?)", ("attempt-1", "executor", "claude-code", "exited", 0, 1, str(spec)))
+            self.assertIsNone(managed_invocation_refusal(db, "attempt-1", policy))
 
     def test_the_committed_policy_gates_both_phases_with_compile_only(self) -> None:
         # Owner decision: the full test suite is too slow for a per-Ticket gate,

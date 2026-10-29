@@ -53,6 +53,8 @@ ACTIVE_V0_OPERATOR = {
 ACTIVE_V0_READS = {
     "GET /api/tickets",
     "GET /api/tickets/{task_key}",
+    "GET /api/tickets/{task_key}/usage",
+    "GET /api/usage",
     "GET /api/repositories",
     "GET /health",
     "GET /api/realtime/board",

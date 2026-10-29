@@ -29,6 +29,7 @@ lifecycle behavior.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -425,6 +426,9 @@ class ClaudeCodeExecutor(Executor):
             "claude_code_stdout": stdout_path,
             "claude_code_stderr": stderr_path,
         }
+        usage_path = _write_usage(context, stdout_path)
+        if usage_path is not None:
+            artifacts["claude_code_usage"] = usage_path
         if managed is not None:
             artifacts["executor_launch_spec"] = managed.launch_spec_path
             artifacts["executor_process_pid"] = managed.pid_manifest_path
@@ -656,6 +660,34 @@ class ClaudeCodeExecutor(Executor):
         artifact_path = context.artifact_dir / CLAUDE_CODE_EXECUTION_ARTIFACT_FILENAME
         atomic_write_json(artifact_path, payload, sort_keys=True)
         return artifact_path
+
+
+def _write_usage(context: ExecutorContext, stdout_path: Path) -> Path | None:
+    """Capture optional usage without affecting the executor outcome."""
+    try:
+        data = json.loads(stdout_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("usage"), dict):
+            return None
+        usage = data["usage"]
+        payload = {
+            "schema_version": "claude_code_usage.v1",
+            "attempt_id": context.attempt_id,
+            "task_key": context.task_key,
+            "model_usage": data.get("modelUsage"),
+            **{key: usage.get(key) for key in (
+                "input_tokens", "output_tokens", "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+            )},
+            **{key: data.get(key) for key in (
+                "total_cost_usd", "num_turns", "duration_ms", "duration_api_ms",
+                "is_error", "subtype",
+            )},
+        }
+        path = context.artifact_dir / "claude-code-usage.json"
+        atomic_write_json(path, payload, sort_keys=True)
+        return path
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return None
 
 
 def _normalize_command(command: Sequence[str] | None) -> list[str]:
