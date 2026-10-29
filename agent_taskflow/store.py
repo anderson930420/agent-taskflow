@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -1020,7 +1020,8 @@ class TaskMirrorStore:
         source: str = "local_mirror",
         blocked_reason: str | None = None,
         expected_current_status: str | None = None,
-    ) -> None:
+        _conn: sqlite3.Connection | None = None,
+    ) -> str | None:
         validated_status = validate_task_status(status)
         validated_expected_status = (
             validate_task_status(expected_current_status)
@@ -1045,7 +1046,7 @@ class TaskMirrorStore:
             update_params += (validated_expected_status,)
 
         terminal_attempt_id: str | None = None
-        with closing(connect(self.db_path)) as conn, conn:
+        with (closing(connect(self.db_path)) if _conn is None else nullcontext(_conn)) as conn, (conn if _conn is None else nullcontext()):
             terminal_attempt_id = _attempt_exposed_to_status_trigger(
                 conn, task_key, validated_status
             )
@@ -1100,10 +1101,11 @@ class TaskMirrorStore:
                 ),
             )
 
-        if terminal_attempt_id is not None:
+        if terminal_attempt_id is not None and _conn is None:
             _publish_status_trigger_outcome_ledger(
                 self.db_path, task_key, terminal_attempt_id
             )
+        return terminal_attempt_id
 
     def record_approval_decision(
         self,
@@ -1145,6 +1147,7 @@ class TaskMirrorStore:
         *,
         message: str | None = None,
         payload: dict[str, Any] | None = None,
+        _conn: sqlite3.Connection | None = None,
     ) -> None:
         record = TaskEventRecord(
             task_key=task_key,
@@ -1155,7 +1158,7 @@ class TaskMirrorStore:
             created_at=utc_now_iso(),
         )
 
-        with closing(connect(self.db_path)) as conn, conn:
+        with (closing(connect(self.db_path)) if _conn is None else nullcontext(_conn)) as conn, (conn if _conn is None else nullcontext()):
             conn.execute(
                 """
                 INSERT INTO task_events (

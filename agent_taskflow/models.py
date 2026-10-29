@@ -103,6 +103,9 @@ TASK_EVENT_TYPES = {
     "merge_verified",
     "integration_cleanup_completed",
     "note",
+    "owner_feedback",
+    "rework_created",
+    "reworked_from",
 }
 
 TASK_ARTIFACT_TYPES = {

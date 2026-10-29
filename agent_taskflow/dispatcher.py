@@ -833,7 +833,7 @@ class Dispatcher:
             return f"Ticket {task.task_key} has no Attempt artifact root"
         try:
             prompt = read_ticket_prompt(self.store.db_path, task.task_key)
-            prompt_path = write_ticket_implementation_prompt(prompt, root)
+            prompt_path = write_ticket_implementation_prompt(prompt, root, db_path=self.store.db_path, task_key=task.task_key)
             atomic_write_json(root / POLICY_SNAPSHOT_FILENAME, policy.snapshot(), sort_keys=True)
         except (OSError, TicketPromptError) as exc:
             return f"Ticket Attempt preparation failed: {exc}"

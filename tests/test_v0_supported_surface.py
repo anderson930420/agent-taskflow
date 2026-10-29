@@ -29,6 +29,8 @@ ACTIVE_V0_HAPPY_PATH = {
     "scripts/run_integration_tick.py",
 }
 ACTIVE_V0_OPERATOR = {
+    "POST /api/tickets/{task_key}/retry",
+    "POST /api/tickets/{task_key}/rework",
     "scripts/run_api.py",
     "scripts/runtime_control.py",
     "scripts/reset_task_status.py",

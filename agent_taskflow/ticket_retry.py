@@ -23,6 +23,7 @@ from typing import Any
 from uuid import uuid4
 
 from agent_taskflow.atomic_write import atomic_write_json
+from agent_taskflow.ticket_feedback import add_ticket_feedback, validate_note
 from agent_taskflow.models import utc_now_iso
 from agent_taskflow.reset_lineage import ACTIVE_EXECUTOR_PROCESS_STATES
 from agent_taskflow.store import TaskMirrorStore, connect
@@ -142,13 +143,15 @@ def _replay(request: Any, store: TaskMirrorStore) -> dict[str, Any] | None:
     return None
 
 
-def retry_ticket(request: Any, *, store: TaskMirrorStore) -> dict[str, Any]:
+def retry_ticket(request: Any, *, store: TaskMirrorStore, note: str | None = None) -> dict[str, Any]:
     """Preview or perform one ``failed``/``needs_decision`` -> ``created`` retry.
 
     ``request`` is a :class:`~agent_taskflow.task_status_reset.TaskStatusResetRequest`.
     Returns the fields of a ``TaskStatusResetResult``. Raises
     :class:`TicketRetryError` before any write on every refusal.
     """
+    if note is not None:
+        validate_note(note)
     if request.from_status not in TICKET_RETRY_FROM_STATUSES:
         raise TicketRetryError(f"A Ticket is retried only from {TICKET_RETRY_FROM_STATUSES!r}")
     if request.request_id is not None:
@@ -287,6 +290,8 @@ def retry_ticket(request: Any, *, store: TaskMirrorStore) -> dict[str, Any]:
             if not request.confirm_reset:
                 raise TicketRetryError("Reset requires --confirm-reset unless --dry-run is used")
 
+            if note is not None:
+                add_ticket_feedback(store.db_path, request.task_key, note, source="retry", actor=request.actor, _conn=conn)
             committed = generation + 1
             generation_sql = ", reset_generation = reset_generation + 1" if has_generation else ""
             updated = conn.execute(

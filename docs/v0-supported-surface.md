@@ -124,6 +124,8 @@ Routes are the `APIRoute`s of `create_app()`. FastAPI's generated `/openapi.json
 | `scripts/run_workflow_policy_pow_package_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `scripts/run_workflow_policy_review_evidence_smoke.py` | script | LEGACY | n/a | Smoke on a fixture DB. |
 | `POST /api/tickets` | api | ACTIVE_V0 | n/a | The V0 entry: creates a Ticket. |
+| `POST /api/tickets/{task_key}/retry` | api | ACTIVE_V0 | n/a | Retry a stopped Ticket. |
+| `POST /api/tickets/{task_key}/rework` | api | ACTIVE_V0 | n/a | Create a replacement Ticket. |
 | `GET /api/tickets` | api | ACTIVE_V0 | n/a | Read. |
 | `GET /api/tickets/{task_key}` | api | ACTIVE_V0 | n/a | Read. |
 | `GET /api/repositories` | api | ACTIVE_V0 | n/a | Read: the registry for Ticket creation. |

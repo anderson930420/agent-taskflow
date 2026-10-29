@@ -182,6 +182,8 @@ class TicketStore:
         payload: dict[str, Any] | None = None,
         blocked_by: str | None = None,
         branch_guard: BranchGuard | None = None,
+        before_insert=None,
+        after_insert=None,
     ) -> TicketRecord:
         """Allocate a task key, insert the `tasks` row, record the audit event.
 
@@ -231,6 +233,9 @@ class TicketStore:
             self._reject_recorded_branch(conn, record)
             if branch_guard is not None:
                 branch_guard(record)
+
+            if before_insert is not None:
+                before_insert(conn, record)
 
             try:
                 conn.execute(
@@ -290,6 +295,8 @@ class TicketStore:
                     f"Could not persist ticket {record.task_key}: {exc}"
                 ) from exc
 
+            if after_insert is not None:
+                after_insert(conn, record)
             return record
 
     @staticmethod

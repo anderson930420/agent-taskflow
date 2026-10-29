@@ -365,3 +365,68 @@ class BranchCollisionRouteTests(TicketApiTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+class TicketActionTests(TicketApiTestCase):
+    def test_retry_feedback_and_validation(self):
+        from agent_taskflow.store import TaskMirrorStore
+        from agent_taskflow.ticket_feedback import list_ticket_feedback
+        from agent_taskflow.ticket_prompt import write_ticket_implementation_prompt
+        key = self.create().json()["task_key"]
+        self.assertEqual(self.client.post(f"/api/tickets/{key}/retry", json={}).status_code, 409)
+        self.assertEqual(self.client.post("/api/tickets/AT-9999/retry", json={}).status_code, 404)
+        from agent_taskflow.attempt_schema import migrate_task_attempt_lifecycle
+        migrate_task_attempt_lifecycle(self.db_path)
+        store = TaskMirrorStore(self.db_path)
+        store.update_task_status(key, "failed", source="test")
+        self.assertEqual(self.client.post(f"/api/tickets/{key}/retry", json={"note": " "}).status_code, 422)
+        self.assertEqual(self.client.post(f"/api/tickets/{key}/retry", json={"note": "x" * 4001}).status_code, 422)
+        response = self.client.post(f"/api/tickets/{key}/retry", json={"note": "Fix <this>"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["display_status"], "ready")
+        self.assertEqual(list_ticket_feedback(self.db_path, key)[0]["note"], "Fix <this>")
+        path = write_ticket_implementation_prompt(PROMPT, self.root / "attempt", db_path=self.db_path, task_key=key)
+        self.assertIn("Fix &lt;this&gt;", path.read_text())
+        self.assertEqual(self.client.get(f"/api/tickets/{key}").json()["item"]["prompt"], PROMPT)
+
+    def test_rework_idempotent_and_cancelled(self):
+        from agent_taskflow.store import TaskMirrorStore
+        for status in ("failed", "needs_decision", "waiting_for_review"):
+            with self.subTest(status=status):
+                key = self.create(prompt=f"Change {status}").json()["task_key"]
+                TaskMirrorStore(self.db_path).update_task_status(key, status, source="test")
+                response = self.client.post(f"/api/tickets/{key}/rework", json={"note": "Start fresh"})
+                self.assertEqual(response.status_code, 200, response.text)
+                result = response.json()
+                self.assertEqual(result["display_status"], "cancelled")
+                replacement = self.client.get(f'/api/tickets/{result["new_task_key"]}').json()
+                self.assertEqual(replacement["item"]["prompt"], f"Change {status}\n\n## Rework note\nStart fresh")
+                self.assertEqual(self.client.post(f"/api/tickets/{key}/rework", json={}).json()["new_task_key"], result["new_task_key"])
+                self.assertIn("reworked_from", [e["event_type"] for e in replacement["events"]])
+
+    def test_rework_refusals(self):
+        key = self.create().json()["task_key"]
+        self.assertEqual(self.client.post(f"/api/tickets/{key}/rework", json={}).status_code, 409)
+        self.assertEqual(self.client.post(f"/api/tickets/{key}/rework", json={"note": ""}).status_code, 422)
+        self.assertEqual(self.client.post("/api/tickets/AT-9999/rework", json={}).status_code, 404)
+
+    def test_rework_closes_pr_and_close_failure_preserves_ticket(self):
+        from agent_taskflow.store import TaskMirrorStore
+        from agent_taskflow.ticket_store import TicketStore
+        from agent_taskflow.integration_store import IntegrationStore
+        from agent_taskflow.ticket_rework import rework_ticket
+        from agent_taskflow.github_pr_adapter import GitHubPrError
+        key = self.create().json()["task_key"]
+        task_store = TaskMirrorStore(self.db_path)
+        task_store.update_task_status(key, "waiting_for_review", source="test")
+        IntegrationStore(self.db_path).update_pr_state(key, pr_number=17, pr_state="open")
+        adapter = mock.Mock()
+        adapter.close_pr.side_effect = GitHubPrError("gh failed")
+        with self.assertRaisesRegex(GitHubPrError, "gh failed"):
+            rework_ticket(key, store=TicketStore(self.db_path), projects_config_path=self.config_path,
+                          github_adapter_factory=lambda repo: adapter)
+        self.assertEqual(task_store.get_task(key).status, "waiting_for_review")
+        self.assertEqual(len(TicketStore(self.db_path).list_tickets()), 1)
+        adapter.close_pr.side_effect = None
+        new_key = rework_ticket(key, store=TicketStore(self.db_path), projects_config_path=self.config_path,
+                                github_adapter_factory=lambda repo: adapter)
+        self.assertEqual(adapter.close_pr.call_args.kwargs["comment"], f"Superseded by {new_key} (rework).")
