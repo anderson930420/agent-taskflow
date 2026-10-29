@@ -36,7 +36,7 @@ class ValidatorProcessCliTests(unittest.TestCase):
         self.assertEqual(payload["active_validator_processes"], 0)
         self.assertEqual(payload["termination"]["shared_registry"], "executor_processes")
         self.assertTrue(payload["termination"]["verified_exit_required"])
-        self.assertEqual(payload["managed_validator_commands"], ["pytest", "compile"])
+        self.assertEqual(payload["managed_validator_commands"], ["pytest", "compile", "affected-tests"])
 
 
 if __name__ == "__main__":

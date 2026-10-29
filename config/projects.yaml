@@ -26,10 +26,13 @@
 # logged-in claude CLI; argv[0] is a version-pinned, root-owned copy of the
 # binary, not the self-updating ~/.local/bin/claude symlink. This is not an
 # isolation boundary: the executor writes the Ticket's output as the same user
-# (hardened mode is D2). Both validator phases run only the fast `compile`
-# syntax gate (python -I -m compileall -f, which never imports or runs the code
-# it checks). The full test suite is not a per-Ticket gate: it stays in tests/
-# and runs on demand; the human review of the PR is the merge gate.
+# (hardened mode is D2). Both validator phases run the fast `compile` syntax
+# gate (python -I -m compileall -f, which never imports or runs the code it
+# checks) and `affected-tests`, which runs only the tests that the change
+# touches (by test file, module name or direct import). The selection logic and
+# the integration command come from the deployed control plane, never from the
+# Ticket's own branch, so a Ticket cannot weaken its own gate. The full suite
+# runs on demand; the human review of the PR is the merge gate.
 # bullet_journal is not runnable.
 # Commented example, with placeholder values:
 #
@@ -82,13 +85,17 @@ projects:
       effort: medium
       timeout_seconds: 3600
       permission_profile: local-dev-accept-edits-no-bash
-      policy_version: "v0-4"
+      policy_version: "v0-5"
       implementation_validators:
         - {name: compile, timeout_seconds: 300}
+        - {name: affected-tests, timeout_seconds: 1200}
       integration_validators:
         - name: compile
           command: [/home/ubuntu/agent-taskflow-runtime/current/.venv/bin/python, -I, -m, compileall, -q, -f, agent_taskflow, scripts, tests]
           timeout_seconds: 300
+        - name: affected-tests
+          command: [/home/ubuntu/agent-taskflow-runtime/current/.venv/bin/python, /home/ubuntu/agent-taskflow-runtime/current/scripts/run_affected_tests.py, --repo-root, ., --base, origin/main]
+          timeout_seconds: 1200
 
   bullet_journal:
     project_slug: bullet_journal

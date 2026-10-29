@@ -7,6 +7,7 @@ from agent_taskflow.validators.base import (
     ValidatorResult,
     validate_validator_result_status,
 )
+from agent_taskflow.validators.affected_tests import AffectedTestsValidator
 from agent_taskflow.validators.compile import CompileValidator
 from agent_taskflow.validators.pytest import PytestValidator
 from agent_taskflow.validators.registry import (
@@ -19,6 +20,7 @@ __all__ = [
     "CompileValidator",
     "PytestValidator",
     "Validator",
+    "AffectedTestsValidator",
     "ValidatorContext",
     "ValidatorResult",
     "get_validator",

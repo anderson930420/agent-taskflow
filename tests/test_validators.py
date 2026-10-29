@@ -336,7 +336,7 @@ class PytestValidatorTests(ValidatorTestCase):
 
 class ValidatorRegistryTests(unittest.TestCase):
     def test_registry_lists_pytest_and_compile(self) -> None:
-        self.assertEqual(list_validator_names(), ["pytest", "compile"])
+        self.assertEqual(list_validator_names(), ["pytest", "compile", "affected-tests"])
 
     def test_registry_returns_pytest_validator(self) -> None:
         self.assertIsInstance(get_validator("pytest"), PytestValidator)

@@ -32,6 +32,7 @@ ACTIVE_V0_OPERATOR = {
     "POST /api/tickets/{task_key}/retry",
     "POST /api/tickets/{task_key}/rework",
     "scripts/run_api.py",
+    "scripts/run_affected_tests.py",
     "scripts/runtime_control.py",
     "scripts/reset_task_status.py",
     "scripts/reap_stale_runtime.py",

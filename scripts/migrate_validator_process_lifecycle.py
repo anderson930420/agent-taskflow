@@ -82,6 +82,7 @@ def main() -> int:
                 "managed_validator_commands": [
                     "pytest",
                     "compile",
+                    "affected-tests",
                 ],
                 "launch_isolation": {
                     "shell": False,

@@ -384,7 +384,7 @@ class CommittedPolicyTests(unittest.TestCase):
         self.assertNotIn("Bash", value("--tools").split(","))
         self.assertEqual(value("--setting-sources"), "project")
         self.assertNotIn("--dangerously-skip-permissions", argv)
-        self.assertEqual(policy.policy_version, "v0-4")
+        self.assertEqual(policy.policy_version, "v0-5")
 
     def test_committed_argv_passes_managed_launch_gate(self) -> None:
         policy = execution_policy.resolve_execution_policy("agent-taskflow", config_path=REPO_ROOT / "config" / "projects.yaml")
@@ -398,15 +398,29 @@ class CommittedPolicyTests(unittest.TestCase):
                 conn.execute("INSERT INTO executor_processes VALUES (?, ?, ?, ?, ?, ?, ?)", ("attempt-1", "executor", "claude-code", "exited", 0, 1, str(spec)))
             self.assertIsNone(managed_invocation_refusal(db, "attempt-1", policy))
 
-    def test_the_committed_policy_gates_both_phases_with_compile_only(self) -> None:
-        # Owner decision: the full test suite is too slow for a per-Ticket gate,
-        # so both phases run the compile syntax gate; the suite runs on demand.
+    def test_the_committed_policy_gates_both_phases(self) -> None:
         path = REPO_ROOT / "config" / "projects.yaml"
         policy = execution_policy.resolve_execution_policy("agent-taskflow", config_path=path)
-        self.assertEqual(policy.implementation_validator_names, ("compile",))
+        self.assertEqual(policy.implementation_validator_names, ("compile", "affected-tests"))
+        self.assertEqual(policy.implementation_validator_timeout("affected-tests"), 1200)
+        self.assertEqual(get_validator("affected-tests").name, "affected-tests")
         self.assertEqual(policy.implementation_validator_timeout("compile"), 300)
         self.assertIsInstance(get_validator("compile"), CompileValidator)
-        (spec,) = policy.integration_validator_specs()
+        spec, affected = policy.integration_validator_specs()
+        self.assertEqual((affected.name, affected.timeout_seconds), ("affected-tests", 1200))
+        # The gate script and its selection logic come from the deployed release,
+        # not from the Ticket's branch, so a Ticket cannot weaken its own gate.
+        self.assertEqual(
+            affected.command[1:],
+            (
+                "/home/ubuntu/agent-taskflow-runtime/current/scripts/run_affected_tests.py",
+                "--repo-root",
+                ".",
+                "--base",
+                "origin/main",
+            ),
+        )
+        self.assertTrue(Path(affected.command[1]).is_absolute())
         self.assertEqual((spec.name, spec.timeout_seconds), ("compile", 300))
         self.assertTrue(Path(spec.command[0]).is_absolute())
         # -I keeps the worktree off sys.path, so a Ticket file cannot shadow

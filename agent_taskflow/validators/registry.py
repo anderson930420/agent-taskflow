@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Sequence
 
 from agent_taskflow.validators.base import Validator
+from agent_taskflow.validators.affected_tests import AffectedTestsValidator
 from agent_taskflow.validators.compile import CompileValidator
 from agent_taskflow.validators.pytest import PytestValidator
 
@@ -32,6 +33,9 @@ def get_validator(
             extra_args=pytest_extra_args,
         )
 
+    if normalized == "affected-tests":
+        return AffectedTestsValidator(python_bin=python_bin)
+
     if normalized == "compile":
         return CompileValidator(python_bin=python_bin)
 
@@ -41,7 +45,7 @@ def get_validator(
 def list_validator_names() -> list[str]:
     """Return supported validator names."""
 
-    return ["pytest", "compile"]
+    return ["pytest", "compile", "affected-tests"]
 
 
 __all__ = [
