@@ -45,6 +45,21 @@ projects:
     worktrees_dir: {worktrees_dir}
     default_branch: main
     branch_prefix: task/
+    execution:
+      executor: claude-code
+      argv: [claude, --print, --model, "{{model}}", --effort, "{{effort}}"]
+      model: claude-test-model
+      effort: medium
+      timeout_seconds: 120
+      permission_profile: test-bounded-implementer
+      policy_version: "test-1"
+      implementation_validators:
+        - name: compile
+          timeout_seconds: 60
+      integration_validators:
+        - name: unit
+          command: [python3, -c, pass]
+          timeout_seconds: 60
   bullet_journal:
     project_slug: bullet_journal
     task_key_prefix: BJ
@@ -128,6 +143,18 @@ class RepositoryRegistryRouteTests(TicketApiTestCase):
         # Task keys come from one global counter, not a per-repo prefix.
         self.assertNotIn("ticket_prefix", forms)
 
+    def test_repository_with_an_execution_policy_is_runnable(self) -> None:
+        forms = self.client.get("/api/repositories").json()["items"][1]
+        self.assertEqual(forms["repository"], "forms")
+        self.assertIs(forms["runnable"], True)
+        self.assertIsNone(forms["not_runnable_reason"])
+
+    def test_repository_without_an_execution_policy_is_not_runnable(self) -> None:
+        bullet_journal = self.client.get("/api/repositories").json()["items"][0]
+        self.assertEqual(bullet_journal["repository"], "bullet_journal")
+        self.assertIs(bullet_journal["runnable"], False)
+        self.assertEqual(bullet_journal["not_runnable_reason"], "execution_policy_missing")
+
 
 class CreateTicketRouteTests(TicketApiTestCase):
     """SPEC §10: repository + prompt + priority is the whole request body."""
@@ -165,6 +192,14 @@ class CreateTicketRouteTests(TicketApiTestCase):
         response = self.create(repository="nope")
         self.assertEqual(response.status_code, 422)
         self.assertIn("nope", response.json()["detail"])
+
+    def test_repository_that_is_not_runnable_is_rejected(self) -> None:
+        response = self.create(repository="bullet_journal")
+        self.assertEqual(response.status_code, 422)
+        detail = response.json()["detail"]
+        self.assertIn("bullet_journal", detail)
+        self.assertIn("execution_policy_missing", detail)
+        self.assertEqual(self.client.get("/api/tickets").json()["count"], 0)
 
     def test_unknown_priority_is_rejected(self) -> None:
         self.assertEqual(self.create(priority="urgent").status_code, 422)
@@ -211,13 +246,17 @@ class TicketReadbackRouteTests(TicketApiTestCase):
 
     def test_list_filters_by_repository_priority_and_display_status(self) -> None:
         self.create(priority="high")
-        self.create(repository="bullet_journal", priority="low")
+        self.create(priority="low")
 
         everything = self.client.get("/api/tickets").json()
         self.assertEqual(everything["count"], 2)
 
         forms = self.client.get("/api/tickets?repository=forms").json()
-        self.assertEqual([item["task_key"] for item in forms["items"]], ["AT-0001"])
+        self.assertEqual(
+            sorted(item["task_key"] for item in forms["items"]), ["AT-0001", "AT-0002"]
+        )
+        other = self.client.get("/api/tickets?repository=bullet_journal").json()
+        self.assertEqual(other["count"], 0)
 
         low = self.client.get("/api/tickets?priority=low").json()
         self.assertEqual([item["task_key"] for item in low["items"]], ["AT-0002"])
