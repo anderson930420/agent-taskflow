@@ -19,7 +19,7 @@ from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from agent_taskflow.atomic_write import atomic_write_json
@@ -143,7 +143,10 @@ def _replay(request: Any, store: TaskMirrorStore) -> dict[str, Any] | None:
     return None
 
 
-def retry_ticket(request: Any, *, store: TaskMirrorStore, note: str | None = None) -> dict[str, Any]:
+def retry_ticket(
+    request: Any, *, store: TaskMirrorStore, note: str | None = None,
+    in_transaction: Callable[[sqlite3.Connection], None] | None = None,
+) -> dict[str, Any]:
     """Preview or perform one ``failed``/``needs_decision`` -> ``created`` retry.
 
     ``request`` is a :class:`~agent_taskflow.task_status_reset.TaskStatusResetRequest`.
@@ -292,6 +295,8 @@ def retry_ticket(request: Any, *, store: TaskMirrorStore, note: str | None = Non
 
             if note is not None:
                 add_ticket_feedback(store.db_path, request.task_key, note, source="retry", actor=request.actor, _conn=conn)
+            if in_transaction is not None:
+                in_transaction(conn)
             committed = generation + 1
             generation_sql = ", reset_generation = reset_generation + 1" if has_generation else ""
             updated = conn.execute(
