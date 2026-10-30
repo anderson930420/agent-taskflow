@@ -57,6 +57,20 @@ class AffectedTestsTest(unittest.TestCase):
         self.write('tests/test_v0_supported_surface.py', '')
         self.assertIn('tests/test_v0_supported_surface.py', select_tests(self.root, {'constraints.txt'}))
 
+    def test_api_change_selects_http_route_tests(self):
+        self.write('tests/test_http_only.py', 'response = client.post("/api/tickets", json={})\n')
+        self.write('tests/test_app_import.py', 'from agent_taskflow.api.main import create_app\n')
+        self.write('tests/test_unrelated.py', 'import agent_taskflow.store\n')
+        selection = select_tests(self.root, {'agent_taskflow/api/tickets.py'})
+        self.assertEqual(selection['tests/test_http_only.py'], ['api route changed: agent_taskflow/api/tickets.py'])
+        self.assertIn('api route changed: agent_taskflow/api/tickets.py', selection['tests/test_app_import.py'])
+        self.assertNotIn('tests/test_unrelated.py', selection)
+        selection = select_tests(self.root, {'agent_taskflow/store.py'})
+        self.assertNotIn('tests/test_http_only.py', selection)
+        self.assertNotIn('tests/test_app_import.py', selection)
+        self.assertTrue(all(not reason.startswith('api route changed')
+                            for reasons in selection.values() for reason in reasons))
+
     def test_git_changes_both_phases(self):
         self.write('committed.py', '')
         self.git('add', 'committed.py')
