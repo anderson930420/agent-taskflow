@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,9 @@ from agent_taskflow.ticket_models import (
     DEFAULT_TICKET_PRIORITY,
     TICKET_PRIORITY_SEQUENCE,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from execution_policy_support import policy_block, project_entry, write_registry  # noqa: E402
 
 
 class SseFormattingTests(unittest.TestCase):
@@ -450,20 +454,6 @@ class SseStreamEndpointTests(RealtimeApiTestCase):
         self.assertEqual(response.status_code, 404)
 
 
-PROJECTS_YAML = """\
-projects:
-  forms:
-    project_slug: forms
-    task_key_prefix: FM
-    repo_path: {repo_path}
-    github_repo: example/forms
-    artifacts_root: {artifacts_root}
-    worktrees_dir: {worktrees_dir}
-    default_branch: main
-    branch_prefix: task/
-"""
-
-
 class TicketReproductionTests(unittest.TestCase):
     """Review item 3c — the reviewer's own reproduction, end to end.
 
@@ -483,13 +473,21 @@ class TicketReproductionTests(unittest.TestCase):
         repo_path = root / "sandbox" / "forms"
         repo_path.mkdir(parents=True)
         config_path = root / "projects.yaml"
-        config_path.write_text(
-            PROJECTS_YAML.format(
-                repo_path=repo_path,
-                artifacts_root=root / "sandbox" / "artifacts",
-                worktrees_dir=repo_path / ".worktrees",
-            ),
-            encoding="utf-8",
+        # POST /api/tickets refuses a repository without an execution policy.
+        write_registry(
+            config_path,
+            {
+                "forms": {
+                    **project_entry(
+                        repo_path, execution=policy_block(), github_repo="example/forms"
+                    ),
+                    "project_slug": "forms",
+                    "task_key_prefix": "FM",
+                    "artifacts_root": str(root / "sandbox" / "artifacts"),
+                    "worktrees_dir": str(repo_path / ".worktrees"),
+                    "branch_prefix": "task/",
+                },
+            },
         )
         (root / "db").mkdir()
         self.db_path = root / "db" / "state.db"

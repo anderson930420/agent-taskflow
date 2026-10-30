@@ -15,6 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from agent_taskflow.execution_policy import (
+    ExecutionPolicyError,
+    resolve_execution_policy,
+)
 from agent_taskflow.models import TaskEventRecord
 from agent_taskflow.status_vocab import persisted_statuses_for_display
 from agent_taskflow.ticket_ai_metadata import TicketAIMetadataAdapter
@@ -104,6 +108,14 @@ def build_ticket_router(
             )
         return ticket
 
+    def not_runnable_reason(repository: str) -> str | None:
+        """The execution policy reason code, or None when Tickets can run."""
+        try:
+            resolve_execution_policy(repository, config_path=projects_config_path)
+        except ExecutionPolicyError as exc:
+            return exc.reason_code
+        return None
+
     @router.get("/api/repositories")
     def list_repositories() -> dict[str, object]:
         """SPEC §11: read-only registry feed for the repository dropdown."""
@@ -111,7 +123,13 @@ def build_ticket_router(
             repositories = list_ticket_repositories(projects_config_path)
         except TicketRepositoryError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        items = [repository.to_dict() for repository in repositories]
+        items = []
+        for repository in repositories:
+            item = repository.to_dict()
+            reason = not_runnable_reason(item["repository"])
+            item["runnable"] = reason is None
+            item["not_runnable_reason"] = reason
+            items.append(item)
         return {"items": items, "count": len(items)}
 
     @router.post("/api/tickets", response_model=TicketResponse)
@@ -126,6 +144,13 @@ def build_ticket_router(
                 priority=request.priority,
                 blocked_by=request.blocked_by,
             )
+            reason = not_runnable_reason(request.repository)
+            if reason is not None:
+                # No execution policy means no claim; refuse before writing.
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Repository {request.repository!r} is not runnable: {reason}",
+                )
             result = create_ticket(
                 creation_request,
                 store=store,
