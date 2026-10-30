@@ -146,6 +146,7 @@ def _replay(request: Any, store: TaskMirrorStore) -> dict[str, Any] | None:
 def retry_ticket(
     request: Any, *, store: TaskMirrorStore, note: str | None = None,
     in_transaction: Callable[[sqlite3.Connection], None] | None = None,
+    pr_feedback: bool = False,
 ) -> dict[str, Any]:
     """Preview or perform one ``failed``/``needs_decision`` -> ``created`` retry.
 
@@ -155,7 +156,7 @@ def retry_ticket(
     """
     if note is not None:
         validate_note(note)
-    if request.from_status not in TICKET_RETRY_FROM_STATUSES:
+    if request.from_status not in TICKET_RETRY_FROM_STATUSES and not (pr_feedback and request.from_status == "waiting_for_review"):
         raise TicketRetryError(f"A Ticket is retried only from {TICKET_RETRY_FROM_STATUSES!r}")
     if request.request_id is not None:
         replay = _replay(request, store)

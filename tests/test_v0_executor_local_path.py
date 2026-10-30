@@ -384,7 +384,7 @@ class CommittedPolicyTests(unittest.TestCase):
         self.assertNotIn("Bash", value("--tools").split(","))
         self.assertEqual(value("--setting-sources"), "project")
         self.assertNotIn("--dangerously-skip-permissions", argv)
-        self.assertEqual(policy.policy_version, "v0-5")
+        self.assertEqual(policy.policy_version, "v0-6")
 
     def test_committed_argv_passes_managed_launch_gate(self) -> None:
         policy = execution_policy.resolve_execution_policy("agent-taskflow", config_path=REPO_ROOT / "config" / "projects.yaml")

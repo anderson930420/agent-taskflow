@@ -96,6 +96,7 @@ _POLICY_KEYS = frozenset(
         "policy_version",
         "implementation_validators",
         "integration_validators",
+        "pr_feedback",
     }
 )
 _PLACEHOLDERS = ("{model}", "{effort}")
@@ -144,6 +145,7 @@ class ExecutionPolicy:
     # The registry entry's absolute repo_path (not part of the policy hash). A
     # Ticket runs only when its stored repo_path is this one.
     repo_path: Path | None = None
+    pr_feedback: dict[str, Any] | None = None
 
     def canonical(self) -> dict[str, Any]:
         """The hashed form: the policy block only, not where it was read from."""
@@ -157,6 +159,7 @@ class ExecutionPolicy:
             policy_version=self.policy_version,
             implementation_validators=self.implementation_validators,
             integration_validators=self.integration_validators,
+            pr_feedback=self.pr_feedback,
         )
 
     def canonical_json(self) -> str:
@@ -211,8 +214,9 @@ def _canonical_block(
     policy_version: str,
     implementation_validators: tuple[ImplementationValidatorPolicy, ...],
     integration_validators: tuple[IntegrationValidatorPolicy, ...],
+    pr_feedback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "executor": executor,
         "argv": list(argv),
         "model": model,
@@ -229,6 +233,9 @@ def _canonical_block(
             for v in integration_validators
         ],
     }
+    if pr_feedback is not None:
+        result["pr_feedback"] = pr_feedback
+    return result
 
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
@@ -374,6 +381,23 @@ def parse_execution_policy(
             )
         )
 
+    feedback = block.get("pr_feedback")
+    if "pr_feedback" in block:
+        if not isinstance(feedback, dict) or set(feedback) - {"trigger", "allowed_authors", "max_ci_fix_attempts"}:
+            raise _invalid(project, "pr_feedback must be a mapping with known keys")
+        trigger = feedback.get("trigger", "@taskflow")
+        authors = feedback.get("allowed_authors")
+        maximum = feedback.get("max_ci_fix_attempts", 2)
+        if not isinstance(trigger, str) or not trigger.strip():
+            raise _invalid(project, "pr_feedback trigger must be non-empty")
+        if authors is not None and (not isinstance(authors, list) or not authors or any(not isinstance(a, str) or not re.fullmatch(r"[A-Za-z0-9-]+", a) for a in authors)):
+            raise _invalid(project, "pr_feedback allowed_authors must be a non-empty list of logins")
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
+            raise _invalid(project, "pr_feedback max_ci_fix_attempts must be a non-negative integer")
+        feedback = {"trigger": trigger, "max_ci_fix_attempts": maximum}
+        if authors is not None:
+            feedback["allowed_authors"] = authors
+
     canonical = _canonical_block(
         executor=executor,
         argv=tuple(argv),
@@ -384,6 +408,7 @@ def parse_execution_policy(
         policy_version=policy_version,
         implementation_validators=tuple(implementation),
         integration_validators=tuple(integration),
+        pr_feedback=feedback,
     )
     return ExecutionPolicy(
         project=project,
@@ -398,6 +423,7 @@ def parse_execution_policy(
         integration_validators=tuple(integration),
         registry_path=registry_path,
         sha256=hashlib.sha256(_canonical_json(canonical).encode("utf-8")).hexdigest(),
+        pr_feedback=feedback,
     )
 
 

@@ -256,6 +256,7 @@ def run_integration_tick(
     ok = all(outcome["ok"] for outcome in outcomes) and crash["ok"]
     result = {
         "kind": "integration_tick", "ok": ok,
+        "pr_feedback": {"started": [], "pending": [], "skipped": []},
         "status": (
             "stopped" if stopped_reason else "dry_run" if effective_dry_run
             else "drained" if not remaining else "partial"
@@ -401,6 +402,7 @@ def _pr_outcomes_phase(
     return {
         "ok": not any(outcome.poll_error for outcome in outcomes),
         "outcomes": [asdict(outcome) for outcome in outcomes],
+        "pr_feedback": {key: [outcome.feedback[key] if key != "skipped" else {"task_key": outcome.task_key, "reason": outcome.feedback[key]} for outcome in outcomes if outcome.feedback and key in outcome.feedback] for key in ("started", "pending", "skipped")},
     }
 
 
@@ -541,6 +543,7 @@ def _with_consumer_phases(
         ok=ok,
         drain_ok=drain_ok,
         tick_status="error" if error else "ok" if ok else "not_ok",
+        pr_feedback=phases.get(PHASE_PR_OUTCOMES, {}).get("pr_feedback", {"started": [], "pending": [], "skipped": []}),
         phase_order=list(PHASE_ORDER),
         phases=phases,
         confirmations={

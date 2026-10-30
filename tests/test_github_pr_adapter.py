@@ -114,7 +114,7 @@ class RealGhPayloadTests(unittest.TestCase):
         "headRefName": "task/v1-step2", "baseRefName": "main",
         "headRefOid": "25143529eea66560138feef2e4326b436b28c6ab", "reviewDecision": "",
         "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
-        "reviews": [], "title": "V1 Step 2", "body": "",
+        "reviews": [], "comments": [], "title": "V1 Step 2", "body": "",
     }
     MERGED = {
         "number": 200, "url": "https://github.com/anderson930420/agent-taskflow/pull/200",
@@ -122,7 +122,7 @@ class RealGhPayloadTests(unittest.TestCase):
         "mergeCommit": {"oid": "a5fa8e2daee56d026ad11068122e99eb5fc78281"},
         "headRefName": "task/v1-step4", "baseRefName": "main",
         "headRefOid": "4f3bdb87350d12c536ec92f900de6ab856e66469", "reviewDecision": "",
-        "statusCheckRollup": [], "reviews": [], "title": "V1 Step 4", "body": "",
+        "statusCheckRollup": [], "reviews": [], "comments": [], "title": "V1 Step 4", "body": "",
     }
 
     def poll(self, payload: dict) -> "github_pr_adapter.PrSnapshot":

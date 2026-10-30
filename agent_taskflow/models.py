@@ -106,6 +106,7 @@ TASK_EVENT_TYPES = {
     "integration_cleanup_completed",
     "note",
     "owner_feedback",
+    "pr_feedback_attempt",
     "rework_created",
     "reworked_from",
 }

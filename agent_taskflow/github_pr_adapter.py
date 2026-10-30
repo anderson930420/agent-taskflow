@@ -52,6 +52,7 @@ PR_VIEW_FIELDS = (
     "reviewDecision",
     "statusCheckRollup",
     "reviews",
+    "comments",
     "title",
     "body",
 )
@@ -313,6 +314,8 @@ class PrSnapshot:
     title: str | None = None
     body: str | None = None
     reviews: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    comments: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    checks: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
     def to_pr_state_fields(self) -> dict[str, Any]:
         """Return the §32.1 fields this snapshot is authoritative for."""
@@ -455,6 +458,14 @@ class GitHubPrAdapter:
              "--comment", comment], cwd=cwd, action="gh pr close"
         )
 
+    def comment_pr(self, *, pr_number: int, cwd: Path, body: str) -> None:
+        self._run_checked([self._gh_bin, "pr", "comment", str(int(pr_number)),
+                           "--repo", self.repo, "--body", body], cwd=cwd, action="gh pr comment")
+
+    def failed_logs(self, *, run_id: int, cwd: Path) -> str:
+        return self._run_checked([self._gh_bin, "run", "view", str(int(run_id)),
+                                  "--repo", self.repo, "--log-failed"], cwd=cwd, action="gh run view")
+
     def poll_pr(self, *, pr_number: int, cwd: Path) -> PrSnapshot:
         """Read a PR's current state. Read-only and safe to repeat (§32)."""
         argv = [
@@ -495,6 +506,8 @@ class GitHubPrAdapter:
             title=payload.get("title"),
             body=payload.get("body"),
             reviews=self._normalize_reviews(payload.get("reviews")),
+            comments=tuple(x for x in (payload.get("comments") or []) if isinstance(x, dict)),
+            checks=tuple(x for x in (payload.get("statusCheckRollup") or []) if isinstance(x, dict)),
         )
 
     @staticmethod
@@ -582,6 +595,8 @@ class GitHubPrAdapter:
             login = author.get("login") if isinstance(author, dict) else author
             reviews.append(
                 {
+                    "id": entry.get("id"),
+                    "url": entry.get("url"),
                     "author": login,
                     "state": entry.get("state"),
                     "body": entry.get("body"),
