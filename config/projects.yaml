@@ -85,7 +85,8 @@ projects:
       effort: medium
       timeout_seconds: 3600
       permission_profile: local-dev-accept-edits-no-bash
-      policy_version: "v0-5"
+      policy_version: "v0-6"
+      pr_feedback: {trigger: "@taskflow", allowed_authors: [anderson930420], max_ci_fix_attempts: 2}
       implementation_validators:
         - {name: compile, timeout_seconds: 300}
         - {name: affected-tests, timeout_seconds: 1200}

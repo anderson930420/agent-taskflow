@@ -17,7 +17,11 @@ def validate_note(note: str) -> str:
 
 
 def add_ticket_feedback(db_path: str | Path, task_key: str, note: str, *, source: str, actor: str = "mission_control", extra: dict | None = None, _conn=None) -> None:
-    validate_note(note)
+    if source in {"pr_comment", "ci_failure"}:
+        if not isinstance(note, str) or not note.strip():
+            raise ValueError("note must not be empty")
+    else:
+        validate_note(note)
     if not isinstance(source, str) or not re.fullmatch(r"[a-z0-9_]{1,40}", source):
         raise ValueError("source must be a short lowercase token")
     payload = {**(extra or {}), "note": note, "source": source}

@@ -59,6 +59,7 @@ __all__ = [
 #     cancelled    -> canceled
 #     completed    -> cleaned
 # so nothing in Step 2 may compare a task status against a §12 name directly.
+READY = to_persisted_status("ready")
 READY_FOR_INTEGRATION = to_persisted_status("ready_for_integration")
 INTEGRATING = to_persisted_status("integrating")
 NEEDS_REVIEW = to_persisted_status("needs_review")
@@ -97,8 +98,9 @@ INTEGRATION_OWNED_STATUSES = frozenset(
 INTEGRATION_TRANSITIONS: dict[str, frozenset[str]] = {
     READY_FOR_INTEGRATION: frozenset({INTEGRATING, CANCELLED, COMPLETED}),
     INTEGRATING: frozenset({READY_FOR_INTEGRATION, NEEDS_REVIEW, NEEDS_DECISION}),
+    # An authorized PR trigger starts a new Attempt on the existing branch.
     NEEDS_REVIEW: frozenset(
-        {READY_FOR_INTEGRATION, NEEDS_DECISION, CANCELLED, COMPLETED}
+        {READY_FOR_INTEGRATION, NEEDS_DECISION, CANCELLED, COMPLETED, READY}
     ),
     NEEDS_DECISION: frozenset({CANCELLED, COMPLETED}),
     PAUSED: frozenset({CANCELLED, COMPLETED}),

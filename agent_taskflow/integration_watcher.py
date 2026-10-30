@@ -16,8 +16,8 @@ Deliberate non-behaviours:
 * A Ticket that is mid-integration is not examined. §25.0 says a target that
   advances during an integration gets no special handling: the run finishes and
   the next tick re-queues it.
-* GitHub CI status is recorded but never consulted. §30 — CI is not a Taskflow
-  lifecycle authority, so a red rollup leaves a Ticket in ``needs_review``.
+* CI can trigger a new Attempt only when the project enables PR feedback;
+  it never approves or merges a PR.
 * Detecting a merge does not complete the Ticket or clean anything up. Cleanup
   is gated on §36 verification and lives in ``integration_cleanup``.
 """
@@ -39,6 +39,7 @@ from agent_taskflow.integration_queue import (
 )
 from agent_taskflow.integration_store import IntegrationStore
 from agent_taskflow.models import utc_now_iso
+from agent_taskflow.pr_feedback import process_feedback
 from agent_taskflow.store import TaskMirrorStore
 from agent_taskflow.worktree import ensure_absolute_path
 
@@ -120,6 +121,7 @@ class PrOutcome:
     # True for an in-flight integration: picked up, but not polled (§25.0).
     deferred: bool = False
     # Set when the poll itself failed: "<ExceptionType>: <message>".
+    feedback: dict[str, Any] | None = None
     poll_error: str | None = None
     # The consecutive failed polls this one makes (a preview counts it too).
     consecutive_poll_failures: int | None = None
@@ -337,9 +339,10 @@ def poll_pr_outcomes(
             )
             continue
 
-        transition = _proposed_transition(snapshot, task.status)
+        feedback = process_feedback(task, snapshot, repo=request.repo, cwd=cwd, store=task_store, adapter=adapter, confirm=request.confirm_poll)
+        transition = None if "started" in feedback or "pending" in feedback or feedback.get("handled_review") else _proposed_transition(snapshot, task.status)
         if not request.confirm_poll:
-            outcomes.append(_outcome(task.task_key, snapshot, transition, None, task.status))
+            outcomes.append(replace(_outcome(task.task_key, snapshot, transition, None, task.status), feedback=feedback))
             continue
 
         changed = _record_pr_state(integration, task.task_key, snapshot, pr_state)
@@ -359,8 +362,7 @@ def poll_pr_outcomes(
                     "merged": snapshot.merged,
                     "review_decision": snapshot.review_decision,
                     "task_status": task.status,
-                    # Recorded for observability only; §30 forbids it from
-                    # influencing any lifecycle transition.
+                    # Recorded for observability; feedback handling is a separate retry.
                     "ci_status": snapshot.ci_status,
                     "ci_is_not_a_lifecycle_authority": True,
                     "changed_fields": changed,
@@ -379,7 +381,7 @@ def poll_pr_outcomes(
             task_status=task.status,
             effective_head_sha=effective_head,
         )
-        outcomes.append(_outcome(task.task_key, snapshot, transition, applied, task.status))
+        outcomes.append(replace(_outcome(task.task_key, snapshot, transition, applied, task.status), feedback=feedback))
 
     return outcomes
 
