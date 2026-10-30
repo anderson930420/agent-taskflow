@@ -84,7 +84,11 @@ def select_tests(root: Path, paths: set[str], tests_dir: Path | None = None) -> 
             if (root / path).exists():
                 continue
         module = path.with_suffix("").as_posix().replace("/", ".")
+        # HTTP-only tests import the app, not the route module, so any API change selects them.
+        is_api_path = path.parts[:2] == ("agent_taskflow", "api")
         for test, text in texts.items():
+            if is_api_path and ("/api/" in text or _imports(text, "agent_taskflow.api")):
+                add(test, f"api route changed: {change}")
             if not is_test_path and (test.name == f"test_{path.stem}.py" or test.name.startswith(f"test_{path.stem}_")):
                 add(test, f"name matches {change}")
             if _imports(text, module) or (is_test_path and _imports(text, path.stem)):
