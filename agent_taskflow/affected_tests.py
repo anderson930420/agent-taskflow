@@ -1,6 +1,7 @@
 """Deterministic, static affected-test selection and Git change discovery.
 
 The dependency scan is deliberately direct: it does not follow transitive imports.
+A change to a file under agent_taskflow/api/ also selects every test that calls the API over HTTP.
 Packaging changes run the small policy and surface smoke set below.
 """
 from __future__ import annotations
